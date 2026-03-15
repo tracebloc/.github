@@ -1,8 +1,12 @@
+[![Website](https://img.shields.io/badge/website-tracebloc.io-00C9A7.svg)](https://tracebloc.io) [![Docs](https://img.shields.io/badge/docs-docs.tracebloc.io-blue.svg)](https://docs.tracebloc.io) [![Discord](https://img.shields.io/badge/discord-join-7289DA.svg)](https://discord.gg/tracebloc) [![PyPI](https://img.shields.io/pypi/v/tracebloc-package.svg)](https://pypi.org/project/tracebloc-package/)
+
 # Discover high-performance AI models. Maximize ROI.
 
 **tracebloc** lets you test AI models from external vendors directly on your data — without ever exposing it. Models come to your infrastructure. Your data never leaves.
 
 Evaluate, fine-tune, and benchmark vendor models in a secure Kubernetes environment you control. Compare results on a shared leaderboard. Select the best model with confidence.
+
+> Trusted by teams at Microsoft, Airbus, Cisco, and Dena.
 
 ## How it works
 
@@ -11,7 +15,7 @@ Evaluate, fine-tune, and benchmark vendor models in a secure Kubernetes environm
 | **1** | Define your AI use case — set datasets, metrics, and benchmarks |
 | **2** | Invite vendors — onboard globally in minutes via email whitelisting |
 | **3** | Train & fine-tune — vendors run models inside your isolated environment |
-| **4** | Benchmark — compare accuracy, latency, robustness, cost, even carbon footprint |
+| **4** | Benchmark — compare accuracy, latency, robustness, cost, even gCO₂e |
 | **5** | Select — pick the best-performing model. Data-driven, fully auditable |
 
 Your data stays on-prem. Fine-tuned weights stay on-prem. Nothing leaves your infrastructure.
