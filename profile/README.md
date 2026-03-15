@@ -4,8 +4,6 @@
 
 Evaluate, fine-tune, and benchmark vendor models in a secure Kubernetes environment you control. Compare results on a shared leaderboard. Select the best model with confidence.
 
-> Trusted by teams at Microsoft, Airbus, Cisco, and Dena.
-
 ## How it works
 
 | Step | What happens |
