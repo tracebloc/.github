@@ -1,30 +1,8 @@
-<p align="center">
-  <a href="https://tracebloc.io"><img src="https://img.shields.io/badge/website-tracebloc.io-00C9A7?style=for-the-badge&logo=google-chrome&logoColor=white" alt="Website"></a>
-  <a href="https://docs.tracebloc.io"><img src="https://img.shields.io/badge/docs-docs.tracebloc.io-0078D4?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Docs"></a>
-  <a href="https://discord.gg/tracebloc"><img src="https://img.shields.io/badge/discord-join-7289DA?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
-  <a href="https://pypi.org/project/tracebloc-package/"><img src="https://img.shields.io/pypi/v/tracebloc-package?style=for-the-badge&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
-  <a href="https://linkedin.com/company/tracebloc"><img src="https://img.shields.io/badge/LinkedIn-follow-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white" alt="LinkedIn"></a>
-</p>
+[![Website](https://img.shields.io/badge/website-tracebloc.io-00C9A7?style=flat-square)](https://tracebloc.io) [![Docs](https://img.shields.io/badge/docs-docs.tracebloc.io-0078D4?style=flat-square)](https://docs.tracebloc.io) [![Discord](https://img.shields.io/badge/discord-join-7289DA?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/tracebloc) [![PyPI](https://img.shields.io/pypi/v/tracebloc-package?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/tracebloc-package/) [![LinkedIn](https://img.shields.io/badge/LinkedIn-follow-0A66C2?style=flat-square&logo=linkedin&logoColor=white)](https://linkedin.com/company/tracebloc)
 
-<h1 align="center">Build better AI together. Without moving data.</h1>
+# Build better AI together. Without moving data.
 
-<p align="center">
-  <strong>tracebloc</strong> is a collaborative AI workspace you deploy on your own infrastructure.<br>
-  Invite researchers, partners, vendors — anyone — to train, fine-tune, and benchmark models on your private data.<br>
-  Your data never moves.
-</p>
-
-<p align="center">
-  <a href="https://ai.tracebloc.io/explore"><img src="https://img.shields.io/badge/Explore_use_cases-00C9A7?style=for-the-badge&logo=rocket&logoColor=white" alt="Explore"></a>
-  &nbsp;
-  <a href="https://docs.tracebloc.io/getting-started/quick-setup"><img src="https://img.shields.io/badge/Quick_start-0078D4?style=for-the-badge&logo=lightning&logoColor=white" alt="Quick Start"></a>
-  &nbsp;
-  <a href="https://colab.research.google.com/drive/1N00idtpoaq1lk9OJE6g4bMqd8o-Qex2C?usp=sharing"><img src="https://img.shields.io/badge/Open_in_Colab-F9AB00?style=for-the-badge&logo=google-colab&logoColor=white" alt="Colab"></a>
-</p>
-
----
-
-### Install in minutes
+**tracebloc** is a collaborative AI workspace you deploy on your own infrastructure. Invite researchers, partners, vendors — anyone — to train, fine-tune, and benchmark models on your private data. Your data never moves.
 
 ```bash
 # Mac / Linux
@@ -36,69 +14,43 @@ irm https://tracebloc.io/install.ps1 | iex
 
 One script. Your Mac, your server, your Kubernetes cluster. A shared workspace where contributors build on your data — without your data ever leaving.
 
----
+## How it works
 
-### How it works
+| Step | What happens |
+|:---:|---|
+| **1** | **Deploy** — install on your Mac, Linux, bare metal, or any Kubernetes cluster |
+| **2** | **Define** — set up a use case with datasets, metrics, and evaluation criteria |
+| **3** | **Invite** — onboard contributors globally in minutes via email whitelisting |
+| **4** | **Build** — contributors train and fine-tune models inside your environment |
+| **5** | **Compare** — one leaderboard. Accuracy, latency, robustness, cost. Ship the winner. |
 
-| | Step | What happens |
-|:---:|:---:|---|
-| :package: | **Deploy** | Install on your Mac, Linux, bare metal, or any Kubernetes cluster |
-| :dart: | **Define** | Set up a use case with datasets, metrics, and evaluation criteria |
-| :envelope: | **Invite** | Onboard contributors globally in minutes via email whitelisting |
-| :hammer_and_wrench: | **Build** | Contributors train and fine-tune models inside your environment |
-| :trophy: | **Compare** | One leaderboard. Accuracy, latency, robustness, cost. Ship the winner. |
+Your data stays on your infrastructure. Fine-tuned weights stay on your infrastructure. Always.
 
-> Your data stays on your infrastructure. Fine-tuned weights stay on your infrastructure. **Always.**
+## Works with
 
----
+![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=flat-square&logo=pytorch&logoColor=white) ![TensorFlow](https://img.shields.io/badge/TensorFlow-FF6F00?style=flat-square&logo=tensorflow&logoColor=white) ![DeepSpeed](https://img.shields.io/badge/DeepSpeed-0078D4?style=flat-square&logo=microsoft&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white) ![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?style=flat-square&logo=kubernetes&logoColor=white) ![AWS](https://img.shields.io/badge/AWS-232F3E?style=flat-square&logo=amazon-web-services&logoColor=white) ![Azure](https://img.shields.io/badge/Azure-0078D4?style=flat-square&logo=microsoft-azure&logoColor=white) ![GCP](https://img.shields.io/badge/GCP-4285F4?style=flat-square&logo=google-cloud&logoColor=white)
 
-### Works with
+## Open-source tools
 
-<p align="center">
-  <img src="https://img.shields.io/badge/PyTorch-EE4C2C?style=flat-square&logo=pytorch&logoColor=white" alt="PyTorch">
-  <img src="https://img.shields.io/badge/TensorFlow-FF6F00?style=flat-square&logo=tensorflow&logoColor=white" alt="TensorFlow">
-  <img src="https://img.shields.io/badge/DeepSpeed-0078D4?style=flat-square&logo=microsoft&logoColor=white" alt="DeepSpeed">
-  <img src="https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker">
-  <img src="https://img.shields.io/badge/Kubernetes-326CE5?style=flat-square&logo=kubernetes&logoColor=white" alt="Kubernetes">
-  <img src="https://img.shields.io/badge/AWS-232F3E?style=flat-square&logo=amazon-web-services&logoColor=white" alt="AWS">
-  <img src="https://img.shields.io/badge/Azure-0078D4?style=flat-square&logo=microsoft-azure&logoColor=white" alt="Azure">
-  <img src="https://img.shields.io/badge/GCP-4285F4?style=flat-square&logo=google-cloud&logoColor=white" alt="GCP">
-  <img src="https://img.shields.io/badge/On--Prem-333333?style=flat-square&logo=server&logoColor=white" alt="On-Prem">
-</p>
+| | |
+|---|---|
+| **[model-zoo](https://github.com/tracebloc/model-zoo)** | Pre-built models for vision, NLP, tabular, time series — ready to train |
+| **[start-training](https://github.com/tracebloc/start-training)** | Jupyter notebook to launch training in minutes |
+| **[data-ingestors](https://github.com/tracebloc/data-ingestors)** | Pipelines to validate, prepare, and ingest your datasets |
+| **[client](https://github.com/tracebloc/client)** | Deploy the tracebloc workspace on your Kubernetes cluster |
 
----
+## Get started
 
-### Open-source tools
-
-| Repo | Description | |
-|---|---|---|
-| **[model-zoo](https://github.com/tracebloc/model-zoo)** | Pre-built models for vision, NLP, tabular, time series — ready to train | ![Stars](https://img.shields.io/github/stars/tracebloc/model-zoo?style=flat-square) |
-| **[start-training](https://github.com/tracebloc/start-training)** | Jupyter notebook to launch training in minutes | ![Stars](https://img.shields.io/github/stars/tracebloc/start-training?style=flat-square) |
-| **[data-ingestors](https://github.com/tracebloc/data-ingestors)** | Pipelines to validate, prepare, and ingest your datasets | ![Stars](https://img.shields.io/github/stars/tracebloc/data-ingestors?style=flat-square) |
-| **[client](https://github.com/tracebloc/client)** | Deploy the tracebloc workspace on your Kubernetes cluster | ![Stars](https://img.shields.io/github/stars/tracebloc/client?style=flat-square) |
+**Deploy your workspace →** [Install tracebloc](https://tracebloc.io/install)
+&nbsp;&nbsp;·&nbsp;&nbsp;
+**Explore use cases →** [ai.tracebloc.io/explore](https://ai.tracebloc.io/explore)
+&nbsp;&nbsp;·&nbsp;&nbsp;
+**Train a model →** [Open the Colab notebook](https://colab.research.google.com/drive/1N00idtpoaq1lk9OJE6g4bMqd8o-Qex2C?usp=sharing)
+&nbsp;&nbsp;·&nbsp;&nbsp;
+**Read the docs →** [docs.tracebloc.io](https://docs.tracebloc.io/)
 
 ---
 
-### Compliance by architecture
+![GDPR](https://img.shields.io/badge/GDPR-compliant-00C9A7?style=flat-square) ![ISO 27001](https://img.shields.io/badge/ISO_27001-certified-00C9A7?style=flat-square) ![EU AI Act](https://img.shields.io/badge/EU_AI_Act-ready-00C9A7?style=flat-square)
 
-<p align="center">
-  <img src="https://img.shields.io/badge/GDPR-compliant-00C9A7?style=flat-square" alt="GDPR">
-  <img src="https://img.shields.io/badge/ISO_27001-certified-00C9A7?style=flat-square" alt="ISO 27001">
-  <img src="https://img.shields.io/badge/EU_AI_Act-ready-00C9A7?style=flat-square" alt="EU AI Act">
-  <img src="https://img.shields.io/badge/Data_residency-your_infrastructure-00C9A7?style=flat-square" alt="Data Residency">
-</p>
-
----
-
-<p align="center">
-  <a href="https://tracebloc.io/">Website</a> ·
-  <a href="https://docs.tracebloc.io/">Documentation</a> ·
-  <a href="https://linkedin.com/company/tracebloc">LinkedIn</a> ·
-  <a href="https://discord.gg/tracebloc">Discord</a> ·
-  <a href="https://x.com/tracebloc">X</a> ·
-  <a href="mailto:support@tracebloc.io">support@tracebloc.io</a>
-</p>
-
-<p align="center">
-  <sub>Built in Berlin. Backed by EU funding. Trusted by teams at Microsoft, Airbus, Cisco, and Dena.</sub>
-</p>
+[Website](https://tracebloc.io/) · [Documentation](https://docs.tracebloc.io/) · [LinkedIn](https://linkedin.com/company/tracebloc) · [Discord](https://discord.gg/tracebloc) · [X](https://x.com/tracebloc) · [support@tracebloc.io](mailto:support@tracebloc.io)
