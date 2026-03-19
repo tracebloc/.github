@@ -1,4 +1,4 @@
-[![Website](https://img.shields.io/badge/website-tracebloc.io-00C9A7?style=flat-square)](https://tracebloc.io) [![Docs](https://img.shields.io/badge/docs-docs.tracebloc.io-0078D4?style=flat-square)](https://docs.tracebloc.io) [![Discord](https://img.shields.io/badge/discord-join-7289DA?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/tracebloc) [![PyPI](https://img.shields.io/pypi/v/tracebloc-package?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/tracebloc-package/) [![LinkedIn](https://img.shields.io/badge/LinkedIn-follow-0A66C2?style=flat-square&logo=linkedin&logoColor=white)](https://linkedin.com/company/tracebloc)
+[![Website](https://img.shields.io/badge/website-tracebloc.io-00C9A7.svg)](https://tracebloc.io) [![Docs](https://img.shields.io/badge/docs-docs.tracebloc.io-blue.svg)](https://docs.tracebloc.io) [![Discord](https://img.shields.io/badge/discord-join-7289DA.svg)](https://discord.gg/tracebloc) [![PyPI](https://img.shields.io/pypi/v/tracebloc-package.svg)](https://pypi.org/project/tracebloc-package/)
 
 # Build better AI together. Without moving data.
 
@@ -26,10 +26,6 @@ One script. Your Mac, your server, your Kubernetes cluster. A shared workspace w
 
 Your data stays on your infrastructure. Fine-tuned weights stay on your infrastructure. Always.
 
-## Works with
-
-![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=flat-square&logo=pytorch&logoColor=white) ![TensorFlow](https://img.shields.io/badge/TensorFlow-FF6F00?style=flat-square&logo=tensorflow&logoColor=white) ![DeepSpeed](https://img.shields.io/badge/DeepSpeed-0078D4?style=flat-square&logo=microsoft&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white) ![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?style=flat-square&logo=kubernetes&logoColor=white) ![AWS](https://img.shields.io/badge/AWS-232F3E?style=flat-square&logo=amazon-web-services&logoColor=white) ![Azure](https://img.shields.io/badge/Azure-0078D4?style=flat-square&logo=microsoft-azure&logoColor=white) ![GCP](https://img.shields.io/badge/GCP-4285F4?style=flat-square&logo=google-cloud&logoColor=white)
-
 ## Open-source tools
 
 | | |
@@ -51,6 +47,6 @@ Your data stays on your infrastructure. Fine-tuned weights stay on your infrastr
 
 ---
 
-![GDPR](https://img.shields.io/badge/GDPR-compliant-00C9A7?style=flat-square) ![ISO 27001](https://img.shields.io/badge/ISO_27001-certified-00C9A7?style=flat-square) ![EU AI Act](https://img.shields.io/badge/EU_AI_Act-ready-00C9A7?style=flat-square)
+PyTorch · TensorFlow · DeepSpeed · Docker · Kubernetes · AWS · Azure · GCP · On-Prem
 
 [Website](https://tracebloc.io/) · [Documentation](https://docs.tracebloc.io/) · [LinkedIn](https://linkedin.com/company/tracebloc) · [Discord](https://discord.gg/tracebloc) · [X](https://x.com/tracebloc) · [support@tracebloc.io](mailto:support@tracebloc.io)
