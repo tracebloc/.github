@@ -4,13 +4,18 @@
 
 **tracebloc** is a collaborative AI workspace you deploy on your own infrastructure. Invite researchers, partners, vendors — anyone — to train, fine-tune, and benchmark models on your private data. Your data never moves.
 
-```bash
-# Mac / Linux
-bash <(curl -fsSL https://tracebloc.io/install.sh)
+**Mac / Linux**
 
-# Windows
+```bash
+bash <(curl -fsSL https://tracebloc.io/install.sh)
+```
+
+**Windows**
+
+```powershell
 irm https://tracebloc.io/install.ps1 | iex
 ```
+
 
 One script. Your Mac, your server, your Kubernetes cluster. A shared workspace where contributors build on your data — without your data ever leaving.
 
