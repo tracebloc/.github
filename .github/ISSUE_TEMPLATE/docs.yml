@@ -1,0 +1,22 @@
+name: 📚 Documentation
+description: Missing, incorrect, or stale documentation
+labels: ["work-type:docs"]
+body:
+  - type: textarea
+    id: gap
+    attributes:
+      label: What's missing or wrong
+    validations:
+      required: true
+  - type: textarea
+    id: audience
+    attributes:
+      label: Audience
+      description: Who needs this? (end-users, internal devs, customers, contributors…)
+    validations:
+      required: true
+  - type: input
+    id: location
+    attributes:
+      label: Where it should live
+      placeholder: "docs.tracebloc.io / README / CLAUDE.md / blog"

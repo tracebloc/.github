@@ -1,0 +1,50 @@
+name: ✨ Feature
+description: Propose a new product capability
+labels: ["work-type:feature", "needs-refinement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for **new product capabilities**. For bugs, use the Bug template.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What user/customer problem does this solve? Who's blocked?
+      placeholder: "Customers can't comply with GDPR right-to-erasure because…"
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Bullet list of testable conditions for "done"
+      placeholder: |
+        - When user clicks Delete Account, all their data is removed within 30 days
+        - User receives confirmation email with rollback option for 7 days
+        - Deletion is logged for compliance audit
+    validations:
+      required: true
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What is explicitly NOT included? Future tickets to consider.
+      placeholder: "Bulk delete (separate ticket); admin-initiated deletion (separate ticket)"
+  - type: textarea
+    id: test-plan
+    attributes:
+      label: Test plan
+      description: How will we verify this works?
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority (best guess — refiner can change)
+      options:
+        - "P1 — High (blocks customer or team)"
+        - "P2 — Normal"
+        - "P3 — Nice-to-have"
+    validations:
+      required: true
