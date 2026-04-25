@@ -1,0 +1,139 @@
+name: Advance deploy environment
+
+# Reusable workflow. Called from each active repo on push to develop/staging/master/main.
+# For each PR contained in the push, updates the Deploy environment project field.
+# When the push is to master/main, also promotes Status → Done.
+
+on:
+  workflow_call:
+    inputs:
+      project-number:
+        description: "GitHub Projects v2 number (default: 2 = engineer kanban)"
+        type: number
+        default: 2
+      org:
+        description: "GitHub org owning the project"
+        type: string
+        default: tracebloc
+
+jobs:
+  advance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine target environment from branch
+        id: env
+        run: |
+          case "${{ github.ref_name }}" in
+            develop)     echo "env=dev"     >> "$GITHUB_OUTPUT" ;;
+            staging)     echo "env=staging" >> "$GITHUB_OUTPUT" ;;
+            master|main) echo "env=prod"    >> "$GITHUB_OUTPUT" ;;
+            *)           echo "env="        >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Skip if branch not tracked
+        if: steps.env.outputs.env == ''
+        run: |
+          echo "Branch '${{ github.ref_name }}' is not develop/staging/master/main — nothing to do."
+
+      - name: Extract PR numbers from new commits
+        id: prs
+        if: steps.env.outputs.env != ''
+        run: |
+          BEFORE="${{ github.event.before }}"
+          SHA="${{ github.sha }}"
+          # First push to a branch reports a zero hash — fall back to last 50 commits
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            RANGE="--max-count=50 $SHA"
+          else
+            RANGE="$BEFORE..$SHA"
+          fi
+          # Squash merges produce "Title (#NNN)" subjects; merge commits "Merge pull request #NNN".
+          PRS=$(git log --format='%s%n%b' $RANGE | grep -oE '#[0-9]+' | tr -d '#' | sort -u | tr '\n' ' ')
+          echo "Found PRs: $PRS"
+          echo "prs=$PRS" >> "$GITHUB_OUTPUT"
+
+      - name: Update project fields for each PR
+        if: steps.env.outputs.env != '' && steps.prs.outputs.prs != ''
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          ORG: ${{ inputs.org }}
+          PROJECT_NUMBER: ${{ inputs.project-number }}
+          DEPLOY_ENV: ${{ steps.env.outputs.env }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          REPO_NAME="${REPO_FULL#*/}"
+
+          # Look up project ID + relevant field/option IDs (one query)
+          PROJ=$(gh api graphql -f query='
+            query($org: String!, $num: Int!) {
+              organization(login: $org) {
+                projectV2(number: $num) {
+                  id
+                  fields(first: 50) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField { id name options { id name } }
+                    }
+                  }
+                }
+              }
+            }' -F org="$ORG" -F num="$PROJECT_NUMBER")
+
+          PROJECT_ID=$(echo "$PROJ" | jq -r '.data.organization.projectV2.id')
+          DEPLOY_FIELD=$(echo "$PROJ" | jq -r '.data.organization.projectV2.fields.nodes[]
+            | select(.name=="Deploy environment") | .id')
+          DEPLOY_OPT=$(echo "$PROJ" | jq -r --arg e "$DEPLOY_ENV" '.data.organization.projectV2.fields.nodes[]
+            | select(.name=="Deploy environment") | .options[] | select(.name==$e) | .id')
+          STATUS_FIELD=$(echo "$PROJ" | jq -r '.data.organization.projectV2.fields.nodes[]
+            | select(.name=="Status") | .id')
+          DONE_OPT=$(echo "$PROJ" | jq -r '.data.organization.projectV2.fields.nodes[]
+            | select(.name=="Status") | .options[] | select(.name=="Done") | .id')
+
+          if [ -z "$DEPLOY_OPT" ] || [ "$DEPLOY_OPT" = "null" ]; then
+            echo "Could not resolve Deploy environment option for '$DEPLOY_ENV' — aborting"
+            exit 1
+          fi
+
+          for prnum in ${{ steps.prs.outputs.prs }}; do
+            ITEM_ID=$(gh api graphql -f query='
+              query($org: String!, $repo: String!, $num: Int!) {
+                repository(owner: $org, name: $repo) {
+                  pullRequest(number: $num) {
+                    projectItems(first: 10) {
+                      nodes { id project { number } }
+                    }
+                  }
+                }
+              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$prnum" \
+              | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
+                  | select(.project.number == ($n | tonumber)) | .id' | head -1)
+
+            if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
+              echo "PR #$prnum not on project — skipping"
+              continue
+            fi
+
+            echo "→ PR #$prnum: Deploy env = $DEPLOY_ENV"
+            gh api graphql -f query='
+              mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $p, itemId: $i, fieldId: $f,
+                  value: {singleSelectOptionId: $o}
+                }) { projectV2Item { id } }
+              }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$DEPLOY_FIELD" -F o="$DEPLOY_OPT" > /dev/null
+
+            if [ "$DEPLOY_ENV" = "prod" ]; then
+              echo "→ PR #$prnum: Status = Done (prod)"
+              gh api graphql -f query='
+                mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $p, itemId: $i, fieldId: $f,
+                    value: {singleSelectOptionId: $o}
+                  }) { projectV2Item { id } }
+                }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -F o="$DONE_OPT" > /dev/null
+            fi
+          done
