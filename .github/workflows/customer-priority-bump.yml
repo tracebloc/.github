@@ -1,0 +1,89 @@
+name: Bump priority on customer-flagged issue
+
+# Reusable workflow. Called from each active repo on any issue label change.
+# When the 'from:customer' label is applied, sets Priority=P1 on the kanban.
+
+on:
+  workflow_call:
+    inputs:
+      project-number:
+        type: number
+        default: 2
+      org:
+        type: string
+        default: tracebloc
+      target-priority:
+        type: string
+        default: "P1"
+      trigger-label:
+        type: string
+        default: "from:customer"
+
+jobs:
+  bump:
+    if: github.event.label.name == inputs.trigger-label
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set Priority for the customer issue
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          ORG: ${{ inputs.org }}
+          PROJECT_NUMBER: ${{ inputs.project-number }}
+          PRIORITY_NAME: ${{ inputs.target-priority }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          REPO_NAME="${REPO_FULL#*/}"
+
+          PROJ=$(gh api graphql -f query='
+            query($org: String!, $num: Int!) {
+              organization(login: $org) {
+                projectV2(number: $num) {
+                  id
+                  fields(first: 50) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField { id name options { id name } }
+                    }
+                  }
+                }
+              }
+            }' -F org="$ORG" -F num="$PROJECT_NUMBER")
+
+          PROJECT_ID=$(echo "$PROJ" | jq -r '.data.organization.projectV2.id')
+          PRIORITY_FIELD=$(echo "$PROJ" | jq -r '.data.organization.projectV2.fields.nodes[]
+            | select(.name=="Priority") | .id')
+          PRIORITY_OPT=$(echo "$PROJ" | jq -r --arg p "$PRIORITY_NAME" '.data.organization.projectV2.fields.nodes[]
+            | select(.name=="Priority") | .options[] | select(.name==$p) | .id')
+
+          # Wait briefly for auto-add to register the issue on the project
+          for i in 1 2 3 4 5; do
+            ITEM_ID=$(gh api graphql -f query='
+              query($org: String!, $repo: String!, $num: Int!) {
+                repository(owner: $org, name: $repo) {
+                  issue(number: $num) {
+                    projectItems(first: 10) { nodes { id project { number } } }
+                  }
+                }
+              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$ISSUE_NUMBER" \
+              | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.issue.projectItems.nodes[]?
+                  | select(.project.number == ($n | tonumber)) | .id' | head -1)
+            if [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then break; fi
+            echo "Issue not yet on project, retrying ($i/5)…"
+            sleep 5
+          done
+
+          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
+            echo "Issue #$ISSUE_NUMBER not on project after 5 retries — skipping."
+            exit 0
+          fi
+
+          gh api graphql -f query='
+            mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $p, itemId: $i, fieldId: $f,
+                value: {singleSelectOptionId: $o}
+              }) { projectV2Item { id } }
+            }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$PRIORITY_FIELD" -F o="$PRIORITY_OPT" > /dev/null
+
+          echo "→ Issue #$ISSUE_NUMBER bumped to Priority=$PRIORITY_NAME"
