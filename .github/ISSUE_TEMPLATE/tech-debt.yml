@@ -1,0 +1,29 @@
+name: 🧹 Tech debt
+description: Refactor / cleanup with no behavior change
+labels: ["work-type:tech-debt", "needs-refinement"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What needs cleanup
+      placeholder: "Backend has 3 different database connection patterns…"
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why now
+      description: What does this unlock? What's the cost of leaving it?
+    validations:
+      required: true
+  - type: textarea
+    id: blast-radius
+    attributes:
+      label: Blast radius
+      description: What might break? What needs careful review?
+    validations:
+      required: true
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
