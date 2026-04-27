@@ -51,8 +51,12 @@ jobs:
           else
             RANGE="$BEFORE..$SHA"
           fi
-          # Squash merges produce "Title (#NNN)" subjects; merge commits "Merge pull request #NNN".
-          PRS=$(git log --format='%s%n%b' $RANGE | grep -oE '#[0-9]+' | tr -d '#' | sort -u | tr '\n' ' ')
+          # Extract PR refs from commit *subjects* only (not bodies), to avoid picking up
+          # issue references like "Closes #47" that aren't PR numbers.
+          # Squash merge subject: "Title (#NNN)"  ·  Merge commit subject: "Merge pull request #NNN"
+          PRS=$(git log --format='%s' $RANGE \
+            | grep -oE '\(#[0-9]+\)|Merge pull request #[0-9]+' \
+            | grep -oE '#[0-9]+' | tr -d '#' | sort -u | tr '\n' ' ')
           echo "Found PRs: $PRS"
           echo "prs=$PRS" >> "$GITHUB_OUTPUT"
 
@@ -99,7 +103,9 @@ jobs:
           fi
 
           for prnum in ${{ steps.prs.outputs.prs }}; do
-            ITEM_ID=$(gh api graphql -f query='
+            # Defensive: if the number isn't a PR (e.g. issue ref slipped through),
+            # the gh api call exits non-zero — swallow that and skip cleanly.
+            RESP=$(gh api graphql -f query='
               query($org: String!, $repo: String!, $num: Int!) {
                 repository(owner: $org, name: $repo) {
                   pullRequest(number: $num) {
@@ -108,12 +114,13 @@ jobs:
                     }
                   }
                 }
-              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$prnum" \
-              | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
-                  | select(.project.number == ($n | tonumber)) | .id' | head -1)
+              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$prnum" 2>/dev/null) || RESP='{}'
+
+            ITEM_ID=$(echo "$RESP" | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
+                  | select(.project.number == ($n | tonumber)) | .id' 2>/dev/null | head -1)
 
             if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
-              echo "PR #$prnum not on project — skipping"
+              echo "#$prnum not on project (or not a PR) — skipping"
               continue
             fi
 
