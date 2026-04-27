@@ -1,0 +1,93 @@
+name: Set PR card Status on project
+
+# Reusable workflow. Called from each active repo on PR open / reopen / draft-toggle.
+# Moves the PR's card to the right Status:
+#   - draft PR  → In progress
+#   - non-draft → In review
+
+on:
+  workflow_call:
+    inputs:
+      project-number:
+        type: number
+        default: 2
+      org:
+        type: string
+        default: tracebloc
+
+jobs:
+  set-status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine target Status
+        id: target
+        run: |
+          if [ "${{ github.event.pull_request.draft }}" = "true" ]; then
+            echo "status_name=In progress" >> "$GITHUB_OUTPUT"
+          else
+            echo "status_name=In review" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update PR Status on project
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          ORG: ${{ inputs.org }}
+          PROJECT_NUMBER: ${{ inputs.project-number }}
+          STATUS_NAME: ${{ steps.target.outputs.status_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          REPO_NAME="${REPO_FULL#*/}"
+
+          PROJ=$(gh api graphql -f query='
+            query($org: String!, $num: Int!) {
+              organization(login: $org) {
+                projectV2(number: $num) {
+                  id
+                  fields(first: 50) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField { id name options { id name } }
+                    }
+                  }
+                }
+              }
+            }' -F org="$ORG" -F num="$PROJECT_NUMBER")
+
+          PROJECT_ID=$(echo "$PROJ" | jq -r '.data.organization.projectV2.id')
+          STATUS_FIELD=$(echo "$PROJ" | jq -r '.data.organization.projectV2.fields.nodes[]
+            | select(.name=="Status") | .id')
+          STATUS_OPT=$(echo "$PROJ" | jq -r --arg s "$STATUS_NAME" '.data.organization.projectV2.fields.nodes[]
+            | select(.name=="Status") | .options[] | select(.name==$s) | .id')
+
+          # Wait briefly for the kanban auto-add workflow to register the PR on the project
+          for i in 1 2 3 4 5; do
+            ITEM_ID=$(gh api graphql -f query='
+              query($org: String!, $repo: String!, $num: Int!) {
+                repository(owner: $org, name: $repo) {
+                  pullRequest(number: $num) {
+                    projectItems(first: 10) { nodes { id project { number } } }
+                  }
+                }
+              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$PR_NUMBER" \
+              | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
+                  | select(.project.number == ($n | tonumber)) | .id' | head -1)
+            if [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then break; fi
+            echo "PR not yet on project, waiting ($i/5)…"
+            sleep 5
+          done
+
+          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
+            echo "PR #$PR_NUMBER not on project after 5 retries — skipping."
+            exit 0
+          fi
+
+          gh api graphql -f query='
+            mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $p, itemId: $i, fieldId: $f,
+                value: {singleSelectOptionId: $o}
+              }) { projectV2Item { id } }
+            }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -F o="$STATUS_OPT" > /dev/null
+
+          echo "→ PR #$PR_NUMBER → Status=$STATUS_NAME"
