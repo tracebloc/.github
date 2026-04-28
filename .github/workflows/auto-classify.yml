@@ -1,0 +1,109 @@
+name: Auto-classify kanban items (Squad / Area)
+
+# Scans the engineer kanban for items missing Squad classification and sets
+# Squad + Area based on the source repo. Closes the gap where auto-add only
+# sets Status=Backlog without populating downstream fields.
+#
+# Runs every 10 minutes. Idempotent — only touches items where Squad is unset.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find + classify unclassified items
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          PROJECT_NUMBER: 2
+          ORG: tracebloc
+        run: |
+          set -euo pipefail
+
+          # Repo → Squad option ID + Area option ID
+          declare -A SQUAD AREA
+          SQUAD[backend]=acd99fea;              AREA[backend]=43f88b89               # Backend/Platform · Backend API
+          SQUAD[averaging-service]=acd99fea;    AREA[averaging-service]=b5f63849     # Backend/Platform · Averaging
+          SQUAD[client]=acd99fea;               AREA[client]=b3b40fa4                # Backend/Platform · Client (Helm)
+          SQUAD[client-runtime]=acd99fea;       AREA[client-runtime]=beb42207        # Backend/Platform · Runtime
+          SQUAD[tracebloc-client]=e90f32ba;     AREA[tracebloc-client]=beb42207      # Data Science · Runtime
+          SQUAD[tracebloc-py-package]=e90f32ba; AREA[tracebloc-py-package]=ec7cf205  # Data Science · SDK
+          SQUAD[model-zoo]=e90f32ba;            AREA[model-zoo]=0140d45d             # Data Science · Model zoo
+          SQUAD[data-ingestors]=e90f32ba;       AREA[data-ingestors]=4cabb119        # Data Science · Data ingestion
+          SQUAD[frontend-app]=f918e74c;         AREA[frontend-app]=6df240fa          # Frontend · Frontend UI
+          SQUAD[tracebloc-website]=f918e74c;    AREA[tracebloc-website]=763b30bf     # Frontend · Website
+          SQUAD[design-system]=f918e74c;        AREA[design-system]=b0ddad7b         # Frontend · Design system
+          SQUAD[docs]=38e2c52d;                 AREA[docs]=aae7e6c3                  # DevEx · Docs
+          SQUAD[documentation]=38e2c52d;        AREA[documentation]=aae7e6c3
+          SQUAD[start-training]=38e2c52d;       AREA[start-training]=aae7e6c3
+          SQUAD[claude-skills]=38e2c52d;        AREA[claude-skills]=f778ef6b
+          SQUAD[.github]=38e2c52d;              AREA[.github]=f778ef6b
+
+          PROJECT_ID="PVT_kwDOCSsgos4BTDWN"
+          SQUAD_FIELD="PVTSSF_lADOCSsgos4BTDWNzhRFdds"
+          AREA_FIELD="PVTSSF_lADOCSsgos4BTDWNzhRFddw"
+
+          # Paginate through items, find ones missing Squad
+          cursor="null"
+          touched=0
+          while true; do
+            if [ "$cursor" = "null" ]; then after_arg=""; else after_arg=", after: \"$cursor\""; fi
+            page=$(gh api graphql -f query="
+              query {
+                organization(login: \"$ORG\") {
+                  projectV2(number: $PROJECT_NUMBER) {
+                    items(first: 100$after_arg) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        id
+                        fieldValues(first: 30) {
+                          nodes {
+                            ... on ProjectV2ItemFieldSingleSelectValue {
+                              field { ... on ProjectV2SingleSelectField { name } }
+                              name
+                            }
+                          }
+                        }
+                        content {
+                          ... on Issue { repository { name } }
+                          ... on PullRequest { repository { name } }
+                        }
+                      }
+                    }
+                  }
+                }
+              }")
+
+            echo "$page" | jq -c '.data.organization.projectV2.items.nodes[]' | while read -r node; do
+              has_squad=$(echo "$node" | jq -r '.fieldValues.nodes[]? | select(.field.name == "Squad") | .name // empty' | head -1)
+              if [ -n "$has_squad" ]; then continue; fi
+              repo=$(echo "$node" | jq -r '.content.repository.name // empty')
+              if [ -z "$repo" ]; then continue; fi
+              squad="${SQUAD[$repo]:-}"; area="${AREA[$repo]:-}"
+              if [ -z "$squad" ]; then continue; fi
+              item_id=$(echo "$node" | jq -r '.id')
+
+              for field_pair in "$SQUAD_FIELD:$squad" "$AREA_FIELD:$area"; do
+                field="${field_pair%:*}"; opt="${field_pair#*:}"
+                gh api graphql -f query="
+                  mutation {
+                    updateProjectV2ItemFieldValue(input: {
+                      projectId: \"$PROJECT_ID\", itemId: \"$item_id\",
+                      fieldId: \"$field\",
+                      value: { singleSelectOptionId: \"$opt\" }
+                    }) { projectV2Item { id } }
+                  }" > /dev/null
+              done
+              echo "  → classified $repo item ($item_id)"
+              touched=$((touched + 1))
+            done
+
+            hasNext=$(echo "$page" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
+            cursor=$(echo "$page" | jq -r '.data.organization.projectV2.items.pageInfo.endCursor')
+            if [ "$hasNext" != "true" ]; then break; fi
+          done
+
+          echo "Auto-classifier touched $touched item(s) this run."
