@@ -1,0 +1,117 @@
+name: WIP limit check (Code review)
+
+# Reusable workflow. When a PR opens, checks the engineer kanban's "Code review"
+# column count. If over the WIP limit, posts a soft nudge comment on the new PR
+# listing what's already in the queue. Doesn't block anything.
+
+on:
+  workflow_call:
+    inputs:
+      project-number:
+        type: number
+        default: 2
+      org:
+        type: string
+        default: tracebloc
+      status-name:
+        type: string
+        default: "Code review"
+      limit:
+        type: number
+        default: 8
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Count items in Code review and comment if over limit
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          ORG: ${{ inputs.org }}
+          PROJECT_NUMBER: ${{ inputs.project-number }}
+          STATUS_NAME: ${{ inputs.status-name }}
+          LIMIT: ${{ inputs.limit }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_FULL: ${{ github.repository }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          REPO_NAME="${REPO_FULL#*/}"
+
+          # Fetch all project items with their Status + content (paginate)
+          cursor="null"
+          > /tmp/items.txt
+          while true; do
+            if [ "$cursor" = "null" ]; then after=""; else after=", after: \"$cursor\""; fi
+            page=$(gh api graphql -f query="
+              query {
+                organization(login: \"$ORG\") {
+                  projectV2(number: $PROJECT_NUMBER) {
+                    items(first: 100$after) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        fieldValues(first: 30) {
+                          nodes {
+                            ... on ProjectV2ItemFieldSingleSelectValue {
+                              field { ... on ProjectV2SingleSelectField { name } }
+                              name
+                            }
+                          }
+                        }
+                        content {
+                          ... on PullRequest {
+                            number title state isDraft updatedAt
+                            repository { name }
+                            author { login }
+                            reviewRequests(first: 5) { nodes { requestedReviewer { ... on User { login } } } }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }")
+            echo "$page" | jq -c '.data.organization.projectV2.items.nodes[]' >> /tmp/items.txt
+            hasNext=$(echo "$page" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
+            cursor=$(echo "$page" | jq -r '.data.organization.projectV2.items.pageInfo.endCursor')
+            [ "$hasNext" != "true" ] && break
+          done
+
+          # Filter to PRs in target Status, currently OPEN
+          jq -c --arg s "$STATUS_NAME" '
+            select(.content.state == "OPEN" and (.content.merged // null) == null
+                   and (.fieldValues.nodes[]? | select(.field.name == "Status") | .name) == $s)
+          ' /tmp/items.txt > /tmp/inreview.txt
+
+          COUNT=$(wc -l < /tmp/inreview.txt | tr -d ' ')
+          echo "Code review queue depth: $COUNT (limit: $LIMIT)"
+
+          if [ "$COUNT" -le "$LIMIT" ]; then
+            echo "Within limit — no comment needed."
+            exit 0
+          fi
+
+          # Build the list of PRs in queue (oldest first), exclude this PR + the new author's own PRs
+          BODY_FILE=$(mktemp)
+          {
+            echo "👋 **Heads-up — Code review queue is at $COUNT / $LIMIT**"
+            echo ""
+            echo "Above the WIP limit. The team convention is to review existing PRs before opening new work."
+            echo ""
+            echo "Open PRs currently in Code review (oldest first):"
+            echo ""
+            jq -r --arg me "$PR_AUTHOR" --arg pr "$PR_NUMBER" '
+              .content as $c
+              | select($c.number != ($pr | tonumber))
+              | "- [\($c.repository.name)#\($c.number)](\($c.repository.name)#\($c.number)) — \($c.title) · author: @\($c.author.login) · " +
+                ((.content.reviewRequests.nodes | map(.requestedReviewer.login) | map(select(.)) | join(", @")) as $rev
+                 | if ($rev | length) > 0 then "reviewer: @\($rev)" else "no reviewer assigned" end)
+            ' /tmp/inreview.txt | sort | head -10
+            echo ""
+            echo "Pull from review before opening new work. _(This is a nudge from the kanban WIP check, not a block.)_"
+          } > "$BODY_FILE"
+
+          gh pr comment "$PR_NUMBER" --repo "$REPO_FULL" --body-file "$BODY_FILE"
+          echo "Posted WIP-overage comment on PR #$PR_NUMBER"
