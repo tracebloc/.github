@@ -25,7 +25,7 @@ jobs:
           if [ "${{ github.event.pull_request.draft }}" = "true" ]; then
             echo "status_name=In progress" >> "$GITHUB_OUTPUT"
           else
-            echo "status_name=In review" >> "$GITHUB_OUTPUT"
+            echo "status_name=Code review" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Update PR Status on project
