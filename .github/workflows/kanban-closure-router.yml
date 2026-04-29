@@ -123,6 +123,6 @@ jobs:
                 projectId: $p, itemId: $i, fieldId: $f,
                 value: {singleSelectOptionId: $o}
               }) { projectV2Item { id } }
-            }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -F o="$STATUS_OPT" > /dev/null
+            }' -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$STATUS_FIELD" -f o="$STATUS_OPT" > /dev/null
 
           echo "→ #$NUMBER → Status=$STATUS_NAME"
