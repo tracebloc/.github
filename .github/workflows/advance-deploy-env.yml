@@ -102,6 +102,18 @@ jobs:
             exit 1
           fi
 
+          # Status update is a nice-to-have for prod pushes; degrade gracefully
+          # if the Status field or its "Done" option can't be resolved, rather
+          # than failing the whole workflow and masking the successful Deploy
+          # environment update.
+          if [ "$DEPLOY_ENV" = "prod" ]; then
+            if [ -z "$STATUS_FIELD" ] || [ "$STATUS_FIELD" = "null" ] \
+               || [ -z "$DONE_OPT" ]    || [ "$DONE_OPT" = "null" ]; then
+              echo "::warning::Could not resolve 'Done' option in Status field of project #$PROJECT_NUMBER — skipping Status updates"
+              SKIP_STATUS=1
+            fi
+          fi
+
           for prnum in ${{ steps.prs.outputs.prs }}; do
             # Defensive: if the number isn't a PR (e.g. issue ref slipped through),
             # the gh api call exits non-zero — swallow that and skip cleanly.
@@ -133,7 +145,7 @@ jobs:
                 }) { projectV2Item { id } }
               }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$DEPLOY_FIELD" -F o="$DEPLOY_OPT" > /dev/null
 
-            if [ "$DEPLOY_ENV" = "prod" ]; then
+            if [ "$DEPLOY_ENV" = "prod" ] && [ "${SKIP_STATUS:-0}" != "1" ]; then
               echo "→ PR #$prnum: Status = Done (prod)"
               gh api graphql -f query='
                 mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
