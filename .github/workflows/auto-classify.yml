@@ -103,7 +103,7 @@ jobs:
                 }
               }")
 
-            echo "$page" | jq -c '.data.organization.projectV2.items.nodes[]' | while read -r node; do
+            while read -r node; do
               item_id=$(echo "$node" | jq -r '.id')
               repo=$(echo "$node" | jq -r '.content.repository.name // empty')
               if [ -z "$repo" ]; then continue; fi
@@ -150,7 +150,7 @@ jobs:
                   touched_deploy=$((touched_deploy + 1))
                 fi
               fi
-            done
+            done < <(echo "$page" | jq -c '.data.organization.projectV2.items.nodes[]')
 
             hasNext=$(echo "$page" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
             cursor=$(echo "$page" | jq -r '.data.organization.projectV2.items.pageInfo.endCursor')
