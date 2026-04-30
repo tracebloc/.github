@@ -79,9 +79,9 @@ jobs:
             [ "$hasNext" != "true" ] && break
           done
 
-          # Filter to PRs in target Status, currently OPEN
+          # Filter to PRs in target Status, currently OPEN, not draft
           jq -c --arg s "$STATUS_NAME" '
-            select(.content.state == "OPEN" and (.content.merged // null) == null
+            select(.content.state == "OPEN" and .content.isDraft == false
                    and (.fieldValues.nodes[]? | select(.field.name == "Status") | .name) == $s)
           ' /tmp/items.txt > /tmp/inreview.txt
 
@@ -102,10 +102,10 @@ jobs:
             echo ""
             echo "Open PRs currently in Code review (oldest first):"
             echo ""
-            jq -r --arg me "$PR_AUTHOR" --arg pr "$PR_NUMBER" '
+            jq -r --arg me "$PR_AUTHOR" --arg pr "$PR_NUMBER" --arg org "$ORG" '
               .content as $c
               | select($c.number != ($pr | tonumber))
-              | "- [\($c.repository.name)#\($c.number)](\($c.repository.name)#\($c.number)) — \($c.title) · author: @\($c.author.login) · " +
+              | "- [\($c.repository.name)#\($c.number)](https://github.com/\($org)/\($c.repository.name)/pull/\($c.number)) — \($c.title) · author: @\($c.author.login) · " +
                 ((.content.reviewRequests.nodes | map(.requestedReviewer.login) | map(select(.)) | join(", @")) as $rev
                  | if ($rev | length) > 0 then "reviewer: @\($rev)" else "no reviewer assigned" end)
             ' /tmp/inreview.txt | sort | head -10
