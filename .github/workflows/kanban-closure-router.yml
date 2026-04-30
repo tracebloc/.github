@@ -2,7 +2,8 @@ name: Route kanban Status on closure
 
 # Reusable workflow. Called on PR closed + issue closed events.
 # Sets the correct Status based on what actually happened:
-#   - PR merged                      → Done
+#   - PR merged to develop/staging   → Functional review (awaiting prod release)
+#   - PR merged to main/master       → Done (shipped to prod)
 #   - PR closed without merging      → Cancelled
 #   - Issue closed as completed      → Done
 #   - Issue closed as not_planned    → Cancelled
@@ -27,12 +28,16 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_MERGED: ${{ github.event.pull_request.merged }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           ISSUE_REASON: ${{ github.event.issue.state_reason }}
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
             if [ "$PR_MERGED" = "true" ]; then
-              echo "status=Done"      >> "$GITHUB_OUTPUT"
+              case "$BASE_REF" in
+                main|master) echo "status=Done"              >> "$GITHUB_OUTPUT" ;;
+                *)           echo "status=Functional review" >> "$GITHUB_OUTPUT" ;;
+              esac
             else
               echo "status=Cancelled" >> "$GITHUB_OUTPUT"
             fi
@@ -123,6 +128,6 @@ jobs:
                 projectId: $p, itemId: $i, fieldId: $f,
                 value: {singleSelectOptionId: $o}
               }) { projectV2Item { id } }
-            }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -F o="$STATUS_OPT" > /dev/null
+            }' -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$STATUS_FIELD" -f o="$STATUS_OPT" > /dev/null
 
           echo "→ #$NUMBER → Status=$STATUS_NAME"
