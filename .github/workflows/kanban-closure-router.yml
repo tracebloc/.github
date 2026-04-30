@@ -5,7 +5,9 @@ name: Route kanban Status on closure
 #   - PR merged to develop/staging   → Functional review (awaiting prod release)
 #   - PR merged to main/master       → Done (shipped to prod)
 #   - PR closed without merging      → Cancelled
-#   - Issue closed as completed      → Done
+#   - Issue closed as completed:
+#       · by a PR (any base)         → mirror the PR's resulting Status
+#       · manually (no closing PR)   → Done
 #   - Issue closed as not_planned    → Cancelled
 #   - Issue closed (no state_reason) → Cancelled (default to abandoned)
 
@@ -43,7 +45,24 @@ jobs:
             fi
           elif [ "$EVENT_NAME" = "issues" ]; then
             if [ "$ISSUE_REASON" = "completed" ]; then
-              echo "status=Done"      >> "$GITHUB_OUTPUT"
+              # If a linked PR closed this issue, mirror that PR's resulting Status.
+              # Otherwise (manual completion), default to Done.
+              REPO_NAME="${REPO_FULL#*/}"
+              CLOSING_PR_BASE=$(gh api graphql -f query='
+                query($org: String!, $repo: String!, $num: Int!) {
+                  repository(owner: $org, name: $repo) {
+                    issue(number: $num) {
+                      timelineItems(last: 20, itemTypes: [CLOSED_EVENT]) {
+                        nodes { ... on ClosedEvent { closer { ... on PullRequest { baseRefName } } } }
+                      }
+                    }
+                  }
+                }' -F org="$ORG" -F repo="$REPO_NAME" -F num="${{ github.event.issue.number }}"                 --jq '[.data.repository.issue.timelineItems.nodes[]?.closer.baseRefName // empty] | last // ""' 2>/dev/null) || CLOSING_PR_BASE=""
+              case "$CLOSING_PR_BASE" in
+                main|master) echo "status=Done"              >> "$GITHUB_OUTPUT" ;;
+                develop|staging) echo "status=Functional review" >> "$GITHUB_OUTPUT" ;;
+                *) echo "status=Done"                        >> "$GITHUB_OUTPUT" ;;
+              esac
             else
               echo "status=Cancelled" >> "$GITHUB_OUTPUT"
             fi
