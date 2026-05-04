@@ -2,14 +2,21 @@ name: Route kanban Status on closure
 
 # Reusable workflow. Called on PR closed + issue closed events.
 # Sets the correct Status based on what actually happened:
-#   - PR merged to develop/staging   → Functional review (awaiting prod release)
-#   - PR merged to main/master       → Done (shipped to prod)
+#   - PR merged to develop           → FR on dev      (functional review on dev environment)
+#   - PR merged to staging           → FR on staging  (functional review on staging environment)
+#   - PR merged to main/master       → Done           (shipped to prod)
 #   - PR closed without merging      → Cancelled
 #   - Issue closed as completed:
 #       · by a PR (any base)         → mirror the PR's resulting Status
 #       · manually (no closing PR)   → Done
 #   - Issue closed as not_planned    → Cancelled
 #   - Issue closed (no state_reason) → Cancelled (default to abandoned)
+#
+# NOTE: For PR merges, advance-deploy-env.yml also fires on the resulting branch
+# push and sets the same Status. Both workflows are idempotent and converge on
+# the same value; this one fires faster (PR close event) and serves as the
+# primary signal, while advance-deploy-env covers the case of pushes that
+# weren't a PR merge (e.g. fast-forward of develop → staging).
 
 on:
   workflow_call:
@@ -37,8 +44,10 @@ jobs:
           if [ "$EVENT_NAME" = "pull_request" ]; then
             if [ "$PR_MERGED" = "true" ]; then
               case "$BASE_REF" in
-                main|master) echo "status=Done"              >> "$GITHUB_OUTPUT" ;;
-                *)           echo "status=Functional review" >> "$GITHUB_OUTPUT" ;;
+                main|master) echo "status=Done"          >> "$GITHUB_OUTPUT" ;;
+                staging)     echo "status=FR on staging" >> "$GITHUB_OUTPUT" ;;
+                develop)     echo "status=FR on dev"     >> "$GITHUB_OUTPUT" ;;
+                *)           echo "status=FR on dev"     >> "$GITHUB_OUTPUT" ;;
               esac
             else
               echo "status=Cancelled" >> "$GITHUB_OUTPUT"
@@ -58,9 +67,10 @@ jobs:
                 }' -F org="$ORG" -F repo="$REPO_NAME" -F num="${{ github.event.issue.number }}" \
                 --jq '.data.repository.issue.closedByPullRequestsReferences.nodes[0].baseRefName // ""' 2>/dev/null) || CLOSING_PR_BASE=""
               case "$CLOSING_PR_BASE" in
-                main|master)     echo "status=Done"              >> "$GITHUB_OUTPUT" ;;
-                develop|staging) echo "status=Functional review" >> "$GITHUB_OUTPUT" ;;
-                *)               echo "status=Done"              >> "$GITHUB_OUTPUT" ;;
+                main|master) echo "status=Done"          >> "$GITHUB_OUTPUT" ;;
+                staging)     echo "status=FR on staging" >> "$GITHUB_OUTPUT" ;;
+                develop)     echo "status=FR on dev"     >> "$GITHUB_OUTPUT" ;;
+                *)           echo "status=Done"          >> "$GITHUB_OUTPUT" ;;
               esac
             else
               echo "status=Cancelled" >> "$GITHUB_OUTPUT"

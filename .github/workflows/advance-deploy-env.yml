@@ -1,8 +1,15 @@
 name: Advance deploy environment
 
 # Reusable workflow. Called from each active repo on push to develop/staging/master/main.
-# For each PR contained in the push, updates the Deploy environment project field.
-# When the push is to master/main, also promotes Status → Done.
+# For each PR contained in the push, updates the Deploy environment project field
+# and advances Status through the multi-stage validation flow:
+#   develop      → Status = "FR on dev"      (functional review on dev environment)
+#   staging      → Status = "FR on staging"  (functional review on staging environment)
+#   master/main  → Status = "Done"           (shipped to production)
+#
+# The "Ready for staging" / "Ready for prod" intermediate states are set manually
+# (drag-and-drop on the kanban or via a /fr-pass comment) when the FR reviewer
+# declares the validation passed but the deploy hasn't happened yet.
 
 on:
   workflow_call:
@@ -94,24 +101,28 @@ jobs:
             | select(.name=="Deploy environment") | .options[] | select(.name==$e) | .id')
           STATUS_FIELD=$(echo "$PROJ" | jq -r '.data.organization.projectV2.fields.nodes[]
             | select(.name=="Status") | .id')
-          DONE_OPT=$(echo "$PROJ" | jq -r '.data.organization.projectV2.fields.nodes[]
-            | select(.name=="Status") | .options[] | select(.name=="Done") | .id')
+
+          # Resolve the Status option that matches this push's target environment.
+          case "$DEPLOY_ENV" in
+            dev)     STATUS_NAME="FR on dev" ;;
+            staging) STATUS_NAME="FR on staging" ;;
+            prod)    STATUS_NAME="Done" ;;
+          esac
+          STATUS_OPT=$(echo "$PROJ" | jq -r --arg s "$STATUS_NAME" '.data.organization.projectV2.fields.nodes[]
+            | select(.name=="Status") | .options[] | select(.name==$s) | .id')
 
           if [ -z "$DEPLOY_OPT" ] || [ "$DEPLOY_OPT" = "null" ]; then
             echo "Could not resolve Deploy environment option for '$DEPLOY_ENV' — aborting"
             exit 1
           fi
 
-          # Status update is a nice-to-have for prod pushes; degrade gracefully
-          # if the Status field or its "Done" option can't be resolved, rather
-          # than failing the whole workflow and masking the successful Deploy
-          # environment update.
-          if [ "$DEPLOY_ENV" = "prod" ]; then
-            if [ -z "$STATUS_FIELD" ] || [ "$STATUS_FIELD" = "null" ] \
-               || [ -z "$DONE_OPT" ]    || [ "$DONE_OPT" = "null" ]; then
-              echo "::warning::Could not resolve 'Done' option in Status field of project #$PROJECT_NUMBER — skipping Status updates"
-              SKIP_STATUS=1
-            fi
+          # Status update degrades gracefully: if the Status field or its target
+          # option can't be resolved, log a warning and skip just the Status step
+          # rather than failing the whole workflow (Deploy env update still wins).
+          if [ -z "$STATUS_FIELD" ] || [ "$STATUS_FIELD" = "null" ] \
+             || [ -z "$STATUS_OPT" ] || [ "$STATUS_OPT" = "null" ]; then
+            echo "::warning::Could not resolve Status option '$STATUS_NAME' in project #$PROJECT_NUMBER — skipping Status updates"
+            SKIP_STATUS=1
           fi
 
           for prnum in ${{ steps.prs.outputs.prs }}; do
@@ -145,14 +156,14 @@ jobs:
                 }) { projectV2Item { id } }
               }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$DEPLOY_FIELD" -F o="$DEPLOY_OPT" > /dev/null
 
-            if [ "$DEPLOY_ENV" = "prod" ] && [ "${SKIP_STATUS:-0}" != "1" ]; then
-              echo "→ PR #$prnum: Status = Done (prod)"
+            if [ "${SKIP_STATUS:-0}" != "1" ]; then
+              echo "→ PR #$prnum: Status = $STATUS_NAME"
               gh api graphql -f query='
                 mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
                   updateProjectV2ItemFieldValue(input: {
                     projectId: $p, itemId: $i, fieldId: $f,
                     value: {singleSelectOptionId: $o}
                   }) { projectV2Item { id } }
-                }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -F o="$DONE_OPT" > /dev/null
+                }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -F o="$STATUS_OPT" > /dev/null
             fi
           done
