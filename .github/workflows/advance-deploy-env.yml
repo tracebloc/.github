@@ -5,7 +5,7 @@ name: Advance deploy environment
 # and advances Status through the multi-stage validation flow:
 #   develop      → Status = "FR on dev"      (functional review on dev environment)
 #   staging      → Status = "FR on staging"  (functional review on staging environment)
-#   master/main  → Status = "Done"           (shipped to production)
+#   master/main  → Status = "Prod"           (shipped to production)
 #
 # The "Ready for staging" / "Ready for prod" intermediate states are set manually
 # (drag-and-drop on the kanban or via a /fr-pass comment) when the FR reviewer
@@ -106,7 +106,7 @@ jobs:
           case "$DEPLOY_ENV" in
             dev)     STATUS_NAME="FR on dev" ;;
             staging) STATUS_NAME="FR on staging" ;;
-            prod)    STATUS_NAME="Done" ;;
+            prod)    STATUS_NAME="Prod" ;;
           esac
           STATUS_OPT=$(echo "$PROJ" | jq -r --arg s "$STATUS_NAME" '.data.organization.projectV2.fields.nodes[]
             | select(.name=="Status") | .options[] | select(.name==$s) | .id')

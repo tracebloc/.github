@@ -1,0 +1,161 @@
+name: FR gate
+
+# Reusable workflow. Called from each active repo on pull_request events
+# targeting staging, main, or master. Blocks the merge unless every item
+# included in the promotion is in the correct "Ready for X" column:
+#
+#   target = staging  → all items must be in "Ready for staging"
+#   target = main/master → all items must be in "Ready for prod"
+#
+# This enforces the "FR must pass before promotion" rule. It runs as a
+# required status check (configured via branch protection) so the merge
+# button stays grey until the gate passes.
+#
+# Override: add the "skip-fr-gate" label to bypass the check (for hotfixes
+# or emergency releases). The label is a deliberate, visible action so we
+# can audit overrides after the fact.
+#
+# Item discovery: extracts PR numbers from the commit subjects between
+# base and head (squash-merge "(#NNN)" or "Merge pull request #NNN"). If
+# the PR has no such refs (e.g. direct hotfix), falls back to checking
+# the promotion PR's own Status.
+
+on:
+  workflow_call:
+    inputs:
+      project-number:
+        type: number
+        default: 2
+      org:
+        type: string
+        default: tracebloc
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine required Status from target branch
+        id: target
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          case "$BASE" in
+            staging)     echo "required=Ready for staging" >> "$GITHUB_OUTPUT" ;;
+            main|master) echo "required=Ready for prod"    >> "$GITHUB_OUTPUT" ;;
+            *)           echo "required="                  >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Skip if not promoting to staging/main/master
+        if: steps.target.outputs.required == ''
+        run: echo "Target branch '${{ github.base_ref }}' is not gated — nothing to enforce."
+
+      - name: Check for skip-fr-gate label
+        id: skip
+        if: steps.target.outputs.required != ''
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          if echo "$LABELS" | grep -q '"skip-fr-gate"'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::FR gate bypassed via 'skip-fr-gate' label."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Discover items in this promotion
+        id: items
+        if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Make the base branch tip available locally for the diff.
+          git fetch origin "$BASE_REF":"refs/remotes/origin/$BASE_REF" --depth=200 2>/dev/null || true
+          BASE_SHA=$(git rev-parse "origin/$BASE_REF")
+
+          # Extract PR refs from commit *subjects* only (avoids "Closes #N" issue refs).
+          PRS=$(git log --format='%s' "$BASE_SHA..$HEAD_SHA" \
+            | grep -oE '\(#[0-9]+\)|Merge pull request #[0-9]+' \
+            | grep -oE '#[0-9]+' | tr -d '#' | sort -u | tr '\n' ' ' || true)
+          echo "Items in promotion: $PRS"
+          echo "prs=$PRS" >> "$GITHUB_OUTPUT"
+
+      - name: Verify each item is in required Status
+        if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          ORG: ${{ inputs.org }}
+          PROJECT_NUMBER: ${{ inputs.project-number }}
+          REPO_FULL: ${{ github.repository }}
+          REQUIRED: ${{ steps.target.outputs.required }}
+          PRS: ${{ steps.items.outputs.prs }}
+          PROMOTION_PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          REPO_NAME="${REPO_FULL#*/}"
+
+          # If commit subjects yielded no PR refs, gate the promotion PR itself.
+          NUMBERS="$PRS"
+          if [ -z "$(echo "$NUMBERS" | tr -d ' ')" ]; then
+            echo "No PR refs in commit subjects — falling back to gating the promotion PR (#$PROMOTION_PR) itself."
+            NUMBERS="$PROMOTION_PR"
+          fi
+
+          BLOCKED=""
+          MISSING=""
+          PASSED=""
+          for num in $NUMBERS; do
+            STATUS=$(gh api graphql -f query='
+              query($org: String!, $repo: String!, $num: Int!) {
+                repository(owner: $org, name: $repo) {
+                  pullRequest(number: $num) {
+                    projectItems(first: 10) {
+                      nodes {
+                        project { number }
+                        fieldValueByName(name: "Status") {
+                          ... on ProjectV2ItemFieldSingleSelectValue { name }
+                        }
+                      }
+                    }
+                  }
+                }
+              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$num" 2>/dev/null \
+              | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
+                  | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' | head -1) || STATUS=""
+
+            if [ -z "$STATUS" ]; then
+              echo "  ⚪ #$num — not on kanban, skipping"
+              MISSING="$MISSING #$num"
+              continue
+            fi
+
+            if [ "$STATUS" = "$REQUIRED" ]; then
+              echo "  ✅ #$num — Status='$REQUIRED'"
+              PASSED="$PASSED #$num"
+            else
+              echo "  ❌ #$num — Status='$STATUS', required='$REQUIRED'"
+              BLOCKED="$BLOCKED #$num($STATUS)"
+            fi
+          done
+
+          echo ""
+          if [ -n "$BLOCKED" ]; then
+            echo "::error::FR gate FAILED. Items not yet '$REQUIRED':$BLOCKED"
+            echo ""
+            echo "How to unblock:"
+            echo "  1. Run /fr-pass on each PR once functional review passes on the previous env, OR"
+            echo "  2. Drag each card to '$REQUIRED' on the engineer kanban."
+            echo ""
+            echo "Emergency override: add the 'skip-fr-gate' label to this PR (visible in audit)."
+            exit 1
+          fi
+
+          echo "✓ FR gate PASSED. All items are in '$REQUIRED'."
+          [ -n "$MISSING" ] && echo "  (skipped not-on-kanban:$MISSING)"

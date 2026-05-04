@@ -4,11 +4,11 @@ name: Route kanban Status on closure
 # Sets the correct Status based on what actually happened:
 #   - PR merged to develop           → FR on dev      (functional review on dev environment)
 #   - PR merged to staging           → FR on staging  (functional review on staging environment)
-#   - PR merged to main/master       → Done           (shipped to prod)
+#   - PR merged to main/master       → Prod           (shipped to prod)
 #   - PR closed without merging      → Cancelled
 #   - Issue closed as completed:
 #       · by a PR (any base)         → mirror the PR's resulting Status
-#       · manually (no closing PR)   → Done
+#       · manually (no closing PR)   → Prod
 #   - Issue closed as not_planned    → Cancelled
 #   - Issue closed (no state_reason) → Cancelled (default to abandoned)
 #
@@ -44,7 +44,7 @@ jobs:
           if [ "$EVENT_NAME" = "pull_request" ]; then
             if [ "$PR_MERGED" = "true" ]; then
               case "$BASE_REF" in
-                main|master) echo "status=Done"          >> "$GITHUB_OUTPUT" ;;
+                main|master) echo "status=Prod"          >> "$GITHUB_OUTPUT" ;;
                 staging)     echo "status=FR on staging" >> "$GITHUB_OUTPUT" ;;
                 develop)     echo "status=FR on dev"     >> "$GITHUB_OUTPUT" ;;
                 *)           echo "status=FR on dev"     >> "$GITHUB_OUTPUT" ;;
@@ -55,7 +55,7 @@ jobs:
           elif [ "$EVENT_NAME" = "issues" ]; then
             if [ "$ISSUE_REASON" = "completed" ]; then
               # If a linked PR closed this issue, mirror that PR's resulting Status.
-              # Otherwise (manual completion), default to Done.
+              # Otherwise (manual completion), default to Prod.
               REPO_NAME="${REPO_FULL#*/}"
               CLOSING_PR_BASE=$(gh api graphql -f query='
                 query($org: String!, $repo: String!, $num: Int!) {
@@ -67,10 +67,10 @@ jobs:
                 }' -F org="$ORG" -F repo="$REPO_NAME" -F num="${{ github.event.issue.number }}" \
                 --jq '.data.repository.issue.closedByPullRequestsReferences.nodes[0].baseRefName // ""' 2>/dev/null) || CLOSING_PR_BASE=""
               case "$CLOSING_PR_BASE" in
-                main|master) echo "status=Done"          >> "$GITHUB_OUTPUT" ;;
+                main|master) echo "status=Prod"          >> "$GITHUB_OUTPUT" ;;
                 staging)     echo "status=FR on staging" >> "$GITHUB_OUTPUT" ;;
                 develop)     echo "status=FR on dev"     >> "$GITHUB_OUTPUT" ;;
-                *)           echo "status=Done"          >> "$GITHUB_OUTPUT" ;;
+                *)           echo "status=Prod"          >> "$GITHUB_OUTPUT" ;;
               esac
             else
               echo "status=Cancelled" >> "$GITHUB_OUTPUT"
