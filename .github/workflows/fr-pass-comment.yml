@@ -1,0 +1,146 @@
+name: FR pass comment handler
+
+# Reusable workflow. Called from each active repo on issue_comment created.
+# Listens for "/fr-pass" comments on PRs/issues that are currently in
+# "FR on dev" or "FR on staging" and advances them to the next column:
+#   FR on dev      → Ready for staging
+#   FR on staging  → Ready for prod
+#
+# Only repo collaborators can trigger this (MEMBER / OWNER / COLLABORATOR).
+# The workflow reacts on the comment with 👍 on success, 👎 on no-op so the
+# author gets immediate visual feedback without a follow-up comment.
+#
+# Why a comment-based gate instead of a kanban field: it leaves a record on
+# the PR/issue thread so reviewers can see who passed FR and when.
+# Drag-and-drop on the kanban also works — this is just a keyboard shortcut.
+
+on:
+  workflow_call:
+    inputs:
+      project-number:
+        type: number
+        default: 2
+      org:
+        type: string
+        default: tracebloc
+
+jobs:
+  advance:
+    # Skip unless the comment body actually contains /fr-pass.
+    # Restrict to repo collaborators to prevent random commenters from advancing items.
+    if: |
+      contains(github.event.comment.body, '/fr-pass') &&
+      (github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'COLLABORATOR')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve current Status and advance one column
+        id: advance
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          ORG: ${{ inputs.org }}
+          PROJECT_NUMBER: ${{ inputs.project-number }}
+          REPO_FULL: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+          IS_PR: ${{ github.event.issue.pull_request != null }}
+        run: |
+          set -euo pipefail
+          REPO_NAME="${REPO_FULL#*/}"
+
+          # One query, two roots: project metadata + item Status.
+          # Uses $itemNum for the issue/PR number to keep it distinct from $num (project).
+          if [ "$IS_PR" = "true" ]; then
+            CONTENT_QUERY='pullRequest(number: $itemNum)'
+          else
+            CONTENT_QUERY='issue(number: $itemNum)'
+          fi
+
+          PROJ=$(gh api graphql -f query="
+            query(\$org: String!, \$num: Int!, \$repo: String!, \$itemNum: Int!) {
+              organization(login: \$org) {
+                projectV2(number: \$num) {
+                  id
+                  field(name: \"Status\") {
+                    ... on ProjectV2SingleSelectField { id options { id name } }
+                  }
+                }
+              }
+              repository(owner: \$org, name: \$repo) {
+                $CONTENT_QUERY {
+                  projectItems(first: 10) {
+                    nodes {
+                      id
+                      project { number }
+                      fieldValueByName(name: \"Status\") {
+                        ... on ProjectV2ItemFieldSingleSelectValue { name }
+                      }
+                    }
+                  }
+                }
+              }
+            }" -F org="$ORG" -F num="$PROJECT_NUMBER" -F repo="$REPO_NAME" -F itemNum="$NUMBER" 2>/dev/null) || PROJ='{}'
+
+          PROJECT_ID=$(echo "$PROJ" | jq -r '.data.organization.projectV2.id // empty')
+          STATUS_FIELD=$(echo "$PROJ" | jq -r '.data.organization.projectV2.field.id // empty')
+          ITEM_ID=$(echo "$PROJ" | jq -r --arg n "$PROJECT_NUMBER" '
+            ([.. | objects | select(has("projectItems"))] | first).projectItems.nodes[]?
+            | select(.project.number == ($n | tonumber)) | .id' | head -1)
+          CURRENT=$(echo "$PROJ" | jq -r --arg n "$PROJECT_NUMBER" '
+            ([.. | objects | select(has("projectItems"))] | first).projectItems.nodes[]?
+            | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' | head -1)
+
+          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
+            echo "Item #$NUMBER not on project #$PROJECT_NUMBER — nothing to do."
+            echo "result=not-on-project" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Decide the next status from the current one.
+          case "$CURRENT" in
+            "FR on dev")     NEXT="Ready for staging" ;;
+            "FR on staging") NEXT="Ready for prod" ;;
+            *)
+              echo "Item is in '$CURRENT' — /fr-pass only applies to 'FR on dev' or 'FR on staging'. Skipping."
+              echo "result=wrong-column" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          NEXT_OPT=$(echo "$PROJ" | jq -r --arg s "$NEXT" \
+            '.data.organization.projectV2.field.options[] | select(.name==$s) | .id')
+
+          if [ -z "$NEXT_OPT" ] || [ "$NEXT_OPT" = "null" ]; then
+            echo "Could not resolve Status option '$NEXT' — aborting"
+            echo "result=missing-option" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          gh api graphql -f query='
+            mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $p, itemId: $i, fieldId: $f,
+                value: {singleSelectOptionId: $o}
+              }) { projectV2Item { id } }
+            }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -F o="$NEXT_OPT" > /dev/null
+
+          echo "→ #$NUMBER: $CURRENT → $NEXT"
+          echo "result=advanced" >> "$GITHUB_OUTPUT"
+          echo "from=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "to=$NEXT" >> "$GITHUB_OUTPUT"
+
+      - name: React on the comment (👍 advanced / 👎 no-op)
+        if: always() && steps.advance.outputs.result != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          RESULT: ${{ steps.advance.outputs.result }}
+        run: |
+          if [ "$RESULT" = "advanced" ]; then
+            REACTION="+1"
+          else
+            REACTION="-1"
+          fi
+          gh api -X POST "/repos/$REPO_FULL/issues/comments/$COMMENT_ID/reactions" \
+            -f content="$REACTION" > /dev/null || true
