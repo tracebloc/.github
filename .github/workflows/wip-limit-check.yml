@@ -23,8 +23,6 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
     steps:
       - name: Count items in Code review and comment if over limit
         env:

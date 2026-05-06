@@ -1,0 +1,15 @@
+name: FR pass comment
+
+# Template for each active repo. Copy this file into a repo's
+# .github/workflows/ directory to enable the /fr-pass comment shortcut
+# for advancing kanban items from "FR on dev" or "FR on staging" to the
+# next column.
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  advance:
+    uses: tracebloc/.github/.github/workflows/fr-pass-comment.yml@main
+    secrets: inherit
