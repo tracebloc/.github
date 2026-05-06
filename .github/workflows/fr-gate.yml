@@ -158,4 +158,9 @@ jobs:
           fi
 
           echo "✓ FR gate PASSED. All items are in '$REQUIRED'."
-          [ -n "$MISSING" ] && echo "  (skipped not-on-kanban:$MISSING)"
+          # Use an `if` here, not `[ -n ... ] && echo`. With `set -e`, the bracket
+          # test returning 1 on empty MISSING (the normal happy path) would short-
+          # circuit && and become the script's exit code, failing the step.
+          if [ -n "$MISSING" ]; then
+            echo "  (skipped not-on-kanban:$MISSING)"
+          fi
