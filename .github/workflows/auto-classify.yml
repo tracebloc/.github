@@ -52,6 +52,7 @@ jobs:
 
           # Deploy env option IDs
           DEPLOY_NONE="14e41520"
+          DEPLOY_ACTIVE="386a9edb"
           DEPLOY_DEV="2bd56845"
           DEPLOY_STAGING="cadea71b"
           DEPLOY_PROD="4c9dd784"
@@ -135,8 +136,10 @@ jobs:
               target=""
               target_name=""
               case "$status" in
-                "Backlog"|"Ready"|"In progress"|"Code review"|"")
+                "Backlog"|"")
                   target="$DEPLOY_NONE"; target_name="none" ;;
+                "Ready"|"In progress"|"Code review")
+                  target="$DEPLOY_ACTIVE"; target_name="Active" ;;
                 "FR on dev"|"Ready for staging")
                   target="$DEPLOY_DEV"; target_name="dev" ;;
                 "FR on staging"|"Ready for prod")
