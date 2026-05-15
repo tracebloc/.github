@@ -55,6 +55,7 @@ jobs:
           DEPLOY_DEV="2bd56845"
           DEPLOY_STAGING="cadea71b"
           DEPLOY_PROD="4c9dd784"
+          DEPLOY_CANCELLED="9866b58c"
 
           set_field() {
             gh api graphql -f query="
@@ -134,7 +135,7 @@ jobs:
               target=""
               target_name=""
               case "$status" in
-                "Backlog"|"Ready"|"In progress"|"Code review"|"Cancelled"|"")
+                "Backlog"|"Ready"|"In progress"|"Code review"|"")
                   target="$DEPLOY_NONE"; target_name="none" ;;
                 "FR on dev"|"Ready for staging")
                   target="$DEPLOY_DEV"; target_name="dev" ;;
@@ -142,6 +143,8 @@ jobs:
                   target="$DEPLOY_STAGING"; target_name="staging" ;;
                 "Prod")
                   target="$DEPLOY_PROD"; target_name="prod" ;;
+                "Cancelled")
+                  target="$DEPLOY_CANCELLED"; target_name="Cancelled" ;;
               esac
 
               if [ -n "$target" ] && [ "$current_deploy" != "$target_name" ]; then
