@@ -1,12 +1,13 @@
 name: Auto-classify kanban items (Squad / Area / Deploy environment)
 
-# Scans the engineer kanban for items missing classification fields and fills them in.
-# - Squad / Area: derived from the source repo
-# - Deploy environment: derived from item type + base branch + merge state
+# Scans the engineer kanban every 10 min and reconciles classification fields:
+# - Squad / Area: derived from the source repo. Set only if unset (idempotent).
+# - Deploy environment: derived from Status. Overwrites if it doesn't match,
+#   so Deploy env always tracks the kanban column. Status is source of truth.
 #
-# Closes the gap where auto-add only sets Status=Backlog without populating
-# downstream fields. Runs every 10 minutes. Idempotent — only touches items
-# where the relevant field is unset.
+# Why Deploy is now sync (not "set if unset"): advance-deploy-env updates it on
+# pushes, but closure-router (issue close), manual drag-and-drop, and one-off
+# backfills only touch Status — leaving Deploy stale. This cron re-syncs.
 
 on:
   schedule:
@@ -120,35 +121,33 @@ jobs:
                 fi
               fi
 
-              # ─── Deploy environment: set if unset ───
-              has_deploy=$(echo "$node" | jq -r '.fieldValues.nodes[]? | select(.field.name == "Deploy environment") | .name // empty' | head -1)
-              if [ -z "$has_deploy" ]; then
-                # Determine target based on item type / state / base
-                merged=$(echo "$node" | jq -r '.content.merged // empty')
-                state=$(echo "$node" | jq -r '.content.state // empty')
-                base=$(echo "$node" | jq -r '.content.baseRefName // empty')
+              # ─── Deploy environment: derive from Status ───
+              # Status is the source of truth. Deploy environment tracks where the
+              # item is currently running, which is fully determined by the kanban
+              # column it's in. The advance-deploy-env workflow keeps these aligned
+              # on pushes, but other paths (closure-router setting Status on issue
+              # close, manual drag-and-drop on the board, my backfills) only touch
+              # Status — leaving Deploy env stale. This cron re-syncs.
+              status=$(echo "$node" | jq -r '.fieldValues.nodes[]? | select(.field.name == "Status") | .name // empty' | head -1)
+              current_deploy=$(echo "$node" | jq -r '.fieldValues.nodes[]? | select(.field.name == "Deploy environment") | .name // empty' | head -1)
 
-                target=""
-                if [ -z "$merged" ] && [ "$state" = "" ]; then
-                  # Issue (no merged field) — always none
-                  target="$DEPLOY_NONE"
-                elif [ "$state" = "OPEN" ]; then
-                  target="$DEPLOY_NONE"
-                elif [ "$state" = "CLOSED" ] && [ "$merged" != "true" ]; then
-                  target="$DEPLOY_NONE"
-                elif [ "$merged" = "true" ]; then
-                  case "$base" in
-                    develop)     target="$DEPLOY_DEV" ;;
-                    staging)     target="$DEPLOY_STAGING" ;;
-                    main|master) target="$DEPLOY_PROD" ;;
-                  esac
-                fi
+              target=""
+              target_name=""
+              case "$status" in
+                "Backlog"|"Ready"|"In progress"|"Code review"|"Cancelled"|"")
+                  target="$DEPLOY_NONE"; target_name="none" ;;
+                "FR on dev"|"Ready for staging")
+                  target="$DEPLOY_DEV"; target_name="dev" ;;
+                "FR on staging"|"Ready for prod")
+                  target="$DEPLOY_STAGING"; target_name="staging" ;;
+                "Prod")
+                  target="$DEPLOY_PROD"; target_name="prod" ;;
+              esac
 
-                if [ -n "$target" ]; then
-                  set_field "$item_id" "$DEPLOY_FIELD" "$target"
-                  echo "  → Deploy env: $repo item ($item_id)"
-                  touched_deploy=$((touched_deploy + 1))
-                fi
+              if [ -n "$target" ] && [ "$current_deploy" != "$target_name" ]; then
+                set_field "$item_id" "$DEPLOY_FIELD" "$target"
+                echo "  → Deploy env: $repo item ($item_id) → $target_name (was: ${current_deploy:-unset})"
+                touched_deploy=$((touched_deploy + 1))
               fi
             done < <(echo "$page" | jq -c '.data.organization.projectV2.items.nodes[]')
 
