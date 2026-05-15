@@ -39,6 +39,12 @@ jobs:
           PR_MERGED: ${{ github.event.pull_request.merged }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           ISSUE_REASON: ${{ github.event.issue.state_reason }}
+          # ORG + REPO_FULL needed by the "issue closed as completed" branch when
+          # it does the closing-PR-base lookup. Without these, `set -u` aborted
+          # the script before any status= output was written, leaving the
+          # built-in "Item closed" project workflow to set Status=Cancelled.
+          ORG: ${{ inputs.org }}
+          REPO_FULL: ${{ github.repository }}
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
