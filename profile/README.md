@@ -7,13 +7,13 @@
 **Mac / Linux**
 
 ```bash
-bash <(curl -fsSL https://tracebloc.io/install.sh)
+bash <(curl -fsSL https://tracebloc.io/i.sh)
 ```
 
 **Windows**
 
 ```powershell
-irm https://tracebloc.io/install.ps1 | iex
+irm https://tracebloc.io/i.ps1 | iex
 ```
 
 
