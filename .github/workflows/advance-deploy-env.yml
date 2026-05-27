@@ -148,13 +148,18 @@ jobs:
             fi
 
             echo "→ PR #$prnum: Deploy env = $DEPLOY_ENV"
+            # Pass option IDs with -f (raw string), NOT -F: ProjectV2 single-select
+            # option IDs can be all-numeric, and -F does magic type coercion that turns
+            # an all-digit value into an integer, which the $o: String! variable then
+            # rejects ("Variable $o of type String! was provided invalid value").
+            # -f forces a string and is coercion-proof.
             gh api graphql -f query='
               mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
                 updateProjectV2ItemFieldValue(input: {
                   projectId: $p, itemId: $i, fieldId: $f,
                   value: {singleSelectOptionId: $o}
                 }) { projectV2Item { id } }
-              }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$DEPLOY_FIELD" -F o="$DEPLOY_OPT" > /dev/null
+              }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$DEPLOY_FIELD" -f o="$DEPLOY_OPT" > /dev/null
 
             if [ "${SKIP_STATUS:-0}" != "1" ]; then
               echo "→ PR #$prnum: Status = $STATUS_NAME"
@@ -164,6 +169,6 @@ jobs:
                     projectId: $p, itemId: $i, fieldId: $f,
                     value: {singleSelectOptionId: $o}
                   }) { projectV2Item { id } }
-                }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -F o="$STATUS_OPT" > /dev/null
+                }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -f o="$STATUS_OPT" > /dev/null
             fi
           done
