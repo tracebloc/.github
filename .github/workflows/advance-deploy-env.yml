@@ -148,11 +148,11 @@ jobs:
             fi
 
             echo "→ PR #$prnum: Deploy env = $DEPLOY_ENV"
-            # Pass option IDs with -f (raw string), NOT -F: ProjectV2 option IDs can
-            # be all-numeric (e.g. "FR on dev" = 90729828, "Prod" = 98236657). -F does
-            # magic type coercion, turning an all-digit value into an integer, which
-            # the $o: String! variable then rejects with "Variable $o of type String!
-            # was provided invalid value". -f forces a string and is coercion-proof.
+            # Pass option IDs with -f (raw string), NOT -F: ProjectV2 single-select
+            # option IDs can be all-numeric, and -F does magic type coercion that turns
+            # an all-digit value into an integer, which the $o: String! variable then
+            # rejects ("Variable $o of type String! was provided invalid value").
+            # -f forces a string and is coercion-proof.
             gh api graphql -f query='
               mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
                 updateProjectV2ItemFieldValue(input: {

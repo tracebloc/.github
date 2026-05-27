@@ -79,9 +79,9 @@ jobs:
           fi
 
           # Pass the option ID with -f (raw string), NOT -F: ProjectV2 option IDs can
-          # be all-numeric (P0 = 79628723 already is), and -F coerces all-digit values
-          # to an integer, which the $o: String! variable rejects. -f forces a string.
-          # P1 happens to contain a letter today, but don't rely on that.
+          # be all-numeric, and -F coerces all-digit values to an integer, which the
+          # $o: String! variable rejects. -f forces a string. (The option set here can
+          # be all-numeric, so this matters even if today's happens to have letters.)
           gh api graphql -f query='
             mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
               updateProjectV2ItemFieldValue(input: {
