@@ -78,12 +78,16 @@ jobs:
             exit 0
           fi
 
+          # Pass the option ID with -f (raw string), NOT -F: ProjectV2 option IDs can
+          # be all-numeric, and -F coerces all-digit values to an integer, which the
+          # $o: String! variable rejects. -f forces a string. (The option set here can
+          # be all-numeric, so this matters even if today's happens to have letters.)
           gh api graphql -f query='
             mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
               updateProjectV2ItemFieldValue(input: {
                 projectId: $p, itemId: $i, fieldId: $f,
                 value: {singleSelectOptionId: $o}
               }) { projectV2Item { id } }
-            }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$PRIORITY_FIELD" -F o="$PRIORITY_OPT" > /dev/null
+            }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$PRIORITY_FIELD" -f o="$PRIORITY_OPT" > /dev/null
 
           echo "→ Issue #$ISSUE_NUMBER bumped to Priority=$PRIORITY_NAME"
