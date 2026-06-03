@@ -1,0 +1,329 @@
+name: Kanban reconcile
+
+# Nightly self-healing pass for the engineer kanban (project #2).
+#
+# Catches stalls and drift that the event-driven workflows
+# (advance-deploy-env, kanban-closure-router) silently miss:
+#
+#   1. Drift to Prod  - items in RfP / FR-on-staging / FR-on-dev / Code review
+#                       whose merge SHA is already on the repo's prod branch.
+#                       Cause: the push event was missed, or the deploy
+#                       happens out-of-band (e.g. averaging-service deploys
+#                       a Docker image from staging without ever pushing main).
+#
+#   2. Release vehicles  - merged PRs whose title matches the
+#                          "Release: develop -> staging" / "Dev to staging"
+#                          / "Staging to prod" pattern. They're not
+#                          deliverables - auto-move to Prod once merged.
+#
+#   3. Cancelled  - closed-not-merged PRs sitting in non-terminal columns.
+#
+#   4. Misplaced open issues - open issues that drifted into a post-merge
+#                              column (RfP, FR-on-*, Ready-for-staging).
+#                              Move back to Backlog.
+#
+# Per-repo override: a repo can declare its prod-truth branch in a
+# `.kanban.yml` at the repo root (see kanban-reconcile docs in this repo).
+# Default: the repo's GitHub default branch (main/master).
+#
+# Safety cap: if the script would move > 100 items in one run, it aborts
+# and reports - that's almost certainly a bug, not real drift.
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 04:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Log moves without applying them"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kanban-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+      ORG: tracebloc
+      PROJECT_NUMBER: 2
+      DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
+      MAX_MOVES: 100
+    steps:
+      - name: Resolve project + field/option IDs
+        id: ids
+        run: |
+          set -euo pipefail
+          PROJ=$(gh api graphql -f query='
+            query($org: String!, $num: Int!) {
+              organization(login: $org) {
+                projectV2(number: $num) {
+                  id
+                  fields(first: 50) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField {
+                        id name options { id name }
+                      }
+                    }
+                  }
+                }
+              }
+            }' -F org="$ORG" -F num="$PROJECT_NUMBER")
+
+          PROJECT_ID=$(echo "$PROJ" | jq -r '.data.organization.projectV2.id')
+          STATUS_FIELD=$(echo "$PROJ" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Status") | .id')
+          opt() {
+            echo "$PROJ" | jq -r --arg n "$1" '.data.organization.projectV2.fields.nodes[]
+              | select(.name=="Status") | .options[] | select(.name==$n) | .id'
+          }
+          echo "project_id=$PROJECT_ID"                 >> "$GITHUB_OUTPUT"
+          echo "status_field=$STATUS_FIELD"             >> "$GITHUB_OUTPUT"
+          echo "prod_opt=$(opt Prod)"                   >> "$GITHUB_OUTPUT"
+          echo "cancelled_opt=$(opt Cancelled)"         >> "$GITHUB_OUTPUT"
+          echo "backlog_opt=$(opt Backlog)"             >> "$GITHUB_OUTPUT"
+
+      - name: Pull non-terminal items
+        run: |
+          set -euo pipefail
+          : > items.ndjson
+          cursor="null"
+          while :; do
+            if [ "$cursor" = "null" ]; then
+              OUT=$(gh api graphql -f query='
+                query($org: String!, $num: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $num) {
+                      items(first: 100) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                          id
+                          fieldValueByName(name: "Status") {
+                            ... on ProjectV2ItemFieldSingleSelectValue { name }
+                          }
+                          content {
+                            __typename
+                            ... on PullRequest {
+                              number title state mergedAt baseRefName
+                              mergeCommit { oid }
+                              repository { name defaultBranchRef { name } }
+                            }
+                            ... on Issue {
+                              number title state stateReason
+                              repository { name defaultBranchRef { name } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }' -F org="$ORG" -F num="$PROJECT_NUMBER")
+            else
+              OUT=$(gh api graphql -f query='
+                query($org: String!, $num: Int!, $c: String!) {
+                  organization(login: $org) {
+                    projectV2(number: $num) {
+                      items(first: 100, after: $c) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                          id
+                          fieldValueByName(name: "Status") {
+                            ... on ProjectV2ItemFieldSingleSelectValue { name }
+                          }
+                          content {
+                            __typename
+                            ... on PullRequest {
+                              number title state mergedAt baseRefName
+                              mergeCommit { oid }
+                              repository { name defaultBranchRef { name } }
+                            }
+                            ... on Issue {
+                              number title state stateReason
+                              repository { name defaultBranchRef { name } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }' -F org="$ORG" -F num="$PROJECT_NUMBER" -F c="$cursor")
+            fi
+            echo "$OUT" | jq -c '.data.organization.projectV2.items.nodes[]
+              | select(.fieldValueByName.name as $s
+                       | ["Code review","FR on dev","Ready for staging",
+                          "FR on staging","Ready for prod"] | index($s))' \
+              >> items.ndjson
+
+            HAS_NEXT=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
+            cursor=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.pageInfo.endCursor')
+            [ "$HAS_NEXT" = "true" ] || break
+          done
+          echo "Found $(wc -l < items.ndjson) non-terminal items to evaluate"
+
+      - name: Classify + plan moves
+        id: plan
+        run: |
+          set -euo pipefail
+          : > moves.tsv
+          : > skip.tsv
+
+          declare -A PROD_BRANCH_CACHE
+          resolve_prod_branch() {
+            local repo="$1" default_branch="$2"
+            if [ -n "${PROD_BRANCH_CACHE[$repo]:-}" ]; then
+              echo "${PROD_BRANCH_CACHE[$repo]}"; return
+            fi
+            local branch="$default_branch"
+            local body
+            body=$(gh api "/repos/$ORG/$repo/contents/.kanban.yml" \
+                   -H "Accept: application/vnd.github.raw" 2>/dev/null || true)
+            if [ -n "$body" ]; then
+              local override
+              override=$(printf '%s\n' "$body" | yq -r \
+                '.branch_status_map // {} | to_entries[] | select(.value=="Prod") | .key' 2>/dev/null \
+                | head -1)
+              if [ -n "$override" ] && [ "$override" != "null" ]; then
+                branch="$override"
+              fi
+            fi
+            PROD_BRANCH_CACHE[$repo]="$branch"
+            echo "$branch"
+          }
+
+          sha_on_branch() {
+            local repo="$1" branch="$2" sha="$3"
+            { [ -z "$sha" ] || [ "$sha" = "null" ]; } && return 1
+            local status
+            status=$(gh api "/repos/$ORG/$repo/compare/$branch...$sha" \
+                     --jq '.status' 2>/dev/null) || return 1
+            [ "$status" = "behind" ] || [ "$status" = "identical" ]
+          }
+
+          is_release_vehicle() {
+            echo "$1" | grep -qiE \
+              '^(release[: ]|dev to (staging|stg|prod)|staging to (prod|master|main))'
+          }
+
+          PROD_OPT="${{ steps.ids.outputs.prod_opt }}"
+          CANCELLED_OPT="${{ steps.ids.outputs.cancelled_opt }}"
+          BACKLOG_OPT="${{ steps.ids.outputs.backlog_opt }}"
+
+          while IFS= read -r line; do
+            ITEM_ID=$(echo "$line"  | jq -r '.id')
+            COL=$(echo "$line"      | jq -r '.fieldValueByName.name')
+            TYPE=$(echo "$line"     | jq -r '.content.__typename')
+            REPO=$(echo "$line"     | jq -r '.content.repository.name')
+            DEFAULT=$(echo "$line"  | jq -r '.content.repository.defaultBranchRef.name // "main"')
+            NUM=$(echo "$line"      | jq -r '.content.number')
+            TITLE=$(echo "$line"    | jq -r '.content.title')
+
+            if [ "$TYPE" = "PullRequest" ]; then
+              STATE=$(echo "$line" | jq -r '.content.state')
+              SHA=$(echo "$line"   | jq -r '.content.mergeCommit.oid // ""')
+
+              if [ "$STATE" = "CLOSED" ]; then
+                printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$CANCELLED_OPT" "$REPO#$NUM closed-not-merged ($COL)" "cancelled" >> moves.tsv
+                continue
+              fi
+
+              if [ "$STATE" = "MERGED" ] && is_release_vehicle "$TITLE"; then
+                printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$PROD_OPT" "$REPO#$NUM release vehicle ($COL -> Prod)" "release-vehicle" >> moves.tsv
+                continue
+              fi
+
+              if [ "$STATE" = "MERGED" ] && [ -n "$SHA" ]; then
+                PROD=$(resolve_prod_branch "$REPO" "$DEFAULT")
+                if sha_on_branch "$REPO" "$PROD" "$SHA"; then
+                  printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$PROD_OPT" "$REPO#$NUM SHA on $PROD ($COL -> Prod)" "drift-to-prod" >> moves.tsv
+                  continue
+                fi
+              fi
+              printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "-" "$REPO#$NUM PR in $COL (legit waiting)" "waiting" >> skip.tsv
+              continue
+            fi
+
+            if [ "$TYPE" = "Issue" ]; then
+              STATE=$(echo "$line" | jq -r '.content.state')
+              SR=$(echo "$line"    | jq -r '.content.stateReason // ""')
+
+              if [ "$STATE" = "CLOSED" ] && { [ "$SR" = "NOT_PLANNED" ] || [ "$SR" = "DUPLICATE" ]; }; then
+                printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$CANCELLED_OPT" "$REPO#$NUM issue not_planned ($COL -> Cancelled)" "cancelled" >> moves.tsv
+                continue
+              fi
+
+              if [ "$STATE" = "OPEN" ]; then
+                case "$COL" in
+                  "Ready for prod"|"FR on staging"|"FR on dev"|"Ready for staging")
+                    printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$BACKLOG_OPT" "$REPO#$NUM open issue in $COL -> Backlog" "misplaced-issue" >> moves.tsv
+                    continue ;;
+                esac
+              fi
+              printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "-" "$REPO#$NUM issue in $COL (no action)" "no-action" >> skip.tsv
+            fi
+          done < items.ndjson
+
+          PLANNED=$(wc -l < moves.tsv | tr -d ' ')
+          echo "planned=$PLANNED" >> "$GITHUB_OUTPUT"
+          echo "Planned moves: $PLANNED"
+          echo "::group::Planned moves"
+          column -t -s$'\t' moves.tsv || cat moves.tsv
+          echo "::endgroup::"
+
+          if [ "$PLANNED" -gt "$MAX_MOVES" ]; then
+            echo "::error::$PLANNED moves exceeds MAX_MOVES=$MAX_MOVES - aborting. Investigate."
+            exit 1
+          fi
+
+      - name: Apply moves
+        if: steps.plan.outputs.planned != '0' && env.DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+          PROJECT_ID="${{ steps.ids.outputs.project_id }}"
+          STATUS_FIELD="${{ steps.ids.outputs.status_field }}"
+          ok=0; fail=0
+          while IFS=$'\t' read -r itemId optId reason label; do
+            [ "$optId" = "-" ] && continue
+            if gh api graphql -f query='
+                mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $p, itemId: $i, fieldId: $f,
+                    value: {singleSelectOptionId: $o}
+                  }) { projectV2Item { id } }
+                }' -F p="$PROJECT_ID" -F i="$itemId" -F f="$STATUS_FIELD" -f o="$optId" \
+                > /dev/null 2>&1; then
+              echo "[OK]   $reason"
+              ok=$((ok+1))
+            else
+              echo "[FAIL] $reason"
+              fail=$((fail+1))
+            fi
+          done < moves.tsv
+          echo ""
+          echo "=== Applied: $ok ok, $fail failed ==="
+
+      - name: Dry-run summary
+        if: env.DRY_RUN == 'true'
+        run: |
+          echo "DRY RUN - no moves applied."
+          echo "$(wc -l < moves.tsv | tr -d ' ') moves were planned (see prior step)."
+
+      - name: Per-label summary
+        if: always() && steps.plan.outputs.planned != '0'
+        run: |
+          {
+            echo "## Reconcile summary"
+            echo ""
+            echo "Planned: ${{ steps.plan.outputs.planned }} | Dry run: $DRY_RUN"
+            echo ""
+            echo "### Counts by label"
+            awk -F'\t' '{print $4}' moves.tsv | sort | uniq -c | sort -rn \
+              | awk '{print "- **"$2"**: "$1}'
+            echo ""
+            echo "### Individual moves"
+            awk -F'\t' '{print "- "$3" -> `"$4"`"}' moves.tsv
+          } >> "$GITHUB_STEP_SUMMARY"
