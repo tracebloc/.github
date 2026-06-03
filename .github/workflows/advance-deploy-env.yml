@@ -3,13 +3,26 @@ name: Advance deploy environment
 # Reusable workflow. Called from each active repo on push to develop/staging/master/main.
 # For each PR contained in the push, updates the Deploy environment project field
 # and advances Status through the multi-stage validation flow:
-#   develop      → Status = "FR on dev"      (functional review on dev environment)
-#   staging      → Status = "FR on staging"  (functional review on staging environment)
-#   master/main  → Status = "Prod"           (shipped to production)
+#   develop      -> Status = "FR on dev"      (functional review on dev environment)
+#   staging      -> Status = "FR on staging"  (functional review on staging environment)
+#   master/main  -> Status = "Prod"           (shipped to production)
 #
 # The "Ready for staging" / "Ready for prod" intermediate states are set manually
 # (drag-and-drop on the kanban or via a /fr-pass comment) when the FR reviewer
 # declares the validation passed but the deploy hasn't happened yet.
+#
+# -- Per-repo override via `.kanban.yml` --
+# For repos where the default branch isn't the prod-truth (e.g. averaging-service
+# deploys a Docker image from staging without ever touching main), drop a
+# `.kanban.yml` at the repo root:
+#
+#   # .kanban.yml
+#   branch_status_map:
+#     staging: Prod          # this repo's deploy ships staging-built artifacts
+#
+# The override merges with the default mapping. Anything you don't explicitly
+# remap stays on the default. Keys are branch names; values are Status column
+# names ("Prod", "FR on staging", "FR on dev").
 
 on:
   workflow_call:
@@ -31,28 +44,53 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Determine target environment from branch
+      - name: Resolve deploy env + status (with .kanban.yml override)
         id: env
+        env:
+          BRANCH: ${{ github.ref_name }}
         run: |
-          case "${{ github.ref_name }}" in
-            develop)     echo "env=dev"     >> "$GITHUB_OUTPUT" ;;
-            staging)     echo "env=staging" >> "$GITHUB_OUTPUT" ;;
-            master|main) echo "env=prod"    >> "$GITHUB_OUTPUT" ;;
-            *)           echo "env="        >> "$GITHUB_OUTPUT" ;;
+          set -euo pipefail
+          # Default mapping
+          case "$BRANCH" in
+            develop)     DEPLOY_ENV="dev";     STATUS_NAME="FR on dev" ;;
+            staging)     DEPLOY_ENV="staging"; STATUS_NAME="FR on staging" ;;
+            master|main) DEPLOY_ENV="prod";    STATUS_NAME="Prod" ;;
+            *)           DEPLOY_ENV="";        STATUS_NAME="" ;;
           esac
+
+          # Per-repo override at .kanban.yml in this repo (already checked out)
+          if [ -f .kanban.yml ]; then
+            OVERRIDE=$(yq -r ".branch_status_map.\"$BRANCH\" // \"\"" .kanban.yml 2>/dev/null || true)
+            if [ -n "$OVERRIDE" ] && [ "$OVERRIDE" != "null" ]; then
+              echo "::notice::.kanban.yml overrides $BRANCH -> $OVERRIDE"
+              STATUS_NAME="$OVERRIDE"
+              # Keep Deploy environment field consistent with the override
+              case "$OVERRIDE" in
+                "Prod")          DEPLOY_ENV="prod" ;;
+                "FR on staging") DEPLOY_ENV="staging" ;;
+                "FR on dev")     DEPLOY_ENV="dev" ;;
+              esac
+            fi
+          fi
+
+          echo "env=$DEPLOY_ENV"           >> "$GITHUB_OUTPUT"
+          echo "status_name=$STATUS_NAME"  >> "$GITHUB_OUTPUT"
 
       - name: Skip if branch not tracked
         if: steps.env.outputs.env == ''
+        env:
+          BRANCH: ${{ github.ref_name }}
         run: |
-          echo "Branch '${{ github.ref_name }}' is not develop/staging/master/main — nothing to do."
+          echo "Branch '$BRANCH' is not develop/staging/master/main (and no .kanban.yml override) - nothing to do."
 
       - name: Extract PR numbers from new commits
         id: prs
         if: steps.env.outputs.env != ''
+        env:
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
         run: |
-          BEFORE="${{ github.event.before }}"
-          SHA="${{ github.sha }}"
-          # First push to a branch reports a zero hash — fall back to last 50 commits
+          # First push to a branch reports a zero hash - fall back to last 50 commits
           if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
             RANGE="--max-count=50 $SHA"
           else
@@ -60,7 +98,7 @@ jobs:
           fi
           # Extract PR refs from commit *subjects* only (not bodies), to avoid picking up
           # issue references like "Closes #47" that aren't PR numbers.
-          # Squash merge subject: "Title (#NNN)"  ·  Merge commit subject: "Merge pull request #NNN"
+          # Squash merge subject: "Title (#NNN)"  Merge commit subject: "Merge pull request #NNN"
           PRS=$(git log --format='%s' $RANGE \
             | grep -oE '\(#[0-9]+\)|Merge pull request #[0-9]+' \
             | grep -oE '#[0-9]+' | tr -d '#' | sort -u | tr '\n' ' ')
@@ -74,7 +112,9 @@ jobs:
           ORG: ${{ inputs.org }}
           PROJECT_NUMBER: ${{ inputs.project-number }}
           DEPLOY_ENV: ${{ steps.env.outputs.env }}
+          STATUS_NAME: ${{ steps.env.outputs.status_name }}
           REPO_FULL: ${{ github.repository }}
+          PR_NUMBERS: ${{ steps.prs.outputs.prs }}
         run: |
           set -euo pipefail
           REPO_NAME="${REPO_FULL#*/}"
@@ -101,33 +141,27 @@ jobs:
             | select(.name=="Deploy environment") | .options[] | select(.name==$e) | .id')
           STATUS_FIELD=$(echo "$PROJ" | jq -r '.data.organization.projectV2.fields.nodes[]
             | select(.name=="Status") | .id')
-
-          # Resolve the Status option that matches this push's target environment.
-          case "$DEPLOY_ENV" in
-            dev)     STATUS_NAME="FR on dev" ;;
-            staging) STATUS_NAME="FR on staging" ;;
-            prod)    STATUS_NAME="Prod" ;;
-          esac
           STATUS_OPT=$(echo "$PROJ" | jq -r --arg s "$STATUS_NAME" '.data.organization.projectV2.fields.nodes[]
             | select(.name=="Status") | .options[] | select(.name==$s) | .id')
 
           if [ -z "$DEPLOY_OPT" ] || [ "$DEPLOY_OPT" = "null" ]; then
-            echo "Could not resolve Deploy environment option for '$DEPLOY_ENV' — aborting"
+            echo "Could not resolve Deploy environment option for '$DEPLOY_ENV' - aborting"
             exit 1
           fi
 
           # Status update degrades gracefully: if the Status field or its target
           # option can't be resolved, log a warning and skip just the Status step
           # rather than failing the whole workflow (Deploy env update still wins).
+          SKIP_STATUS=0
           if [ -z "$STATUS_FIELD" ] || [ "$STATUS_FIELD" = "null" ] \
              || [ -z "$STATUS_OPT" ] || [ "$STATUS_OPT" = "null" ]; then
-            echo "::warning::Could not resolve Status option '$STATUS_NAME' in project #$PROJECT_NUMBER — skipping Status updates"
+            echo "::warning::Could not resolve Status option '$STATUS_NAME' in project #$PROJECT_NUMBER - skipping Status updates"
             SKIP_STATUS=1
           fi
 
-          for prnum in ${{ steps.prs.outputs.prs }}; do
+          for prnum in $PR_NUMBERS; do
             # Defensive: if the number isn't a PR (e.g. issue ref slipped through),
-            # the gh api call exits non-zero — swallow that and skip cleanly.
+            # the gh api call exits non-zero - swallow that and skip cleanly.
             RESP=$(gh api graphql -f query='
               query($org: String!, $repo: String!, $num: Int!) {
                 repository(owner: $org, name: $repo) {
@@ -143,11 +177,11 @@ jobs:
                   | select(.project.number == ($n | tonumber)) | .id' 2>/dev/null | head -1)
 
             if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
-              echo "#$prnum not on project (or not a PR) — skipping"
+              echo "#$prnum not on project (or not a PR) - skipping"
               continue
             fi
 
-            echo "→ PR #$prnum: Deploy env = $DEPLOY_ENV"
+            echo "-> PR #$prnum: Deploy env = $DEPLOY_ENV"
             # Pass option IDs with -f (raw string), NOT -F: ProjectV2 single-select
             # option IDs can be all-numeric, and -F does magic type coercion that turns
             # an all-digit value into an integer, which the $o: String! variable then
@@ -161,8 +195,8 @@ jobs:
                 }) { projectV2Item { id } }
               }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$DEPLOY_FIELD" -f o="$DEPLOY_OPT" > /dev/null
 
-            if [ "${SKIP_STATUS:-0}" != "1" ]; then
-              echo "→ PR #$prnum: Status = $STATUS_NAME"
+            if [ "$SKIP_STATUS" != "1" ]; then
+              echo "-> PR #$prnum: Status = $STATUS_NAME"
               gh api graphql -f query='
                 mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
                   updateProjectV2ItemFieldValue(input: {
