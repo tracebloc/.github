@@ -2,10 +2,14 @@ name: FR gate
 
 # Reusable workflow. Called from each active repo on pull_request events
 # targeting staging, main, or master. Blocks the merge unless every item
-# included in the promotion is in the correct "Ready for X" column:
+# included in the promotion is at or beyond the correct "Ready for X" column:
 #
-#   target = staging  → all items must be in "Ready for staging"
-#   target = main/master → all items must be in "Ready for prod"
+#   target = staging  → all items must be at "Ready for staging" or later
+#   target = main/master → all items must be at "Ready for prod" or later
+#
+# "or later" means an item already further down the pipeline (e.g. "Prod")
+# satisfies an earlier gate ("Ready for staging") instead of being falsely
+# blocked. See the rank() helper below for the canonical stage ordering.
 #
 # This enforces the "FR must pass before promotion" rule. It runs as a
 # required status check (configured via branch protection) so the merge
@@ -108,6 +112,28 @@ jobs:
             NUMBERS="$PROMOTION_PR"
           fi
 
+          # Pipeline rank for each kanban Status. An item satisfies the gate when
+          # it is AT OR BEYOND the required stage — e.g. an item already in "Prod"
+          # trivially satisfies a "Ready for staging" gate. Strict equality used to
+          # falsely block already-promoted items that reappear in a later promotion's
+          # commit range. Unknown statuses (incl. "Cancelled") return empty and fall
+          # through to the strict-equality path below, preserving the old behavior.
+          rank() {
+            case "$1" in
+              "Backlog")           echo 1  ;;
+              "North Stars")       echo 2  ;;
+              "Ready")             echo 3  ;;
+              "In progress")       echo 4  ;;
+              "Code review")       echo 5  ;;
+              "FR on dev")         echo 6  ;;
+              "Ready for staging") echo 7  ;;
+              "FR on staging")     echo 8  ;;
+              "Ready for prod")    echo 9  ;;
+              "Prod")              echo 10 ;;
+              *)                   echo "" ;;
+            esac
+          }
+
           BLOCKED=""
           MISSING=""
           PASSED=""
@@ -136,18 +162,24 @@ jobs:
               continue
             fi
 
-            if [ "$STATUS" = "$REQUIRED" ]; then
-              echo "  ✅ #$num — Status='$REQUIRED'"
+            SR=$(rank "$STATUS")
+            RR=$(rank "$REQUIRED")
+            if { [ -n "$SR" ] && [ -n "$RR" ] && [ "$SR" -ge "$RR" ]; } || [ "$STATUS" = "$REQUIRED" ]; then
+              if [ "$STATUS" = "$REQUIRED" ]; then
+                echo "  ✅ #$num — Status='$REQUIRED'"
+              else
+                echo "  ✅ #$num — Status='$STATUS' (beyond '$REQUIRED')"
+              fi
               PASSED="$PASSED #$num"
             else
-              echo "  ❌ #$num — Status='$STATUS', required='$REQUIRED'"
+              echo "  ❌ #$num — Status='$STATUS', required '$REQUIRED' or later"
               BLOCKED="$BLOCKED #$num($STATUS)"
             fi
           done
 
           echo ""
           if [ -n "$BLOCKED" ]; then
-            echo "::error::FR gate FAILED. Items not yet '$REQUIRED':$BLOCKED"
+            echo "::error::FR gate FAILED. Items not yet at '$REQUIRED' (or later):$BLOCKED"
             echo ""
             echo "How to unblock:"
             echo "  1. Run /fr-pass on each PR once functional review passes on the previous env, OR"
@@ -157,7 +189,7 @@ jobs:
             exit 1
           fi
 
-          echo "✓ FR gate PASSED. All items are in '$REQUIRED'."
+          echo "✓ FR gate PASSED. All items are at '$REQUIRED' or later."
           # Use an `if` here, not `[ -n ... ] && echo`. With `set -e`, the bracket
           # test returning 1 on empty MISSING (the normal happy path) would short-
           # circuit && and become the script's exit code, failing the step.
