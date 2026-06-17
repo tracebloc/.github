@@ -18,7 +18,7 @@ on:
         default: "Code review"
       limit:
         type: number
-        default: 8
+        default: 30
 
 jobs:
   check:
