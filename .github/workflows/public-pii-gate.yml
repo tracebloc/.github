@@ -16,13 +16,19 @@ name: Public PII gate
 #
 # Override a false positive: add the 'pii-gate-override' label to the PR
 # (visible in audit).
+#
+# Token permissions: this workflow needs only `contents: read`. It reads
+# commit messages via the Compare API (contents-scoped), NOT the Pull
+# requests API, so it works under the org default workflow-token permission
+# of "read" with a minimal caller (just `uses:` + `secrets: inherit`).
+# Requesting `pull-requests` here would exceed a minimal caller's grant and
+# fail the run at startup with no jobs.
 
 on:
   workflow_call: {}
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   pii-check:
@@ -34,7 +40,8 @@ jobs:
           DENYLIST: ${{ secrets.PII_DENYLIST }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
-          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REPO_FULL: ${{ github.repository }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
@@ -54,8 +61,10 @@ jobs:
           fi
 
           # Build the haystack: PR title + body + every commit message.
-          COMMITS=$(gh pr view "$PR_NUM" --repo "$REPO_FULL" \
-            --json commits --jq '.commits[] | .messageHeadline + " " + (.messageBody // "")' 2>/dev/null || true)
+          # Commits come from the Compare API (contents-scoped). It returns up
+          # to 250 commits, which is ample for PR-hygiene scanning.
+          COMMITS=$(gh api "repos/$REPO_FULL/compare/$PR_BASE_SHA...$PR_HEAD_SHA" \
+            --jq '.commits[].commit.message' 2>/dev/null || true)
           HAYSTACK=$(printf '%s\n%s\n%s' "${PR_TITLE:-}" "${PR_BODY:-}" "$COMMITS")
 
           # Check each denylist term (comma-separated). Never echo the term or
