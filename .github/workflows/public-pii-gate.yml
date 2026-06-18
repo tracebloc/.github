@@ -1,0 +1,82 @@
+name: Public PII gate
+
+# Reusable workflow. Called from PUBLIC repos on every PR.
+# Fails the PR if its title / body / commit messages contain any term from
+# the private denylist (customer + partner names, known leaked secrets).
+#
+# The denylist lives ONLY in the org Actions secret PII_DENYLIST — never in
+# this (public) file. Matches are reported generically; the matched term is
+# never printed (the secret is masked in logs anyway), so the gate itself
+# can't leak what it protects.
+#
+# Setup (one-time, org admin):
+#   gh secret set PII_DENYLIST --org tracebloc --visibility all \
+#     --body "name1,name2,name3,..."
+#   (comma-separated, case-insensitive substring match)
+#
+# Override a false positive: add the 'pii-gate-override' label to the PR
+# (visible in audit).
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pii-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scan PR text against the private denylist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DENYLIST: ${{ secrets.PII_DENYLIST }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          REPO_FULL: ${{ github.repository }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -uo pipefail
+
+          # Gate inactive until an admin populates the secret — warn, don't block.
+          if [ -z "${DENYLIST:-}" ]; then
+            echo "::warning::PII_DENYLIST org secret is not set — the public PII gate is INACTIVE."
+            echo "An org admin must run: gh secret set PII_DENYLIST --org tracebloc --visibility all --body \"name1,name2,...\""
+            exit 0
+          fi
+
+          # Manual override (visible in audit).
+          if printf '%s' "$LABELS" | grep -q 'pii-gate-override'; then
+            echo "::warning::PII gate bypassed via 'pii-gate-override' label."
+            exit 0
+          fi
+
+          # Build the haystack: PR title + body + every commit message.
+          COMMITS=$(gh pr view "$PR_NUM" --repo "$REPO_FULL" \
+            --json commits --jq '.commits[] | .messageHeadline + " " + (.messageBody // "")' 2>/dev/null || true)
+          HAYSTACK=$(printf '%s\n%s\n%s' "${PR_TITLE:-}" "${PR_BODY:-}" "$COMMITS")
+
+          # Check each denylist term (comma-separated). Never echo the term or
+          # the matched line — only a generic error, so the gate can't leak.
+          HIT=0
+          OLDIFS="$IFS"; IFS=','
+          for term in $DENYLIST; do
+            t=$(printf '%s' "$term" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            [ -z "$t" ] && continue
+            if printf '%s' "$HAYSTACK" | grep -iqF -- "$t"; then
+              HIT=1
+            fi
+          done
+          IFS="$OLDIFS"
+
+          if [ "$HIT" = "1" ]; then
+            echo "::error::This PR's title, body, or commit messages contain a denylisted term"
+            echo "::error::(a customer/partner name or a known secret). This is a PUBLIC repo."
+            echo ""
+            echo "Remove the sensitive text before merging. Keep customer names in private repos."
+            echo "False positive? Add the 'pii-gate-override' label (visible in audit)."
+            exit 1
+          fi
+          echo "PII gate passed — no denylisted terms found."
