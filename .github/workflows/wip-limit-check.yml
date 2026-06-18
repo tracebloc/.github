@@ -106,7 +106,11 @@ jobs:
               | "- [\($c.repository.name)#\($c.number)](https://github.com/\($org)/\($c.repository.name)/pull/\($c.number)) — \($c.title) · author: @\($c.author.login) · " +
                 ((.content.reviewRequests.nodes | map(.requestedReviewer.login) | map(select(.)) | join(", @")) as $rev
                  | if ($rev | length) > 0 then "reviewer: @\($rev)" else "no reviewer assigned" end)
-            ' /tmp/inreview.txt | sort | head -10
+            ' /tmp/inreview.txt | sort > /tmp/inreview_sorted.txt
+            # NB: don't pipe `sort | head` directly — once head closes the pipe
+            # after 10 lines, sort gets SIGPIPE/EPIPE and exits non-zero, which
+            # under `set -o pipefail` fails the whole step. Sort to a file, then head it.
+            head -10 /tmp/inreview_sorted.txt
             echo ""
             echo "Pull from review before opening new work. _(This is a nudge from the kanban WIP check, not a block.)_"
           } > "$BODY_FILE"
