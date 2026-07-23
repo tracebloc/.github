@@ -45,6 +45,12 @@ jobs:
           # built-in "Item closed" project workflow to set Status=Cancelled.
           ORG: ${{ inputs.org }}
           REPO_FULL: ${{ github.repository }}
+          # GH_TOKEN is required for that same closing-PR-base lookup: on Actions
+          # runners `gh` exits immediately when no token is set, the error was
+          # discarded (2>/dev/null) and swallowed (|| CLOSING_PR_BASE=""), so
+          # every issue closed as completed fell through to the manual-close
+          # default (Prod) instead of mirroring its closing PR's Status.
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
@@ -71,7 +77,8 @@ jobs:
                     }
                   }
                 }' -F org="$ORG" -F repo="$REPO_NAME" -F num="${{ github.event.issue.number }}" \
-                --jq '.data.repository.issue.closedByPullRequestsReferences.nodes[0].baseRefName // ""' 2>/dev/null) || CLOSING_PR_BASE=""
+                --jq '.data.repository.issue.closedByPullRequestsReferences.nodes[0].baseRefName // ""') || CLOSING_PR_BASE=""
+              echo "Closing-PR base: '$CLOSING_PR_BASE' (empty = no closing PR found -> manual-close default)"
               case "$CLOSING_PR_BASE" in
                 main|master) echo "status=Prod"          >> "$GITHUB_OUTPUT" ;;
                 staging)     echo "status=FR on staging" >> "$GITHUB_OUTPUT" ;;
