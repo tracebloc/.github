@@ -1,0 +1,520 @@
+name: Code quality
+
+# Reusable workflow. The org's first *code* quality gate — every other reusable
+# workflow in this repo automates process (kanban, FR gate, WIP, PII), and none
+# of them looks at what the code does.
+#
+# WHY (measured over 60 days of automated code review)
+#   The automated reviewer's false-positive rate is 3% — so what it reports is
+#   real, and it arrives at the most expensive possible moment. Of the findings
+#   we hand-classified, 20% were expressible as a lint or grep rule, and 14%
+#   were rules the team had already agreed on, being re-enforced one PR at a
+#   time by a reviewer instead of once by CI. This workflow moves that share to
+#   the left, where it costs seconds instead of a review round-trip.
+#
+# JOBS — each is a SEPARATE job on purpose
+#   ruff         Python lint (opt in with `python: true`)
+#   shellcheck   shell lint (opt in with `shell: true`)
+#   gitleaks     credential scanning (on by default)
+#   house-rules  the org's own grep-level rules (on by default)
+#   Separate jobs run independently, so a ruff failure never hides what
+#   shellcheck found. Steps inside one job would short-circuit; jobs do not.
+#
+# BLOCKING BEHAVIOUR — read this before adopting
+#   `soft-fail` defaults to TRUE: every finding is annotated on the diff and
+#   written to the job summary, and the job still exits 0. That is deliberate.
+#   A linter switched on as a required check against an unlinted backlog gets
+#   the check removed, not the backlog fixed. The intended path is:
+#
+#     1. Add the caller with the defaults below. Findings appear; nothing blocks.
+#     2. Run it once with `all-files: true` to size the whole backlog.
+#     3. Clear the backlog (or record a gitleaks baseline / add ignore pragmas
+#        for the deliberate exceptions).
+#     4. Flip `soft-fail: false` in the caller.
+#     5. Mark `Code quality / <job>` as a required status check in branch
+#        protection. Only then is it a gate.
+#
+#   Step 4 is the point of the exercise. `soft-fail: true` is a migration
+#   setting, not a destination: a linter that only ever warns changes nothing.
+#   If a repo is still on the default months from now, that is the finding.
+#
+# ADOPTION — drop this in as `.github/workflows/code-quality-caller.yml`
+#
+#     name: Code quality
+#
+#     on:
+#       pull_request:
+#         types: [opened, reopened, synchronize, ready_for_review]
+#
+#     # Supersede the previous run when a branch is pushed again. Measured:
+#     # workflows missing this stack ~10-minute duplicate runs per push.
+#     concurrency:
+#       group: code-quality-${{ github.workflow }}-${{ github.ref }}
+#       cancel-in-progress: true
+#
+#     permissions:
+#       contents: read
+#
+#     jobs:
+#       quality:
+#         uses: tracebloc/.github/.github/workflows/code-quality.yml@main
+#         with:
+#           python: true          # repos with Python
+#           shell: true           # repos with shell scripts
+#           # soft-fail: false    # flip once the backlog is clear
+#
+#   `secrets: inherit` is NOT needed — this workflow uses no secrets and asks
+#   only for `contents: read`, so it runs under a minimal caller and under the
+#   org default workflow-token permission of "read".
+#
+# SUPPLY CHAIN
+#   gitleaks is installed from its release tarball pinned by version AND
+#   verified against a pinned SHA-256, rather than via gitleaks-action. Two
+#   reasons: gitleaks-action requires a GITLEAKS_LICENSE for organization-owned
+#   repos (it would simply fail here), and a version+digest pin on the artefact
+#   we actually execute is a stronger guarantee than a commit pin on a wrapper
+#   that downloads it for us. `actions/checkout` is pinned to a commit SHA.
+#
+# EXTENDING house-rules
+#   Rules live in `scripts/house-rules.sh` in this repo. A repo adds its own
+#   without touching the shared workflow by committing `.house-rules.conf`:
+#
+#     exclude: third_party/*
+#     timeout-wrapper: guard             # a wrapper that already bounds time
+#     disable: curl-timeout
+#     rule: no-print | *.py | ^[[:space:]]*print\( | use client_logger, not print()
+#
+#   Run it locally exactly as CI does:  ./house-rules.sh --all
+#   (`--help` documents every rule, every exclusion, and the ignore pragma.)
+
+on:
+  workflow_call:
+    inputs:
+      soft-fail:
+        description: "Report findings but exit 0. Flip to false to make the jobs a real gate."
+        type: boolean
+        default: true
+      all-files:
+        description: "Scan the whole repo instead of only the files this PR changed."
+        type: boolean
+        default: false
+      python:
+        description: "Run the ruff job."
+        type: boolean
+        default: false
+      shell:
+        description: "Run the shellcheck job."
+        type: boolean
+        default: false
+      credential-scan:
+        description: "Run the gitleaks job."
+        type: boolean
+        default: true
+      house-rules:
+        description: "Run the org house-rules checker."
+        type: boolean
+        default: true
+      ruff-version:
+        description: "Pinned ruff version."
+        type: string
+        default: "0.15.20"
+      ruff-select:
+        description: >-
+          Rule selection used ONLY when the repo has no ruff config of its own.
+          The default is ruff's own default set: pyflakes plus the pycodestyle
+          errors that indicate a real bug. Deliberately excludes every
+          formatting-opinion family (E1/E2/E3 whitespace, W, I import order,
+          D docstrings, ANN annotations) — those would report thousands of
+          findings on legacy code and get the job switched off.
+        type: string
+        default: "E4,E7,E9,F"
+      ruff-paths:
+        description: "Paths ruff scans in all-files mode."
+        type: string
+        default: "."
+      shellcheck-severity:
+        description: >-
+          Minimum severity: error | warning | info | style. Defaults to `error`
+          so a repo can adopt the job on day one; `warning` is the recommended
+          target once the backlog is clear (it is where SC2086 and friends live).
+        type: string
+        default: "error"
+      house-rules-config:
+        description: "Path to the repo's house-rules config."
+        type: string
+        default: ".house-rules.conf"
+      house-rules-exclude:
+        description: "Extra path glob for house-rules to skip (one glob)."
+        type: string
+        default: ""
+      gitleaks-baseline:
+        description: "Path to a gitleaks baseline report; known findings in it are not re-reported."
+        type: string
+        default: ""
+      quality-ref:
+        description: >-
+          Ref of tracebloc/.github the house-rules script is taken from. Callers
+          pin this workflow at `@main`, so `main` is the matching version and is
+          the default. Override it only when calling this workflow from a branch
+          — e.g. to test a change to the checker before it merges.
+        type: string
+        default: "main"
+
+# Only `contents: read`. Requesting more would exceed a minimal caller's grant
+# and fail the run at startup with no jobs — see public-pii-gate.yml.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------- Python ----
+  ruff:
+    name: ruff
+    if: ${{ inputs.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Resolve the file set
+        id: files
+        env:
+          ALL_FILES: ${{ inputs.all-files }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PATHS: ${{ inputs.ruff-paths }}
+        run: |
+          set -euo pipefail
+          if [ "$ALL_FILES" = "true" ] || [ -z "${BASE_SHA:-}" ]; then
+            echo "mode=all" >> "$GITHUB_OUTPUT"
+            echo "Scanning: $PATHS"
+            exit 0
+          fi
+          # Three-dot: what this branch changed, not what the base moved on to.
+          git diff --name-only --diff-filter=ACMR "$BASE_SHA...HEAD" \
+            | grep -E '\.pyi?$' > /tmp/py-files.txt || true
+          COUNT=$(wc -l < /tmp/py-files.txt | tr -d ' ')
+          echo "mode=diff" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Changed Python files: $COUNT"
+
+      - name: Install ruff
+        if: steps.files.outputs.mode == 'all' || steps.files.outputs.count != '0'
+        env:
+          RUFF_VERSION: ${{ inputs.ruff-version }}
+        run: |
+          set -euo pipefail
+          # pipx is preinstalled on GitHub runners and sidesteps the
+          # externally-managed-environment refusal that plain pip hits.
+          pipx install "ruff==$RUFF_VERSION"
+          ruff --version
+
+      - name: ruff check
+        if: steps.files.outputs.mode == 'all' || steps.files.outputs.count != '0'
+        env:
+          MODE: ${{ steps.files.outputs.mode }}
+          SELECT: ${{ inputs.ruff-select }}
+          PATHS: ${{ inputs.ruff-paths }}
+          SOFT_FAIL: ${{ inputs.soft-fail }}
+        run: |
+          set -uo pipefail
+
+          # Never override a repo that has made its own choices.
+          CONFIGURED=0
+          if [ -f ruff.toml ] || [ -f .ruff.toml ]; then CONFIGURED=1; fi
+          if [ -f pyproject.toml ] && grep -q '^\[tool\.ruff' pyproject.toml; then CONFIGURED=1; fi
+
+          set -- --output-format=concise --no-cache
+          if [ "$CONFIGURED" = "1" ]; then
+            echo "Using this repo's own ruff configuration."
+          else
+            echo "No ruff config found — using the shared default selection: $SELECT"
+            set -- "$@" --isolated --select "$SELECT"
+          fi
+
+          RC=0
+          if [ "$MODE" = "all" ]; then
+            # shellcheck disable=SC2086  # PATHS is a deliberate word-split list
+            ruff check "$@" $PATHS > /tmp/ruff.out 2>&1 || RC=$?
+          else
+            # -r: never fall through to ruff's default of scanning the whole tree.
+            xargs -r -a /tmp/py-files.txt ruff check "$@" > /tmp/ruff.out 2>&1 || RC=$?
+          fi
+
+          cat /tmp/ruff.out
+
+          if [ "$SOFT_FAIL" = "true" ]; then LEVEL=warning; else LEVEL=error; fi
+          # concise format: path:line:col: CODE message
+          awk -v lvl="$LEVEL" '
+            /^[^ ]+:[0-9]+:[0-9]+: / {
+              split($0, p, ":")
+              msg=$0; sub(/^[^:]*:[0-9]+:[0-9]+: /, "", msg)
+              printf "::%s file=%s,line=%s,col=%s,title=ruff::%s\n", lvl, p[1], p[2], p[3], msg
+            }' /tmp/ruff.out
+
+          COUNT=$(grep -cE '^[^ ]+:[0-9]+:[0-9]+: ' /tmp/ruff.out || true)
+          {
+            echo "### ruff"
+            echo ""
+            if [ "$COUNT" = "0" ]; then
+              echo "No findings."
+            else
+              echo "**$COUNT finding(s).**"
+              echo ""
+              echo '```'
+              head -200 /tmp/ruff.out
+              echo '```'
+            fi
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$RC" != "0" ] && [ "$SOFT_FAIL" = "true" ]; then
+            echo "soft-fail is on — reporting only, not failing this job."
+            exit 0
+          fi
+          exit "$RC"
+
+  # ----------------------------------------------------------------- shell ----
+  shellcheck:
+    name: shellcheck
+    if: ${{ inputs.shell }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: shellcheck
+        env:
+          ALL_FILES: ${{ inputs.all-files }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SEVERITY: ${{ inputs.shellcheck-severity }}
+          SOFT_FAIL: ${{ inputs.soft-fail }}
+        run: |
+          set -uo pipefail
+          # Preinstalled on ubuntu-latest — no download, no third-party action.
+          # (A comment here must not begin with the tool's name: that is the
+          # syntax for an inline directive and shellcheck fails to parse it.)
+          shellcheck --version | head -2
+
+          # Collect shell files by extension or shebang, from the diff or all.
+          : > /tmp/sh-files.txt
+          if [ "$ALL_FILES" = "true" ] || [ -z "${BASE_SHA:-}" ]; then
+            git ls-files > /tmp/cand.txt
+          else
+            git diff --name-only --diff-filter=ACMR "$BASE_SHA...HEAD" > /tmp/cand.txt \
+              || git ls-files > /tmp/cand.txt
+          fi
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            case "$f" in
+              *.sh|*.bash|*.ksh) printf '%s\n' "$f" >> /tmp/sh-files.txt ;;
+              *.bats|*.ps1|*.psm1|*.zsh) ;;
+              *) head -n 1 "$f" 2>/dev/null \
+                   | grep -Eq '^#![[:space:]]*[^[:space:]]*(/|[[:space:]])(ba|da|k)?sh([[:space:]]|$)' \
+                   && printf '%s\n' "$f" >> /tmp/sh-files.txt ;;
+            esac
+          done < /tmp/cand.txt
+
+          COUNT_FILES=$(wc -l < /tmp/sh-files.txt | tr -d ' ')
+          echo "Shell files to check: $COUNT_FILES"
+          if [ "$COUNT_FILES" = "0" ]; then
+            {
+              echo "### shellcheck"
+              echo ""
+              echo "No shell files in scope."
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # SC1091 = "not following sourced file"; unavoidable and uninteresting
+          # when a library is sourced through a variable path.
+          RC=0
+          xargs -r -a /tmp/sh-files.txt shellcheck \
+            --severity="$SEVERITY" --format=gcc --exclude=SC1091 \
+            > /tmp/shellcheck.out 2>&1 || RC=$?
+
+          cat /tmp/shellcheck.out
+
+          if [ "$SOFT_FAIL" = "true" ]; then LEVEL=warning; else LEVEL=error; fi
+          # gcc format: path:line:col: severity: message [SCxxxx]
+          awk -v lvl="$LEVEL" '
+            /^[^ ]+:[0-9]+:[0-9]+: / {
+              split($0, p, ":")
+              msg=$0; sub(/^[^:]*:[0-9]+:[0-9]+: /, "", msg)
+              printf "::%s file=%s,line=%s,col=%s,title=shellcheck::%s\n", lvl, p[1], p[2], p[3], msg
+            }' /tmp/shellcheck.out
+
+          COUNT=$(grep -cE '^[^ ]+:[0-9]+:[0-9]+: ' /tmp/shellcheck.out || true)
+          {
+            echo "### shellcheck (severity: $SEVERITY)"
+            echo ""
+            if [ "$COUNT" = "0" ]; then
+              echo "No findings across $COUNT_FILES file(s)."
+            else
+              echo "**$COUNT finding(s)** across $COUNT_FILES file(s)."
+              echo ""
+              echo '```'
+              head -200 /tmp/shellcheck.out
+              echo '```'
+            fi
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$RC" != "0" ] && [ "$SOFT_FAIL" = "true" ]; then
+            echo "soft-fail is on — reporting only, not failing this job."
+            exit 0
+          fi
+          exit "$RC"
+
+  # --------------------------------------------------------------- gitleaks ---
+  gitleaks:
+    name: gitleaks
+    if: ${{ inputs.credential-scan }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Full history: the scan walks the PR's commit range, so the base
+          # commit has to exist locally. A shallow clone silently scans nothing.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install gitleaks (version + SHA-256 pinned)
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$URL" -o /tmp/gitleaks.tar.gz
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          chmod +x /tmp/gitleaks
+          /tmp/gitleaks version
+
+      - name: Scan for leaked credentials
+        env:
+          ALL_FILES: ${{ inputs.all-files }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASELINE: ${{ inputs.gitleaks-baseline }}
+          SOFT_FAIL: ${{ inputs.soft-fail }}
+        run: |
+          set -uo pipefail
+
+          set -- --no-banner --redact --report-format json --report-path /tmp/gitleaks.json
+          if [ -n "${BASELINE:-}" ] && [ -f "$BASELINE" ]; then
+            echo "Applying baseline: $BASELINE"
+            set -- "$@" --baseline-path "$BASELINE"
+          fi
+          # A .gitleaks.toml at the repo root is picked up automatically.
+
+          RC=0
+          if [ "$ALL_FILES" = "true" ] || [ -z "${BASE_SHA:-}" ]; then
+            echo "Scanning the full history."
+            /tmp/gitleaks git "$@" . || RC=$?
+          else
+            # Exactly the commits this PR adds — every version of every line it
+            # introduced, so a value added and then deleted again is still found.
+            echo "Scanning commit range ${BASE_SHA}..${HEAD_SHA}"
+            /tmp/gitleaks git "$@" --log-opts="--no-merges ${BASE_SHA}..${HEAD_SHA}" . || RC=$?
+          fi
+
+          COUNT=0
+          if [ -s /tmp/gitleaks.json ]; then
+            COUNT=$(jq 'length' /tmp/gitleaks.json 2>/dev/null || echo 0)
+          fi
+
+          {
+            echo "### gitleaks"
+            echo ""
+            if [ "$COUNT" = "0" ]; then
+              echo "Nothing detected."
+            else
+              echo "**$COUNT finding(s).** Values are redacted here and in the log."
+              echo ""
+              echo "| Rule | File | Line | Commit |"
+              echo "|---|---|---:|---|"
+              jq -r '.[] | "| \(.RuleID) | `\(.File)` | \(.StartLine) | \(.Commit[0:8]) |"' \
+                /tmp/gitleaks.json 2>/dev/null | head -50
+              echo ""
+              echo "Treat anything detected here as compromised: **rotate it first**, then"
+              echo "remove it from the code. Rewriting history is not remediation — the"
+              echo "value was already pushed. A deliberate false positive belongs in"
+              echo "\`.gitleaks.toml\` (allowlist) or in a committed baseline report."
+            fi
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$COUNT" != "0" ]; then
+            if [ "$SOFT_FAIL" = "true" ]; then LEVEL=warning; else LEVEL=error; fi
+            jq -r --arg lvl "$LEVEL" '.[] | "::" + $lvl + " file=" + .File + ",line=" + (.StartLine|tostring) + ",title=gitleaks: " + .RuleID + "::Detected by rule " + .RuleID + ". Rotate the value, then remove it from the code."' \
+              /tmp/gitleaks.json 2>/dev/null || true
+          fi
+
+          if [ "$RC" != "0" ] && [ "$SOFT_FAIL" = "true" ]; then
+            echo "soft-fail is on — reporting only, not failing this job."
+            echo "Note: this is the one job worth flipping soft-fail off for first."
+            exit 0
+          fi
+          exit "$RC"
+
+  # ------------------------------------------------------------ house rules ---
+  house-rules:
+    name: house-rules
+    if: ${{ inputs.house-rules }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Check out the shared checker
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: tracebloc/.github
+          # Same repo this workflow lives in, so `main` is the version that
+          # matches a `@main` caller. `quality-ref` overrides it for testing.
+          ref: ${{ inputs.quality-ref }}
+          path: .quality-tools
+          persist-credentials: false
+
+      - name: Run the house-rules checker
+        env:
+          ALL_FILES: ${{ inputs.all-files }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CONFIG: ${{ inputs.house-rules-config }}
+          EXCLUDE: ${{ inputs.house-rules-exclude }}
+          SOFT_FAIL: ${{ inputs.soft-fail }}
+        run: |
+          set -uo pipefail
+          CHECKER=".quality-tools/scripts/house-rules.sh"
+          chmod +x "$CHECKER"
+
+          set -- --github --summary "$GITHUB_STEP_SUMMARY"
+          if [ -n "${CONFIG:-}" ] && [ -f "$CONFIG" ]; then
+            set -- "$@" --config "$CONFIG"
+          fi
+          if [ -n "${EXCLUDE:-}" ]; then
+            set -- "$@" --exclude "$EXCLUDE"
+          fi
+          # The checker's own tree must not be linted as if it were the repo's.
+          set -- "$@" --exclude '.quality-tools/*'
+          if [ "$SOFT_FAIL" = "true" ]; then
+            set -- "$@" --soft-fail
+          fi
+          if [ "$ALL_FILES" = "true" ] || [ -z "${BASE_SHA:-}" ]; then
+            set -- "$@" --all
+          else
+            set -- "$@" --base "$BASE_SHA"
+          fi
+
+          "$CHECKER" "$@"
