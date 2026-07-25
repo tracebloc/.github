@@ -23,6 +23,20 @@ name: FR gate
 # base and head (squash-merge "(#NNN)" or "Merge pull request #NNN"). If
 # the PR has no such refs (e.g. direct hotfix), falls back to checking
 # the promotion PR's own Status.
+#
+# Feedback: on a blocked promotion the gate posts ONE sticky comment on the
+# PR naming each blocking item, its Status now, and the Status it needs —
+# then updates that same comment in place on every later run (found by the
+# "<!-- fr-gate-sticky" marker, never re-posted). When the gate goes green
+# the comment is closed out; if it never failed, nothing is posted at all,
+# so the happy path stays silent. The marker also carries the blocking item
+# numbers, which is what fr-gate-recheck.yml reads to decide when pressing
+# "Re-run" is worthwhile — see that workflow for the self-clearing half.
+#
+# The verdict itself is unchanged by all of this: the "Verify each item"
+# step is still the only thing that sets the job's exit code, and the
+# comment step is continue-on-error so an API hiccup can never turn a
+# blocked promotion green (or a clean one red).
 
 on:
   workflow_call:
@@ -92,6 +106,7 @@ jobs:
           echo "prs=$PRS" >> "$GITHUB_OUTPUT"
 
       - name: Verify each item is in required Status
+        id: verify
         if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
@@ -137,6 +152,12 @@ jobs:
           BLOCKED=""
           MISSING=""
           PASSED=""
+          # Machine-readable twins of $BLOCKED, for the sticky comment below.
+          # BLOCKED_ROWS is "<number>|<status>" per line ("|" cannot occur in a
+          # kanban Status name); BLOCKED_NUMS is the bare comma-separated list
+          # that goes into the comment marker.
+          BLOCKED_ROWS=""
+          BLOCKED_NUMS=""
           for num in $NUMBERS; do
             STATUS=$(gh api graphql -f query='
               query($org: String!, $repo: String!, $num: Int!) {
@@ -174,8 +195,27 @@ jobs:
             else
               echo "  ❌ #$num — Status='$STATUS', required '$REQUIRED' or later"
               BLOCKED="$BLOCKED #$num($STATUS)"
+              BLOCKED_ROWS="${BLOCKED_ROWS}${num}|${STATUS}"$'\n'
+              BLOCKED_NUMS="${BLOCKED_NUMS}${BLOCKED_NUMS:+,}${num}"
             fi
           done
+
+          # Hand the verdict to the sticky-comment step. Written BEFORE the
+          # `exit 1` below on purpose: the runner reads $GITHUB_OUTPUT once the
+          # step ends, whatever its exit code, so a blocked promotion still
+          # publishes the list of what blocked it.
+          VERDICT=pass
+          if [ -n "$BLOCKED" ]; then
+            VERDICT=fail
+          fi
+          {
+            echo "verdict=$VERDICT"
+            echo "required=$REQUIRED"
+            echo "blocked_nums=$BLOCKED_NUMS"
+            echo "blocked_rows<<FR_GATE_ROWS_EOF"
+            printf '%s' "$BLOCKED_ROWS"
+            echo "FR_GATE_ROWS_EOF"
+          } >> "$GITHUB_OUTPUT"
 
           echo ""
           if [ -n "$BLOCKED" ]; then
@@ -184,6 +224,9 @@ jobs:
             echo "How to unblock:"
             echo "  1. Run /fr-pass on each PR once functional review passes on the previous env, OR"
             echo "  2. Drag each card to '$REQUIRED' on the engineer kanban."
+            echo ""
+            echo "Either way the gate re-runs itself afterwards — you should not"
+            echo "need to press 'Re-run jobs'. See the sticky comment on the PR."
             echo ""
             echo "Emergency override: add the 'skip-fr-gate' label to this PR (visible in audit)."
             exit 1
@@ -196,3 +239,107 @@ jobs:
           if [ -n "$MISSING" ]; then
             echo "  (skipped not-on-kanban:$MISSING)"
           fi
+
+      - name: Post or update the FR gate sticky comment
+        # always(): the step above exits 1 on a blocked promotion, and explaining
+        # that failure on the PR is the entire point of this step.
+        # continue-on-error: this is feedback, not the verdict. If the API is
+        # having a bad minute the gate result must stand on its own.
+        # The `verdict != ''` guard means this only runs when the check above
+        # actually reached a decision — never on the not-gated or skip-label
+        # paths, and never after an infrastructure failure mid-verify.
+        if: >-
+          always() &&
+          steps.target.outputs.required != '' &&
+          steps.skip.outputs.skip != 'true' &&
+          steps.verify.outputs.verdict != ''
+        continue-on-error: true
+        env:
+          # Same credential the gate already uses. Deliberately NOT GITHUB_TOKEN:
+          # a reusable workflow can only narrow the caller's permissions, never
+          # widen them, so relying on `pull-requests: write` would mean editing
+          # the caller in all ~17 repos and would silently no-op wherever the
+          # org default is read-only. The PAT is already inherited everywhere.
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          REPO_FULL: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.base_ref }}
+          VERDICT: ${{ steps.verify.outputs.verdict }}
+          REQUIRED: ${{ steps.verify.outputs.required }}
+          BLOCKED_NUMS: ${{ steps.verify.outputs.blocked_nums }}
+          BLOCKED_ROWS: ${{ steps.verify.outputs.blocked_rows }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          BODY="$RUNNER_TEMP/fr-gate-sticky.md"
+
+          # The marker does double duty: it identifies the one comment to update
+          # in place (so N runs never leave N comments), and it publishes the
+          # blocking item numbers for fr-gate-recheck.yml, which would otherwise
+          # have to re-derive them from the commit range.
+          MARKER="<!-- fr-gate-sticky blocked=\"$BLOCKED_NUMS\" base=\"$BASE\" -->"
+
+          # Find our previous comment, if any. Matching on the marker prefix, not
+          # on the author, so the sticky is still found if the PAT identity changes.
+          EXISTING=$(gh api --paginate "/repos/$REPO_FULL/issues/$PR_NUMBER/comments" \
+            --jq '.[] | select(.body | startswith("<!-- fr-gate-sticky")) | .id' \
+            2>/dev/null | head -1) || EXISTING=""
+
+          upsert() {
+            if [ -n "$EXISTING" ]; then
+              jq -n --rawfile b "$BODY" '{body: $b}' \
+                | gh api -X PATCH "/repos/$REPO_FULL/issues/comments/$EXISTING" --input - > /dev/null
+              echo "Updated sticky comment $EXISTING in place."
+            else
+              jq -n --rawfile b "$BODY" '{body: $b}' \
+                | gh api -X POST "/repos/$REPO_FULL/issues/$PR_NUMBER/comments" --input - > /dev/null
+              echo "Posted sticky comment."
+            fi
+          }
+
+          if [ "$VERDICT" = "pass" ]; then
+            # Silence on the happy path: only close out a comment we ourselves
+            # already posted. A promotion that was never blocked gets no comment.
+            if [ -z "$EXISTING" ]; then
+              echo "Gate passed and no sticky comment exists — nothing to say."
+              exit 0
+            fi
+            {
+              echo "$MARKER"
+              echo "### ✅ FR gate passed"
+              echo ""
+              echo "Every item in this promotion is at **$REQUIRED** or later."
+              echo ""
+              echo "<sub>[gate log]($RUN_URL)</sub>"
+            } > "$BODY"
+            upsert
+            exit 0
+          fi
+
+          COUNT=$(printf '%s' "$BLOCKED_ROWS" | grep -c . || true)
+          {
+            echo "$MARKER"
+            echo "### ⛔ FR gate: $COUNT item(s) not ready to promote to \`$BASE\`"
+            echo ""
+            echo "| Item | Status now | Needs to be |"
+            echo "| --- | --- | --- |"
+            # BLOCKED_ROWS is "<number>|<status>" per line, emitted by the step above.
+            while IFS='|' read -r num status; do
+              if [ -n "$num" ]; then
+                echo "| #$num | $status | \`$REQUIRED\` (or later) |"
+              fi
+            done <<< "$BLOCKED_ROWS"
+            echo ""
+            echo "**To clear this**, for each item above either:"
+            echo ""
+            echo "- comment \`/fr-pass\` on it, once functional review passed on the previous environment, or"
+            echo "- drag its card to **$REQUIRED** on the engineer kanban."
+            echo ""
+            echo "The gate then re-runs itself — immediately after a \`/fr-pass\`, or on the next"
+            echo "sweep (≤15 min) after a drag. **You should not need to press \"Re-run jobs\".**"
+            echo ""
+            echo "Emergency override: add the \`skip-fr-gate\` label. It is deliberate and visible in audit."
+            echo ""
+            echo "<sub>[gate log]($RUN_URL) · this comment is updated in place, never re-posted</sub>"
+          } > "$BODY"
+          upsert

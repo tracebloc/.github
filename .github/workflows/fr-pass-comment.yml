@@ -13,6 +13,13 @@ name: FR pass comment handler
 # Why a comment-based gate instead of a kanban field: it leaves a record on
 # the PR/issue thread so reviewers can see who passed FR and when.
 # Drag-and-drop on the kanban also works — this is just a keyboard shortcut.
+#
+# After a successful advance this workflow also re-runs the FR gate on any
+# open promotion PR in the same repo. Advancing a card is precisely the input
+# fr-gate.yml reads, but a Projects v2 field change fires no event a promotion
+# PR can listen to, so its already-red check would sit there until a human
+# found the "Re-run jobs" button. Pressing it is the whole fix — see the
+# rationale on that step.
 
 on:
   workflow_call:
@@ -28,8 +35,15 @@ jobs:
   advance:
     # Skip unless the comment body actually contains /fr-pass.
     # Restrict to repo collaborators to prevent random commenters from advancing items.
+    # And ignore the FR gate's own sticky comment: it spells out "/fr-pass" as
+    # the remedy, and it is posted with the org PAT, i.e. by an account whose
+    # author_association passes the check above. Without this guard the gate
+    # would advance the promotion PR's own card the moment it explained why the
+    # promotion was blocked. Only the initial POST can reach here — later runs
+    # edit that comment in place, and this workflow subscribes to `created` only.
     if: |
       contains(github.event.comment.body, '/fr-pass') &&
+      !startsWith(github.event.comment.body, '<!-- fr-gate-sticky') &&
       (github.event.comment.author_association == 'MEMBER' ||
        github.event.comment.author_association == 'OWNER' ||
        github.event.comment.author_association == 'COLLABORATOR')
@@ -148,3 +162,94 @@ jobs:
           fi
           gh api -X POST "/repos/$REPO_FULL/issues/comments/$COMMENT_ID/reactions" \
             -f content="$REACTION" > /dev/null || true
+
+      - name: Re-run the FR gate on this repo's open promotion PRs
+        # Only when a card actually moved — a no-op /fr-pass changes nothing the
+        # gate reads, so there is nothing to re-evaluate.
+        #
+        # Why re-run the existing run rather than publish a fresh status: branch
+        # protection requires the check by name ("gate / gate"), and only a real
+        # run of that job can satisfy it. Re-running is exactly the manual action
+        # people take today — which succeeds 96% of the time, because the gate was
+        # right and the board had simply not caught up yet.
+        #
+        # continue-on-error: /fr-pass advancing the card is the contract. If the
+        # convenience re-run cannot happen, say so and leave the card advanced.
+        if: steps.advance.outputs.result == 'advanced'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL: ${{ github.repository }}
+          MAX_RERUNS: 5
+        run: |
+          set -euo pipefail
+
+          # rerun-failed-jobs is the cheap path (re-runs only the failed job).
+          # /rerun is the fallback for runs with nothing marked failed, e.g. a
+          # cancelled one. Try the org PAT first — it is what the rest of this
+          # workflow uses and it works cross-repo — then the caller's own token,
+          # in case the PAT is a fine-grained one without actions:write.
+          rerun() {
+            local run_id="$1" tok
+            for tok in "$GH_TOKEN" "$FALLBACK_TOKEN"; do
+              if [ -z "$tok" ]; then
+                continue
+              fi
+              if GH_TOKEN="$tok" gh api -X POST \
+                   "/repos/$REPO_FULL/actions/runs/$run_id/rerun-failed-jobs" \
+                   > /dev/null 2>&1 < /dev/null; then
+                return 0
+              fi
+              if GH_TOKEN="$tok" gh api -X POST \
+                   "/repos/$REPO_FULL/actions/runs/$run_id/rerun" \
+                   > /dev/null 2>&1 < /dev/null; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          # Open PRs targeting a gated branch. There are normally 0-2 of these
+          # per repo; the gate is only wired to staging/main/master.
+          PRS="$RUNNER_TEMP/promotion-prs.txt"
+          gh pr list --repo "$REPO_FULL" --state open --limit 50 \
+            --json number,baseRefName,headRefOid \
+            --jq '.[] | select(.baseRefName == "staging" or .baseRefName == "main"
+                               or .baseRefName == "master")
+                  | "\(.number) \(.headRefOid)"' > "$PRS" 2>/dev/null || : > "$PRS"
+
+          COUNT=0
+          while read -r pr sha; do
+            if [ -z "${pr:-}" ]; then
+              continue
+            fi
+            if [ "$COUNT" -ge "$MAX_RERUNS" ]; then
+              echo "  Re-run cap ($MAX_RERUNS) reached — the scheduled sweep will pick up the rest."
+              break
+            fi
+
+            # Newest completed FR gate run for that PR's head. Matched on the
+            # caller's workflow *path* so a repo that renamed the display name
+            # still matches. Skip it if it is already green or still running.
+            RUN_ID=$(gh api "/repos/$REPO_FULL/actions/runs?head_sha=$sha&per_page=100" \
+              --jq '[.workflow_runs[]
+                     | select(((.path // "") | test("fr-gate")) and .status == "completed")]
+                    | sort_by(.run_started_at) | last
+                    | select(. != null and .conclusion != "success") | .id' \
+              2>/dev/null < /dev/null) || RUN_ID=""
+
+            if [ -z "$RUN_ID" ]; then
+              echo "  #$pr — no red FR gate run on $sha, nothing to re-run"
+              continue
+            fi
+
+            if rerun "$RUN_ID"; then
+              echo "  #$pr — re-ran FR gate run $RUN_ID after the card advanced"
+              COUNT=$((COUNT + 1))
+            else
+              echo "::warning::Could not re-run FR gate run $RUN_ID on #$pr — the run may be older than 30 days, or the token lacks actions:write. The scheduled sweep will retry."
+            fi
+          done < "$PRS"
+
+          echo "Re-ran the FR gate on $COUNT open promotion PR(s)."

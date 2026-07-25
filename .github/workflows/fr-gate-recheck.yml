@@ -1,0 +1,305 @@
+name: FR gate re-check
+
+# Self-clearing half of the FR gate. Not a reusable workflow — this is a
+# central cron that runs in THIS repo and reaches across the org, the same
+# shape as auto-classify.yml and kanban-reconcile.yml.
+#
+# THE PROBLEM
+#   fr-gate.yml is a required status check that fires the instant a promotion
+#   PR opens — which is before anyone has moved the kanban cards, so the first
+#   run is structurally doomed. Measured over 60 days: 448 runs, 58% failed,
+#   30% were retried by hand, and the retry passed 96% of the time. The gate
+#   alone produced 128 of the fleet's 151 same-commit fail→pass events;
+#   excluding it, org-wide CI flake drops from 1.26% to 0.20%. Nothing is
+#   wrong with what the gate checks. What is wrong is that clearing a stale
+#   red requires a human to notice it and find the "Re-run jobs" button.
+#
+# WHY A CRON AND NOT AN EVENT
+#   The input the gate reads is a Projects v2 single-select field. GitHub
+#   fires no workflow trigger for a Projects v2 field change, and a promotion
+#   PR has no event of its own to listen to — moving a card touches neither
+#   its branch nor its metadata. Two paths therefore cover the two ways a card
+#   moves: fr-pass-comment.yml re-runs the gate immediately on `/fr-pass`
+#   (an event we do get), and this sweep catches drag-and-drop on the board
+#   (which we do not). Between them there is no way to advance a card that
+#   leaves a promotion PR stuck red.
+#
+# WHY RE-RUN INSTEAD OF PUBLISHING A STATUS
+#   Branch protection requires the check by name ("gate / gate"). Only a real
+#   run of that job satisfies it; a synthetic commit status of the same name
+#   would sit alongside the failed check run, not replace it. Re-running is
+#   also exactly what a human does today, so the behaviour being automated is
+#   already understood and already known to work.
+#
+# THIS IS A TRIGGER, NOT A SECOND GATE — READ THIS BEFORE EDITING
+#   Nothing here decides whether a promotion may merge. It decides only
+#   whether pressing "Re-run" is worth an Actions minute; the re-run itself is
+#   a normal, full, authoritative gate run that can still fail. So the worst a
+#   bug in this file can do is re-run too often (noise) or too rarely (today's
+#   status quo, where a human presses the button). It cannot let an unready
+#   item through. Keep it that way: never add code here that writes a check
+#   result, a commit status, or a kanban Status.
+#
+# COST
+#   Four sweeps an hour, each one 3 search queries plus a handful of reads
+#   against the ~9 open promotion PRs that exist org-wide at any time. This
+#   repo is public, so scheduled Actions minutes here are free. Cards that
+#   have not moved cost nothing beyond the read: a re-run only happens when
+#   the previously-blocking items have actually reached the required column.
+
+on:
+  schedule:
+    # Off-peak minutes on purpose. Everything scheduled at :00 queues behind
+    # the whole platform's top-of-hour burst and can be delayed by 10+ min,
+    # which is most of the latency this workflow exists to remove.
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Report what would be re-run without pressing the button"
+        type: boolean
+        default: false
+
+# Read-only against this repo. Everything cross-repo goes through the org PAT.
+permissions:
+  contents: read
+
+# Sweeps must not overlap: two in flight would each see the same red run and
+# both press re-run.
+concurrency:
+  group: fr-gate-recheck
+  cancel-in-progress: false
+
+jobs:
+  recheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+      ORG: tracebloc
+      PROJECT_NUMBER: 2
+      DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
+      # Safety cap. More re-runs than this in one sweep means something is
+      # wrong with this workflow, not with 10 promotion PRs simultaneously.
+      MAX_RERUNS: 10
+      # Fallback retry cadence for a red gate run with no sticky marker to
+      # read — see the "no marker" branch below.
+      STALE_HOURS: 4
+    steps:
+      - name: Re-run the FR gate wherever the board has caught up
+        run: |
+          set -euo pipefail
+
+          # ── Canonical stage ordering ──────────────────────────────────────
+          # Mirrors rank() in fr-gate.yml, which is the source of truth. This
+          # copy is a heuristic for "is it worth re-running yet"; if the two
+          # drift, the re-run either fires early (and fails again, harmlessly)
+          # or late (and a human presses the button, as today). It can never
+          # decide a promotion.
+          rank() {
+            case "$1" in
+              "Backlog")           echo 1  ;;
+              "North Stars")       echo 2  ;;
+              "Ready")             echo 3  ;;
+              "In progress")       echo 4  ;;
+              "Code review")       echo 5  ;;
+              "FR on dev")         echo 6  ;;
+              "Ready for staging") echo 7  ;;
+              "FR on staging")     echo 8  ;;
+              "Ready for prod")    echo 9  ;;
+              "Prod")              echo 10 ;;
+              *)                   echo "" ;;
+            esac
+          }
+
+          # Same mapping as the "Determine required Status" step in fr-gate.yml.
+          required_for() {
+            case "$1" in
+              staging)     echo "Ready for staging" ;;
+              main|master) echo "Ready for prod"    ;;
+              *)           echo ""                  ;;
+            esac
+          }
+
+          # Status of one item on the kanban. The same query fr-gate.yml uses,
+          # so both read the same field the same way.
+          item_status() {
+            local full="$1" num="$2" owner repo
+            owner="${full%%/*}"
+            repo="${full#*/}"
+            # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
+            gh api graphql -f query='
+              query($org: String!, $repo: String!, $num: Int!) {
+                repository(owner: $org, name: $repo) {
+                  pullRequest(number: $num) {
+                    projectItems(first: 10) {
+                      nodes {
+                        project { number }
+                        fieldValueByName(name: "Status") {
+                          ... on ProjectV2ItemFieldSingleSelectValue { name }
+                        }
+                      }
+                    }
+                  }
+                }
+              }' -F org="$owner" -F repo="$repo" -F num="$num" 2>/dev/null < /dev/null \
+              | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
+                  | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' \
+              | head -1
+          }
+
+          # ── Collect every open promotion PR in the org ────────────────────
+          # One search per gated base branch (GitHub search does not reliably
+          # OR repeated `base:` qualifiers). Comments come along for the ride
+          # so the sticky marker needs no extra round-trip: the gate posts it
+          # on the first failure and updates it in place, so it is always near
+          # the top of the thread.
+          PRS="$RUNNER_TEMP/promotion-prs.jsonl"
+          : > "$PRS"
+          for base in staging main master; do
+            # shellcheck disable=SC2016  # $q is a GraphQL variable, not shell - keep literal
+            gh api graphql -f query='
+              query($q: String!) {
+                search(query: $q, type: ISSUE, first: 50) {
+                  nodes {
+                    ... on PullRequest {
+                      number
+                      baseRefName
+                      headRefOid
+                      repository { nameWithOwner }
+                      labels(first: 30) { nodes { name } }
+                      comments(first: 100) { nodes { body } }
+                    }
+                  }
+                }
+              }' -f q="org:$ORG is:pr is:open base:$base" 2>/dev/null < /dev/null \
+              | jq -c '.data.search.nodes[]? | select(.number != null)' >> "$PRS" || true
+          done
+
+          TOTAL=$(wc -l < "$PRS" | tr -d ' ')
+          echo "Open promotion PRs org-wide: $TOTAL"
+          echo ""
+
+          RERUNS=0
+          while read -r pr; do
+            if [ -z "${pr:-}" ]; then
+              continue
+            fi
+            FULL=$(jq -r '.repository.nameWithOwner' <<< "$pr")
+            NUM=$(jq -r '.number' <<< "$pr")
+            SHA=$(jq -r '.headRefOid' <<< "$pr")
+            BASE=$(jq -r '.baseRefName' <<< "$pr")
+            TAG="$FULL#$NUM"
+
+            REQUIRED=$(required_for "$BASE")
+            if [ -z "$REQUIRED" ]; then
+              continue
+            fi
+
+            # An explicit bypass is a decision, not a stall. Leave it alone.
+            if jq -e '.labels.nodes[]? | select(.name == "skip-fr-gate")' \
+                 > /dev/null <<< "$pr"; then
+              echo "·  $TAG — skip-fr-gate label set, gate deliberately bypassed"
+              continue
+            fi
+
+            # Newest completed FR gate run on the current head. Matched on the
+            # caller's workflow path, so a repo that renamed the display name
+            # still matches. Anything green or still in flight is left alone.
+            # Age is computed inside jq rather than with `date -d` so it is one
+            # integer out of one command — no arithmetic on a string that a
+            # failed API call could have left empty.
+            RUN=$(gh api "/repos/$FULL/actions/runs?head_sha=$SHA&per_page=100" \
+              --jq '[.workflow_runs[]
+                     | select(((.path // "") | test("fr-gate")) and .status == "completed")]
+                    | sort_by(.run_started_at) | last
+                    | select(. != null and .conclusion != "success")
+                    | "\(.id) \(((now - (.updated_at | fromdateiso8601)) / 3600) | floor)"' \
+              2>/dev/null < /dev/null) || RUN=""
+            if [ -z "$RUN" ]; then
+              continue
+            fi
+            RUN_ID="${RUN%% *}"
+            RUN_AGE_H="${RUN##* }"
+
+            # The gate publishes the numbers it blocked on in its sticky
+            # comment marker, so we re-check exactly those items instead of
+            # re-deriving the promotion's contents from the commit range.
+            # Duplicating that discovery is what would actually risk a
+            # divergence between this file and the gate.
+            BLOCKED=$(jq -r '
+              ([.comments.nodes[]?.body
+                | select(startswith("<!-- fr-gate-sticky"))] | last // "")
+              | (split("\n")[0] | capture("blocked=\"(?<b>[^\"]*)\"").b) // ""
+            ' <<< "$pr" 2>/dev/null) || BLOCKED=""
+
+            REASON=""
+            if [ -n "$BLOCKED" ]; then
+              STILL=""
+              RR=$(rank "$REQUIRED")
+              IFS=',' read -ra ITEMS <<< "$BLOCKED"
+              for item in "${ITEMS[@]}"; do
+                # The marker is read out of a PR comment, i.e. out of something
+                # anyone able to comment on a public repo can write. Only digits
+                # are ever passed onward, and a forged marker can at worst cause
+                # an extra gate run — the gate re-derives the truth itself.
+                case "$item" in
+                  ''|*[!0-9]*)
+                    STILL="$STILL #${item:-?}(unreadable-marker)"
+                    continue
+                    ;;
+                esac
+                ST=$(item_status "$FULL" "$item") || ST=""
+                SR=$(rank "$ST")
+                if [ -n "$SR" ] && [ -n "$RR" ] && [ "$SR" -ge "$RR" ]; then
+                  continue
+                fi
+                STILL="$STILL #$item(${ST:-not-on-kanban})"
+              done
+              if [ -z "$STILL" ]; then
+                REASON="board caught up — every previously-blocking item is now at '$REQUIRED' or later"
+              else
+                echo "·  $TAG — still blocked:$STILL"
+              fi
+            else
+              # No marker: either the gate run predates the sticky comment, or
+              # posting it failed. Without the blocking list there is nothing
+              # cheap to re-check, so fall back to a slow blind retry — the PR
+              # still self-heals, just on hours rather than minutes.
+              if [ "$RUN_AGE_H" -ge "$STALE_HOURS" ]; then
+                REASON="no sticky marker to read; last gate run is ${RUN_AGE_H}h old"
+              else
+                echo "·  $TAG — no sticky marker, last run only ${RUN_AGE_H}h old, waiting"
+              fi
+            fi
+
+            if [ -z "$REASON" ]; then
+              continue
+            fi
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "▷  $TAG — WOULD re-run gate run $RUN_ID ($REASON)"
+              continue
+            fi
+            if [ "$RERUNS" -ge "$MAX_RERUNS" ]; then
+              echo "::warning::Re-run cap ($MAX_RERUNS) hit — $TAG left for the next sweep."
+              continue
+            fi
+
+            # rerun-failed-jobs is the cheap path; /rerun covers runs with no
+            # job marked failed, e.g. a cancelled one.
+            if gh api -X POST "/repos/$FULL/actions/runs/$RUN_ID/rerun-failed-jobs" \
+                 > /dev/null 2>&1 < /dev/null \
+               || gh api -X POST "/repos/$FULL/actions/runs/$RUN_ID/rerun" \
+                 > /dev/null 2>&1 < /dev/null; then
+              echo "↻  $TAG — re-ran gate run $RUN_ID ($REASON)"
+              RERUNS=$((RERUNS + 1))
+            else
+              echo "::warning::$TAG — could not re-run gate run $RUN_ID. Runs older than 30 days cannot be re-run, and the credential needs actions:write."
+            fi
+          done < "$PRS"
+
+          echo ""
+          echo "Sweep summary: $TOTAL promotion PR(s) examined · $RERUNS gate run(s) re-run."
+          echo "### FR gate re-check: $RERUNS re-run(s) across $TOTAL open promotion PR(s)" \
+            >> "$GITHUB_STEP_SUMMARY"
