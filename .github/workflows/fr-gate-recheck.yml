@@ -122,13 +122,20 @@ jobs:
           }
 
           # Status of one item on the kanban. The same query fr-gate.yml uses,
-          # so both read the same field the same way.
+          # so both read the same field the same way. Three distinct answers,
+          # because the caller must not conflate them:
+          #   "<name>"  the item's Status
+          #   ""        the item is genuinely not on the board — which the gate
+          #             SKIPS rather than blocks on, so neither may this
+          #   "?"       the lookup itself failed; nothing can be concluded
+          # Collapsing the last two would turn a transient API error into
+          # "not on the board", and every hiccup into a pointless re-run.
           item_status() {
-            local full="$1" num="$2" owner repo
+            local full="$1" num="$2" owner repo resp
             owner="${full%%/*}"
             repo="${full#*/}"
             # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
-            gh api graphql -f query='
+            resp=$(gh api graphql -f query='
               query($org: String!, $repo: String!, $num: Int!) {
                 repository(owner: $org, name: $repo) {
                   pullRequest(number: $num) {
@@ -142,10 +149,15 @@ jobs:
                     }
                   }
                 }
-              }' -F org="$owner" -F repo="$repo" -F num="$num" 2>/dev/null < /dev/null \
-              | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
-                  | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' \
-              | head -1
+              }' -F org="$owner" -F repo="$repo" -F num="$num" 2>/dev/null < /dev/null) || resp=""
+            if ! jq -e '.data.repository.pullRequest != null' > /dev/null 2>&1 <<< "$resp"; then
+              echo "?"
+              return 0
+            fi
+            jq -r --arg n "$PROJECT_NUMBER" '
+              [.data.repository.pullRequest.projectItems.nodes[]?
+               | select(.project.number == ($n | tonumber))
+               | .fieldValueByName.name // ""] | first // ""' <<< "$resp"
           }
 
           # ── Collect every open promotion PR in the org ────────────────────
@@ -249,15 +261,40 @@ jobs:
                     continue
                     ;;
                 esac
-                ST=$(item_status "$FULL" "$item") || ST=""
-                SR=$(rank "$ST")
-                if [ -n "$SR" ] && [ -n "$RR" ] && [ "$SR" -ge "$RR" ]; then
+                ST=$(item_status "$FULL" "$item") || ST="?"
+                if [ "$ST" = "?" ]; then
+                  # Nothing was learned. Don't guess in either direction —
+                  # just leave it for the next sweep.
+                  STILL="$STILL #$item(lookup-failed)"
                   continue
                 fi
-                STILL="$STILL #$item(${ST:-not-on-kanban})"
+                if [ -z "$ST" ]; then
+                  # Not on the kanban at all. fr-gate.yml logs these as
+                  # "⚪ not on kanban, skipping" and can pass with them
+                  # present, so predicting a block here would strand a PR the
+                  # gate would happily let through.
+                  continue
+                fi
+                # Same predicate as the gate: at-or-beyond by rank, with the
+                # exact-match clause kept for statuses rank() does not know.
+                SR=$(rank "$ST")
+                if { [ -n "$SR" ] && [ -n "$RR" ] && [ "$SR" -ge "$RR" ]; } \
+                   || [ "$ST" = "$REQUIRED" ]; then
+                  continue
+                fi
+                STILL="$STILL #$item($ST)"
               done
               if [ -z "$STILL" ]; then
                 REASON="board caught up — every previously-blocking item is now at '$REQUIRED' or later"
+              elif [ "$RUN_AGE_H" -ge "$STALE_HOURS" ]; then
+                # Backstop for any disagreement between this file's heuristic
+                # and the gate's real verdict — a stale marker, a rank table
+                # that has drifted, a repeatedly-failing lookup. Rather than
+                # teach this file every rule the gate has, stop guessing after
+                # STALE_HOURS and let the gate itself answer. Self-throttling:
+                # a re-run resets the run's updated_at, so this can fire at
+                # most once per STALE_HOURS per PR.
+                REASON="still reads as blocked:$STILL — but the last gate run is ${RUN_AGE_H}h old, so asking the gate rather than trusting this heuristic"
               else
                 echo "·  $TAG — still blocked:$STILL"
               fi
