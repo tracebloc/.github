@@ -1,0 +1,27 @@
+# Code owners for tracebloc/.github
+#
+# This repository is the org's enforcement root: 96 caller workflows across 14
+# repos reference `tracebloc/.github/.github/workflows/*.yml@main`, and every
+# one of them passes `secrets: inherit`. A change merged here takes effect in
+# every repo on the next workflow run, and reaches every secret those repos
+# hold.
+#
+# Branch protection on `main` already sets `require_code_owner_reviews: true`,
+# but no CODEOWNERS file existed — so the requirement was vacuous and any two
+# of the seven org members could land a change to the gates themselves. This
+# file makes that flag mean something.
+#
+# Note on self-merge: as sole code owner, @LukasWodka cannot approve his own
+# PRs, so his changes still rely on the admin bypass (`enforce_admins: false`).
+# That is deliberate for now — the control this file adds is over the other six
+# members' changes. Adding a second owner would make it a true two-person rule
+# at the cost of a second gatekeeper.
+
+# Everything, by default.
+*                           @LukasWodka
+
+# The reusable workflows that define every gate in the org.
+/.github/workflows/         @LukasWodka
+
+# Scripts invoked by those workflows.
+/scripts/                   @LukasWodka
