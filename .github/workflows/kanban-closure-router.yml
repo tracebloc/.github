@@ -63,6 +63,7 @@ jobs:
               # If a linked PR closed this issue, mirror that PR's resulting Status.
               # Otherwise (manual completion), default to Prod.
               REPO_NAME="${REPO_FULL#*/}"
+              # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
               CLOSING_PR_BASE=$(gh api graphql -f query='
                 query($org: String!, $repo: String!, $num: Int!) {
                   repository(owner: $org, name: $repo) {
@@ -102,6 +103,7 @@ jobs:
           REPO_NAME="${REPO_FULL#*/}"
 
           # Look up project ID + Status field/option IDs
+          # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
           PROJ=$(gh api graphql -f query='
             query($org: String!, $num: Int!) {
               organization(login: $org) {
@@ -129,8 +131,10 @@ jobs:
 
           # Find item ID for this PR or issue
           if [ "$IS_PR" = "true" ]; then
+            # shellcheck disable=SC2016  # $num is a GraphQL variable - must not expand in shell
             FIELD_QUERY='pullRequest(number: $num) { projectItems(first: 10) { nodes { id project { number } } } }'
           else
+            # shellcheck disable=SC2016  # $num is a GraphQL variable - must not expand in shell
             FIELD_QUERY='issue(number: $num) { projectItems(first: 10) { nodes { id project { number } } } }'
           fi
 
@@ -156,6 +160,7 @@ jobs:
             exit 0
           fi
 
+          # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
           gh api graphql -f query='
             mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
               updateProjectV2ItemFieldValue(input: {

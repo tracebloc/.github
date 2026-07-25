@@ -90,16 +90,20 @@ jobs:
           BEFORE: ${{ github.event.before }}
           SHA: ${{ github.sha }}
         run: |
-          # First push to a branch reports a zero hash - fall back to last 50 commits
+          # First push to a branch reports a zero hash - fall back to last 50 commits.
+          # Keep the range as an array, not a string: the zero-hash branch needs TWO
+          # argv entries (--max-count=50 and the SHA). A plain quoted "$RANGE" would
+          # hand git one bogus "--max-count=50 <sha>" argument and break the
+          # first-push path - the array is what makes quoting safe here.
           if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            RANGE="--max-count=50 $SHA"
+            RANGE=(--max-count=50 "$SHA")
           else
-            RANGE="$BEFORE..$SHA"
+            RANGE=("$BEFORE..$SHA")
           fi
           # Extract PR refs from commit *subjects* only (not bodies), to avoid picking up
           # issue references like "Closes #47" that aren't PR numbers.
           # Squash merge subject: "Title (#NNN)"  Merge commit subject: "Merge pull request #NNN"
-          PRS=$(git log --format='%s' $RANGE \
+          PRS=$(git log --format='%s' "${RANGE[@]}" \
             | grep -oE '\(#[0-9]+\)|Merge pull request #[0-9]+' \
             | grep -oE '#[0-9]+' | tr -d '#' | sort -u | tr '\n' ' ')
           echo "Found PRs: $PRS"
@@ -120,6 +124,7 @@ jobs:
           REPO_NAME="${REPO_FULL#*/}"
 
           # Look up project ID + relevant field/option IDs (one query)
+          # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
           PROJ=$(gh api graphql -f query='
             query($org: String!, $num: Int!) {
               organization(login: $org) {
@@ -162,6 +167,7 @@ jobs:
           for prnum in $PR_NUMBERS; do
             # Defensive: if the number isn't a PR (e.g. issue ref slipped through),
             # the gh api call exits non-zero - swallow that and skip cleanly.
+            # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
             RESP=$(gh api graphql -f query='
               query($org: String!, $repo: String!, $num: Int!) {
                 repository(owner: $org, name: $repo) {
@@ -187,6 +193,7 @@ jobs:
             # an all-digit value into an integer, which the $o: String! variable then
             # rejects ("Variable $o of type String! was provided invalid value").
             # -f forces a string and is coercion-proof.
+            # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
             gh api graphql -f query='
               mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
                 updateProjectV2ItemFieldValue(input: {
@@ -197,6 +204,7 @@ jobs:
 
             if [ "$SKIP_STATUS" != "1" ]; then
               echo "-> PR #$prnum: Status = $STATUS_NAME"
+              # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
               gh api graphql -f query='
                 mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
                   updateProjectV2ItemFieldValue(input: {
