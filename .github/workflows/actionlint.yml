@@ -45,11 +45,14 @@ name: Actionlint
 #   brew install actionlint shellcheck   # or: go install .../actionlint@latest
 #   actionlint
 
+# Deliberately NO `paths:` filter. A required status check that is filtered by
+# path never runs on a PR that touches nothing matching it -- and a required
+# check that never runs leaves that PR waiting forever for a status that cannot
+# arrive. The job is ~7s, so running it on every PR costs less than that class
+# of stuck PR. Keep it unfiltered for as long as it is a required check.
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
-    paths:
-      - '.github/workflows/**'
   workflow_dispatch:
 
 # Supersede the previous run when the branch is pushed again, instead of
