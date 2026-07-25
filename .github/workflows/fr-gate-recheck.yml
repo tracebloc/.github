@@ -215,20 +215,37 @@ jobs:
               continue
             fi
 
-            # Newest completed FR gate run on the current head. Matched on the
+            # Newest completed FR gate run on the current head, or "INFLIGHT" if
+            # any gate run for this head is still queued/running. Matched on the
             # caller's workflow path, so a repo that renamed the display name
-            # still matches. Anything green or still in flight is left alone.
+            # still matches.
+            #
+            # The INFLIGHT case matters: a fresh run (a label change, a push, our
+            # own previous re-run) means a verdict is already on its way. Picking
+            # the older completed run and re-running THAT would just duplicate it.
+            # A verdict already coming is the one thing that makes pressing the
+            # button pointless.
+            #
             # Age is computed inside jq rather than with `date -d` so it is one
             # integer out of one command — no arithmetic on a string that a
             # failed API call could have left empty.
             RUN=$(gh api "/repos/$FULL/actions/runs?head_sha=$SHA&per_page=100" \
-              --jq '[.workflow_runs[]
-                     | select(((.path // "") | test("fr-gate")) and .status == "completed")]
-                    | sort_by(.run_started_at) | last
-                    | select(. != null and .conclusion != "success")
-                    | "\(.id) \(((now - (.updated_at | fromdateiso8601)) / 3600) | floor)"' \
+              --jq '{inflight: ([.workflow_runs[]
+                       | select(((.path // "") | test("fr-gate")) and .status != "completed")]
+                      | length),
+                     run: ([.workflow_runs[]
+                       | select(((.path // "") | test("fr-gate")) and .status == "completed")]
+                      | sort_by(.run_started_at) | last
+                      | if . == null or .conclusion == "success" then ""
+                        else "\(.id) \(((now - (.updated_at | fromdateiso8601)) / 3600) | floor)"
+                        end)}
+                    | if .inflight > 0 then "INFLIGHT" else .run end' \
               2>/dev/null < /dev/null) || RUN=""
             if [ -z "$RUN" ]; then
+              continue
+            fi
+            if [ "$RUN" = "INFLIGHT" ]; then
+              echo "·  $TAG — a gate run is already in flight, letting it finish"
               continue
             fi
             RUN_ID="${RUN%% *}"

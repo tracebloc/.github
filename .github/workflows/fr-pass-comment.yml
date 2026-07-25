@@ -229,18 +229,30 @@ jobs:
               break
             fi
 
-            # Newest completed FR gate run for that PR's head. Matched on the
-            # caller's workflow *path* so a repo that renamed the display name
-            # still matches. Skip it if it is already green or still running.
+            # Newest completed FR gate run for that PR's head, or "INFLIGHT" if
+            # one is still queued/running. Matched on the caller's workflow
+            # *path* so a repo that renamed the display name still matches.
+            # Already-green runs are skipped, and so is anything in flight: a
+            # verdict is already coming, so re-running an older completed run
+            # would only duplicate it. Two /fr-pass comments in quick succession
+            # is the ordinary way that happens.
             RUN_ID=$(gh api "/repos/$REPO_FULL/actions/runs?head_sha=$sha&per_page=100" \
-              --jq '[.workflow_runs[]
-                     | select(((.path // "") | test("fr-gate")) and .status == "completed")]
-                    | sort_by(.run_started_at) | last
-                    | select(. != null and .conclusion != "success") | .id' \
+              --jq '{inflight: ([.workflow_runs[]
+                       | select(((.path // "") | test("fr-gate")) and .status != "completed")]
+                      | length),
+                     run: ([.workflow_runs[]
+                       | select(((.path // "") | test("fr-gate")) and .status == "completed")]
+                      | sort_by(.run_started_at) | last
+                      | if . == null or .conclusion == "success" then "" else "\(.id)" end)}
+                    | if .inflight > 0 then "INFLIGHT" else .run end' \
               2>/dev/null < /dev/null) || RUN_ID=""
 
             if [ -z "$RUN_ID" ]; then
               echo "  #$pr — no red FR gate run on $sha, nothing to re-run"
+              continue
+            fi
+            if [ "$RUN_ID" = "INFLIGHT" ]; then
+              echo "  #$pr — a gate run is already in flight, letting it finish"
               continue
             fi
 
