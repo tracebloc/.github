@@ -238,8 +238,11 @@ jobs:
             # shellcheck disable=SC2086  # PATHS is a deliberate word-split list
             ruff check "$@" $PATHS > /tmp/ruff.out 2>&1 || RC=$?
           else
-            # -r: never fall through to ruff's default of scanning the whole tree.
-            xargs -r -a /tmp/py-files.txt ruff check "$@" > /tmp/ruff.out 2>&1 || RC=$?
+            # NUL-delimited so a path with a space stays one argument; -r so an
+            # empty list never falls through to ruff's default of scanning
+            # everything.
+            tr '\n' '\0' < /tmp/py-files.txt \
+              | xargs -0 -r ruff check "$@" > /tmp/ruff.out 2>&1 || RC=$?
           fi
 
           cat /tmp/ruff.out
@@ -334,9 +337,10 @@ jobs:
           # SC1091 = "not following sourced file"; unavoidable and uninteresting
           # when a library is sourced through a variable path.
           RC=0
-          xargs -r -a /tmp/sh-files.txt shellcheck \
-            --severity="$SEVERITY" --format=gcc --exclude=SC1091 \
-            > /tmp/shellcheck.out 2>&1 || RC=$?
+          tr '\n' '\0' < /tmp/sh-files.txt \
+            | xargs -0 -r shellcheck \
+                --severity="$SEVERITY" --format=gcc --exclude=SC1091 \
+                > /tmp/shellcheck.out 2>&1 || RC=$?
 
           cat /tmp/shellcheck.out
 
