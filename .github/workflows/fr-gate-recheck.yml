@@ -163,9 +163,14 @@ jobs:
           # ── Collect every open promotion PR in the org ────────────────────
           # One search per gated base branch (GitHub search does not reliably
           # OR repeated `base:` qualifiers). Comments come along for the ride
-          # so the sticky marker needs no extra round-trip: the gate posts it
-          # on the first failure and updates it in place, so it is always near
-          # the top of the thread.
+          # so the sticky marker needs no extra round-trip.
+          #
+          # Both ends of the thread are fetched. The gate posts the sticky on
+          # the first failure and thereafter edits it in place, so it sits
+          # wherever the thread was when the gate first failed: near the top on
+          # a normal promotion PR, near the bottom if the PR was already busy.
+          # `first` alone would miss the latter. A PR long enough to bury the
+          # marker between the two windows falls back to the age backstop.
           PRS="$RUNNER_TEMP/promotion-prs.jsonl"
           : > "$PRS"
           for base in staging main master; do
@@ -180,7 +185,8 @@ jobs:
                       headRefOid
                       repository { nameWithOwner }
                       labels(first: 30) { nodes { name } }
-                      comments(first: 100) { nodes { body } }
+                      head: comments(first: 100) { nodes { body } }
+                      tail: comments(last: 100) { nodes { body } }
                     }
                   }
                 }
@@ -257,7 +263,7 @@ jobs:
             # Duplicating that discovery is what would actually risk a
             # divergence between this file and the gate.
             BLOCKED=$(jq -r '
-              ([.comments.nodes[]?.body
+              ([(.head.nodes[]?, .tail.nodes[]?) | .body
                 | select(startswith("<!-- fr-gate-sticky"))] | last // "")
               | (split("\n")[0] | capture("blocked=\"(?<b>[^\"]*)\"").b) // ""
             ' <<< "$pr" 2>/dev/null) || BLOCKED=""
