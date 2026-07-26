@@ -192,8 +192,17 @@ jobs:
             exit 0
           fi
           # Three-dot: what this branch changed, not what the base moved on to.
-          git diff --name-only --diff-filter=ACMR "$BASE_SHA...HEAD" \
-            | grep -E '\.pyi?$' > /tmp/py-files.txt || true
+          # If the diff itself fails (shallow clone, BASE_SHA not fetched), fall
+          # back to scanning everything — never silently lint nothing. shellcheck
+          # and house-rules already do this; ruff must not be the one gate that
+          # no-ops on a bad diff.
+          if ! git diff --name-only --diff-filter=ACMR "$BASE_SHA...HEAD" > /tmp/py-diff.txt 2>/dev/null; then
+            echo "mode=all" >> "$GITHUB_OUTPUT"
+            echo "::warning::git diff against $BASE_SHA failed — scanning all files instead of skipping."
+            echo "Scanning: $PATHS"
+            exit 0
+          fi
+          grep -E '\.pyi?$' /tmp/py-diff.txt > /tmp/py-files.txt || true
           COUNT=$(wc -l < /tmp/py-files.txt | tr -d ' ')
           echo "mode=diff" >> "$GITHUB_OUTPUT"
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"

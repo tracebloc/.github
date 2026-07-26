@@ -296,7 +296,7 @@ if [ -s "$SHELLFILES" ]; then
     else
         grep -rhE '^[[:space:]]*(\.|source)[[:space:]]+[^|;&]+' . 2>/dev/null || true
     fi |
-        sed -E 's/^[[:space:]]*(\.|source)[[:space:]]+//; s|.*/||; s/["'"'"'].*//; s/[[:space:]].*//' |
+        sed -E 's/^[[:space:]]*(\.|source)[[:space:]]+//; s/["'"'"']//g; s|.*/||; s/[[:space:]].*//' |
         grep -E '\.(sh|bash|ksh|zsh)$' | sort -u >"$SOURCED" || true
 fi
 
@@ -354,6 +354,11 @@ function findtok(s, tok,   off, pos, sub_s, before, after, pre) {
             # invisible to every rule, so `curl-tls` silently stopped applying
             # to the exact hardening pattern the config documents as supported.
             if (TIMEOUT_PREFIX_RE != "" && pre ~ TIMEOUT_PREFIX_RE) return pos
+            # After one or more env-assignment prefixes (`HTTPS_PROXY=… curl …`,
+            # `KUBECONFIG=… kubectl …`). The shell runs the tool with those vars
+            # set, so it is still in command position; without this the tool is
+            # invisible and tls/timeout/pipefail never run on it.
+            if (pre ~ /(^|[|&;({]|[[:space:]])([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)+(![[:space:]]+)?$/) return pos
         }
         off = pos + length(tok) - 1
     }
@@ -618,7 +623,7 @@ function check_segment(seg, mask, lno,   sub_cmd, segx, bounded) {
             if (segx !~ /--tlsv1\.[23]/)
                 report(FILENAME, lno, "curl-tls", \
                     "`curl` without `--tlsv1.2`: the request may negotiate a downgraded TLS version. Add `--tlsv1.2` (house rule).")
-            if (!bounded && segx !~ /(^|[[:space:]])(--max-time|--connect-timeout|-[a-zA-Z]*m)([[:space:]]|=|$)/)
+            if (!bounded && segx !~ /(^|[[:space:]])(--max-time|--connect-timeout|-[a-zA-Z]*m)([[:space:]]|=|[0-9]|$)/)
                 report(FILENAME, lno, "curl-timeout", \
                     "`curl` without a timeout: a hung endpoint blocks the script forever. Add `--connect-timeout <s>` and `--max-time <s>`.")
         }
