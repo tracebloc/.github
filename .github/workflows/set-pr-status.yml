@@ -40,6 +40,7 @@ jobs:
           set -euo pipefail
           REPO_NAME="${REPO_FULL#*/}"
 
+          # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
           PROJ=$(gh api graphql -f query='
             query($org: String!, $num: Int!) {
               organization(login: $org) {
@@ -62,6 +63,7 @@ jobs:
 
           # Wait briefly for the kanban auto-add workflow to register the PR on the project
           for i in 1 2 3 4 5; do
+            # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
             ITEM_ID=$(gh api graphql -f query='
               query($org: String!, $repo: String!, $num: Int!) {
                 repository(owner: $org, name: $repo) {
@@ -86,6 +88,7 @@ jobs:
           # be all-numeric, and -F coerces all-digit values to an integer, which the
           # $o: String! variable rejects. -f forces a string. (Some option IDs contain
           # letters today, but don't rely on that — IDs regenerate if recreated.)
+          # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
           gh api graphql -f query='
             mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
               updateProjectV2ItemFieldValue(input: {

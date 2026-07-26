@@ -60,6 +60,7 @@ jobs:
         id: ids
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
           PROJ=$(gh api graphql -f query='
             query($org: String!, $num: Int!) {
               organization(login: $org) {
@@ -82,11 +83,13 @@ jobs:
             echo "$PROJ" | jq -r --arg n "$1" '.data.organization.projectV2.fields.nodes[]
               | select(.name=="Status") | .options[] | select(.name==$n) | .id'
           }
-          echo "project_id=$PROJECT_ID"                 >> "$GITHUB_OUTPUT"
-          echo "status_field=$STATUS_FIELD"             >> "$GITHUB_OUTPUT"
-          echo "prod_opt=$(opt Prod)"                   >> "$GITHUB_OUTPUT"
-          echo "cancelled_opt=$(opt Cancelled)"         >> "$GITHUB_OUTPUT"
-          echo "backlog_opt=$(opt Backlog)"             >> "$GITHUB_OUTPUT"
+          {
+            echo "project_id=$PROJECT_ID"
+            echo "status_field=$STATUS_FIELD"
+            echo "prod_opt=$(opt Prod)"
+            echo "cancelled_opt=$(opt Cancelled)"
+            echo "backlog_opt=$(opt Backlog)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Pull non-terminal items
         run: |
@@ -95,6 +98,7 @@ jobs:
           cursor="null"
           while :; do
             if [ "$cursor" = "null" ]; then
+              # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
               OUT=$(gh api graphql -f query='
                 query($org: String!, $num: Int!) {
                   organization(login: $org) {
@@ -124,6 +128,7 @@ jobs:
                   }
                 }' -F org="$ORG" -F num="$PROJECT_NUMBER")
             else
+              # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
               OUT=$(gh api graphql -f query='
                 query($org: String!, $num: Int!, $c: String!) {
                   organization(login: $org) {
@@ -286,8 +291,14 @@ jobs:
           PROJECT_ID="${{ steps.ids.outputs.project_id }}"
           STATUS_FIELD="${{ steps.ids.outputs.status_field }}"
           ok=0; fail=0
+          # `label` is field 4 of moves.tsv (the move category, consumed by awk in the
+          # Per-label summary step). It is read here only so that `read` does not fold
+          # field 4 into $reason - without a trailing variable the [OK]/[FAIL] lines
+          # below would print "<reason><TAB><label>". Deliberately unused in this step.
+          # shellcheck disable=SC2034
           while IFS=$'\t' read -r itemId optId reason label; do
             [ "$optId" = "-" ] && continue
+            # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
             if gh api graphql -f query='
                 mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
                   updateProjectV2ItemFieldValue(input: {

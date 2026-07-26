@@ -36,11 +36,12 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
-          REPO_NAME="${REPO_FULL#*/}"
 
           # Fetch all project items with their Status + content (paginate)
           cursor="null"
-          > /tmp/items.txt
+          # Truncate with `: >`, not a bare `>`: a redirection needs a command, and the
+          # no-op `:` is the portable one (same form as kanban-reconcile.yml).
+          : > /tmp/items.txt
           while true; do
             if [ "$cursor" = "null" ]; then after=""; else after=", after: \"$cursor\""; fi
             page=$(gh api graphql -f query="
