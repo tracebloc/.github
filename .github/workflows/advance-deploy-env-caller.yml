@@ -1,0 +1,17 @@
+name: Advance deploy env
+
+# .github hosts the reusable advance-deploy-env.yml (workflow_call only), so —
+# unlike every other repo — it had no push trigger of its own. Its kanban items
+# therefore never advanced as their code moved through develop -> main: feature
+# PRs stranded at "FR on dev" while their promotion PR alone reached Prod. This
+# caller fires the reusable on this repo's own pushes, like the other 14 repos,
+# so shipping to main auto-advances the contained tickets to Prod.
+
+on:
+  push:
+    branches: [develop, staging, master, main]
+
+jobs:
+  advance:
+    uses: tracebloc/.github/.github/workflows/advance-deploy-env.yml@main
+    secrets: inherit
