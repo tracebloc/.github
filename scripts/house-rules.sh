@@ -297,7 +297,7 @@ if [ -s "$SHELLFILES" ]; then
         grep -rhE '^[[:space:]]*(\.|source)[[:space:]]+[^|;&]+' . 2>/dev/null || true
     fi |
         sed -E 's/^[[:space:]]*(\.|source)[[:space:]]+//; s/["'"'"']//g; s|.*/||; s/[[:space:]].*//' |
-        grep -E '\.(sh|bash|ksh|zsh)$' | sort -u >"$SOURCED" || true
+        grep -E '(\.(sh|bash|ksh|zsh)$|^[^.]+$)' | sort -u >"$SOURCED" || true
 fi
 
 # Flag-holding variables. `readonly CURL_SECURE="--tlsv1.2"` in one file is used
@@ -382,8 +382,17 @@ function expand_flags(seg,   name, out, pos, after) {
 }
 
 # Does an external time bound already wrap this command (`timeout 30 curl …`)?
-function externally_bounded(seg) {
-    return (TIMEOUT_WRAPPER_RE != "" && seg ~ TIMEOUT_WRAPPER_RE)
+function externally_bounded(seg,   i, n, arr) {
+    # A timeout wrapper bounds a call only when the wrapper itself is in COMMAND
+    # position. The old regex matched `timeout` anywhere, so `myprog timeout 30`
+    # (timeout as an argument) wrongly suppressed curl/kubectl/helm-timeout on a
+    # genuinely unbounded call elsewhere in the segment. findtok pins it to
+    # command position.
+    if (TW_NAMES == "") return 0
+    n = split(TW_NAMES, arr, " ")
+    for (i = 1; i <= n; i++)
+        if (arr[i] != "" && findtok(seg, arr[i]) > 0) return 1
+    return 0
 }
 
 function report(f, ln, rule, msg) {
@@ -631,10 +640,14 @@ function check_segment(seg, mask, lno,   sub_cmd, segx, bounded) {
 
     # ---- kubectl (blocking subcommands only) ----
     if (findtok(mask, "kubectl") > 0) {
+        # Match the subcommand only where it actually follows `kubectl` (global
+        # flags may sit between). Matching `wait`/`delete` as any word in the
+        # segment let a resource or file name of that name trigger the finding.
         sub_cmd = ""
-        if (seg ~ /(^|[[:space:]])wait([[:space:]]|$)/) sub_cmd = "wait"
-        else if (seg ~ /(^|[[:space:]])rollout[[:space:]]+status([[:space:]]|$)/) sub_cmd = "rollout status"
-        else if (seg ~ /(^|[[:space:]])delete([[:space:]]|$)/) sub_cmd = "delete"
+        kflags = "kubectl([[:space:]]+(-[^[:space:]]+|[A-Za-z0-9_.-]+=[^[:space:]]+))*[[:space:]]+"
+        if (mask ~ ("(^|[|&;({]|[[:space:]])" kflags "wait([[:space:]]|$)")) sub_cmd = "wait"
+        else if (mask ~ ("(^|[|&;({]|[[:space:]])" kflags "rollout[[:space:]]+status([[:space:]]|$)")) sub_cmd = "rollout status"
+        else if (mask ~ ("(^|[|&;({]|[[:space:]])" kflags "delete([[:space:]]|$)")) sub_cmd = "delete"
         if (sub_cmd != "" && !bounded &&
             segx !~ /(--timeout|--request-timeout)([[:space:]]|=)/ &&
             segx !~ /(^|[[:space:]])--help([[:space:]]|$)/) {
@@ -686,7 +699,12 @@ BEGIN {
     # (`--foreground`), flag arguments and durations with or without a unit
     # (`-k 5 30`, `30s`), and variables (`"$DUR"`). Zero of them is valid too,
     # for a repo-declared wrapper used as `guard curl ...`.
-    TW_ARG = "((-[^[:space:]]+|[0-9]+[smhd]?|\"?\\$[{]?[A-Za-z_][A-Za-z0-9_]*[}]?\"?)[[:space:]]+)*"
+    # ...and a masked token: findtok runs on the quote-masked line, where a
+    # quoted duration like "$DUR" is blanked to a run of `_`. Accept `_+` so a
+    # quoted arg between the wrapper and the tool still counts (finding: quoted
+    # "$DUR" dropped curl-tls).
+    TW_ARG = "((-[^[:space:]]+|[0-9]+[smhd]?|\"?\\$[{]?[A-Za-z_][A-Za-z0-9_]*[}]?\"?|_+)[[:space:]]+)*"
+    TW_NAMES = TW  # space-separated wrapper names, for command-position checks
     TIMEOUT_WRAPPER_RE = "(^|[|&;({]|[[:space:]])(" twr ")[[:space:]]+" TW_ARG
     # Same shape, end-anchored: decides whether the token that FOLLOWS a timeout
     # wrapper is in command position (finding 1).
