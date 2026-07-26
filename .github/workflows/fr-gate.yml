@@ -108,7 +108,21 @@ jobs:
           # commits — direct pushes, or a release branch hand-edited after its
           # last PR — are flagged.
           UNATTRIB=""
-          MERGES=$(git rev-list --merges "$BASE_SHA..$HEAD_SHA")
+          # Only merges that are THEMSELVES PR merges may vouch for a commit. A
+          # routine `Merge branch 'develop' into feature` sync merge is also in
+          # range, and for it a direct-push commit on develop sits in S^1..S^2 —
+          # so an unqualified merge would launder that push into attribution,
+          # reopening the hole the ^1 check closed (Bugbot #73). Require the
+          # merge subject to carry a (#N) / "Merge pull request #N".
+          MERGES=""
+          while IFS= read -r mline; do
+            [ -z "$mline" ] && continue
+            msha="${mline%% *}"
+            msubj="${mline#* }"
+            if printf '%s' "$msubj" | grep -qE '\(#[0-9]+\)|Merge pull request #[0-9]+'; then
+              MERGES="$MERGES $msha"
+            fi
+          done < <(git log --merges --format='%H %s' "$BASE_SHA..$HEAD_SHA")
           while IFS= read -r line; do
             [ -z "$line" ] && continue
             csha="${line%% *}"
