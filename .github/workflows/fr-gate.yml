@@ -119,10 +119,19 @@ jobs:
             fi
             # ...or if it is reachable from the 2nd parent of a merge in range,
             # i.e. it entered via a PR merge even though its own subject is bare.
+            # A merge M *introduces* a commit only if it is in M^1..M^2 — on the
+            # merged-in side and NOT already on the first-parent (mainline) side.
+            # "Ancestor of ^2" alone is too loose: a direct push to the base
+            # branch becomes an ancestor of ^2 once a feature branch merges the
+            # base in, so it would be silently vouched despite never being in a
+            # PR (Bugbot, #72). Requiring "not an ancestor of ^1" pins vouching
+            # to the commits the merge actually added.
             attributed=0
             for msha in $MERGES; do
-              if p2=$(git rev-parse --verify --quiet "${msha}^2") \
-                 && git merge-base --is-ancestor "$csha" "$p2" 2>/dev/null; then
+              p2=$(git rev-parse --verify --quiet "${msha}^2") || continue
+              p1=$(git rev-parse --verify --quiet "${msha}^1") || continue
+              if git merge-base --is-ancestor "$csha" "$p2" 2>/dev/null \
+                 && ! git merge-base --is-ancestor "$csha" "$p1" 2>/dev/null; then
                 attributed=1
                 break
               fi
