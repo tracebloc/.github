@@ -51,8 +51,10 @@ jobs:
           # One query, two roots: project metadata + item Status.
           # Uses $itemNum for the issue/PR number to keep it distinct from $num (project).
           if [ "$IS_PR" = "true" ]; then
+            # shellcheck disable=SC2016  # $itemNum is a GraphQL variable - must not expand in shell
             CONTENT_QUERY='pullRequest(number: $itemNum)'
           else
+            # shellcheck disable=SC2016  # $itemNum is a GraphQL variable - must not expand in shell
             CONTENT_QUERY='issue(number: $itemNum)'
           fi
 
@@ -120,6 +122,7 @@ jobs:
           # be all-numeric, and -F coerces all-digit values to an integer, which the
           # $o: String! variable rejects. -f forces a string. (Some option IDs contain
           # letters today, but don't rely on that — IDs regenerate if recreated.)
+          # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
           gh api graphql -f query='
             mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
               updateProjectV2ItemFieldValue(input: {
@@ -129,9 +132,11 @@ jobs:
             }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -f o="$NEXT_OPT" > /dev/null
 
           echo "→ #$NUMBER: $CURRENT → $NEXT"
-          echo "result=advanced" >> "$GITHUB_OUTPUT"
-          echo "from=$CURRENT" >> "$GITHUB_OUTPUT"
-          echo "to=$NEXT" >> "$GITHUB_OUTPUT"
+          {
+            echo "result=advanced"
+            echo "from=$CURRENT"
+            echo "to=$NEXT"
+          } >> "$GITHUB_OUTPUT"
 
       - name: React on the comment (👍 advanced / 👎 no-op)
         if: always() && steps.advance.outputs.result != ''

@@ -138,6 +138,7 @@ jobs:
           MISSING=""
           PASSED=""
           for num in $NUMBERS; do
+            # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
             STATUS=$(gh api graphql -f query='
               query($org: String!, $repo: String!, $num: Int!) {
                 repository(owner: $org, name: $repo) {
