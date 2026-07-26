@@ -582,7 +582,7 @@ FNR == 1 {
 }
 
 # Split a logical line on command separators and apply the rules per segment.
-function check_line(raw, mask, lno,   L, i, c, nc, segstart, seglen, is_pipe, prevseg, prevpipe) {
+function check_line(raw, mask, lno,   L, i, c, nc, pc, segstart, seglen, is_pipe, prevseg, prevpipe) {
     L = length(mask)
     segstart = 1
     prevseg = ""
@@ -599,7 +599,17 @@ function check_line(raw, mask, lno,   L, i, c, nc, segstart, seglen, is_pipe, pr
             if (c == "|" && nc == "|") { seglen = i - segstart; skip = 2 }
             else if (c == "&" && nc == "&") { seglen = i - segstart; skip = 2 }
             else if (c == "|") { seglen = i - segstart; skip = 1; is_pipe = 1 }
-            else if (c == ";" || c == "&") { seglen = i - segstart; skip = 1 }
+            else if (c == ";") { seglen = i - segstart; skip = 1 }
+            else if (c == "&") {
+                # A bare `&` is a command separator only when it backgrounds a
+                # command — NOT when it is part of a redirection: `2>&1` / `>&2`
+                # (previous char `>`/`<`) or `&>file` (next char `>`). Splitting
+                # on the `&` of `2>&1` cut `curl … 2>&1 | grep` before the `|`,
+                # so the pipefail rule never saw the pipeline (Bugbot #65).
+                pc = (i > 1) ? substr(mask, i - 1, 1) : ""
+                if (pc == ">" || pc == "<" || nc == ">") { i++; continue }
+                seglen = i - segstart; skip = 1
+            }
             else { i++; continue }
         }
         seg_raw = substr(raw, segstart, seglen)
