@@ -384,17 +384,21 @@ function expand_flags(seg,   name, out, pos, after) {
 }
 
 # Does an external time bound already wrap this command (`timeout 30 curl …`)?
-function externally_bounded(seg,   i, n, arr) {
-    # A timeout wrapper bounds a call only when the wrapper itself is in COMMAND
-    # position. The old regex matched `timeout` anywhere, so `myprog timeout 30`
-    # (timeout as an argument) wrongly suppressed curl/helm-timeout on a
-    # genuinely unbounded call elsewhere in the segment. findtok pins it to
-    # command position.
-    if (TW_NAMES == "") return 0
-    n = split(TW_NAMES, arr, " ")
-    for (i = 1; i <= n; i++)
-        if (arr[i] != "" && findtok(seg, arr[i]) > 0) return 1
-    return 0
+function tool_bounded(seg, tool,   pos, pre) {
+    # Is THIS tool's own invocation time-bounded — does a timeout wrapper sit
+    # IMMEDIATELY before this occurrence in command position? Per-occurrence, not
+    # segment-global. A segment-wide check wrongly bounded:
+    #   - `timeout 30 foo $(curl x)` — timeout wraps foo; the nested curl in the
+    #     subshell runs unbounded (Bugbot #65 round 8), and
+    #   - it was also why `myprog timeout 30` (timeout as an argument) once had
+    #     to be special-cased; here it simply isn't a prefix of any tool.
+    # TIMEOUT_PREFIX_RE is end-anchored (`…wrapper <args>$`), so testing the text
+    # before the tool answers "is the wrapper directly in front of it".
+    if (TIMEOUT_PREFIX_RE == "") return 0
+    pos = findtok(seg, tool)
+    if (pos == 0) return 0
+    pre = substr(seg, 1, pos - 1)
+    return (pre ~ TIMEOUT_PREFIX_RE)
 }
 
 function report(f, ln, rule, msg) {
@@ -624,9 +628,8 @@ function note_pipeline(seg_raw, seg_mask, lno,   nr, i, t) {
     }
 }
 
-function check_segment(seg, mask, lno,   sub_cmd, segx, bounded) {
+function check_segment(seg, mask, lno,   sub_cmd, segx) {
     segx = expand_flags(seg)
-    bounded = externally_bounded(mask)
 
     # ---- curl ----
     if (findtok(mask, "curl") > 0) {
@@ -634,7 +637,7 @@ function check_segment(seg, mask, lno,   sub_cmd, segx, bounded) {
             if (segx !~ /--tlsv1\.[23]/)
                 report(FILENAME, lno, "curl-tls", \
                     "`curl` without `--tlsv1.2`: the request may negotiate a downgraded TLS version. Add `--tlsv1.2` (house rule).")
-            if (!bounded && segx !~ /(^|[[:space:]])(--max-time|--connect-timeout|-[a-zA-Z]*m)([[:space:]]|=|[0-9]|$)/)
+            if (!tool_bounded(mask, "curl") && segx !~ /(^|[[:space:]])(--max-time|--connect-timeout|-[a-zA-Z]*m)([[:space:]]|=|[0-9]|$)/)
                 report(FILENAME, lno, "curl-timeout", \
                     "`curl` without a timeout: a hung endpoint blocks the script forever. Add `--connect-timeout <s>` and `--max-time <s>`.")
         }
@@ -644,7 +647,7 @@ function check_segment(seg, mask, lno,   sub_cmd, segx, bounded) {
     if (findtok(mask, "helm") > 0) {
         if (seg ~ /(^|[[:space:]])(install|upgrade|uninstall|rollback|test)([[:space:]]|$)/ &&
             segx ~ /(^|[[:space:]])(--wait|--atomic)([[:space:]]|$)/ &&
-            !bounded &&
+            !tool_bounded(mask, "helm") &&
             segx !~ /--timeout([[:space:]]|=)/ &&
             segx !~ /(^|[[:space:]])--help([[:space:]]|$)/) {
             report(FILENAME, lno, "helm-timeout", \
@@ -688,7 +691,6 @@ BEGIN {
     # quoted arg between the wrapper and the tool still counts (finding: quoted
     # "$DUR" dropped curl-tls).
     TW_ARG = "((-[^[:space:]]+|[0-9]+[smhd]?|\"?\\$[{]?[A-Za-z_][A-Za-z0-9_]*[}]?\"?|_+)[[:space:]]+)*"
-    TW_NAMES = TW  # space-separated wrapper names, for command-position checks
     TIMEOUT_WRAPPER_RE = "(^|[|&;({]|[[:space:]])(" twr ")[[:space:]]+" TW_ARG
     # Same shape, end-anchored: decides whether the token that FOLLOWS a timeout
     # wrapper is in command position (finding 1).
