@@ -3,11 +3,11 @@ name: Advance deploy environment
 # Reusable workflow. Called from each active repo on push to develop/staging/master/main.
 # For each PR contained in the push, updates the Deploy environment project field
 # and advances Status through the multi-stage validation flow:
-#   develop      -> Status = "FR on dev"      (functional review on dev environment)
+#   develop      -> Status = "On dev"         (automatic; no dev-side review — D6)
 #   staging      -> Status = "FR on staging"  (functional review on staging environment)
 #   master/main  -> Status = "Prod"           (shipped to production)
 #
-# The "Ready for staging" / "Ready for prod" intermediate states are set manually
+# The "Ready for prod" intermediate state is set manually via /fr-pass at staging
 # (drag-and-drop on the kanban or via a /fr-pass comment) when the FR reviewer
 # declares the validation passed but the deploy hasn't happened yet.
 #
@@ -22,7 +22,7 @@ name: Advance deploy environment
 #
 # The override merges with the default mapping. Anything you don't explicitly
 # remap stays on the default. Keys are branch names; values are Status column
-# names ("Prod", "FR on staging", "FR on dev").
+# names ("Prod", "FR on staging", "On dev").
 
 on:
   workflow_call:
@@ -52,7 +52,7 @@ jobs:
           set -euo pipefail
           # Default mapping
           case "$BRANCH" in
-            develop)     DEPLOY_ENV="dev";     STATUS_NAME="FR on dev" ;;
+            develop)     DEPLOY_ENV="dev";     STATUS_NAME="On dev" ;;
             staging)     DEPLOY_ENV="staging"; STATUS_NAME="FR on staging" ;;
             master|main) DEPLOY_ENV="prod";    STATUS_NAME="Prod" ;;
             *)           DEPLOY_ENV="";        STATUS_NAME="" ;;
@@ -68,7 +68,7 @@ jobs:
               case "$OVERRIDE" in
                 "Prod")          DEPLOY_ENV="prod" ;;
                 "FR on staging") DEPLOY_ENV="staging" ;;
-                "FR on dev")     DEPLOY_ENV="dev" ;;
+                "On dev")        DEPLOY_ENV="dev" ;;
               esac
             fi
           fi

@@ -160,7 +160,7 @@ jobs:
             fi
             echo "$OUT" | jq -c '.data.organization.projectV2.items.nodes[]
               | select(.fieldValueByName.name as $s
-                       | ["Code review","FR on dev","Ready for staging",
+                       | ["Code review","On dev",
                           "FR on staging","Ready for prod"] | index($s))' \
               >> items.ndjson
 
@@ -251,7 +251,7 @@ jobs:
 
               if [ "$STATE" = "OPEN" ]; then
                 case "$COL" in
-                  "Ready for prod"|"FR on staging"|"FR on dev"|"Ready for staging")
+                  "Ready for prod"|"FR on staging"|"On dev")
                     printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$BACKLOG_OPT" "$REPO#$NUM open issue in $COL -> Backlog" "misplaced-issue" >> moves.tsv
                     continue ;;
                 esac
