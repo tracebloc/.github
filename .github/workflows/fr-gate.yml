@@ -173,12 +173,20 @@ jobs:
                       }
                     }
                   }
-                }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$num" 2>&1); then
+                }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$num" 2>/dev/null); then
                 api_ok=1
+                # Parse is deliberately non-fatal. Under `set -euo pipefail` a jq
+                # error or a SIGPIPE from `head` closing the pipe early would
+                # otherwise abort resolve_status mid-loop, skipping the remaining
+                # retries and returning an ambiguous code. `2>/dev/null` + `|| true`
+                # turn any parse failure into an empty result, which just falls
+                # through to the next attempt. (The gh call above is captured with
+                # `2>/dev/null`, not `2>&1`, so a stderr warning can never be fed
+                # into jq as if it were the JSON body.)
                 status=$(printf '%s' "$resp" \
                   | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
-                      | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' \
-                  | head -1)
+                      | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' 2>/dev/null \
+                  | head -1 || true)
                 if [ -n "$status" ]; then
                   printf '%s' "$status"
                   return 0
@@ -186,7 +194,7 @@ jobs:
               else
                 echo "    (attempt $attempt/5: API call failed for #$num)" >&2
               fi
-              [ "$attempt" -lt 5 ] && sleep $((attempt * 2))
+              if [ "$attempt" -lt 5 ]; then sleep $((attempt * 2)); fi
             done
             [ "$api_ok" -eq 1 ] && return 2
             return 1
