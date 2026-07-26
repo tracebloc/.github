@@ -437,6 +437,15 @@ jobs:
             # introduced, so a value added and then deleted again is still found.
             echo "Scanning commit range ${BASE_SHA}..${HEAD_SHA}"
             /tmp/gitleaks git "$@" --log-opts="--no-merges ${BASE_SHA}..${HEAD_SHA}" . || RC=$?
+            # gitleaks uses 0 = clean, 1 = leaks found; any other code is an
+            # operational error (missing base.sha, bad log-opts). Don't let a
+            # broken credential scan look clean — fall back to a full-history
+            # scan, the same as ruff/shellcheck/house-rules (Bugbot #65).
+            if [ "$RC" != "0" ] && [ "$RC" != "1" ]; then
+              echo "::warning::gitleaks range scan errored (exit $RC) — falling back to a full-history scan."
+              RC=0
+              /tmp/gitleaks git "$@" . || RC=$?
+            fi
           fi
 
           COUNT=0
