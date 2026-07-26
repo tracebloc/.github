@@ -78,6 +78,8 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # Make the base branch tip available locally for the diff.
@@ -91,6 +93,95 @@ jobs:
           echo "Items in promotion: $PRS"
           echo "prs=$PRS" >> "$GITHUB_OUTPUT"
 
+          # Attribution check. The refs above come from commit SUBJECTS, so any
+          # commit whose subject carries no (#N) — a hand-written commit, a
+          # rebase-merged commit, or the individual commits folded inside a merge
+          # commit — is invisible to the gate. design-system#70 shipped 12 such
+          # commits to main under a single blessed (#67): the gate saw one item,
+          # passed, and the other 12 were never evaluated (RFC-0008 D27-L1).
+          #
+          # So: every commit in the range must be reachable from a discovered
+          # PR's merge, OR itself carry a (#N). A merge commit contributes its
+          # own (#N) and vouches for its first-parent..second-parent set. What is
+          # left over is code that entered the range without an attributable PR.
+          #
+          # Squash- and rebase-merges to develop produce single (#N)-bearing
+          # commits, so they attribute cleanly. Only genuinely unattributable
+          # commits — direct pushes, or a release branch hand-edited after its
+          # last PR — are flagged.
+          UNATTRIB=""
+          # Only merges that are THEMSELVES PR merges may vouch for a commit. A
+          # routine `Merge branch 'develop' into feature` sync merge is also in
+          # range, and for it a direct-push commit on develop sits in S^1..S^2 —
+          # so an unqualified merge would launder that push into attribution,
+          # reopening the hole the ^1 check closed (Bugbot #73). Require the
+          # merge subject to carry a (#N) / "Merge pull request #N".
+          MERGES=""
+          while IFS= read -r mline; do
+            [ -z "$mline" ] && continue
+            msha="${mline%% *}"
+            msubj="${mline#* }"
+            if printf '%s' "$msubj" | grep -qE '\(#[0-9]+\)|Merge pull request #[0-9]+'; then
+              MERGES="$MERGES $msha"
+            fi
+          done < <(git log --merges --format='%H %s' "$BASE_SHA..$HEAD_SHA")
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            csha="${line%% *}"
+            csubj="${line#* }"
+            # Attributable if the subject itself references a PR...
+            if printf '%s' "$csubj" | grep -qE '\(#[0-9]+\)|Merge pull request #[0-9]+'; then
+              continue
+            fi
+            # ...or if it is reachable from the 2nd parent of a merge in range,
+            # i.e. it entered via a PR merge even though its own subject is bare.
+            # A merge M *introduces* a commit only if it is in M^1..M^2 — on the
+            # merged-in side and NOT already on the first-parent (mainline) side.
+            # "Ancestor of ^2" alone is too loose: a direct push to the base
+            # branch becomes an ancestor of ^2 once a feature branch merges the
+            # base in, so it would be silently vouched despite never being in a
+            # PR (Bugbot, #72). Requiring "not an ancestor of ^1" pins vouching
+            # to the commits the merge actually added.
+            attributed=0
+            for msha in $MERGES; do
+              p2=$(git rev-parse --verify --quiet "${msha}^2") || continue
+              p1=$(git rev-parse --verify --quiet "${msha}^1") || continue
+              if git merge-base --is-ancestor "$csha" "$p2" 2>/dev/null \
+                 && ! git merge-base --is-ancestor "$csha" "$p1" 2>/dev/null; then
+                attributed=1
+                break
+              fi
+            done
+            [ "$attributed" -eq 1 ] && continue
+
+            # Authoritative fallback for commits the local git heuristics can't
+            # place. GitHub rebase-and-merge REPLAYS a PR's commits unchanged —
+            # no (#N) subject, no merge commit — so neither the subject check nor
+            # the merge-vouch loop sees them, yet they legitimately came from a
+            # PR (Bugbot: rebase merges falsely unattributable). Ask GitHub which
+            # PR introduced the commit; a MERGED PR attributes it, a direct push
+            # has none. Retry, and fail CLOSED on a persistent API error — an
+            # unverifiable commit must never pass.
+            verdict=""
+            for attempt in 1 2 3; do
+              n=$(gh api "repos/$REPO/commits/$csha/pulls"                     --jq '[.[] | select(.merged_at != null)] | length' 2>/dev/null) && { verdict="$n"; break; }
+              sleep $((attempt * 2))
+            done
+            if [ -z "$verdict" ]; then
+              echo "  ⛔ ${csha} — could not verify via API after 3 attempts (failing closed)"
+              UNATTRIB="$UNATTRIB ${csha}"
+              continue
+            fi
+            [ "$verdict" != "0" ] && continue   # a merged PR introduced this commit
+
+            UNATTRIB="$UNATTRIB ${csha}"
+          done < <(git log --no-merges --format='%H %s' "$BASE_SHA..$HEAD_SHA")
+
+          echo "unattributed=$UNATTRIB" >> "$GITHUB_OUTPUT"
+          if [ -n "$UNATTRIB" ]; then
+            echo "Unattributable commits (no PR reference, not merged via a PR):$UNATTRIB"
+          fi
+
       - name: Verify each item is in required Status
         if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
         env:
@@ -100,10 +191,12 @@ jobs:
           REPO_FULL: ${{ github.repository }}
           REQUIRED: ${{ steps.target.outputs.required }}
           PRS: ${{ steps.items.outputs.prs }}
+          UNATTRIB: ${{ steps.items.outputs.unattributed }}
           PROMOTION_PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           REPO_NAME="${REPO_FULL#*/}"
+          UNATTRIB="${UNATTRIB:-}"
 
           # If commit subjects yielded no PR refs, gate the promotion PR itself.
           NUMBERS="$PRS"
@@ -136,29 +229,82 @@ jobs:
 
           BLOCKED=""
           MISSING=""
+          UNREADABLE=""
           PASSED=""
-          for num in $NUMBERS; do
-            # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
-            STATUS=$(gh api graphql -f query='
-              query($org: String!, $repo: String!, $num: Int!) {
-                repository(owner: $org, name: $repo) {
-                  pullRequest(number: $num) {
-                    projectItems(first: 10) {
-                      nodes {
-                        project { number }
-                        fieldValueByName(name: "Status") {
-                          ... on ProjectV2ItemFieldSingleSelectValue { name }
+
+          # Read one PR's Status column, retrying on both an API failure and an
+          # empty result.
+          #
+          # The empty case needs retrying because it is usually a RACE, not an
+          # absence: fr-gate-caller.yml and add-to-kanban.yml both fire on
+          # `pull_request: opened` and run concurrently, so the gate regularly
+          # queries the board before the card has been created. Observed on
+          # tracebloc/.github#61 — the gate finished at 16:48:09 and the card
+          # appeared at 16:48:14. It won the race by one second and passed.
+          #
+          # Echoes the column on success. Returns 1 if the API never answered,
+          # 2 if the API answered but the PR has no card. The caller must treat
+          # both as blocking; neither is evidence that review happened.
+          resolve_status() {
+            num="$1"
+            attempt=0
+            api_ok=0
+            while [ "$attempt" -lt 5 ]; do
+              attempt=$((attempt + 1))
+              # shellcheck disable=SC2016  # $names are GraphQL variables, not shell - keep literal
+              if resp=$(gh api graphql -f query='
+                query($org: String!, $repo: String!, $num: Int!) {
+                  repository(owner: $org, name: $repo) {
+                    pullRequest(number: $num) {
+                      projectItems(first: 10) {
+                        nodes {
+                          project { number }
+                          fieldValueByName(name: "Status") {
+                            ... on ProjectV2ItemFieldSingleSelectValue { name }
+                          }
                         }
                       }
                     }
                   }
-                }
-              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$num" 2>/dev/null \
-              | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
-                  | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' | head -1) || STATUS=""
+                }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$num" 2>/dev/null); then
+                api_ok=1
+                # Parse is deliberately non-fatal. Under `set -euo pipefail` a jq
+                # error or a SIGPIPE from `head` closing the pipe early would
+                # otherwise abort resolve_status mid-loop, skipping the remaining
+                # retries and returning an ambiguous code. `2>/dev/null` + `|| true`
+                # turn any parse failure into an empty result, which just falls
+                # through to the next attempt. (The gh call above is captured with
+                # `2>/dev/null`, not `2>&1`, so a stderr warning can never be fed
+                # into jq as if it were the JSON body.)
+                status=$(printf '%s' "$resp" \
+                  | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
+                      | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' 2>/dev/null \
+                  | head -1 || true)
+                if [ -n "$status" ]; then
+                  printf '%s' "$status"
+                  return 0
+                fi
+              else
+                echo "    (attempt $attempt/5: API call failed for #$num)" >&2
+              fi
+              if [ "$attempt" -lt 5 ]; then sleep $((attempt * 2)); fi
+            done
+            [ "$api_ok" -eq 1 ] && return 2
+            return 1
+          }
 
-            if [ -z "$STATUS" ]; then
-              echo "  ⚪ #$num — not on kanban, skipping"
+          for num in $NUMBERS; do
+            STATUS=""
+            rc=0
+            STATUS=$(resolve_status "$num") || rc=$?
+
+            if [ "$rc" -eq 1 ]; then
+              echo "  ⛔ #$num — Status unreadable after 5 attempts (API failure)"
+              UNREADABLE="$UNREADABLE #$num"
+              continue
+            fi
+            if [ "$rc" -eq 2 ] || [ -z "$STATUS" ]; then
+              echo "  ⛔ #$num — not on the kanban board after 5 attempts"
               MISSING="$MISSING #$num"
               continue
             fi
@@ -179,21 +325,51 @@ jobs:
           done
 
           echo ""
-          if [ -n "$BLOCKED" ]; then
-            echo "::error::FR gate FAILED. Items not yet at '$REQUIRED' (or later):$BLOCKED"
+
+          # FAIL CLOSED. An item the gate could not evaluate is not evidence that
+          # review happened, and until now it was treated as one: an unreadable
+          # or absent Status hit `continue`, and if every item was unreadable the
+          # gate printed "PASSED". A missing token, an expired token, a repo-level
+          # secret shadowing the org one, or a transient 5xx all collapsed into a
+          # silent pass — the only promotion gate disarming itself, with failure
+          # indistinguishable from success.
+          if [ -n "$BLOCKED" ] || [ -n "$MISSING" ] || [ -n "$UNREADABLE" ] || [ -n "${UNATTRIB// /}" ]; then
+            if [ -n "$BLOCKED" ]; then
+              echo "::error::FR gate FAILED. Items not yet at '$REQUIRED' (or later):$BLOCKED"
+              echo ""
+              echo "How to unblock:"
+              echo "  1. Run /fr-pass on each PR once functional review passes on the previous env, OR"
+              echo "  2. Drag each card to '$REQUIRED' on the engineer kanban."
+            fi
+            if [ -n "$MISSING" ]; then
+              echo "::error::FR gate FAILED. Not on the kanban board:$MISSING"
+              echo ""
+              echo "These items were queried 5 times and never appeared. Either the PR"
+              echo "was never added to project #$PROJECT_NUMBER, or its card was removed."
+              echo "Add it to the board, then re-run this check."
+            fi
+            if [ -n "$UNREADABLE" ]; then
+              echo "::error::FR gate FAILED. Status unreadable:$UNREADABLE"
+              echo ""
+              echo "The board could not be queried after 5 attempts. This is an"
+              echo "infrastructure failure, not a review failure — check that"
+              echo "PROJECTS_KANBAN_TOKEN is present and unexpired, and that no"
+              echo "repo-level secret of the same name is shadowing the org one."
+            fi
+            if [ -n "${UNATTRIB// /}" ]; then
+              echo "::error::FR gate FAILED. Commits with no attributable PR:$UNATTRIB"
+              echo ""
+              echo "These commits are in the promotion range but carry no (#N) and did"
+              echo "not arrive via a PR merge — a direct push, or a release branch edited"
+              echo "after its last PR. The gate can only vouch for reviewed commits, so"
+              echo "an unattributable commit rides in unevaluated (RFC-0008 D27-L1)."
+              echo "Open a PR for the change, or if it is a legitimate release-mechanics"
+              echo "commit, add the 'skip-fr-gate' label with a written reason."
+            fi
             echo ""
-            echo "How to unblock:"
-            echo "  1. Run /fr-pass on each PR once functional review passes on the previous env, OR"
-            echo "  2. Drag each card to '$REQUIRED' on the engineer kanban."
-            echo ""
-            echo "Emergency override: add the 'skip-fr-gate' label to this PR (visible in audit)."
+            echo "Emergency override: add the 'skip-fr-gate' label to this PR, with a"
+            echo "written reason in a comment."
             exit 1
           fi
 
           echo "✓ FR gate PASSED. All items are at '$REQUIRED' or later."
-          # Use an `if` here, not `[ -n ... ] && echo`. With `set -e`, the bracket
-          # test returning 1 on empty MISSING (the normal happy path) would short-
-          # circuit && and become the script's exit code, failing the step.
-          if [ -n "$MISSING" ]; then
-            echo "  (skipped not-on-kanban:$MISSING)"
-          fi
