@@ -183,18 +183,17 @@ jobs:
             if [ -n "${PROD_BRANCH_CACHE[$repo]:-}" ]; then
               echo "${PROD_BRANCH_CACHE[$repo]}"; return
             fi
+            # Prod is conventionally main or master. Probe those directly instead
+            # of trusting a repo-controlled .kanban.yml override: a repo could
+            # commit `branch_status_map: {develop: Prod}` and self-grant prod
+            # status to every develop merge (D27-L4). Read from the repo, not a
+            # file the PR author controls. Fall back to the default branch only
+            # if neither main nor master exists.
             local branch="$default_branch"
-            local body
-            body=$(gh api "/repos/$ORG/$repo/contents/.kanban.yml" \
-                   -H "Accept: application/vnd.github.raw" 2>/dev/null || true)
-            if [ -n "$body" ]; then
-              local override
-              override=$(printf '%s\n' "$body" | yq -r \
-                '.branch_status_map // {} | to_entries[] | select(.value=="Prod") | .key' 2>/dev/null \
-                | head -1)
-              if [ -n "$override" ] && [ "$override" != "null" ]; then
-                branch="$override"
-              fi
+            if gh api "/repos/$ORG/$repo/branches/main" --jq '.name' >/dev/null 2>&1; then
+              branch="main"
+            elif gh api "/repos/$ORG/$repo/branches/master" --jq '.name' >/dev/null 2>&1; then
+              branch="master"
             fi
             PROD_BRANCH_CACHE[$repo]="$branch"
             echo "$branch"
@@ -209,11 +208,6 @@ jobs:
             [ "$status" = "behind" ] || [ "$status" = "identical" ]
           }
 
-          is_release_vehicle() {
-            echo "$1" | grep -qiE \
-              '^(release[: ]|dev to (staging|stg|prod)|staging to (prod|master|main))'
-          }
-
           PROD_OPT="${{ steps.ids.outputs.prod_opt }}"
           CANCELLED_OPT="${{ steps.ids.outputs.cancelled_opt }}"
           BACKLOG_OPT="${{ steps.ids.outputs.backlog_opt }}"
@@ -225,7 +219,6 @@ jobs:
             REPO=$(echo "$line"     | jq -r '.content.repository.name')
             DEFAULT=$(echo "$line"  | jq -r '.content.repository.defaultBranchRef.name // "main"')
             NUM=$(echo "$line"      | jq -r '.content.number')
-            TITLE=$(echo "$line"    | jq -r '.content.title')
 
             if [ "$TYPE" = "PullRequest" ]; then
               STATE=$(echo "$line" | jq -r '.content.state')
@@ -233,11 +226,6 @@ jobs:
 
               if [ "$STATE" = "CLOSED" ]; then
                 printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$CANCELLED_OPT" "$REPO#$NUM closed-not-merged ($COL)" "cancelled" >> moves.tsv
-                continue
-              fi
-
-              if [ "$STATE" = "MERGED" ] && is_release_vehicle "$TITLE"; then
-                printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$PROD_OPT" "$REPO#$NUM release vehicle ($COL -> Prod)" "release-vehicle" >> moves.tsv
                 continue
               fi
 
