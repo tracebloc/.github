@@ -28,11 +28,15 @@ jobs:
   advance:
     # Skip unless the comment body actually contains /fr-pass.
     # Restrict to repo collaborators to prevent random commenters from advancing items.
+    # A functional review is a second pair of eyes: the person who wrote the PR
+    # cannot sign off their own promotion (author != commenter), and a read-only
+    # outside collaborator cannot either (MEMBER/OWNER only — COLLABORATOR
+    # dropped, since it includes triage/read outside collaborators). D30.
     if: |
       contains(github.event.comment.body, '/fr-pass') &&
       (github.event.comment.author_association == 'MEMBER' ||
-       github.event.comment.author_association == 'OWNER' ||
-       github.event.comment.author_association == 'COLLABORATOR')
+       github.event.comment.author_association == 'OWNER') &&
+      github.event.comment.user.login != github.event.issue.user.login
     runs-on: ubuntu-latest
     steps:
       - name: Resolve current Status and advance one column
