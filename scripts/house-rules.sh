@@ -256,22 +256,28 @@ case "$MODE" in
         ;;
 esac
 
+# True (return 0) if the path matches any configured exclude glob. Shared by the
+# shell-file scan and the custom-rule scan so `exclude:` / `--exclude` are
+# applied consistently — the custom-rule scan used to skip them (Bugbot #65).
+is_excluded() {
+    # shellcheck disable=SC2254  # glob patterns in $pat are intentional
+    while IFS= read -r pat; do
+        [ -n "$pat" ] || continue
+        case "$1" in
+            $pat) return 0 ;;
+        esac
+    done <<EOF
+$EXCLUDES
+EOF
+    return 1
+}
+
 # Keep only existing shell files, minus exclusions. Detection is by extension
 # or by shebang, so an extension-less `bin/deploy` is still checked.
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ -f "$f" ] || continue
-    skip=0
-    # shellcheck disable=SC2254  # glob patterns in $pat are intentional
-    while IFS= read -r pat; do
-        [ -n "$pat" ] || continue
-        case "$f" in
-            $pat) skip=1 ;;
-        esac
-    done <<EOF
-$EXCLUDES
-EOF
-    [ "$skip" = 0 ] || continue
+    is_excluded "$f" && continue
 
     case "$f" in
         *.sh | *.bash | *.ksh | *.zsh) ;;
@@ -742,6 +748,7 @@ if [ -s "$CUSTOM" ]; then
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         [ -f "$f" ] || continue
+        is_excluded "$f" && continue
         grep -qxF "$f" "$TOCHECK" 2>/dev/null || printf '%s\n' "$f" >>"$TOCHECK"
     done <"$CAND"
 fi
