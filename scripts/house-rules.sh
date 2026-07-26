@@ -296,7 +296,7 @@ if [ -s "$SHELLFILES" ]; then
     else
         grep -rhE '^[[:space:]]*(\.|source)[[:space:]]+[^|;&]+' . 2>/dev/null || true
     fi |
-        sed 's|.*/||; s/["'"'"'].*//; s/[[:space:]].*//' |
+        sed -E 's/^[[:space:]]*(\.|source)[[:space:]]+//; s|.*/||; s/["'"'"'].*//; s/[[:space:]].*//' |
         grep -E '\.(sh|bash|ksh|zsh)$' | sort -u >"$SOURCED" || true
 fi
 
@@ -544,8 +544,13 @@ FNR == 1 {
     # mark the whole file as pipefail-safe and suppress every real finding.
     if (lmask ~ /(^|[[:space:];])set[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*o[a-zA-Z]*[[:space:]]+pipefail/) pf_has = 1
 
-    # A heredoc opened on this logical line swallows the following lines.
-    if (match(lraw, /<<[-~]?[[:space:]]*(\\)?("[A-Za-z_][A-Za-z0-9_]*"|'[A-Za-z_][A-Za-z0-9_]*'|[A-Za-z_][A-Za-z0-9_]*)/)) {
+    # A heredoc opened on this logical line swallows the following lines. Match
+    # on lraw (so quoted heredoc tags like <<'EOF' still parse), but only accept
+    # a '<<' that SURVIVED masking — i.e. the operator is real, not sitting
+    # inside a quoted string. A `<<` blanked to `__` in lmask came from a string
+    # (same quote-blind class as the pipefail/lraw bug) and must not open a heredoc.
+    if (match(lraw, /<<[-~]?[[:space:]]*(\\)?("[A-Za-z_][A-Za-z0-9_]*"|'[A-Za-z_][A-Za-z0-9_]*'|[A-Za-z_][A-Za-z0-9_]*)/) \
+        && substr(lmask, RSTART, 2) == "<<") {
         tag = substr(lraw, RSTART, RLENGTH)
         hd_strip = (tag ~ /^<<-/)
         sub(/^<<[-~]?[[:space:]]*(\\)?/, "", tag)
@@ -704,12 +709,14 @@ BEGIN {
         CUSTOM_N++
         custom_id[CUSTOM_N] = ltrim(rtrim(cf[1]))
         custom_glob[CUSTOM_N] = glob2ere(ltrim(rtrim(cf[2])))
-        custom_re[CUSTOM_N] = ltrim(rtrim(cf[3]))
-        # A message may itself contain "|", so re-join every field past the third.
-        # `length(array)` is a gawk extension, hence the split() return value.
-        msg = cf[4]
-        for (mi = 5; mi <= nf_cf; mi++) msg = msg "|" cf[mi]
-        custom_msg[CUSTOM_N] = ltrim(rtrim(msg))
+        # The ERE (field 3) commonly needs "|" for alternation, so treat the LAST
+        # field as the message and rejoin fields 3..n-1 as the pattern. A rule's
+        # message therefore may not itself contain "|" (ids/globs never do). The
+        # nf_cf >= 4 guard above holds, so cf[3] and cf[nf_cf] always exist.
+        re = cf[3]
+        for (mi = 4; mi < nf_cf; mi++) re = re "|" cf[mi]
+        custom_re[CUSTOM_N] = ltrim(rtrim(re))
+        custom_msg[CUSTOM_N] = ltrim(rtrim(cf[nf_cf]))
     }
     close(CUSTOM_LIST)
 }
