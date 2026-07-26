@@ -91,6 +91,74 @@ jobs:
           echo "Items in promotion: $PRS"
           echo "prs=$PRS" >> "$GITHUB_OUTPUT"
 
+          # Attribution check. The refs above come from commit SUBJECTS, so any
+          # commit whose subject carries no (#N) — a hand-written commit, a
+          # rebase-merged commit, or the individual commits folded inside a merge
+          # commit — is invisible to the gate. design-system#70 shipped 12 such
+          # commits to main under a single blessed (#67): the gate saw one item,
+          # passed, and the other 12 were never evaluated (RFC-0008 D27-L1).
+          #
+          # So: every commit in the range must be reachable from a discovered
+          # PR's merge, OR itself carry a (#N). A merge commit contributes its
+          # own (#N) and vouches for its first-parent..second-parent set. What is
+          # left over is code that entered the range without an attributable PR.
+          #
+          # Squash- and rebase-merges to develop produce single (#N)-bearing
+          # commits, so they attribute cleanly. Only genuinely unattributable
+          # commits — direct pushes, or a release branch hand-edited after its
+          # last PR — are flagged.
+          UNATTRIB=""
+          # Only merges that are THEMSELVES PR merges may vouch for a commit. A
+          # routine `Merge branch 'develop' into feature` sync merge is also in
+          # range, and for it a direct-push commit on develop sits in S^1..S^2 —
+          # so an unqualified merge would launder that push into attribution,
+          # reopening the hole the ^1 check closed (Bugbot #73). Require the
+          # merge subject to carry a (#N) / "Merge pull request #N".
+          MERGES=""
+          while IFS= read -r mline; do
+            [ -z "$mline" ] && continue
+            msha="${mline%% *}"
+            msubj="${mline#* }"
+            if printf '%s' "$msubj" | grep -qE '\(#[0-9]+\)|Merge pull request #[0-9]+'; then
+              MERGES="$MERGES $msha"
+            fi
+          done < <(git log --merges --format='%H %s' "$BASE_SHA..$HEAD_SHA")
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            csha="${line%% *}"
+            csubj="${line#* }"
+            # Attributable if the subject itself references a PR...
+            if printf '%s' "$csubj" | grep -qE '\(#[0-9]+\)|Merge pull request #[0-9]+'; then
+              continue
+            fi
+            # ...or if it is reachable from the 2nd parent of a merge in range,
+            # i.e. it entered via a PR merge even though its own subject is bare.
+            # A merge M *introduces* a commit only if it is in M^1..M^2 — on the
+            # merged-in side and NOT already on the first-parent (mainline) side.
+            # "Ancestor of ^2" alone is too loose: a direct push to the base
+            # branch becomes an ancestor of ^2 once a feature branch merges the
+            # base in, so it would be silently vouched despite never being in a
+            # PR (Bugbot, #72). Requiring "not an ancestor of ^1" pins vouching
+            # to the commits the merge actually added.
+            attributed=0
+            for msha in $MERGES; do
+              p2=$(git rev-parse --verify --quiet "${msha}^2") || continue
+              p1=$(git rev-parse --verify --quiet "${msha}^1") || continue
+              if git merge-base --is-ancestor "$csha" "$p2" 2>/dev/null \
+                 && ! git merge-base --is-ancestor "$csha" "$p1" 2>/dev/null; then
+                attributed=1
+                break
+              fi
+            done
+            [ "$attributed" -eq 1 ] && continue
+            UNATTRIB="$UNATTRIB ${csha}"
+          done < <(git log --no-merges --format='%H %s' "$BASE_SHA..$HEAD_SHA")
+
+          echo "unattributed=$UNATTRIB" >> "$GITHUB_OUTPUT"
+          if [ -n "$UNATTRIB" ]; then
+            echo "Unattributable commits (no PR reference, not merged via a PR):$UNATTRIB"
+          fi
+
       - name: Verify each item is in required Status
         if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
         env:
@@ -100,10 +168,12 @@ jobs:
           REPO_FULL: ${{ github.repository }}
           REQUIRED: ${{ steps.target.outputs.required }}
           PRS: ${{ steps.items.outputs.prs }}
+          UNATTRIB: ${{ steps.items.outputs.unattributed }}
           PROMOTION_PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           REPO_NAME="${REPO_FULL#*/}"
+          UNATTRIB="${UNATTRIB:-}"
 
           # If commit subjects yielded no PR refs, gate the promotion PR itself.
           NUMBERS="$PRS"
@@ -240,7 +310,7 @@ jobs:
           # secret shadowing the org one, or a transient 5xx all collapsed into a
           # silent pass — the only promotion gate disarming itself, with failure
           # indistinguishable from success.
-          if [ -n "$BLOCKED" ] || [ -n "$MISSING" ] || [ -n "$UNREADABLE" ]; then
+          if [ -n "$BLOCKED" ] || [ -n "$MISSING" ] || [ -n "$UNREADABLE" ] || [ -n "${UNATTRIB// /}" ]; then
             if [ -n "$BLOCKED" ]; then
               echo "::error::FR gate FAILED. Items not yet at '$REQUIRED' (or later):$BLOCKED"
               echo ""
@@ -262,6 +332,16 @@ jobs:
               echo "infrastructure failure, not a review failure — check that"
               echo "PROJECTS_KANBAN_TOKEN is present and unexpired, and that no"
               echo "repo-level secret of the same name is shadowing the org one."
+            fi
+            if [ -n "${UNATTRIB// /}" ]; then
+              echo "::error::FR gate FAILED. Commits with no attributable PR:$UNATTRIB"
+              echo ""
+              echo "These commits are in the promotion range but carry no (#N) and did"
+              echo "not arrive via a PR merge — a direct push, or a release branch edited"
+              echo "after its last PR. The gate can only vouch for reviewed commits, so"
+              echo "an unattributable commit rides in unevaluated (RFC-0008 D27-L1)."
+              echo "Open a PR for the change, or if it is a legitimate release-mechanics"
+              echo "commit, add the 'skip-fr-gate' label with a written reason."
             fi
             echo ""
             echo "Emergency override: add the 'skip-fr-gate' label to this PR, with a"
