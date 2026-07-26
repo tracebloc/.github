@@ -78,6 +78,8 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # Make the base branch tip available locally for the diff.
@@ -151,6 +153,27 @@ jobs:
               fi
             done
             [ "$attributed" -eq 1 ] && continue
+
+            # Authoritative fallback for commits the local git heuristics can't
+            # place. GitHub rebase-and-merge REPLAYS a PR's commits unchanged —
+            # no (#N) subject, no merge commit — so neither the subject check nor
+            # the merge-vouch loop sees them, yet they legitimately came from a
+            # PR (Bugbot: rebase merges falsely unattributable). Ask GitHub which
+            # PR introduced the commit; a MERGED PR attributes it, a direct push
+            # has none. Retry, and fail CLOSED on a persistent API error — an
+            # unverifiable commit must never pass.
+            verdict=""
+            for attempt in 1 2 3; do
+              n=$(gh api "repos/$REPO/commits/$csha/pulls"                     --jq '[.[] | select(.merged_at != null)] | length' 2>/dev/null) && { verdict="$n"; break; }
+              sleep $((attempt * 2))
+            done
+            if [ -z "$verdict" ]; then
+              echo "  ⛔ ${csha} — could not verify via API after 3 attempts (failing closed)"
+              UNATTRIB="$UNATTRIB ${csha}"
+              continue
+            fi
+            [ "$verdict" != "0" ] && continue   # a merged PR introduced this commit
+
             UNATTRIB="$UNATTRIB ${csha}"
           done < <(git log --no-merges --format='%H %s' "$BASE_SHA..$HEAD_SHA")
 
