@@ -640,11 +640,20 @@ function check_segment(seg, mask, lno,   sub_cmd, segx, bounded) {
 
     # ---- kubectl (blocking subcommands only) ----
     if (findtok(mask, "kubectl") > 0) {
-        # Match the subcommand only where it actually follows `kubectl` (global
-        # flags may sit between). Matching `wait`/`delete` as any word in the
-        # segment let a resource or file name of that name trigger the finding.
+        # The subcommand is the first token after `kubectl` that is neither a
+        # flag nor a flag's value. Global flags come in three shapes, and the
+        # third is why this is fiddly: a value-taking flag (`-n ns`,
+        # `--context ctx`) consumes the NEXT bare word — so a namespace named
+        # `wait` (`kubectl -n wait get`) must NOT be read as the subcommand
+        # (round 6), while `kubectl -n ns wait` MUST (round 6) and
+        # `kubectl get pod wait` must NOT (round 5). Model the three shapes:
+        #   VF <space> value   — value-taking flag + its separate argument
+        #   -anything          — boolean/glued flag or flag=value
+        #   key=value          — value glued with `=`
+        # A value after VF is any token NOT starting with `-` (flags start `-`).
+        vf = "(-n|--namespace|--context|--cluster|--user|--kubeconfig|--token|--server|-s|--as|--as-group|--request-timeout|-v|--v)"
+        kflags = "kubectl([[:space:]]+(" vf "[[:space:]]+[^-[:space:]][^[:space:]]*|-[^[:space:]]+|[A-Za-z0-9_.-]+=[^[:space:]]+))*[[:space:]]+"
         sub_cmd = ""
-        kflags = "kubectl([[:space:]]+(-[^[:space:]]+|[A-Za-z0-9_.-]+=[^[:space:]]+))*[[:space:]]+"
         if (mask ~ ("(^|[|&;({]|[[:space:]])" kflags "wait([[:space:]]|$)")) sub_cmd = "wait"
         else if (mask ~ ("(^|[|&;({]|[[:space:]])" kflags "rollout[[:space:]]+status([[:space:]]|$)")) sub_cmd = "rollout status"
         else if (mask ~ ("(^|[|&;({]|[[:space:]])" kflags "delete([[:space:]]|$)")) sub_cmd = "delete"
