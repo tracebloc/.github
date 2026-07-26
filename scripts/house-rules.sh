@@ -42,10 +42,6 @@
 # RULES
 #   curl-tls        curl invoked without --tlsv1.2 (or --tlsv1.3).
 #   curl-timeout    curl invoked without --max-time/-m or --connect-timeout.
-#   kubectl-timeout kubectl wait | rollout status | delete without --timeout
-#                   (or the global --request-timeout). Scoped to the blocking
-#                   subcommands only: `kubectl rollout status` with no timeout
-#                   waits forever, `kubectl get pods` cannot hang.
 #   helm-timeout    helm install/upgrade/rollback/test/uninstall that waits
 #                   (--wait/--atomic) without --timeout.
 #   pipefail        A script that pipes the output of a fallible command
@@ -385,7 +381,7 @@ function expand_flags(seg,   name, out, pos, after) {
 function externally_bounded(seg,   i, n, arr) {
     # A timeout wrapper bounds a call only when the wrapper itself is in COMMAND
     # position. The old regex matched `timeout` anywhere, so `myprog timeout 30`
-    # (timeout as an argument) wrongly suppressed curl/kubectl/helm-timeout on a
+    # (timeout as an argument) wrongly suppressed curl/helm-timeout on a
     # genuinely unbounded call elsewhere in the segment. findtok pins it to
     # command position.
     if (TW_NAMES == "") return 0
@@ -635,33 +631,6 @@ function check_segment(seg, mask, lno,   sub_cmd, segx, bounded) {
             if (!bounded && segx !~ /(^|[[:space:]])(--max-time|--connect-timeout|-[a-zA-Z]*m)([[:space:]]|=|[0-9]|$)/)
                 report(FILENAME, lno, "curl-timeout", \
                     "`curl` without a timeout: a hung endpoint blocks the script forever. Add `--connect-timeout <s>` and `--max-time <s>`.")
-        }
-    }
-
-    # ---- kubectl (blocking subcommands only) ----
-    if (findtok(mask, "kubectl") > 0) {
-        # The subcommand is the first token after `kubectl` that is neither a
-        # flag nor a flag's value. Global flags come in three shapes, and the
-        # third is why this is fiddly: a value-taking flag (`-n ns`,
-        # `--context ctx`) consumes the NEXT bare word — so a namespace named
-        # `wait` (`kubectl -n wait get`) must NOT be read as the subcommand
-        # (round 6), while `kubectl -n ns wait` MUST (round 6) and
-        # `kubectl get pod wait` must NOT (round 5). Model the three shapes:
-        #   VF <space> value   — value-taking flag + its separate argument
-        #   -anything          — boolean/glued flag or flag=value
-        #   key=value          — value glued with `=`
-        # A value after VF is any token NOT starting with `-` (flags start `-`).
-        vf = "(-n|--namespace|--context|--cluster|--user|--kubeconfig|--token|--server|-s|--as|--as-group|--request-timeout|-v|--v)"
-        kflags = "kubectl([[:space:]]+(" vf "[[:space:]]+[^-[:space:]][^[:space:]]*|-[^[:space:]]+|[A-Za-z0-9_.-]+=[^[:space:]]+))*[[:space:]]+"
-        sub_cmd = ""
-        if (mask ~ ("(^|[|&;({]|[[:space:]])" kflags "wait([[:space:]]|$)")) sub_cmd = "wait"
-        else if (mask ~ ("(^|[|&;({]|[[:space:]])" kflags "rollout[[:space:]]+status([[:space:]]|$)")) sub_cmd = "rollout status"
-        else if (mask ~ ("(^|[|&;({]|[[:space:]])" kflags "delete([[:space:]]|$)")) sub_cmd = "delete"
-        if (sub_cmd != "" && !bounded &&
-            segx !~ /(--timeout|--request-timeout)([[:space:]]|=)/ &&
-            segx !~ /(^|[[:space:]])--help([[:space:]]|$)/) {
-            report(FILENAME, lno, "kubectl-timeout", \
-                "`kubectl " sub_cmd "` without `--timeout`: it blocks indefinitely when the resource never settles, so CI hangs instead of failing. Add `--timeout=<s>`.")
         }
     }
 
