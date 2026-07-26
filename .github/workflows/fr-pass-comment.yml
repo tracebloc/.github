@@ -2,9 +2,10 @@ name: FR pass comment handler
 
 # Reusable workflow. Called from each active repo on issue_comment created.
 # Listens for "/fr-pass" comments on PRs/issues that are currently in
-# "FR on dev" or "FR on staging" and advances them to the next column:
-#   FR on dev      → Ready for staging
+# "FR on staging" and advances it to the next column:
 #   FR on staging  → Ready for prod
+# (D6: the dev-side review is gone — "On dev" is automatic — so /fr-pass only
+#  applies at staging, the single functional-review gate.)
 #
 # Only repo collaborators can trigger this (MEMBER / OWNER / COLLABORATOR).
 # The workflow reacts on the comment with 👍 on success, 👎 on no-op so the
@@ -104,10 +105,9 @@ jobs:
 
           # Decide the next status from the current one.
           case "$CURRENT" in
-            "FR on dev")     NEXT="Ready for staging" ;;
             "FR on staging") NEXT="Ready for prod" ;;
             *)
-              echo "Item is in '$CURRENT' — /fr-pass only applies to 'FR on dev' or 'FR on staging'. Skipping."
+              echo "Item is in '$CURRENT' — /fr-pass only applies to 'FR on staging' (the one functional review, on staging). Skipping."
               echo "result=wrong-column" >> "$GITHUB_OUTPUT"
               exit 0
               ;;

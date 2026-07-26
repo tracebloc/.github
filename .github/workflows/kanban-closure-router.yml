@@ -2,7 +2,7 @@ name: Route kanban Status on closure
 
 # Reusable workflow. Called on PR closed + issue closed events.
 # Sets the correct Status based on what actually happened:
-#   - PR merged to develop           → FR on dev      (functional review on dev environment)
+#   - PR merged to develop           → On dev         (automatic; no dev-side review — D6)
 #   - PR merged to staging           → FR on staging  (functional review on staging environment)
 #   - PR merged to main/master       → Prod           (shipped to prod)
 #   - PR closed without merging      → Cancelled
@@ -59,8 +59,8 @@ jobs:
               case "$BASE_REF" in
                 main|master) STATUS="Prod" ;;
                 staging)     STATUS="FR on staging" ;;
-                develop)     STATUS="FR on dev" ;;
-                *)           STATUS="FR on dev" ;;
+                develop)     STATUS="On dev" ;;
+                *)           STATUS="On dev" ;;
               esac
             else
               STATUS="Cancelled"
@@ -105,10 +105,10 @@ jobs:
                 case "$CLOSING_PR_BASE" in
                   main|master) STATUS="Prod" ;;
                   staging)     STATUS="FR on staging" ;;
-                  develop)     STATUS="FR on dev" ;;
+                  develop)     STATUS="On dev" ;;
                   # Unrecognised base: mirror what the pull_request branch above
                   # does for the same base, so the issue and its PR agree.
-                  *)           STATUS="FR on dev" ;;
+                  *)           STATUS="On dev" ;;
                 esac
               fi
             else
