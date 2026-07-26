@@ -350,6 +350,10 @@ function findtok(s, tok,   off, pos, sub_s, before, after, pre) {
             if (pre ~ /(^|[|&;({]|[[:space:]])(sudo|time|exec|nohup|if|then|else|elif|do|while|until)[[:space:]]+(![[:space:]]+)?$/) return pos
             # After a repo-declared wrapper function that execs its arguments.
             if (WRAPPERS != "" && pre ~ WRAPPER_RE) return pos
+            # After a time bound (`timeout 30 curl …`). Without this the tool is
+            # invisible to every rule, so `curl-tls` silently stopped applying
+            # to the exact hardening pattern the config documents as supported.
+            if (TIMEOUT_PREFIX_RE != "" && pre ~ TIMEOUT_PREFIX_RE) return pos
         }
         off = pos + length(tok) - 1
     }
@@ -648,7 +652,10 @@ BEGIN {
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", WRAPPERS)
         wr = WRAPPERS
         gsub(/[[:space:]]+/, "|", wr)
-        WRAPPER_RE = "(^|[|&;({]|[[:space:]])(" wr ")[[:space:]]"
+        # End-anchored, like the shell-keyword check above it. Unanchored, any
+        # earlier wrapper name anywhere in the preceding text marked later
+        # tokens as command position (`spin_cmd a && echo b` flagged `b`).
+        WRAPPER_RE = "(^|[|&;({]|[[:space:]])(" wr ")[[:space:]]+(![[:space:]]+)?$"
     }
     # `timeout 30 curl …` already bounds the call; so does a repo-declared
     # equivalent (config: `timeout-wrapper: guard`).
@@ -656,7 +663,20 @@ BEGIN {
     gsub(/^[[:space:]]+|[[:space:]]+$/, "", TW)
     twr = TW
     gsub(/[[:space:]]+/, "|", twr)
-    TIMEOUT_WRAPPER_RE = "(^|[|&;({]|[[:space:]])(" twr ")[[:space:]]+-?[0-9]"
+    # A duration may carry a unit (`30s`), be a variable (`"$DUR"`), or be
+    # absent entirely for a repo-declared wrapper (`timeout-wrapper: guard`,
+    # used as `guard curl …`). Options may precede it (`timeout -k 5 30 …`,
+    # `timeout --foreground 30 …`). Requiring a bare digit rejected all of
+    # those and still raised *-timeout findings on correctly bounded calls.
+    # Everything between the wrapper and the command it wraps: flags
+    # (`--foreground`), flag arguments and durations with or without a unit
+    # (`-k 5 30`, `30s`), and variables (`"$DUR"`). Zero of them is valid too,
+    # for a repo-declared wrapper used as `guard curl ...`.
+    TW_ARG = "((-[^[:space:]]+|[0-9]+[smhd]?|\"?\\$[{]?[A-Za-z_][A-Za-z0-9_]*[}]?\"?)[[:space:]]+)*"
+    TIMEOUT_WRAPPER_RE = "(^|[|&;({]|[[:space:]])(" twr ")[[:space:]]+" TW_ARG
+    # Same shape, end-anchored: decides whether the token that FOLLOWS a timeout
+    # wrapper is in command position (finding 1).
+    TIMEOUT_PREFIX_RE = "(^|[|&;({]|[[:space:]])(" twr ")[[:space:]]+" TW_ARG "$"
     # File list (so the shell layer decides what is a shell file, once).
     while ((getline l < SHELLFILE_LIST) > 0) if (l != "") IS_SHELL[l] = 1
     close(SHELLFILE_LIST)
