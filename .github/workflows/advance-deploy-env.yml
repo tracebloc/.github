@@ -38,6 +38,12 @@ on:
 
 jobs:
   advance:
+    # A branch CREATION or deletion is not a merge — its commits are inherited,
+    # not newly shipped. Without this guard, creating a branch (BEFORE = zero
+    # hash) falls through to the "last 50 commits" range below and mass-advances
+    # ~50 recent PRs' kanban items — e.g. every time a new `staging` branch is
+    # cut for a repo (RFC-BACKEND-0008 D8/#1274). Skip create/delete pushes.
+    if: github.event.created != true && github.event.deleted != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
