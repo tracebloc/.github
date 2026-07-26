@@ -537,8 +537,12 @@ FNR == 1 {
     lno = pend_ln
     pend_raw = ""; pend_mask = ""; pend_ln = 0
 
-    # `set -euo pipefail`, `set -o pipefail`, `set -eo pipefail`, …
-    if (lraw ~ /(^|[[:space:];])set[[:space:]]+-[a-zA-Z]*o[a-zA-Z]*[[:space:]]+pipefail/) pf_has = 1
+    # `set -euo pipefail`, `set -o pipefail`, `set -eo pipefail`, and the
+    # split forms `set -eu -o pipefail` / `set -e -o pipefail` — `-o pipefail`
+    # may sit in its own flag word after earlier clusters. Tested on lmask, not
+    # lraw: reading the raw line let `echo "set -o pipefail"` inside a string
+    # mark the whole file as pipefail-safe and suppress every real finding.
+    if (lmask ~ /(^|[[:space:];])set[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*o[a-zA-Z]*[[:space:]]+pipefail/) pf_has = 1
 
     # A heredoc opened on this logical line swallows the following lines.
     if (match(lraw, /<<[-~]?[[:space:]]*(\\)?("[A-Za-z_][A-Za-z0-9_]*"|'[A-Za-z_][A-Za-z0-9_]*'|[A-Za-z_][A-Za-z0-9_]*)/)) {
