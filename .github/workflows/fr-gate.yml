@@ -136,29 +136,74 @@ jobs:
 
           BLOCKED=""
           MISSING=""
+          UNREADABLE=""
           PASSED=""
-          for num in $NUMBERS; do
-            # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
-            STATUS=$(gh api graphql -f query='
-              query($org: String!, $repo: String!, $num: Int!) {
-                repository(owner: $org, name: $repo) {
-                  pullRequest(number: $num) {
-                    projectItems(first: 10) {
-                      nodes {
-                        project { number }
-                        fieldValueByName(name: "Status") {
-                          ... on ProjectV2ItemFieldSingleSelectValue { name }
+
+          # Read one PR's Status column, retrying on both an API failure and an
+          # empty result.
+          #
+          # The empty case needs retrying because it is usually a RACE, not an
+          # absence: fr-gate-caller.yml and add-to-kanban.yml both fire on
+          # `pull_request: opened` and run concurrently, so the gate regularly
+          # queries the board before the card has been created. Observed on
+          # tracebloc/.github#61 — the gate finished at 16:48:09 and the card
+          # appeared at 16:48:14. It won the race by one second and passed.
+          #
+          # Echoes the column on success. Returns 1 if the API never answered,
+          # 2 if the API answered but the PR has no card. The caller must treat
+          # both as blocking; neither is evidence that review happened.
+          resolve_status() {
+            num="$1"
+            attempt=0
+            api_ok=0
+            while [ "$attempt" -lt 5 ]; do
+              attempt=$((attempt + 1))
+              # shellcheck disable=SC2016  # $names are GraphQL variables, not shell - keep literal
+              if resp=$(gh api graphql -f query='
+                query($org: String!, $repo: String!, $num: Int!) {
+                  repository(owner: $org, name: $repo) {
+                    pullRequest(number: $num) {
+                      projectItems(first: 10) {
+                        nodes {
+                          project { number }
+                          fieldValueByName(name: "Status") {
+                            ... on ProjectV2ItemFieldSingleSelectValue { name }
+                          }
                         }
                       }
                     }
                   }
-                }
-              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$num" 2>/dev/null \
-              | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
-                  | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' | head -1) || STATUS=""
+                }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$num" 2>&1); then
+                api_ok=1
+                status=$(printf '%s' "$resp" \
+                  | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
+                      | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' \
+                  | head -1)
+                if [ -n "$status" ]; then
+                  printf '%s' "$status"
+                  return 0
+                fi
+              else
+                echo "    (attempt $attempt/5: API call failed for #$num)" >&2
+              fi
+              [ "$attempt" -lt 5 ] && sleep $((attempt * 2))
+            done
+            [ "$api_ok" -eq 1 ] && return 2
+            return 1
+          }
 
-            if [ -z "$STATUS" ]; then
-              echo "  ⚪ #$num — not on kanban, skipping"
+          for num in $NUMBERS; do
+            STATUS=""
+            rc=0
+            STATUS=$(resolve_status "$num") || rc=$?
+
+            if [ "$rc" -eq 1 ]; then
+              echo "  ⛔ #$num — Status unreadable after 5 attempts (API failure)"
+              UNREADABLE="$UNREADABLE #$num"
+              continue
+            fi
+            if [ "$rc" -eq 2 ] || [ -z "$STATUS" ]; then
+              echo "  ⛔ #$num — not on the kanban board after 5 attempts"
               MISSING="$MISSING #$num"
               continue
             fi
@@ -179,21 +224,41 @@ jobs:
           done
 
           echo ""
-          if [ -n "$BLOCKED" ]; then
-            echo "::error::FR gate FAILED. Items not yet at '$REQUIRED' (or later):$BLOCKED"
+
+          # FAIL CLOSED. An item the gate could not evaluate is not evidence that
+          # review happened, and until now it was treated as one: an unreadable
+          # or absent Status hit `continue`, and if every item was unreadable the
+          # gate printed "PASSED". A missing token, an expired token, a repo-level
+          # secret shadowing the org one, or a transient 5xx all collapsed into a
+          # silent pass — the only promotion gate disarming itself, with failure
+          # indistinguishable from success.
+          if [ -n "$BLOCKED" ] || [ -n "$MISSING" ] || [ -n "$UNREADABLE" ]; then
+            if [ -n "$BLOCKED" ]; then
+              echo "::error::FR gate FAILED. Items not yet at '$REQUIRED' (or later):$BLOCKED"
+              echo ""
+              echo "How to unblock:"
+              echo "  1. Run /fr-pass on each PR once functional review passes on the previous env, OR"
+              echo "  2. Drag each card to '$REQUIRED' on the engineer kanban."
+            fi
+            if [ -n "$MISSING" ]; then
+              echo "::error::FR gate FAILED. Not on the kanban board:$MISSING"
+              echo ""
+              echo "These items were queried 5 times and never appeared. Either the PR"
+              echo "was never added to project #$PROJECT_NUMBER, or its card was removed."
+              echo "Add it to the board, then re-run this check."
+            fi
+            if [ -n "$UNREADABLE" ]; then
+              echo "::error::FR gate FAILED. Status unreadable:$UNREADABLE"
+              echo ""
+              echo "The board could not be queried after 5 attempts. This is an"
+              echo "infrastructure failure, not a review failure — check that"
+              echo "PROJECTS_KANBAN_TOKEN is present and unexpired, and that no"
+              echo "repo-level secret of the same name is shadowing the org one."
+            fi
             echo ""
-            echo "How to unblock:"
-            echo "  1. Run /fr-pass on each PR once functional review passes on the previous env, OR"
-            echo "  2. Drag each card to '$REQUIRED' on the engineer kanban."
-            echo ""
-            echo "Emergency override: add the 'skip-fr-gate' label to this PR (visible in audit)."
+            echo "Emergency override: add the 'skip-fr-gate' label to this PR, with a"
+            echo "written reason in a comment."
             exit 1
           fi
 
           echo "✓ FR gate PASSED. All items are at '$REQUIRED' or later."
-          # Use an `if` here, not `[ -n ... ] && echo`. With `set -e`, the bracket
-          # test returning 1 on empty MISSING (the normal happy path) would short-
-          # circuit && and become the script's exit code, failing the step.
-          if [ -n "$MISSING" ]; then
-            echo "  (skipped not-on-kanban:$MISSING)"
-          fi
