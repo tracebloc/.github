@@ -1,0 +1,122 @@
+name: Kanban archive
+
+# Continuous board hygiene (RFC-BACKEND-0008 D3): archive every item that has
+# reached a terminal column (Prod / Cancelled) so the board shows only live work.
+#
+# Archived items are RETAINED and searchable - this hides done work, it does not
+# delete it. Archiving is what keeps the board fast: at the current merge rate
+# ~800 items/month land in Prod, so terminal work has to leave the board on entry,
+# not accumulate.
+#
+# Archives by COLUMN MEMBERSHIP, never by age. Age is unusable on this board (the
+# retired auto-classify rewrote updatedAt every 10 min), and a just-shipped item
+# should archive promptly, not after N idle days. Runs daily, just after the
+# reconcile pass (which moves any drifted items into Prod first).
+
+on:
+  schedule:
+    - cron: '0 5 * * *'  # 05:00 UTC daily (after kanban-reconcile at 04:00)
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Log what would be archived without archiving"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kanban-archive
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+      ORG: tracebloc
+      PROJECT_NUMBER: 2
+      DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
+    steps:
+      - name: Resolve project id
+        id: ids
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016  # $names are GraphQL variables, not shell - keep literal
+          PROJECT_ID=$(gh api graphql -f query='
+            query($org: String!, $num: Int!) {
+              organization(login: $org) { projectV2(number: $num) { id } }
+            }' -F org="$ORG" -F num="$PROJECT_NUMBER" \
+            --jq '.data.organization.projectV2.id')
+          echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Collect un-archived terminal items (Prod / Cancelled)
+        run: |
+          set -euo pipefail
+          : > terminal.ids
+          cursor="null"
+          while :; do
+            if [ "$cursor" = "null" ]; then
+              # shellcheck disable=SC2016  # $names are GraphQL variables, not shell - keep literal
+              OUT=$(gh api graphql -f query='
+                query($org: String!, $num: Int!) {
+                  organization(login: $org) { projectV2(number: $num) {
+                    items(first: 100) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes { id isArchived
+                        fieldValueByName(name: "Status") {
+                          ... on ProjectV2ItemFieldSingleSelectValue { name } } }
+                    } } } }' -F org="$ORG" -F num="$PROJECT_NUMBER")
+            else
+              # shellcheck disable=SC2016  # $names are GraphQL variables, not shell - keep literal
+              OUT=$(gh api graphql -f query='
+                query($org: String!, $num: Int!, $c: String!) {
+                  organization(login: $org) { projectV2(number: $num) {
+                    items(first: 100, after: $c) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes { id isArchived
+                        fieldValueByName(name: "Status") {
+                          ... on ProjectV2ItemFieldSingleSelectValue { name } } }
+                    } } } }' -F org="$ORG" -F num="$PROJECT_NUMBER" -F c="$cursor")
+            fi
+            echo "$OUT" | jq -r '.data.organization.projectV2.items.nodes[]
+              | select(.isArchived == false)
+              | select(.fieldValueByName.name == "Prod" or .fieldValueByName.name == "Cancelled")
+              | .id' >> terminal.ids
+            HAS_NEXT=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
+            cursor=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.pageInfo.endCursor')
+            [ "$HAS_NEXT" = "true" ] || break
+          done
+          echo "Un-archived terminal items: $(wc -l < terminal.ids)"
+
+      - name: Archive them
+        run: |
+          set -euo pipefail
+          PROJECT_ID="${{ steps.ids.outputs.project_id }}"
+          n=$(wc -l < terminal.ids | tr -d ' ')
+          if [ "$n" = "0" ]; then echo "Nothing to archive."; exit 0; fi
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY RUN - would archive $n terminal item(s)."
+            exit 0
+          fi
+          ok=0; fail=0
+          while IFS= read -r itemId; do
+            [ -z "$itemId" ] && continue
+            # shellcheck disable=SC2016  # $names are GraphQL variables, not shell - keep literal
+            if gh api graphql -f query='
+                mutation($p: ID!, $i: ID!) {
+                  archiveProjectV2Item(input: {projectId: $p, itemId: $i}) { item { id } }
+                }' -F p="$PROJECT_ID" -F i="$itemId" > /dev/null 2>&1; then
+              ok=$((ok+1))
+            else
+              echo "::warning::failed to archive item $itemId"
+              fail=$((fail+1))
+            fi
+          done < terminal.ids
+          echo "=== Archived: $ok ok, $fail failed ==="
+          {
+            echo "## Kanban archive"
+            echo ""
+            echo "Archived $ok terminal item(s), $fail failed."
+          } >> "$GITHUB_STEP_SUMMARY"
