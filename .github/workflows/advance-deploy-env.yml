@@ -170,6 +170,29 @@ jobs:
             SKIP_STATUS=1
           fi
 
+          # Apply one single-select field update WITHOUT letting a single bad item
+          # abort the whole push. An unguarded mutation under `set -e` aborts the
+          # step on the first failure, leaving every later PR un-advanced. Archived
+          # items are already skipped above; this is defense-in-depth for any other
+          # per-item error -- log it, flag the run, but keep processing the rest.
+          RUN_FAILED=0
+          update_field() {   # $1=fieldId  $2=optionId  $3=human label
+            local err
+            # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
+            if err=$(gh api graphql -f query='
+              mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $p, itemId: $i, fieldId: $f,
+                  value: {singleSelectOptionId: $o}
+                }) { projectV2Item { id } }
+              }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$1" -f o="$2" 2>&1 >/dev/null); then
+              return 0
+            fi
+            echo "::warning::#$prnum $3 update failed: $err"
+            RUN_FAILED=1
+            return 0
+          }
+
           for prnum in $PR_NUMBERS; do
             # Defensive: if the number isn't a PR (e.g. issue ref slipped through),
             # the gh api call exits non-zero - swallow that and skip cleanly.
@@ -179,7 +202,7 @@ jobs:
                 repository(owner: $org, name: $repo) {
                   pullRequest(number: $num) {
                     projectItems(first: 10) {
-                      nodes { id project { number } }
+                      nodes { id isArchived project { number } }
                     }
                   }
                 }
@@ -193,30 +216,27 @@ jobs:
               continue
             fi
 
+            # An archived project item cannot be updated: the mutation errors and,
+            # under `set -e`, used to abort the whole step -- stranding every PR
+            # after it in the push below its deploy column. Archived cards are
+            # intentionally out of the deploy flow, so skip them cleanly.
+            ARCHIVED=$(echo "$RESP" | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
+                  | select(.project.number == ($n | tonumber)) | .isArchived' 2>/dev/null | head -1)
+            if [ "$ARCHIVED" = "true" ]; then
+              echo "::notice::#$prnum project item is archived -- skipping (out of deploy flow)"
+              continue
+            fi
+
             echo "-> PR #$prnum: Deploy env = $DEPLOY_ENV"
-            # Pass option IDs with -f (raw string), NOT -F: ProjectV2 single-select
-            # option IDs can be all-numeric, and -F does magic type coercion that turns
-            # an all-digit value into an integer, which the $o: String! variable then
-            # rejects ("Variable $o of type String! was provided invalid value").
-            # -f forces a string and is coercion-proof.
-            # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
-            gh api graphql -f query='
-              mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
-                updateProjectV2ItemFieldValue(input: {
-                  projectId: $p, itemId: $i, fieldId: $f,
-                  value: {singleSelectOptionId: $o}
-                }) { projectV2Item { id } }
-              }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$DEPLOY_FIELD" -f o="$DEPLOY_OPT" > /dev/null
+            update_field "$DEPLOY_FIELD" "$DEPLOY_OPT" "Deploy env=$DEPLOY_ENV"
 
             if [ "$SKIP_STATUS" != "1" ]; then
               echo "-> PR #$prnum: Status = $STATUS_NAME"
-              # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
-              gh api graphql -f query='
-                mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
-                  updateProjectV2ItemFieldValue(input: {
-                    projectId: $p, itemId: $i, fieldId: $f,
-                    value: {singleSelectOptionId: $o}
-                  }) { projectV2Item { id } }
-                }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -f o="$STATUS_OPT" > /dev/null
+              update_field "$STATUS_FIELD" "$STATUS_OPT" "Status=$STATUS_NAME"
             fi
           done
+
+          if [ "$RUN_FAILED" -ne 0 ]; then
+            echo "::error::One or more project items failed to update (see warnings above)."
+            exit 1
+          fi
