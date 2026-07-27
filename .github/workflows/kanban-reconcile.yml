@@ -1,6 +1,6 @@
 name: Kanban reconcile
 
-# Nightly self-healing pass for the engineer kanban (project #2).
+# Weekly self-healing backstop for the engineer kanban (project #2).
 #
 # Catches stalls and drift that the event-driven workflows
 # (advance-deploy-env, kanban-closure-router) silently miss:
@@ -11,27 +11,18 @@ name: Kanban reconcile
 #                       happens out-of-band (e.g. averaging-service deploys
 #                       a Docker image from staging without ever pushing main).
 #
-#   2. Release vehicles  - merged PRs whose title matches the
-#                          "Release: develop -> staging" / "Dev to staging"
-#                          / "Staging to prod" pattern. They're not
-#                          deliverables - auto-move to Prod once merged.
+#   2. Cancelled  - closed-not-merged PRs sitting in non-terminal columns.
 #
-#   3. Cancelled  - closed-not-merged PRs sitting in non-terminal columns.
-#
-#   4. Misplaced open issues - open issues that drifted into a post-merge
+#   3. Misplaced open issues - open issues that drifted into a post-merge
 #                              column (RfP, FR-on-*, Ready-for-staging).
 #                              Move back to Backlog.
-#
-# Per-repo override: a repo can declare its prod-truth branch in a
-# `.kanban.yml` at the repo root (see kanban-reconcile docs in this repo).
-# Default: the repo's GitHub default branch (main/master).
 #
 # Safety cap: if the script would move > 100 items in one run, it aborts
 # and reports - that's almost certainly a bug, not real drift.
 
 on:
   schedule:
-    - cron: '0 4 * * *'  # 04:00 UTC daily
+    - cron: '0 4 * * 1'  # 04:00 UTC Mondays — weekly backstop (event-driven flows are the primary path)
   workflow_dispatch:
     inputs:
       dry-run:
