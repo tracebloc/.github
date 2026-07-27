@@ -103,10 +103,9 @@ jobs:
           # CLOSED on a persistent API error (an unverifiable commit must never pass).
           # The base fetch is --depth=200, so the commit set -- and the call count --
           # is bounded.
-          resolve_commit_prs() {   # $1=sha; echoes merged PR numbers (may be empty); rc 1 = API error
+          fetch_pulls() {   # $1=sha; echoes the commits/pulls JSON array; rc 1 = API error
             for attempt in 1 2 3; do
-              if out=$(gh api "repos/$REPO/commits/$1/pulls" \
-                  --jq '[.[] | select(.merged_at != null) | .number] | join(" ")' 2>/dev/null); then
+              if out=$(gh api "repos/$REPO/commits/$1/pulls" 2>/dev/null); then
                 printf '%s' "$out"
                 return 0
               fi
@@ -118,15 +117,24 @@ jobs:
           ATTRIBUTED=""   # real merged PR numbers (deduped at the end)
           UNATTRIB=""     # commits introduced by no merged PR -- i.e. a direct push
 
-          # Pass 1: merge commits that are THEMSELVES PR merges vouch for their
-          # merged-in range (M^1..M^2) and contribute their own PR. A routine sync
-          # merge ("Merge branch 'develop'...") is not a PR merge -- commits/pulls
-          # returns nothing for it -- so it neither vouches nor contributes, and any
-          # push it carries is caught by pass 2 (Bugbot #72/#73).
+          # Pass 1: a merge commit vouches for its merged-in range (M^1..M^2) and
+          # contributes its PR ONLY IF it is that PR's actual merge_commit_sha.
+          # commits/pulls returns EVERY PR whose branch CONTAINS the commit, so a
+          # sync merge ("Merge branch 'develop' into feature") also lists the feature
+          # PR; without the merge_commit_sha match it would enter MERGES and mark a
+          # direct-push-to-base it happened to pull in as "covered", skipping Pass 2
+          # and reopening the fail-open hole (Bugbot #73). Requiring merge_commit_sha
+          # ==sha admits only true PR merges -- verified on real history: the sync
+          # merge ba80b3a (backend #1128 back-merge) yields no merge_commit_sha match
+          # and drops to Pass 2, while every "Merge pull request #N" matches #N. A
+          # routine or non-PR merge neither vouches nor contributes; any push it
+          # carries is caught by Pass 2.
           MERGES=""
           while IFS= read -r msha; do
             [ -z "$msha" ] && continue
-            if mprs=$(resolve_commit_prs "$msha"); then
+            if raw=$(fetch_pulls "$msha"); then
+              mprs=$(printf '%s' "${raw:-[]}" | jq -r --arg s "$msha" \
+                '[.[] | select(.merged_at != null and .merge_commit_sha == $s) | .number] | join(" ")')
               if [ -n "$mprs" ]; then
                 ATTRIBUTED="$ATTRIBUTED $mprs"
                 MERGES="$MERGES $msha"
@@ -137,11 +145,11 @@ jobs:
             fi
           done < <(git log --merges --format='%H' "$BASE_SHA..$HEAD_SHA")
 
-          # Pass 2: non-merge commits not already vouched by a PR-merge above. A merge
-          # M introduces a commit only if it is in M^1..M^2 -- on the merged-in side
-          # and NOT already on the mainline side; requiring "not ancestor of ^1" stops
-          # a base-branch push being laundered into attribution once a feature branch
-          # merges the base in (Bugbot #72).
+          # Pass 2: non-merge commits not already vouched by a true PR-merge above. A
+          # merge M introduces a commit only if it is in M^1..M^2 -- on the merged-in
+          # side and NOT already on the mainline side; requiring "not ancestor of ^1"
+          # stops a base-branch push being laundered into attribution once a feature
+          # branch merges the base in (Bugbot #72).
           while IFS= read -r csha; do
             [ -z "$csha" ] && continue
             covered=0
@@ -155,7 +163,8 @@ jobs:
               fi
             done
             [ "$covered" -eq 1 ] && continue
-            if cprs=$(resolve_commit_prs "$csha"); then
+            if raw=$(fetch_pulls "$csha"); then
+              cprs=$(printf '%s' "${raw:-[]}" | jq -r '[.[] | select(.merged_at != null) | .number] | join(" ")')
               if [ -z "$cprs" ]; then
                 UNATTRIB="$UNATTRIB ${csha}"   # no merged PR introduced it: a direct push
               else
