@@ -86,100 +86,93 @@ jobs:
           git fetch origin "$BASE_REF":"refs/remotes/origin/$BASE_REF" --depth=200 2>/dev/null || true
           BASE_SHA=$(git rev-parse "origin/$BASE_REF")
 
-          # Extract PR refs from commit *subjects* only (avoids "Closes #N" issue refs).
-          PRS=$(git log --format='%s' "$BASE_SHA..$HEAD_SHA" \
-            | grep -oE '\(#[0-9]+\)|Merge pull request #[0-9]+' \
-            | grep -oE '#[0-9]+' | tr -d '#' | sort -u | tr '\n' ' ' || true)
-          echo "Items in promotion: $PRS"
-          echo "prs=$PRS" >> "$GITHUB_OUTPUT"
+          # -- Build the item list AUTHORITATIVELY from GitHub's commit->PR
+          # attribution, NOT from commit subjects. --------------------------------
+          # Scraping "(#N)" from subjects is unreliable three ways, all seen in real
+          # ranges (backend#1228): this org's convention is "<subject> (#issue) (#PR)",
+          # so it (a) picks up ISSUE numbers, which fail the later pullRequest() lookup
+          # and used to fail the gate CLOSED; (b) picks up bare "#N" MENTIONS of
+          # unrelated PRs; and (c) MISSES a commit's real PR when the (#PR) is not in
+          # the subject at all (rebase-merges, or a squash whose subject kept only the
+          # issue ref) -- letting un-reviewed code ride in unevaluated (fail OPEN).
+          #
+          # repos/{owner}/{repo}/commits/{sha}/pulls returns the actual MERGED PR(s)
+          # that introduced a commit -- the source of truth for both "which PRs are in
+          # this range" (PRS) and "is every commit attributable" (UNATTRIB). One call
+          # per commit not already vouched by a PR-merge in range; retry, and fail
+          # CLOSED on a persistent API error (an unverifiable commit must never pass).
+          # The base fetch is --depth=200, so the commit set -- and the call count --
+          # is bounded.
+          resolve_commit_prs() {   # $1=sha; echoes merged PR numbers (may be empty); rc 1 = API error
+            for attempt in 1 2 3; do
+              if out=$(gh api "repos/$REPO/commits/$1/pulls" \
+                  --jq '[.[] | select(.merged_at != null) | .number] | join(" ")' 2>/dev/null); then
+                printf '%s' "$out"
+                return 0
+              fi
+              sleep $((attempt * 2))
+            done
+            return 1
+          }
 
-          # Attribution check. The refs above come from commit SUBJECTS, so any
-          # commit whose subject carries no (#N) — a hand-written commit, a
-          # rebase-merged commit, or the individual commits folded inside a merge
-          # commit — is invisible to the gate. design-system#70 shipped 12 such
-          # commits to main under a single blessed (#67): the gate saw one item,
-          # passed, and the other 12 were never evaluated (RFC-0008 D27-L1).
-          #
-          # So: every commit in the range must be reachable from a discovered
-          # PR's merge, OR itself carry a (#N). A merge commit contributes its
-          # own (#N) and vouches for its first-parent..second-parent set. What is
-          # left over is code that entered the range without an attributable PR.
-          #
-          # Squash- and rebase-merges to develop produce single (#N)-bearing
-          # commits, so they attribute cleanly. Only genuinely unattributable
-          # commits — direct pushes, or a release branch hand-edited after its
-          # last PR — are flagged.
-          UNATTRIB=""
-          # Only merges that are THEMSELVES PR merges may vouch for a commit. A
-          # routine `Merge branch 'develop' into feature` sync merge is also in
-          # range, and for it a direct-push commit on develop sits in S^1..S^2 —
-          # so an unqualified merge would launder that push into attribution,
-          # reopening the hole the ^1 check closed (Bugbot #73). Require the
-          # merge subject to carry a (#N) / "Merge pull request #N".
+          ATTRIBUTED=""   # real merged PR numbers (deduped at the end)
+          UNATTRIB=""     # commits introduced by no merged PR -- i.e. a direct push
+
+          # Pass 1: merge commits that are THEMSELVES PR merges vouch for their
+          # merged-in range (M^1..M^2) and contribute their own PR. A routine sync
+          # merge ("Merge branch 'develop'...") is not a PR merge -- commits/pulls
+          # returns nothing for it -- so it neither vouches nor contributes, and any
+          # push it carries is caught by pass 2 (Bugbot #72/#73).
           MERGES=""
-          while IFS= read -r mline; do
-            [ -z "$mline" ] && continue
-            msha="${mline%% *}"
-            msubj="${mline#* }"
-            if printf '%s' "$msubj" | grep -qE '\(#[0-9]+\)|Merge pull request #[0-9]+'; then
-              MERGES="$MERGES $msha"
+          while IFS= read -r msha; do
+            [ -z "$msha" ] && continue
+            if mprs=$(resolve_commit_prs "$msha"); then
+              if [ -n "$mprs" ]; then
+                ATTRIBUTED="$ATTRIBUTED $mprs"
+                MERGES="$MERGES $msha"
+              fi
+            else
+              echo "  BLOCKED ${msha} -- merge commit unverifiable via API after 3 attempts (failing closed)"
+              UNATTRIB="$UNATTRIB ${msha}"
             fi
-          done < <(git log --merges --format='%H %s' "$BASE_SHA..$HEAD_SHA")
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            csha="${line%% *}"
-            csubj="${line#* }"
-            # Attributable if the subject itself references a PR...
-            if printf '%s' "$csubj" | grep -qE '\(#[0-9]+\)|Merge pull request #[0-9]+'; then
-              continue
-            fi
-            # ...or if it is reachable from the 2nd parent of a merge in range,
-            # i.e. it entered via a PR merge even though its own subject is bare.
-            # A merge M *introduces* a commit only if it is in M^1..M^2 — on the
-            # merged-in side and NOT already on the first-parent (mainline) side.
-            # "Ancestor of ^2" alone is too loose: a direct push to the base
-            # branch becomes an ancestor of ^2 once a feature branch merges the
-            # base in, so it would be silently vouched despite never being in a
-            # PR (Bugbot, #72). Requiring "not an ancestor of ^1" pins vouching
-            # to the commits the merge actually added.
-            attributed=0
+          done < <(git log --merges --format='%H' "$BASE_SHA..$HEAD_SHA")
+
+          # Pass 2: non-merge commits not already vouched by a PR-merge above. A merge
+          # M introduces a commit only if it is in M^1..M^2 -- on the merged-in side
+          # and NOT already on the mainline side; requiring "not ancestor of ^1" stops
+          # a base-branch push being laundered into attribution once a feature branch
+          # merges the base in (Bugbot #72).
+          while IFS= read -r csha; do
+            [ -z "$csha" ] && continue
+            covered=0
             for msha in $MERGES; do
               p2=$(git rev-parse --verify --quiet "${msha}^2") || continue
               p1=$(git rev-parse --verify --quiet "${msha}^1") || continue
               if git merge-base --is-ancestor "$csha" "$p2" 2>/dev/null \
                  && ! git merge-base --is-ancestor "$csha" "$p1" 2>/dev/null; then
-                attributed=1
+                covered=1
                 break
               fi
             done
-            [ "$attributed" -eq 1 ] && continue
-
-            # Authoritative fallback for commits the local git heuristics can't
-            # place. GitHub rebase-and-merge REPLAYS a PR's commits unchanged —
-            # no (#N) subject, no merge commit — so neither the subject check nor
-            # the merge-vouch loop sees them, yet they legitimately came from a
-            # PR (Bugbot: rebase merges falsely unattributable). Ask GitHub which
-            # PR introduced the commit; a MERGED PR attributes it, a direct push
-            # has none. Retry, and fail CLOSED on a persistent API error — an
-            # unverifiable commit must never pass.
-            verdict=""
-            for attempt in 1 2 3; do
-              n=$(gh api "repos/$REPO/commits/$csha/pulls"                     --jq '[.[] | select(.merged_at != null)] | length' 2>/dev/null) && { verdict="$n"; break; }
-              sleep $((attempt * 2))
-            done
-            if [ -z "$verdict" ]; then
-              echo "  ⛔ ${csha} — could not verify via API after 3 attempts (failing closed)"
+            [ "$covered" -eq 1 ] && continue
+            if cprs=$(resolve_commit_prs "$csha"); then
+              if [ -z "$cprs" ]; then
+                UNATTRIB="$UNATTRIB ${csha}"   # no merged PR introduced it: a direct push
+              else
+                ATTRIBUTED="$ATTRIBUTED $cprs"
+              fi
+            else
+              echo "  BLOCKED ${csha} -- could not verify via API after 3 attempts (failing closed)"
               UNATTRIB="$UNATTRIB ${csha}"
-              continue
             fi
-            [ "$verdict" != "0" ] && continue   # a merged PR introduced this commit
+          done < <(git log --no-merges --format='%H' "$BASE_SHA..$HEAD_SHA")
 
-            UNATTRIB="$UNATTRIB ${csha}"
-          done < <(git log --no-merges --format='%H %s' "$BASE_SHA..$HEAD_SHA")
-
+          PRS=$(echo "$ATTRIBUTED" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -un | tr '\n' ' ' || true)
+          echo "Items in promotion (commit->PR attribution): $PRS"
+          echo "prs=$PRS" >> "$GITHUB_OUTPUT"
           echo "unattributed=$UNATTRIB" >> "$GITHUB_OUTPUT"
           if [ -n "$UNATTRIB" ]; then
-            echo "Unattributable commits (no PR reference, not merged via a PR):$UNATTRIB"
+            echo "Unattributable commits (introduced by no merged PR):$UNATTRIB"
           fi
 
       - name: Verify each item is in required Status
