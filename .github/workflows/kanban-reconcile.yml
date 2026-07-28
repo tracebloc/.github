@@ -27,6 +27,13 @@ name: Kanban reconcile
 #                           sensible starting column. Archived items count as
 #                           present, so the daily archiver is never fought.
 #
+#   5. Closed-issue terminalize - a CLOSED issue in any non-terminal column.
+#                       The closure-router only moves issues closed by a linked
+#                       PR (and misses even those to a close-time race), and
+#                       never moves hand-closed ones -- so completed issues pile
+#                       up wherever they were. Route by state_reason:
+#                       not_planned/duplicate -> Cancelled, else -> Prod.
+#
 # Safety cap: if the script would move > 100 items OR add > 60 items in one
 # run, it aborts and reports - that's almost certainly a bug, not real drift.
 
@@ -163,14 +170,16 @@ jobs:
                   }
                 }' -F org="$ORG" -F num="$PROJECT_NUMBER" -F c="$cursor")
             fi
-            # Pre-merge columns (Backlog / In progress / No status) are pulled ONLY
-            # so closed promotion-PR cards hiding there can be archived; classify
-            # skips everything else in them.
+            # We also pull the planning columns (Backlog / In progress / No status
+            # / Ready / North Stars) so that (a) closed promotion-PR cards hiding
+            # there can be archived and (b) CLOSED issues stranded there get
+            # terminalized. Classify leaves everything else in them untouched.
             echo "$OUT" | jq -c '.data.organization.projectV2.items.nodes[]
               | select((.fieldValueByName.name // "No status") as $s
                        | ["Code review","On dev",
                           "FR on staging","Ready for prod",
-                          "Backlog","In progress","No status"] | index($s))' \
+                          "Backlog","In progress","No status",
+                          "Ready","North Stars"] | index($s))' \
               >> items.ndjson
 
             HAS_NEXT=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
@@ -272,26 +281,40 @@ jobs:
             fi
 
             if [ "$TYPE" = "Issue" ]; then
-              case "$COL" in
-                "Backlog"|"In progress"|"No status")
-                  printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "-" "$REPO#$NUM issue in $COL (pre-merge, no action)" "no-action" >> skip.tsv
-                  continue ;;
-              esac
               STATE=$(echo "$line" | jq -r '.content.state')
               SR=$(echo "$line"    | jq -r '.content.stateReason // ""')
 
-              if [ "$STATE" = "CLOSED" ] && { [ "$SR" = "NOT_PLANNED" ] || [ "$SR" = "DUPLICATE" ]; }; then
-                printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$CANCELLED_OPT" "$REPO#$NUM issue not_planned ($COL -> Cancelled)" "cancelled" >> moves.tsv
+              # A CLOSED issue in ANY non-terminal column is stale clutter. The
+              # closure-router only moves issues closed by a linked PR (and can
+              # miss even those to a close-time race), and never moves hand-closed
+              # ones -- so completed issues pile up wherever they were closed.
+              # Terminalize by reason: not_planned / duplicate -> Cancelled,
+              # otherwise (completed / unspecified) -> Prod. Safe now that
+              # fr-gate.yml attributes promotions via commits->PRs, so a card
+              # parked in Prod cannot satisfy the gate.
+              if [ "$STATE" = "CLOSED" ]; then
+                if [ "$SR" = "NOT_PLANNED" ] || [ "$SR" = "DUPLICATE" ]; then
+                  printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$CANCELLED_OPT" "$REPO#$NUM closed issue $SR ($COL -> Cancelled)" "cancelled" >> moves.tsv
+                else
+                  printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$PROD_OPT" "$REPO#$NUM closed issue completed ($COL -> Prod)" "closed-issue-terminalized" >> moves.tsv
+                fi
                 continue
               fi
 
-              if [ "$STATE" = "OPEN" ]; then
-                case "$COL" in
-                  "Ready for prod"|"FR on staging"|"On dev")
-                    printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$BACKLOG_OPT" "$REPO#$NUM open issue in $COL -> Backlog" "misplaced-issue" >> moves.tsv
-                    continue ;;
-                esac
-              fi
+              # OPEN issue in a pre-merge / planning column: it belongs there (or
+              # the event flows handle it) -> no action.
+              case "$COL" in
+                "Backlog"|"In progress"|"No status"|"Ready"|"North Stars")
+                  printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "-" "$REPO#$NUM open issue in $COL (no action)" "no-action" >> skip.tsv
+                  continue ;;
+              esac
+
+              # OPEN issue that drifted into a post-merge column -> back to Backlog.
+              case "$COL" in
+                "Ready for prod"|"FR on staging"|"On dev")
+                  printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$BACKLOG_OPT" "$REPO#$NUM open issue in $COL -> Backlog" "misplaced-issue" >> moves.tsv
+                  continue ;;
+              esac
               printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "-" "$REPO#$NUM issue in $COL (no action)" "no-action" >> skip.tsv
             fi
           done < items.ndjson
