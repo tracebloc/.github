@@ -19,10 +19,13 @@ name: FR gate
 # or emergency releases). The label is a deliberate, visible action so we
 # can audit overrides after the fact.
 #
-# Item discovery: extracts PR numbers from the commit subjects between
-# base and head (squash-merge "(#NNN)" or "Merge pull request #NNN"). If
-# the PR has no such refs (e.g. direct hotfix), falls back to checking
-# the promotion PR's own Status.
+# Item discovery: authoritative commit->PR attribution via the
+# commits/{sha}/pulls API between base and head (see the discovery step).
+# Release-train promotion PRs (head release-train/*) are transparent
+# plumbing: they never appear as gated items and never vouch for their
+# range -- attribution passes through to the cargo PRs they carry. If
+# discovery yields no PRs at all, falls back to checking the promotion
+# PR's own Status.
 
 on:
   workflow_call:
@@ -133,8 +136,14 @@ jobs:
           while IFS= read -r msha; do
             [ -z "$msha" ] && continue
             if raw=$(fetch_pulls "$msha"); then
+              # Promotion PRs (head release-train/*) are the train's own plumbing:
+              # they never vouch for their range and are never gated items -- their
+              # cargo is attributed individually (inner merges here, non-merge
+              # commits in Pass 2).
               mprs=$(printf '%s' "${raw:-[]}" | jq -r --arg s "$msha" \
-                '[.[] | select(.merged_at != null and .merge_commit_sha == $s) | .number] | join(" ")')
+                '[.[] | select(.merged_at != null and .merge_commit_sha == $s
+                         and (((.head.ref // "") | startswith("release-train/")) | not))
+                  | .number] | join(" ")')
               if [ -n "$mprs" ]; then
                 ATTRIBUTED="$ATTRIBUTED $mprs"
                 MERGES="$MERGES $msha"
@@ -164,7 +173,14 @@ jobs:
             done
             [ "$covered" -eq 1 ] && continue
             if raw=$(fetch_pulls "$csha"); then
-              cprs=$(printf '%s' "${raw:-[]}" | jq -r '[.[] | select(.merged_at != null) | .number] | join(" ")')
+              # commits/pulls lists every PR whose branch contains the commit, so a
+              # promotion PR (head release-train/*) shows up for every commit it
+              # carried. Filter it out; a commit whose ONLY merged PR is a promotion
+              # PR is a direct push that rode the train -- correctly unattributed.
+              cprs=$(printf '%s' "${raw:-[]}" | jq -r \
+                '[.[] | select(.merged_at != null
+                         and (((.head.ref // "") | startswith("release-train/")) | not))
+                  | .number] | join(" ")')
               if [ -z "$cprs" ]; then
                 UNATTRIB="$UNATTRIB ${csha}"   # no merged PR introduced it: a direct push
               else
