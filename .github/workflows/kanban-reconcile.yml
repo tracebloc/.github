@@ -367,8 +367,8 @@ jobs:
           echo "Board-tracked repos (${#SCOPE[@]}): ${SCOPE[*]}"
 
           # Find open + recently-merged items NOT already on project #2.
-          # includeArchived:true => an intentionally-archived item counts as present,
-          # so we never re-add something the archiver deliberately removed.
+          # projectItems' includeArchived defaults to true, so an archived card counts
+          # as present and we never re-add something the daily archiver removed.
           : > missing.ndjson
           search_missing() {
             local q="$1" cursor="" out hn ec
@@ -383,9 +383,9 @@ jobs:
                         __typename
                         ... on PullRequest { id number isDraft state mergeCommit { oid }
                           repository { name defaultBranchRef { name } }
-                          projectItems(first: 10, includeArchived: true) { nodes { project { number } } } }
+                          projectItems(first: 10) { nodes { project { number } } } }
                         ... on Issue { id number state repository { name }
-                          projectItems(first: 10, includeArchived: true) { nodes { project { number } } } }
+                          projectItems(first: 10) { nodes { project { number } } } }
                       }
                     }
                   }' -F q="$q")
@@ -399,9 +399,9 @@ jobs:
                         __typename
                         ... on PullRequest { id number isDraft state mergeCommit { oid }
                           repository { name defaultBranchRef { name } }
-                          projectItems(first: 10, includeArchived: true) { nodes { project { number } } } }
+                          projectItems(first: 10) { nodes { project { number } } } }
                         ... on Issue { id number state repository { name }
-                          projectItems(first: 10, includeArchived: true) { nodes { project { number } } } }
+                          projectItems(first: 10) { nodes { project { number } } } }
                       }
                     }
                   }' -F q="$q" -F c="$cursor")
