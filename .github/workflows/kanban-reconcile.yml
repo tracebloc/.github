@@ -163,10 +163,14 @@ jobs:
                   }
                 }' -F org="$ORG" -F num="$PROJECT_NUMBER" -F c="$cursor")
             fi
+            # Pre-merge columns (Backlog / In progress / No status) are pulled ONLY
+            # so closed promotion-PR cards hiding there can be archived; classify
+            # skips everything else in them.
             echo "$OUT" | jq -c '.data.organization.projectV2.items.nodes[]
-              | select(.fieldValueByName.name as $s
+              | select((.fieldValueByName.name // "No status") as $s
                        | ["Code review","On dev",
-                          "FR on staging","Ready for prod"] | index($s))' \
+                          "FR on staging","Ready for prod",
+                          "Backlog","In progress","No status"] | index($s))' \
               >> items.ndjson
 
             HAS_NEXT=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
@@ -219,7 +223,7 @@ jobs:
 
           while IFS= read -r line; do
             ITEM_ID=$(echo "$line"  | jq -r '.id')
-            COL=$(echo "$line"      | jq -r '.fieldValueByName.name')
+            COL=$(echo "$line"      | jq -r '.fieldValueByName.name // "No status"')
             TYPE=$(echo "$line"     | jq -r '.content.__typename')
             REPO=$(echo "$line"     | jq -r '.content.repository.name')
             DEFAULT=$(echo "$line"  | jq -r '.content.repository.defaultBranchRef.name // "main"')
@@ -243,6 +247,14 @@ jobs:
                 continue
               fi
 
+              # Pre-merge columns are pulled only for the promotion-PR archive
+              # above -- leave everything else in them to the event-driven flows.
+              case "$COL" in
+                "Backlog"|"In progress"|"No status")
+                  printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "-" "$REPO#$NUM PR in $COL (pre-merge, no action)" "no-action" >> skip.tsv
+                  continue ;;
+              esac
+
               if [ "$STATE" = "CLOSED" ]; then
                 printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$CANCELLED_OPT" "$REPO#$NUM closed-not-merged ($COL)" "cancelled" >> moves.tsv
                 continue
@@ -260,6 +272,11 @@ jobs:
             fi
 
             if [ "$TYPE" = "Issue" ]; then
+              case "$COL" in
+                "Backlog"|"In progress"|"No status")
+                  printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "-" "$REPO#$NUM issue in $COL (pre-merge, no action)" "no-action" >> skip.tsv
+                  continue ;;
+              esac
               STATE=$(echo "$line" | jq -r '.content.state')
               SR=$(echo "$line"    | jq -r '.content.stateReason // ""')
 
@@ -364,6 +381,10 @@ jobs:
 
       - name: Discover + add items missing from the board
         id: membership
+        # Independent of the status-reconcile steps above: run even when classify
+        # or apply failed (e.g. a MAX_MOVES abort) so missing-board gaps still
+        # heal. Needs only the resolved ids; has its own MAX_ADDS runaway guard.
+        if: always() && steps.ids.outcome == 'success'
         env:
           LOOKBACK_DAYS: 21
           MAX_ADDS: 60
