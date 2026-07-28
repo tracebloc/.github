@@ -118,7 +118,7 @@ jobs:
                           content {
                             __typename
                             ... on PullRequest {
-                              number title state mergedAt baseRefName
+                              number title state mergedAt baseRefName headRefName
                               mergeCommit { oid }
                               repository { name defaultBranchRef { name } }
                             }
@@ -148,7 +148,7 @@ jobs:
                           content {
                             __typename
                             ... on PullRequest {
-                              number title state mergedAt baseRefName
+                              number title state mergedAt baseRefName headRefName
                               mergeCommit { oid }
                               repository { name defaultBranchRef { name } }
                             }
@@ -228,6 +228,20 @@ jobs:
             if [ "$TYPE" = "PullRequest" ]; then
               STATE=$(echo "$line" | jq -r '.content.state')
               SHA=$(echo "$line"   | jq -r '.content.mergeCommit.oid // ""')
+              HEADREF=$(echo "$line" | jq -r '.content.headRefName // ""')
+
+              # Release-train promotion PRs are plumbing, not work items: the
+              # fr-gate ignores them and the membership sweep never adds them.
+              # Archive the card once the PR is no longer open; leave open ones
+              # alone (the train manages them).
+              if [ "${HEADREF#release-train/}" != "$HEADREF" ]; then
+                if [ "$STATE" = "OPEN" ]; then
+                  printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "-" "$REPO#$NUM open promotion PR (train-managed)" "waiting" >> skip.tsv
+                else
+                  printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "ARCHIVE" "$REPO#$NUM promotion PR card ($COL -> archive)" "archive-promotion" >> moves.tsv
+                fi
+                continue
+              fi
 
               if [ "$STATE" = "CLOSED" ]; then
                 printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$CANCELLED_OPT" "$REPO#$NUM closed-not-merged ($COL)" "cancelled" >> moves.tsv
@@ -291,6 +305,22 @@ jobs:
           # shellcheck disable=SC2034
           while IFS=$'\t' read -r itemId optId reason label; do
             [ "$optId" = "-" ] && continue
+            if [ "$optId" = "ARCHIVE" ]; then
+              # shellcheck disable=SC2016  # GraphQL variables, not shell - keep literal
+              if gh api graphql -f query='
+                  mutation($p: ID!, $i: ID!) {
+                    archiveProjectV2Item(input: {projectId: $p, itemId: $i}) {
+                      item { id }
+                    }
+                  }' -F p="$PROJECT_ID" -F i="$itemId" > /dev/null 2>&1; then
+                echo "[OK]   $reason"
+                ok=$((ok+1))
+              else
+                echo "[FAIL] $reason"
+                fail=$((fail+1))
+              fi
+              continue
+            fi
             # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
             if gh api graphql -f query='
                 mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
@@ -381,7 +411,7 @@ jobs:
                       pageInfo { hasNextPage endCursor }
                       nodes {
                         __typename
-                        ... on PullRequest { id number isDraft state mergeCommit { oid }
+                        ... on PullRequest { id number isDraft state headRefName mergeCommit { oid }
                           repository { name defaultBranchRef { name } }
                           projectItems(first: 10) { nodes { project { number } } } }
                         ... on Issue { id number state repository { name }
@@ -397,7 +427,7 @@ jobs:
                       pageInfo { hasNextPage endCursor }
                       nodes {
                         __typename
-                        ... on PullRequest { id number isDraft state mergeCommit { oid }
+                        ... on PullRequest { id number isDraft state headRefName mergeCommit { oid }
                           repository { name defaultBranchRef { name } }
                           projectItems(first: 10) { nodes { project { number } } } }
                         ... on Issue { id number state repository { name }
@@ -408,6 +438,7 @@ jobs:
               fi
               echo "$out" | jq -c '.data.search.nodes[]
                 | select(.__typename=="PullRequest" or .__typename=="Issue")
+                | select(((.headRefName // "") | startswith("release-train/")) | not)
                 | select([.projectItems.nodes[].project.number] | index(2) | not)' \
                 >> missing.ndjson
               hn=$(echo "$out" | jq -r '.data.search.pageInfo.hasNextPage')
