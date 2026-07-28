@@ -17,8 +17,18 @@ name: Kanban reconcile
 #                              column (RfP, FR-on-*, Ready-for-staging).
 #                              Move back to Backlog.
 #
-# Safety cap: if the script would move > 100 items in one run, it aborts
-# and reports - that's almost certainly a bug, not real drift.
+#   4. Missing from board - open or recently-merged PRs/issues that were never
+#                           added by the event-driven add-to-kanban workflow.
+#                           That workflow is fire-and-forget (one shot on
+#                           'opened', no retry), so a single dropped webhook
+#                           leaves a permanent silent gap that nothing else
+#                           catches. We sweep every board-tracked repo, find
+#                           items with no project #2 entry, and add them in a
+#                           sensible starting column. Archived items count as
+#                           present, so the daily archiver is never fought.
+#
+# Safety cap: if the script would move > 100 items OR add > 60 items in one
+# run, it aborts and reports - that's almost certainly a bug, not real drift.
 
 on:
   schedule:
@@ -80,6 +90,10 @@ jobs:
             echo "prod_opt=$(opt Prod)"
             echo "cancelled_opt=$(opt Cancelled)"
             echo "backlog_opt=$(opt Backlog)"
+            echo "code_review_opt=$(opt 'Code review')"
+            echo "in_progress_opt=$(opt 'In progress')"
+            echo "on_dev_opt=$(opt 'On dev')"
+            echo "fr_staging_opt=$(opt 'FR on staging')"
           } >> "$GITHUB_OUTPUT"
 
       - name: Pull non-terminal items
@@ -316,4 +330,204 @@ jobs:
             echo ""
             echo "### Individual moves"
             awk -F'\t' '{print "- "$3" -> `"$4"`"}' moves.tsv
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Discover + add items missing from the board
+        id: membership
+        env:
+          LOOKBACK_DAYS: 21
+          MAX_ADDS: 60
+        run: |
+          set -euo pipefail
+
+          PROJECT_ID="${{ steps.ids.outputs.project_id }}"
+          STATUS_FIELD="${{ steps.ids.outputs.status_field }}"
+          BACKLOG_OPT="${{ steps.ids.outputs.backlog_opt }}"
+          CODE_REVIEW_OPT="${{ steps.ids.outputs.code_review_opt }}"
+          IN_PROGRESS_OPT="${{ steps.ids.outputs.in_progress_opt }}"
+          ON_DEV_OPT="${{ steps.ids.outputs.on_dev_opt }}"
+          FR_STAGING_OPT="${{ steps.ids.outputs.fr_staging_opt }}"
+          PROD_OPT="${{ steps.ids.outputs.prod_opt }}"
+
+          SINCE=$(date -u -d "${LOOKBACK_DAYS} days ago" +%Y-%m-%d)
+          echo "Merged-PR lookback since $SINCE"
+
+          # Scope = repos that opt into the board (have the add-to-kanban caller).
+          # Self-maintaining: mirrors add-to-kanban's coverage exactly, so we never
+          # pull in repos that deliberately don't track (e.g. release-train's own PRs).
+          mapfile -t ALL < <(gh api "orgs/$ORG/repos?per_page=100&type=all" --paginate \
+                               --jq '.[] | select(.archived==false) | .name')
+          SCOPE=()
+          for r in "${ALL[@]}"; do
+            if gh api "repos/$ORG/$r/contents/.github/workflows/add-to-kanban.yml" \
+                 >/dev/null 2>&1; then
+              SCOPE+=("$r")
+            fi
+          done
+          echo "Board-tracked repos (${#SCOPE[@]}): ${SCOPE[*]}"
+
+          # Find open + recently-merged items NOT already on project #2.
+          # includeArchived:true => an intentionally-archived item counts as present,
+          # so we never re-add something the archiver deliberately removed.
+          : > missing.ndjson
+          search_missing() {
+            local q="$1" cursor="" out hn ec
+            while :; do
+              # shellcheck disable=SC2016  # $q/$c are GraphQL variables, keep literal
+              if [ -z "$cursor" ]; then
+                out=$(gh api graphql -f query='
+                  query($q: String!) {
+                    search(query: $q, type: ISSUE, first: 100) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        __typename
+                        ... on PullRequest { id number isDraft state mergeCommit { oid }
+                          repository { name defaultBranchRef { name } }
+                          projectItems(first: 10, includeArchived: true) { nodes { project { number } } } }
+                        ... on Issue { id number state repository { name }
+                          projectItems(first: 10, includeArchived: true) { nodes { project { number } } } }
+                      }
+                    }
+                  }' -F q="$q")
+              else
+                # shellcheck disable=SC2016  # $q/$c are GraphQL variables, keep literal
+                out=$(gh api graphql -f query='
+                  query($q: String!, $c: String!) {
+                    search(query: $q, type: ISSUE, first: 100, after: $c) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        __typename
+                        ... on PullRequest { id number isDraft state mergeCommit { oid }
+                          repository { name defaultBranchRef { name } }
+                          projectItems(first: 10, includeArchived: true) { nodes { project { number } } } }
+                        ... on Issue { id number state repository { name }
+                          projectItems(first: 10, includeArchived: true) { nodes { project { number } } } }
+                      }
+                    }
+                  }' -F q="$q" -F c="$cursor")
+              fi
+              echo "$out" | jq -c '.data.search.nodes[]
+                | select(.__typename=="PullRequest" or .__typename=="Issue")
+                | select([.projectItems.nodes[].project.number] | index(2) | not)' \
+                >> missing.ndjson
+              hn=$(echo "$out" | jq -r '.data.search.pageInfo.hasNextPage')
+              ec=$(echo "$out" | jq -r '.data.search.pageInfo.endCursor')
+              [ "$hn" = "true" ] || break
+              cursor="$ec"
+            done
+          }
+
+          for r in "${SCOPE[@]}"; do
+            search_missing "repo:$ORG/$r is:open"
+            search_missing "repo:$ORG/$r is:pr is:merged merged:>=$SINCE"
+          done
+
+          if [ -s missing.ndjson ]; then
+            jq -s -c 'unique_by(.id)[]' missing.ndjson > missing.dedup \
+              && mv missing.dedup missing.ndjson
+          fi
+          COUNT=$(wc -l < missing.ndjson | tr -d ' ')
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Missing from board: $COUNT"
+
+          if [ "$COUNT" -gt "$MAX_ADDS" ]; then
+            echo "::error::$COUNT missing exceeds MAX_ADDS=$MAX_ADDS - aborting (likely a token/scope problem making everything look missing, not real drift)."
+            exit 1
+          fi
+
+          declare -A PROD_BRANCH_CACHE
+          resolve_prod_branch() {
+            local repo="$1" default_branch="$2" branch
+            if [ -n "${PROD_BRANCH_CACHE[$repo]:-}" ]; then
+              echo "${PROD_BRANCH_CACHE[$repo]}"; return
+            fi
+            branch="$default_branch"
+            if gh api "/repos/$ORG/$repo/branches/main"   --jq '.name' >/dev/null 2>&1; then
+              branch="main"
+            elif gh api "/repos/$ORG/$repo/branches/master" --jq '.name' >/dev/null 2>&1; then
+              branch="master"
+            fi
+            PROD_BRANCH_CACHE[$repo]="$branch"
+            echo "$branch"
+          }
+          sha_on_branch() {
+            local repo="$1" branch="$2" sha="$3" status
+            { [ -z "$sha" ] || [ "$sha" = "null" ]; } && return 1
+            status=$(gh api "/repos/$ORG/$repo/compare/$branch...$sha" \
+                     --jq '.status' 2>/dev/null) || return 1
+            [ "$status" = "behind" ] || [ "$status" = "identical" ]
+          }
+          add_item() {
+            # shellcheck disable=SC2016  # GraphQL variables, keep literal
+            gh api graphql -f query='mutation($p: ID!, $c: ID!) {
+              addProjectV2ItemById(input: {projectId: $p, contentId: $c}) { item { id } } }' \
+              -F p="$PROJECT_ID" -F c="$1" --jq '.data.addProjectV2ItemById.item.id'
+          }
+          set_status() {
+            # shellcheck disable=SC2016  # GraphQL variables, keep literal
+            gh api graphql -f query='mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+              updateProjectV2ItemFieldValue(input: {projectId: $p, itemId: $i, fieldId: $f,
+                value: {singleSelectOptionId: $o}}) { projectV2Item { id } } }' \
+              -F p="$PROJECT_ID" -F i="$1" -F f="$STATUS_FIELD" -f o="$2" >/dev/null
+          }
+
+          : > added.tsv
+          while IFS= read -r line; do
+            TYPE=$(echo "$line" | jq -r '.__typename')
+            NID=$(echo "$line"  | jq -r '.id')
+            REPO=$(echo "$line" | jq -r '.repository.name')
+            NUM=$(echo "$line"  | jq -r '.number')
+
+            if [ "$TYPE" = "Issue" ]; then
+              OPT="$BACKLOG_OPT"; DESC="issue -> Backlog"
+            else
+              STATE=$(echo "$line" | jq -r '.state')
+              if [ "$STATE" = "OPEN" ]; then
+                if [ "$(echo "$line" | jq -r '.isDraft')" = "true" ]; then
+                  OPT="$IN_PROGRESS_OPT"; DESC="draft PR -> In progress"
+                else
+                  OPT="$CODE_REVIEW_OPT"; DESC="open PR -> Code review"
+                fi
+              else
+                SHA=$(echo "$line" | jq -r '.mergeCommit.oid // ""')
+                DEF=$(echo "$line" | jq -r '.repository.defaultBranchRef.name // "main"')
+                PB=$(resolve_prod_branch "$REPO" "$DEF")
+                OPT="$ON_DEV_OPT"; DESC="merged PR -> On dev"
+                if sha_on_branch "$REPO" "staging" "$SHA"; then
+                  OPT="$FR_STAGING_OPT"; DESC="merged PR -> FR on staging"
+                fi
+                if sha_on_branch "$REPO" "$PB" "$SHA"; then
+                  OPT="$PROD_OPT"; DESC="merged PR -> Prod"
+                fi
+              fi
+            fi
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[DRY]  would add $REPO#$NUM ($DESC)"
+              printf '%s\t%s\n' "$REPO#$NUM" "$DESC" >> added.tsv
+              continue
+            fi
+            if item=$(add_item "$NID") && [ -n "$item" ]; then
+              if set_status "$item" "$OPT"; then
+                echo "[OK]   added $REPO#$NUM ($DESC)"
+              else
+                echo "[WARN] added $REPO#$NUM but Status set failed"
+              fi
+              printf '%s\t%s\n' "$REPO#$NUM" "$DESC" >> added.tsv
+            else
+              echo "[FAIL] could not add $REPO#$NUM"
+            fi
+          done < missing.ndjson
+
+      - name: Membership summary
+        if: always() && steps.membership.outputs.count != '' && steps.membership.outputs.count != '0'
+        run: |
+          {
+            echo "## Membership reconcile"
+            echo ""
+            echo "Found missing from board: ${{ steps.membership.outputs.count }} | Dry run: $DRY_RUN"
+            echo ""
+            if [ -s added.tsv ]; then
+              awk -F'\t' '{print "- "$1" -> `"$2"`"}' added.tsv
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
