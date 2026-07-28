@@ -67,49 +67,62 @@ jobs:
             fi
           elif [ "$EVENT_NAME" = "issues" ]; then
             if [ "$ISSUE_REASON" = "completed" ]; then
-              # If a linked PR closed this issue, mirror that PR's resulting Status.
+              # Mirror the Status of whatever CLOSED this issue, read from the
+              # timeline ClosedEvent.closer -- NOT closedByPullRequestsReferences.
+              # That reference field is eventually-consistent and is EMPTY at the
+              # instant the close event fires, so the router used to miss the
+              # closing PR and no-op, leaving completed issues stuck in their
+              # pre-close column (confirmed on backend#979: closer PR present in
+              # the timeline, closedByPullRequestsReferences still empty). The
+              # ClosedEvent that triggered this run exists immediately and names
+              # its closer: a PullRequest (mirror its base), a Commit (a direct
+              # "Closes #N" push -- no base ref, start at On dev), or none (a
+              # genuine manual close).
               REPO_NAME="${REPO_FULL#*/}"
               # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
-              CLOSING_PR_BASE=$(gh api graphql -f query='
+              CLOSER=$(gh api graphql -f query='
                 query($org: String!, $repo: String!, $num: Int!) {
                   repository(owner: $org, name: $repo) {
                     issue(number: $num) {
-                      closedByPullRequestsReferences(first: 5) { nodes { baseRefName } }
+                      timelineItems(last: 10, itemTypes: [CLOSED_EVENT]) {
+                        nodes {
+                          ... on ClosedEvent {
+                            closer { __typename ... on PullRequest { baseRefName } }
+                          }
+                        }
+                      }
                     }
                   }
                 }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$ISSUE_NUMBER" \
-                --jq '.data.repository.issue.closedByPullRequestsReferences.nodes[0].baseRefName // ""' 2>/dev/null) || CLOSING_PR_BASE=""
+                --jq '((.data.repository.issue.timelineItems.nodes // [])
+                       | map(select(.closer != null)) | last) as $e
+                      | (($e.closer.__typename // "NONE") + "|" + ($e.closer.baseRefName // ""))' \
+                2>/dev/null) || CLOSER="NONE|"
+              CLOSER_TYPE="${CLOSER%%|*}"
+              CLOSING_PR_BASE="${CLOSER#*|}"
 
-              if [ -z "$CLOSING_PR_BASE" ]; then
-                # Closed by hand, with no PR to mirror.
-                #
-                # THERE IS DELIBERATELY NO DEFAULT HERE — do not add one.
-                # Ticking an issue off by hand says nothing about where its code
-                # is deployed, so this workflow must not invent a deploy state.
-                # Leave Status where it is; the develop → staging → prod
-                # automation (advance-deploy-env.yml) moves the card when the
-                # code actually ships, and kanban-reconcile.yml catches drift.
-                #
-                # This branch used to default to "Prod". That silently parked
-                # unreviewed work in the Prod column, which SATISFIES the
-                # required fr-gate.yml check — the gate whose whole job is to
-                # hold a promotion PR until every contained item has passed
-                # functional review. A wrong default here defeats that gate.
-                #
-                # "No change" is only truly no change while the project's
-                # built-in "Item closed" workflow stays disabled (verified
-                # disabled on project #2). If it is ever re-enabled it will set
-                # its own column here and this branch will need revisiting.
-                echo "Issue #$ISSUE_NUMBER closed as completed with no closing PR — leaving Status unchanged."
-              else
+              if [ "$CLOSER_TYPE" = "PullRequest" ]; then
                 case "$CLOSING_PR_BASE" in
                   main|master) STATUS="Prod" ;;
                   staging)     STATUS="FR on staging" ;;
                   develop)     STATUS="On dev" ;;
-                  # Unrecognised base: mirror what the pull_request branch above
-                  # does for the same base, so the issue and its PR agree.
+                  # Unrecognised base: mirror the pull_request branch's default so
+                  # the issue and its PR agree.
                   *)           STATUS="On dev" ;;
                 esac
+              elif [ "$CLOSER_TYPE" = "Commit" ]; then
+                # Direct "Closes #N" push: a commit has no base ref. Start it at
+                # On dev; advance-deploy-env.yml / kanban-reconcile.yml promote it
+                # once the code actually reaches staging/prod.
+                STATUS="On dev"
+              else
+                # No closer -> genuinely closed by hand. Do not invent a deploy
+                # state here; kanban-reconcile.yml terminalizes hand-closed
+                # completed issues (safe now that fr-gate.yml attributes
+                # promotions via commits->PRs, so a card's column cannot satisfy
+                # the gate). The project's built-in "Item closed" workflow stays
+                # disabled on project #2, so "no change" is truly no change.
+                echo "Issue #$ISSUE_NUMBER closed as completed with no PR/commit closer -- leaving Status unchanged (reconcile terminalizes)."
               fi
             else
               # not_planned, or closed with no state_reason at all → abandoned.
