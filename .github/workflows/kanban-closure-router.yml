@@ -74,7 +74,8 @@ jobs:
               # closing PR and no-op, leaving completed issues stuck in their
               # pre-close column (confirmed on backend#979: closer PR present in
               # the timeline, closedByPullRequestsReferences still empty). The
-              # ClosedEvent that triggered this run exists immediately and names
+              # MOST RECENT ClosedEvent (the close that triggered this run; after a
+              # reopen+reclose it is the current close) exists immediately and names
               # its closer: a PullRequest (mirror its base), a Commit (a direct
               # "Closes #N" push -- no base ref, start at On dev), or none (a
               # genuine manual close).
@@ -95,7 +96,7 @@ jobs:
                   }
                 }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$ISSUE_NUMBER" \
                 --jq '((.data.repository.issue.timelineItems.nodes // [])
-                       | map(select(.closer != null)) | last) as $e
+                       | last) as $e
                       | (($e.closer.__typename // "NONE") + "|" + ($e.closer.baseRefName // ""))' \
                 2>/dev/null) || CLOSER="NONE|"
               CLOSER_TYPE="${CLOSER%%|*}"
