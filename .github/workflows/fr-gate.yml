@@ -65,9 +65,33 @@ jobs:
           if echo "$LABELS" | grep -q '"skip-fr-gate"'; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::warning::FR gate bypassed via 'skip-fr-gate' label."
+            # (promotion-shape guard below is also bypassed by this label)
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Promotion-shape guard — only the train promotes
+        if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          # Manual promotion PRs bypass the release train's Bugbot soft-gate,
+          # its tagging, and its run records — and indirect-merge the train's
+          # own PRs (backend#1336 / averaging-service, 2026-07-29). Promotions
+          # into staging/main/master are the train's job. Sanctioned lanes:
+          #   release-train/*       the train's own mirror PRs
+          #   hotfix-backmerge/*    hotfix.yml's automated back-merges
+          #   'hotfix' label        single-repo emergency fix (D14a, audited)
+          #   'skip-fr-gate' label  full gate override (handled above, audited)
+          case "$HEAD_REF" in
+            release-train/*|hotfix-backmerge/*) exit 0 ;;
+          esac
+          if echo "$LABELS" | grep -q '"hotfix"'; then
+            exit 0
+          fi
+          echo "::error::Manual promotion PRs are retired — promotions into this branch go through the release train (tracebloc/release-train → Actions → 'Release train'). For a single-repo emergency prod fix use the 'hotfix' label; 'skip-fr-gate' remains the audited full override."
+          exit 1
 
       - uses: actions/checkout@v4
         if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
