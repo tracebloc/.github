@@ -1,0 +1,197 @@
+# Weekly guard on repo merge settings (tracebloc/backend#1337).
+#
+# WHY THIS EXISTS: the fr-gate proves every promoted commit came from a merged
+# PR via commits/{sha}/pulls. Rebase-merge creates NEW shas on the base branch
+# that this API often cannot associate with any PR, so the gate fails CLOSED on
+# legitimately-reviewed code (design-system#88, 2026-07-29, needed an audited
+# skip-fr-gate override). All 19 active repos were set to merge+squash only on
+# 2026-07-30 — but GitHub defaults allow_rebase_merge to TRUE on repo creation
+# and nothing enforces it, so repo number 20 arrives with rebase on. This is
+# that enforcement.
+#
+# It also flags a repo left with NEITHER merge-commit NOR squash, which would
+# make it unmergeable — the failure mode the original sweep guarded against.
+#
+# REPORT-ONLY by design. It never PATCHes a repo: a settings change should be a
+# visible, deliberate act, and the token then only needs read access rather than
+# standing administration:write over every repo (see backend#1343 on
+# over-scoped credentials). The report tells you the one command to run.
+
+name: Merge-settings drift
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Mondays 06:00 UTC, before the refinement ritual
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write # the drift report lands on a tracking issue
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check every active repo's merge settings
+        id: audit
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          ORG: tracebloc
+        run: |
+          set -euo pipefail
+
+          # Enumerate by LISTING, never by probing a hard-coded name list: a
+          # stale list silently skips new repos, which is exactly the drift
+          # this job exists to catch. Forks are excluded along with archives —
+          # a fork's merge settings are not ours to police. Written to a file
+          # and read line-by-line so a name never goes through word splitting.
+          REPOS="$RUNNER_TEMP/repos.txt"
+          gh repo list "$ORG" --limit 200 --json name,isArchived,isFork \
+            --jq '.[] | select(.isArchived == false and .isFork == false) | .name' \
+            | sort > "$REPOS"
+
+          count=$(wc -l < "$REPOS" | tr -d ' ')
+          if [ "$count" -eq 0 ]; then
+            echo "::error::Enumerated zero repos - the token cannot list the org. Refusing to report 'no drift' from a failed read." >&2
+            exit 1
+          fi
+          echo "Checked $count active repos."
+
+          drift=""       # rebase-merge enabled
+          unmergeable="" # neither merge-commit nor squash
+          failed=""      # settings unreadable, or not the booleans we expect
+
+          # `gh api` inherits stdin, which would swallow the repo list; feed it
+          # from /dev/null so the loop cannot lose entries.
+          while IFS= read -r repo; do
+            [ -n "$repo" ] || continue
+            if ! settings=$(gh api "repos/$ORG/$repo" \
+                 --jq '[.allow_merge_commit, .allow_squash_merge, .allow_rebase_merge] | @tsv' \
+                 < /dev/null 2>/dev/null); then
+              echo "  ?? $repo - could not read settings"
+              failed="$failed $repo(read)"
+              continue
+            fi
+            merge=$(printf '%s' "$settings" | cut -f1)
+            squash=$(printf '%s' "$settings" | cut -f2)
+            rebase=$(printf '%s' "$settings" | cut -f3)
+
+            # FAIL CLOSED on anything that is not a literal true/false. These
+            # three fields are only returned to a principal with admin on the
+            # repo, so a token that can LIST but not read settings gets a
+            # perfectly successful response with the keys absent — jq then
+            # yields empty strings, which match neither branch below and would
+            # have been silently counted as compliant. That is the same false
+            # all-clear the zero-repo guard above exists to prevent.
+            for value in "$merge" "$squash" "$rebase"; do
+              case "$value" in
+                true | false) ;;
+                *)
+                  echo "  ?? $repo - merge settings missing or non-boolean (does the token have admin here?)"
+                  failed="$failed $repo(unreadable)"
+                  continue 2
+                  ;;
+              esac
+            done
+
+            if [ "$merge" = "false" ] && [ "$squash" = "false" ] && [ "$rebase" = "false" ]; then
+              # Nothing could be merged at all. Reported, never "corrected".
+              echo "  !! $repo - NO merge method is enabled"
+              unmergeable="$unmergeable $repo"
+            elif [ "$rebase" = "true" ]; then
+              if [ "$merge" = "false" ] && [ "$squash" = "false" ]; then
+                # Rebase is the only way in. Disabling it here would leave the
+                # repo unmergeable, so this needs a human to enable merge or
+                # squash FIRST — never a blind flip.
+                echo "  !! $repo - rebase is the ONLY enabled merge method"
+                drift="$drift $repo(rebase-only)"
+              else
+                echo "  !! $repo - rebase merge is ENABLED"
+                drift="$drift $repo"
+              fi
+            fi
+          done < "$REPOS"
+
+          {
+            echo "checked=$count"
+            echo "drift=${drift# }"
+            echo "unmergeable=${unmergeable# }"
+            echo "failed=${failed# }"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Merge-settings drift"
+            echo ""
+            echo "Checked **$count** active repos (archived and forks excluded)."
+            echo ""
+            if [ -n "$drift" ]; then echo "- Rebase-merge enabled:$drift"; else echo "- Rebase-merge enabled: none"; fi
+            if [ -n "$unmergeable" ]; then echo "- No merge method enabled:$unmergeable"; fi
+            if [ -n "$failed" ]; then echo "- Settings unreadable:$failed"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report drift on the tracking issue
+        # Only speaks up when something is wrong - a weekly "all clear" comment
+        # would train everyone to ignore it (see the design-system Amplify app,
+        # backend#1344: five silent failures nobody read).
+        if: steps.audit.outputs.drift != '' || steps.audit.outputs.unmergeable != '' || steps.audit.outputs.failed != ''
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          DRIFT: ${{ steps.audit.outputs.drift }}
+          UNMERGEABLE: ${{ steps.audit.outputs.unmergeable }}
+          FAILED: ${{ steps.audit.outputs.failed }}
+          CHECKED: ${{ steps.audit.outputs.checked }}
+          ORG: tracebloc
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck disable=SC2016  # the backticks below are markdown code
+          # spans in the issue body, not command substitution - they must stay
+          # literal, which is exactly why these printf strings are single-quoted.
+          #
+          # Each finding gets ONLY its own remediation. A single generic
+          # "disable rebase-merge" footer was wrong for two of the three
+          # conditions: on an all-methods-disabled repo that PATCH is a no-op
+          # that restores nothing, and on an unreadable one the problem is the
+          # token, not the setting. An alert whose fix does not match what it
+          # detected is worse than no alert.
+          {
+            printf 'Weekly merge-settings check over **%s** active repos found:\n\n' "$CHECKED"
+
+            if [ -n "$DRIFT" ]; then
+              printf '### Rebase-merge is enabled\n\n%s\n\n' "$DRIFT"
+              printf 'Rebase-merging rewrites commits into shas that `commits/{sha}/pulls` cannot\n'
+              printf 'associate with a PR, so the FR gate fails closed on properly-reviewed code.\n\n'
+              printf 'For each repo NOT marked `(rebase-only)`:\n\n'
+              printf '```bash\ngh api -X PATCH repos/%s/<repo> -F allow_rebase_merge=false\n```\n\n' "$ORG"
+              printf 'A repo marked `(rebase-only)` has rebase as its ONLY merge method — enable\n'
+              printf 'merge-commit or squash there FIRST, or you will leave it unmergeable.\n\n'
+            fi
+
+            if [ -n "$UNMERGEABLE" ]; then
+              printf '### No merge method is enabled\n\n%s\n\n' "$UNMERGEABLE"
+              printf 'Nothing can be merged in these repos at all. Disabling rebase is not the fix\n'
+              printf 'here — enable one of the attribution-preserving methods:\n\n'
+              printf '```bash\ngh api -X PATCH repos/%s/<repo> -F allow_merge_commit=true\n```\n\n' "$ORG"
+            fi
+
+            if [ -n "$FAILED" ]; then
+              printf '### Settings could not be read\n\n%s\n\n' "$FAILED"
+              printf 'These are NOT known to be compliant. The three merge fields are only returned\n'
+              printf 'to a principal with admin on the repo, so `(unreadable)` usually means the\n'
+              printf 'token lacks admin there rather than that anything is misconfigured. Fix the\n'
+              printf 'token permissions (or check the repo still exists), then re-run.\n\n'
+            fi
+
+            printf '[Run log](%s)\n' "$RUN_URL"
+          } > body.md
+          gh issue comment 1337 --repo tracebloc/backend --body-file body.md
+
+      - name: Fail the run when drift was found but not corrected
+        # A green run must mean "settings are correct", not merely "the check
+        # executed" - otherwise the badge lies.
+        if: steps.audit.outputs.failed != '' || steps.audit.outputs.unmergeable != '' || steps.audit.outputs.drift != ''
+        run: |
+          echo "::error::Merge-settings drift detected and not corrected - see the run summary and the comment on backend#1337."
+          exit 1
