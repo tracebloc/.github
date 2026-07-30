@@ -2,18 +2,28 @@ name: FR pass comment handler
 
 # Reusable workflow. Called from each active repo on issue_comment created.
 # Listens for "/fr-pass" comments on PRs/issues that are currently in
-# "FR on staging" and advances it to the next column:
-#   FR on staging  → Ready for prod
+# "FR on staging" and advances them one column:
+#   FR on staging  →  Ready for prod
 # (D6: the dev-side review is gone — "On dev" is automatic — so /fr-pass only
 #  applies at staging, the single functional-review gate.)
 #
-# Only repo collaborators can trigger this (MEMBER / OWNER / COLLABORATOR).
-# The workflow reacts on the comment with 👍 on success, 👎 on no-op so the
-# author gets immediate visual feedback without a follow-up comment.
+# NEVER NO-OP IN SILENCE  (backend#1319)
+#   Every terminating path below leaves a signal on the thread: 👍 when the card
+#   moved, 👎 plus a one-paragraph comment saying why when it did not. The single
+#   deliberate exception is a comment that merely *mentions* the string without
+#   issuing the command ("/fr-passport", "you can /fr-pass it later") — reacting
+#   to prose would turn the bot into noise.
 #
-# Why a comment-based gate instead of a kanban field: it leaves a record on
-# the PR/issue thread so reviewers can see who passed FR and when.
-# Drag-and-drop on the kanban also works — this is just a keyboard shortcut.
+#   The rule that follows from that: no decision may live in the job-level `if`.
+#   A false job `if` skips the job with zero steps, so there is nothing left to
+#   react or comment with — the run just reports `skipped` and the reviewer
+#   believes the card moved. The job `if` is therefore only a cheap "is this even
+#   about /fr-pass" filter; authorisation, self-signoff, board membership and the
+#   column check all happen in steps that can report.
+#
+# WHY A COMMENT GATE
+#   It leaves a record on the thread, so reviewers can see who passed FR and
+#   when. Dragging the card on the kanban works too — this is the shortcut.
 
 on:
   workflow_call:
@@ -24,37 +34,194 @@ on:
       org:
         type: string
         default: tracebloc
+      allow-self-signoff:
+        description: >-
+          Allow the PR/issue author to sign off their own promotion on ANY item.
+          The default (false) keeps D30's two-pairs-of-eyes rule for real work.
+          Release-train promotion PRs are exempt regardless of this input (see
+          the self-signoff step): the FR gate on those evaluates the contained
+          items, so the promotion PR itself carries no review value. Flipping
+          this default changes the policy org-wide, since the per-repo callers
+          pass no inputs.
+        type: boolean
+        default: false
+
+# GITHUB_TOKEN stays read-only and is NOT used for any write here. Two reasons it
+# cannot be: the org default is `default_workflow_permissions: read`, and a called
+# workflow can only narrow the caller job's token, never widen it — so a
+# `permissions: issues: write` block on this workflow would be silently
+# ineffective while looking like it worked. That is exactly how the 👍/👎 reaction
+# came to fail with "Resource not accessible by integration (HTTP 403)" on every
+# run, including the ones that advanced their card successfully. All writes
+# therefore go through PROJECTS_KANBAN_TOKEN, which already has cross-repo write
+# (wip-limit-check.yml posts PR comments with it). The block below pins GITHUB_TOKEN
+# to contents:read and nothing else, which is also why there is no GITHUB_TOKEN
+# fallback on the writes: it would be dead code that logs a misleading retry.
+permissions:
+  contents: read
 
 jobs:
   advance:
-    # Skip unless the comment body actually contains /fr-pass.
-    # Restrict to repo collaborators to prevent random commenters from advancing items.
-    # A functional review is a second pair of eyes: the person who wrote the PR
-    # cannot sign off their own promotion (author != commenter), and a read-only
-    # outside collaborator cannot either (MEMBER/OWNER only — COLLABORATOR
-    # dropped, since it includes triage/read outside collaborators). D30.
-    if: |
-      contains(github.event.comment.body, '/fr-pass') &&
-      (github.event.comment.author_association == 'MEMBER' ||
-       github.event.comment.author_association == 'OWNER') &&
-      github.event.comment.user.login != github.event.issue.user.login
+    # The ONLY job-level condition: does this comment mention /fr-pass at all?
+    # Deliberately loose — GitHub's contains() is a case-insensitive substring
+    # test, so "/FR-PASS", leading whitespace and trailing text all get through.
+    # Loose is the point: a comment that gets in but turns out not to be the
+    # command exits silently from the first step, whereas a genuine command that
+    # never gets in can never be reported. The precise match lives in the step.
+    if: contains(github.event.comment.body, '/fr-pass')
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Resolve current Status and advance one column
-        id: advance
+      - name: Decide the outcome and advance the card
+        id: assess
         env:
           GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
           ORG: ${{ inputs.org }}
           PROJECT_NUMBER: ${{ inputs.project-number }}
+          ALLOW_SELF_SIGNOFF: ${{ inputs.allow-self-signoff }}
           REPO_FULL: ${{ github.repository }}
           NUMBER: ${{ github.event.issue.number }}
           IS_PR: ${{ github.event.issue.pull_request != null }}
+          ITEM_AUTHOR: ${{ github.event.issue.user.login }}
+          ACTOR: ${{ github.event.comment.user.login }}
+          ASSOCIATION: ${{ github.event.comment.author_association }}
+          # Via the environment, never interpolated into the script: a comment
+          # body is attacker-controlled text and must not reach the shell parser.
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BOARD_URL: ${{ github.server_url }}/orgs/${{ inputs.org }}/projects/${{ inputs.project-number }}
         run: |
           set -euo pipefail
+
+          RESULT_FILE="$RUNNER_TEMP/fr-pass.result"
+          NOTE_FILE="$RUNNER_TEMP/fr-pass.note.md"
+          : > "$RESULT_FILE"
+          : > "$NOTE_FILE"
+
+          # A literal ``` fence, kept in a variable so no backtick ever has to be
+          # escaped inside a command substitution below.
+          FENCE='```'
+
+          # Publish an outcome on EVERY exit, including an unplanned one. The
+          # reporting step keys off this one output, so a crash halfway through
+          # (API error, jq error, a `set -e` trip) still produces a 👎 and an
+          # explanation rather than the silence reported in backend#1319.
+          publish() {
+            if [ ! -s "$RESULT_FILE" ]; then
+              printf 'internal-error' > "$RESULT_FILE"
+              printf '%s\n' \
+                "⚠️ \`/fr-pass\` failed before it could decide anything, so the card was **not** moved." \
+                "" \
+                "This is a bug in the handler, not something you did. Run log: $RUN_URL" > "$NOTE_FILE"
+            fi
+            echo "result=$(cat "$RESULT_FILE")" >> "$GITHUB_OUTPUT"
+          }
+          trap publish EXIT
+
+          # decide <result> [note-line...] — record the outcome, plus the comment
+          # to post with it. No note lines = react only, no thread comment.
+          decide() {
+            printf '%s' "$1" > "$RESULT_FILE"
+            shift
+            if [ "$#" -gt 0 ]; then
+              printf '%s\n' "$@" > "$NOTE_FILE"
+            fi
+          }
+
+          # ------------------------------------------------ 1. is it a command?
+          # /fr-pass must be the first token on some line of the comment. Leading
+          # whitespace and trailing text are fine; a quoted reply ("> /fr-pass")
+          # or an inline mention is not the command and must not re-trigger it.
+          BODY_FILE="$RUNNER_TEMP/fr-pass.body"
+          printf '%s' "$COMMENT_BODY" | tr -d '\r' > "$BODY_FILE"
+          if ! grep -qiE '^[[:space:]]*/fr-pass([[:space:]].*)?$' "$BODY_FILE"; then
+            echo "Body mentions /fr-pass but does not issue it as a command — staying silent by design."
+            decide not-a-command
+            exit 0
+          fi
+
+          # --------------------------------------------- 2. may they sign off?
+          # author_association is not a permission check: a member whose org
+          # membership is private reads as CONTRIBUTOR (or NONE) on repos they
+          # were not added to individually, so the old MEMBER/OWNER test would
+          # silently reject a real reviewer. Ask for the actual repository
+          # permission, which also states D30's intent — "not a triage/read
+          # outside collaborator" — directly instead of approximating it.
+          PERM_ERR="$RUNNER_TEMP/fr-pass.perm.err"
+          PERM_JSON=$(gh api "repos/$REPO_FULL/collaborators/$ACTOR/permission" 2> "$PERM_ERR") || PERM_JSON=""
+          PERM=$(printf '%s' "$PERM_JSON" | jq -r '.permission // empty' 2> /dev/null || true)
+          ROLE=$(printf '%s' "$PERM_JSON" | jq -r '.role_name // empty' 2> /dev/null || true)
+
+          AUTHORISED=false
+          case "$PERM" in admin | maintain | write) AUTHORISED=true ;; esac
+          case "$ROLE" in admin | maintain | write) AUTHORISED=true ;; esac
+
+          if [ -z "$PERM_JSON" ]; then
+            # API unreachable (scope, rate limit, outage). Fall back to the
+            # association rather than reject a legitimate reviewer — and say so.
+            echo "::warning::Could not read repository permission for @$ACTOR — falling back to author_association=$ASSOCIATION"
+            sed -n '1,3p' "$PERM_ERR"
+            case "$ASSOCIATION" in MEMBER | OWNER | COLLABORATOR) AUTHORISED=true ;; esac
+          fi
+
+          if [ "$AUTHORISED" != "true" ]; then
+            decide not-authorised \
+              "🚫 \`/fr-pass\` was **not** applied: @$ACTOR does not have write access to \`$REPO_FULL\`." \
+              "" \
+              "Functional sign-off is limited to people who can write to the repository (seen: permission \`${PERM:-unknown}\`, association \`$ASSOCIATION\`). Ask someone on the team to sign off, or move the card by hand on the [engineering kanban]($BOARD_URL)."
+            exit 0
+          fi
+
+          # -------------------------- 3a. is this a release-train promotion?
+          # Promotion PRs (`release-train/*`, and hotfix back-merges) are
+          # plumbing: the FR gate on them evaluates the CONTAINED items, so the
+          # promotion PR itself has nothing for a second reviewer to assess and
+          # D30 would only block the train on its own author. The comment event
+          # carries no branch refs, so look them up; FAIL CLOSED — an
+          # unreadable PR is treated as normal work and keeps the D30 rule.
+          IS_PROMOTION=false
+          if [ "$IS_PR" = "true" ]; then
+            if REFS=$(gh api "repos/$REPO_FULL/pulls/$NUMBER" \
+                        --jq '[.head.ref, .base.ref] | @tsv' 2>/dev/null); then
+              HEAD_REF=$(printf '%s' "$REFS" | cut -f1)
+              BASE_REF=$(printf '%s' "$REFS" | cut -f2)
+              case "$HEAD_REF" in
+                release-train/* | hotfix-backmerge/*)
+                  # Belt and braces: those heads only ever target an
+                  # integration branch, so require that too.
+                  case "$BASE_REF" in
+                    staging | main | master) IS_PROMOTION=true ;;
+                  esac
+                  ;;
+              esac
+            else
+              echo "Could not read the PR refs for #$NUMBER; treating it as normal work (D30 stays in force)."
+            fi
+          fi
+
+          # ----------------------------------------- 3. self sign-off (D30)
+          # THE bug from backend#1319 lived here, as a clause in the job-level
+          # `if`: when the reviewer was also the PR author the whole job was
+          # skipped, so no step was left to react or explain. 8 of the 13
+          # /fr-pass comments on 2026-07-29 died exactly this way. The rule is
+          # unchanged; what changed is that it now says so out loud.
+          if [ "$ACTOR" = "$ITEM_AUTHOR" ] \
+             && [ "$ALLOW_SELF_SIGNOFF" != "true" ] \
+             && [ "$IS_PROMOTION" != "true" ]; then
+            decide self-signoff \
+              "👀 \`/fr-pass\` was **not** applied: functional review needs a second pair of eyes, and @$ACTOR opened this one (D30)." \
+              "" \
+              "Ask another team member to comment \`/fr-pass\`, or move the card to **Ready for prod** on the [engineering kanban]($BOARD_URL) if you are deliberately overriding the rule." \
+              "" \
+              "_Release-train promotion PRs are exempt from this rule automatically. To allow self sign-off on everything org-wide, set \`allow-self-signoff: true\` on \`fr-pass-comment.yml\`._"
+            exit 0
+          fi
+
+          # ----------------------------------------- 4. resolve the board item
           REPO_NAME="${REPO_FULL#*/}"
 
-          # One query, two roots: project metadata + item Status.
-          # Uses $itemNum for the issue/PR number to keep it distinct from $num (project).
+          # One query, two roots: project metadata + this item's Status.
+          # $itemNum names the issue/PR number so it stays distinct from $num.
           if [ "$IS_PR" = "true" ]; then
             # shellcheck disable=SC2016  # $itemNum is a GraphQL variable - must not expand in shell
             CONTENT_QUERY='pullRequest(number: $itemNum)'
@@ -63,7 +230,11 @@ jobs:
             CONTENT_QUERY='issue(number: $itemNum)'
           fi
 
-          PROJ=$(gh api graphql -f query="
+          GQL_ERR="$RUNNER_TEMP/fr-pass.gql.err"
+          # No `2>/dev/null || PROJ='{}'` here. Swallowing the error made an
+          # expired token, a rate limit and a genuinely unlisted card all produce
+          # the same "not on project" 👎 — undiagnosable from the thread.
+          if ! PROJ=$(gh api graphql -f query="
             query(\$org: String!, \$num: Int!, \$repo: String!, \$itemNum: Int!) {
               organization(login: \$org) {
                 projectV2(number: \$num) {
@@ -75,7 +246,8 @@ jobs:
               }
               repository(owner: \$org, name: \$repo) {
                 $CONTENT_QUERY {
-                  projectItems(first: 10) {
+                  projectItems(first: 20) {
+                    totalCount
                     nodes {
                       id
                       project { number }
@@ -86,74 +258,238 @@ jobs:
                   }
                 }
               }
-            }" -F org="$ORG" -F num="$PROJECT_NUMBER" -F repo="$REPO_NAME" -F itemNum="$NUMBER" 2>/dev/null) || PROJ='{}'
+            }" -F org="$ORG" -F num="$PROJECT_NUMBER" -F repo="$REPO_NAME" -F itemNum="$NUMBER" 2> "$GQL_ERR"); then
+            GQL_HEAD=$(sed -n '1,5p' "$GQL_ERR" | tr -d "$FENCE")
+            decide api-error \
+              "⚠️ \`/fr-pass\` could **not** be applied: the kanban API call failed, so the card was left alone." \
+              "" \
+              "$FENCE" \
+              "$GQL_HEAD" \
+              "$FENCE" \
+              "" \
+              "Usually an expired \`PROJECTS_KANBAN_TOKEN\` or a transient GitHub error. Re-comment \`/fr-pass\` to retry. Run log: $RUN_URL"
+            exit 1
+          fi
 
-          PROJECT_ID=$(echo "$PROJ" | jq -r '.data.organization.projectV2.id // empty')
-          STATUS_FIELD=$(echo "$PROJ" | jq -r '.data.organization.projectV2.field.id // empty')
-          ITEM_ID=$(echo "$PROJ" | jq -r --arg n "$PROJECT_NUMBER" '
-            ([.. | objects | select(has("projectItems"))] | first).projectItems.nodes[]?
-            | select(.project.number == ($n | tonumber)) | .id' | head -1)
-          CURRENT=$(echo "$PROJ" | jq -r --arg n "$PROJECT_NUMBER" '
-            ([.. | objects | select(has("projectItems"))] | first).projectItems.nodes[]?
-            | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' | head -1)
+          GQL_ERRORS=$(printf '%s' "$PROJ" | jq -r '(.errors // []) | map(.message) | join("; ")')
+          PROJECT_ID=$(printf '%s' "$PROJ" | jq -r '.data.organization.projectV2.id // empty')
+          STATUS_FIELD=$(printf '%s' "$PROJ" | jq -r '.data.organization.projectV2.field.id // empty')
 
-          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
-            echo "Item #$NUMBER not on project #$PROJECT_NUMBER — nothing to do."
-            echo "result=not-on-project" >> "$GITHUB_OUTPUT"
+          if [ -n "$GQL_ERRORS" ] || [ -z "$PROJECT_ID" ] || [ -z "$STATUS_FIELD" ]; then
+            decide api-error \
+              "⚠️ \`/fr-pass\` could **not** be applied: project #$PROJECT_NUMBER or its \`Status\` field did not resolve, so the card was left alone." \
+              "" \
+              "GraphQL said: \`${GQL_ERRORS:-no error message}\`" \
+              "" \
+              "Run log: $RUN_URL"
+            exit 1
+          fi
+
+          # Take whichever content root the query returned, then keep only the
+          # items that belong to OUR project.
+          NODES=$(printf '%s' "$PROJ" | jq -c --arg n "$PROJECT_NUMBER" '
+            [ ((.data.repository // {}) | (.issue // .pullRequest // {}) | .projectItems.nodes // [])[]
+              | select(.project.number == ($n | tonumber)) ]')
+          TOTAL_ITEMS=$(printf '%s' "$PROJ" | jq -r '
+            ((.data.repository // {}) | (.issue // .pullRequest // {}) | .projectItems.totalCount) // 0')
+          ITEM_COUNT=$(printf '%s' "$NODES" | jq -r 'length')
+
+          if [ "$ITEM_COUNT" = "0" ]; then
+            # A truncated page is not proof of absence: say which case this is.
+            if [ "$TOTAL_ITEMS" -gt 20 ]; then
+              decide api-error \
+                "⚠️ \`/fr-pass\` could **not** be applied: this item is on $TOTAL_ITEMS projects and the handler reads only the first 20, so project #$PROJECT_NUMBER may have been cut off." \
+                "" \
+                "Raise the \`projectItems(first: 20)\` page size in \`fr-pass-comment.yml\`. Run log: $RUN_URL"
+              exit 1
+            fi
+            decide not-on-project \
+              "🔍 \`/fr-pass\` did nothing: this item is not on the [engineering kanban]($BOARD_URL) (project #$PROJECT_NUMBER), so there is no card to advance." \
+              "" \
+              "\`add-to-kanban.yml\` normally adds every new issue and PR. If it was missed, add the card, set **FR on staging**, then comment \`/fr-pass\` again. If the tracked work lives on a linked issue rather than this PR, sign off there instead."
             exit 0
           fi
 
-          # Decide the next status from the current one.
+          if [ "$ITEM_COUNT" != "1" ]; then
+            # A single piece of content can only sit on a project once, so this
+            # means the board data is odd. Do not guess which card was meant.
+            decide ambiguous-item \
+              "⚠️ \`/fr-pass\` did nothing: this item resolves to $ITEM_COUNT separate cards on project #$PROJECT_NUMBER, so the handler will not guess which one to advance." \
+              "" \
+              "Clean up the duplicate on the [engineering kanban]($BOARD_URL) and comment \`/fr-pass\` again."
+            exit 0
+          fi
+
+          ITEM_ID=$(printf '%s' "$NODES" | jq -r '.[0].id')
+          CURRENT=$(printf '%s' "$NODES" | jq -r '.[0].fieldValueByName.name // ""')
+
+          # The two column names below are hard-coded, and this board has been
+          # renamed before (RFC-BACKEND-0008 collapsed the dev-side FR columns).
+          # Check they still exist, so the next rename fails loudly here instead
+          # of reporting "wrong column" for every card on the board.
+          for WANT in "FR on staging" "Ready for prod"; do
+            if ! printf '%s' "$PROJ" \
+              | jq -e --arg s "$WANT" '.data.organization.projectV2.field.options[] | select(.name == $s)' > /dev/null; then
+              decide missing-option \
+                "⚠️ \`/fr-pass\` could **not** be applied: project #$PROJECT_NUMBER has no \`Status\` option named **$WANT**, so the card was left alone." \
+                "" \
+                "The board's columns were probably renamed. Update the column names in \`.github/.github/workflows/fr-pass-comment.yml\`. Run log: $RUN_URL"
+              exit 1
+            fi
+          done
+
+          # ------------------------------------------------------ 5. the column
           case "$CURRENT" in
-            "FR on staging") NEXT="Ready for prod" ;;
+            "FR on staging")
+              NEXT="Ready for prod"
+              ;;
+            "Ready for prod" | "Prod")
+              decide already-advanced \
+                "✅ Nothing to do: this card is already in **$CURRENT**, past the staging functional review." \
+                "" \
+                "No change made — you can ignore this."
+              exit 0
+              ;;
+            "")
+              decide no-status \
+                "🔍 \`/fr-pass\` did nothing: this card is on the board but its \`Status\` is empty, so there is no column to advance from." \
+                "" \
+                "Set it to **FR on staging** on the [engineering kanban]($BOARD_URL) and comment \`/fr-pass\` again."
+              exit 0
+              ;;
             *)
-              echo "Item is in '$CURRENT' — /fr-pass only applies to 'FR on staging' (the one functional review, on staging). Skipping."
-              echo "result=wrong-column" >> "$GITHUB_OUTPUT"
+              decide wrong-column \
+                "🔍 \`/fr-pass\` did nothing: this card is in **$CURRENT**, and \`/fr-pass\` only advances **FR on staging → Ready for prod** (the one functional-review gate)." \
+                "" \
+                "Promote it to **FR on staging** first — that happens automatically when the release train pushes to \`staging\`."
               exit 0
               ;;
           esac
 
-          NEXT_OPT=$(echo "$PROJ" | jq -r --arg s "$NEXT" \
-            '.data.organization.projectV2.field.options[] | select(.name==$s) | .id')
-
-          if [ -z "$NEXT_OPT" ] || [ "$NEXT_OPT" = "null" ]; then
-            echo "Could not resolve Status option '$NEXT' — aborting"
-            echo "result=missing-option" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
+          NEXT_OPT=$(printf '%s' "$PROJ" | jq -r --arg s "$NEXT" \
+            '.data.organization.projectV2.field.options[] | select(.name == $s) | .id')
 
           # Pass the option ID with -f (raw string), NOT -F: ProjectV2 option IDs can
           # be all-numeric, and -F coerces all-digit values to an integer, which the
           # $o: String! variable rejects. -f forces a string. (Some option IDs contain
           # letters today, but don't rely on that — IDs regenerate if recreated.)
+          MUT_ERR="$RUNNER_TEMP/fr-pass.mutate.err"
           # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
-          gh api graphql -f query='
+          if ! gh api graphql -f query='
             mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
               updateProjectV2ItemFieldValue(input: {
                 projectId: $p, itemId: $i, fieldId: $f,
                 value: {singleSelectOptionId: $o}
               }) { projectV2Item { id } }
-            }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -f o="$NEXT_OPT" > /dev/null
+            }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -f o="$NEXT_OPT" > /dev/null 2> "$MUT_ERR"; then
+            MUT_HEAD=$(sed -n '1,5p' "$MUT_ERR" | tr -d "$FENCE")
+            decide mutation-failed \
+              "⚠️ \`/fr-pass\` could **not** be applied: the card is still in **$CURRENT** — the write to project #$PROJECT_NUMBER failed." \
+              "" \
+              "$FENCE" \
+              "$MUT_HEAD" \
+              "$FENCE" \
+              "" \
+              "Re-comment \`/fr-pass\` to retry. Run log: $RUN_URL"
+            exit 1
+          fi
 
           echo "→ #$NUMBER: $CURRENT → $NEXT"
+          decide advanced
           {
-            echo "result=advanced"
             echo "from=$CURRENT"
             echo "to=$NEXT"
           } >> "$GITHUB_OUTPUT"
 
-      - name: React on the comment (👍 advanced / 👎 no-op)
-        if: always() && steps.advance.outputs.result != ''
+      - name: Report the outcome (👍 / 👎 + why)
+        # always(), with no `steps.*` condition: if the step above died before it
+        # could publish anything, THAT is the case most in need of reporting.
+        if: always()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
           REPO_FULL: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
           COMMENT_ID: ${{ github.event.comment.id }}
-          RESULT: ${{ steps.advance.outputs.result }}
+          RESULT: ${{ steps.assess.outputs.result }}
+          FROM: ${{ steps.assess.outputs.from }}
+          TO: ${{ steps.assess.outputs.to }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ "$RESULT" = "advanced" ]; then
+          set -uo pipefail
+
+          NOTE_FILE="$RUNNER_TEMP/fr-pass.note.md"
+          OUTCOME="${RESULT:-}"
+          if [ -z "$OUTCOME" ]; then
+            # The step above produced no output at all — it was cancelled, or it
+            # died before its EXIT trap could run. Still report something.
+            OUTCOME="internal-error"
+            if [ ! -s "$NOTE_FILE" ]; then
+              printf '%s\n' \
+                "⚠️ The \`/fr-pass\` handler stopped before deciding anything, so the card was **not** moved." \
+                "" \
+                "Run log: $RUN_URL" > "$NOTE_FILE"
+            fi
+          fi
+
+          # The one intentionally silent outcome: the comment mentioned /fr-pass
+          # but never issued it. Reacting to prose would make the bot noise.
+          if [ "$OUTCOME" = "not-a-command" ]; then
+            echo "Not a /fr-pass command — no reaction, by design."
+            echo "### /fr-pass: not a command (no action taken)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ "$OUTCOME" = "advanced" ]; then
             REACTION="+1"
+            SUMMARY="advanced #$NUMBER: $FROM → $TO"
           else
             REACTION="-1"
+            SUMMARY="no-op on #$NUMBER ($OUTCOME)"
           fi
-          gh api -X POST "/repos/$REPO_FULL/issues/comments/$COMMENT_ID/reactions" \
-            -f content="$REACTION" > /dev/null || true
+
+          FAILED=""
+
+          # Reaction. The old version used GITHUB_TOKEN and hid the outcome behind
+          # `|| true`, so every attempt died on HTTP 403 in silence — even the runs
+          # that DID advance the card. PROJECTS_KANBAN_TOKEN is the only token here
+          # that can write at all (see the permissions note at the top of the
+          # file), so there is no second token to fall back to — a failure is
+          # reported and fails the run instead of being swallowed.
+          REACT_ERR="$RUNNER_TEMP/fr-pass.react.err"
+          if ! gh api -X POST "/repos/$REPO_FULL/issues/comments/$COMMENT_ID/reactions" \
+            -f content="$REACTION" > /dev/null 2> "$REACT_ERR"; then
+            echo "::error::Could not react on comment $COMMENT_ID."
+            sed -n '1,6p' "$REACT_ERR"
+            FAILED="reaction"
+          fi
+
+          # Explanation. Only outcomes that are a real problem carry a note; a
+          # clean advance stays a bare 👍 so the happy path keeps the thread quiet.
+          if [ -s "$NOTE_FILE" ]; then
+            BODY=$(cat "$NOTE_FILE")
+            COMMENT_ERR="$RUNNER_TEMP/fr-pass.comment.err"
+            # REST, not `gh pr/issue comment`: a PR's conversation IS an issue, so
+            # this one endpoint covers both without branching on the item type.
+            if ! gh api -X POST "/repos/$REPO_FULL/issues/$NUMBER/comments" \
+              -f body="$BODY" > /dev/null 2> "$COMMENT_ERR"; then
+              echo "::error::Could not post the explanation on #$NUMBER."
+              sed -n '1,6p' "$COMMENT_ERR"
+              FAILED="$FAILED comment"
+            fi
+          fi
+
+          {
+            echo "### /fr-pass: $SUMMARY"
+            echo ""
+            echo "- outcome: \`$OUTCOME\`"
+            echo "- reaction: $REACTION on comment $COMMENT_ID"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # A write that failed must not leave a green run behind it — a red run
+          # is the last remaining signal once the thread could not be reached.
+          if [ -n "$FAILED" ]; then
+            echo "::error::/fr-pass could not report its outcome ($FAILED). Outcome was: $OUTCOME"
+            exit 1
+          fi
+
+          echo "/fr-pass → $OUTCOME (reacted $REACTION)"
