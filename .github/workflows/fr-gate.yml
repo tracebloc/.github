@@ -105,6 +105,7 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO_FULL: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
@@ -220,6 +221,44 @@ jobs:
           echo "Items in promotion (commit->PR attribution): $PRS"
           echo "prs=$PRS" >> "$GITHUB_OUTPUT"
           echo "unattributed=$UNATTRIB" >> "$GITHUB_OUTPUT"
+
+          # Does this range change any FILE at all? A promotion can be
+          # ancestry-only: the train's mirror merge records that a branch's
+          # history is contained, while the base already holds every byte of
+          # that content (data-ingestors 2026-07-30 -- 1 commit ahead, 0 files
+          # changed, because a manual promotion had already carried the content
+          # to master). There is nothing reviewable in such a range, which is
+          # different from "we failed to attribute real content" -- and the
+          # fallback below depends on telling those apart.
+          # Ask the compare API, three-dot semantics: "what did HEAD contribute
+          # relative to the merge base", NOT "how do the two tips differ".
+          #
+          # A two-dot `git diff BASE..HEAD` counts files the BASE moved on
+          # alone, which is wrong here and would have defeated this whole fix:
+          # on data-ingestors two-dot reports 6 files (master's own commits
+          # that staging lacks) while three-dot reports 0 -- so the
+          # ancestry-only branch would never have been taken and the deadlock
+          # would have survived (Bugbot, .github#109).
+          #
+          # The API is used rather than local three-dot git because this repo's
+          # history has multiple merge bases after the mirror reconciliations,
+          # and `git diff A...B` silently picks one of them. FAIL CLOSED on any
+          # error: an uncounted range must never be treated as empty.
+          DIFF_FILES=""
+          for attempt in 1 2 3; do
+            DIFF_FILES=$(gh api "repos/$REPO_FULL/compare/$BASE_SHA...$HEAD_SHA" \
+                           --jq '.files | length' 2>/dev/null) && break
+            DIFF_FILES=""
+            sleep $((attempt * 2))
+          done
+          case "${DIFF_FILES:-}" in
+            ''|*[!0-9]*)
+              echo "::warning::could not count changed files for this range - treating it as non-empty (fail closed)."
+              DIFF_FILES=-1
+              ;;
+          esac
+          echo "changed_files=$DIFF_FILES" >> "$GITHUB_OUTPUT"
+          echo "Range contributes $DIFF_FILES file(s) relative to the merge base."
           if [ -n "$UNATTRIB" ]; then
             echo "Unattributable commits (introduced by no merged PR):$UNATTRIB"
           fi
@@ -235,14 +274,39 @@ jobs:
           PRS: ${{ steps.items.outputs.prs }}
           UNATTRIB: ${{ steps.items.outputs.unattributed }}
           PROMOTION_PR: ${{ github.event.pull_request.number }}
+          CHANGED_FILES: ${{ steps.items.outputs.changed_files }}
         run: |
           set -euo pipefail
           REPO_NAME="${REPO_FULL#*/}"
           UNATTRIB="${UNATTRIB:-}"
 
-          # If commit subjects yielded no PR refs, gate the promotion PR itself.
+          # No attributable items. Two very different causes, and conflating
+          # them deadlocked the train (data-ingestors 2026-07-30):
+          #
+          #  a) ANCESTRY-ONLY range - the only new commit is the train's own
+          #     mirror merge and the base already contains every byte of its
+          #     content (0 files changed). Nothing shipped, so there is nothing
+          #     to gate. Gating the promotion PR here is unsatisfiable BY
+          #     CONSTRUCTION: set-pr-status parks it in "Code review", and it
+          #     can only leave that column by merging - which this gate blocks.
+          #
+          #  b) Real content we could not attribute - fall back to gating the
+          #     promotion PR, which fails closed and forces a human look. Never
+          #     let unreviewed content through just because attribution broke.
           NUMBERS="$PRS"
           if [ -z "$(echo "$NUMBERS" | tr -d ' ')" ]; then
+            # UNATTRIB must ALSO be empty. Its fail-closed check lives further
+            # down this step, so exiting here would jump over it: a
+            # tree-identical range that contains a commit we could not verify
+            # (e.g. commits/{sha}/pulls erroring three times) would pass the
+            # gate. 0 files changed means "nothing shipped" only if we
+            # successfully accounted for every commit (Bugbot, .github#109).
+            if [ "${CHANGED_FILES:-1}" = "0" ] \
+               && [ -z "$(echo "${UNATTRIB}" | tr -d ' ')" ]; then
+              echo "No attributable items, no unattributable commits, and the range changes no files — ancestry-only promotion, nothing to gate."
+              echo "::notice::FR gate PASSED (ancestry-only promotion: 0 files changed, every commit accounted for)."
+              exit 0
+            fi
             echo "No PR refs in commit subjects — falling back to gating the promotion PR (#$PROMOTION_PR) itself."
             NUMBERS="$PROMOTION_PR"
           fi
