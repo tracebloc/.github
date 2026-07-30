@@ -51,7 +51,9 @@ on:
 # came to fail with "Resource not accessible by integration (HTTP 403)" on every
 # run, including the ones that advanced their card successfully. All writes
 # therefore go through PROJECTS_KANBAN_TOKEN, which already has cross-repo write
-# (wip-limit-check.yml posts PR comments with it).
+# (wip-limit-check.yml posts PR comments with it). The block below pins GITHUB_TOKEN
+# to contents:read and nothing else, which is also why there is no GITHUB_TOKEN
+# fallback on the writes: it would be dead code that logs a misleading retry.
 permissions:
   contents: read
 
@@ -373,7 +375,6 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
-          FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_FULL: ${{ github.repository }}
           NUMBER: ${{ github.event.issue.number }}
           COMMENT_ID: ${{ github.event.comment.id }}
@@ -416,22 +417,18 @@ jobs:
 
           FAILED=""
 
-          # Reaction. The old version used GITHUB_TOKEN and hid the outcome
-          # behind `|| true`, so every attempt died on HTTP 403 in silence — even
-          # the runs that DID advance the card. Use the PAT, keep GITHUB_TOKEN as
-          # a fallback for repos that grant it, and never swallow a failure.
+          # Reaction. The old version used GITHUB_TOKEN and hid the outcome behind
+          # `|| true`, so every attempt died on HTTP 403 in silence — even the runs
+          # that DID advance the card. PROJECTS_KANBAN_TOKEN is the only token here
+          # that can write at all (see the permissions note at the top of the
+          # file), so there is no second token to fall back to — a failure is
+          # reported and fails the run instead of being swallowed.
           REACT_ERR="$RUNNER_TEMP/fr-pass.react.err"
           if ! gh api -X POST "/repos/$REPO_FULL/issues/comments/$COMMENT_ID/reactions" \
             -f content="$REACTION" > /dev/null 2> "$REACT_ERR"; then
-            echo "::warning::Reaction failed with PROJECTS_KANBAN_TOKEN, retrying with GITHUB_TOKEN"
-            sed -n '1,3p' "$REACT_ERR"
-            if ! GH_TOKEN="$FALLBACK_TOKEN" gh api -X POST \
-              "/repos/$REPO_FULL/issues/comments/$COMMENT_ID/reactions" \
-              -f content="$REACTION" > /dev/null 2>> "$REACT_ERR"; then
-              echo "::error::Could not react on comment $COMMENT_ID with either token."
-              sed -n '1,6p' "$REACT_ERR"
-              FAILED="reaction"
-            fi
+            echo "::error::Could not react on comment $COMMENT_ID."
+            sed -n '1,6p' "$REACT_ERR"
+            FAILED="reaction"
           fi
 
           # Explanation. Only outcomes that are a real problem carry a note; a
@@ -443,15 +440,9 @@ jobs:
             # this one endpoint covers both without branching on the item type.
             if ! gh api -X POST "/repos/$REPO_FULL/issues/$NUMBER/comments" \
               -f body="$BODY" > /dev/null 2> "$COMMENT_ERR"; then
-              echo "::warning::Explanation comment failed with PROJECTS_KANBAN_TOKEN, retrying with GITHUB_TOKEN"
-              sed -n '1,3p' "$COMMENT_ERR"
-              if ! GH_TOKEN="$FALLBACK_TOKEN" gh api -X POST \
-                "/repos/$REPO_FULL/issues/$NUMBER/comments" \
-                -f body="$BODY" > /dev/null 2>> "$COMMENT_ERR"; then
-                echo "::error::Could not post the explanation on #$NUMBER with either token."
-                sed -n '1,6p' "$COMMENT_ERR"
-                FAILED="$FAILED comment"
-              fi
+              echo "::error::Could not post the explanation on #$NUMBER."
+              sed -n '1,6p' "$COMMENT_ERR"
+              FAILED="$FAILED comment"
             fi
           fi
 
