@@ -36,10 +36,13 @@ on:
         default: tracebloc
       allow-self-signoff:
         description: >-
-          Allow the PR/issue author to sign off their own promotion. The default
-          (false) keeps D30's two-pairs-of-eyes rule. This is the one-line knob
-          for that policy: flipping the default here changes it org-wide, since
-          the per-repo callers pass no inputs.
+          Allow the PR/issue author to sign off their own promotion on ANY item.
+          The default (false) keeps D30's two-pairs-of-eyes rule for real work.
+          Release-train promotion PRs are exempt regardless of this input (see
+          the self-signoff step): the FR gate on those evaluates the contained
+          items, so the promotion PR itself carries no review value. Flipping
+          this default changes the policy org-wide, since the per-repo callers
+          pass no inputs.
         type: boolean
         default: false
 
@@ -169,19 +172,48 @@ jobs:
             exit 0
           fi
 
+          # -------------------------- 3a. is this a release-train promotion?
+          # Promotion PRs (`release-train/*`, and hotfix back-merges) are
+          # plumbing: the FR gate on them evaluates the CONTAINED items, so the
+          # promotion PR itself has nothing for a second reviewer to assess and
+          # D30 would only block the train on its own author. The comment event
+          # carries no branch refs, so look them up; FAIL CLOSED — an
+          # unreadable PR is treated as normal work and keeps the D30 rule.
+          IS_PROMOTION=false
+          if [ "$IS_PR" = "true" ]; then
+            if REFS=$(gh api "repos/$REPO_FULL/pulls/$NUMBER" \
+                        --jq '[.head.ref, .base.ref] | @tsv' 2>/dev/null); then
+              HEAD_REF=$(printf '%s' "$REFS" | cut -f1)
+              BASE_REF=$(printf '%s' "$REFS" | cut -f2)
+              case "$HEAD_REF" in
+                release-train/* | hotfix-backmerge/*)
+                  # Belt and braces: those heads only ever target an
+                  # integration branch, so require that too.
+                  case "$BASE_REF" in
+                    staging | main | master) IS_PROMOTION=true ;;
+                  esac
+                  ;;
+              esac
+            else
+              echo "Could not read the PR refs for #$NUMBER; treating it as normal work (D30 stays in force)."
+            fi
+          fi
+
           # ----------------------------------------- 3. self sign-off (D30)
           # THE bug from backend#1319 lived here, as a clause in the job-level
           # `if`: when the reviewer was also the PR author the whole job was
           # skipped, so no step was left to react or explain. 8 of the 13
           # /fr-pass comments on 2026-07-29 died exactly this way. The rule is
           # unchanged; what changed is that it now says so out loud.
-          if [ "$ACTOR" = "$ITEM_AUTHOR" ] && [ "$ALLOW_SELF_SIGNOFF" != "true" ]; then
+          if [ "$ACTOR" = "$ITEM_AUTHOR" ] \
+             && [ "$ALLOW_SELF_SIGNOFF" != "true" ] \
+             && [ "$IS_PROMOTION" != "true" ]; then
             decide self-signoff \
               "👀 \`/fr-pass\` was **not** applied: functional review needs a second pair of eyes, and @$ACTOR opened this one (D30)." \
               "" \
               "Ask another team member to comment \`/fr-pass\`, or move the card to **Ready for prod** on the [engineering kanban]($BOARD_URL) if you are deliberately overriding the rule." \
               "" \
-              "_To let authors sign off their own promotions org-wide, set \`allow-self-signoff: true\` on \`fr-pass-comment.yml\`._"
+              "_Release-train promotion PRs are exempt from this rule automatically. To allow self sign-off on everything org-wide, set \`allow-self-signoff: true\` on \`fr-pass-comment.yml\`._"
             exit 0
           fi
 
