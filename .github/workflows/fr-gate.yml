@@ -105,6 +105,7 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO_FULL: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
@@ -229,9 +230,35 @@ jobs:
           # to master). There is nothing reviewable in such a range, which is
           # different from "we failed to attribute real content" -- and the
           # fallback below depends on telling those apart.
-          DIFF_FILES=$(git diff --name-only "$BASE_SHA..$HEAD_SHA" | wc -l | tr -d ' ')
+          # Ask the compare API, three-dot semantics: "what did HEAD contribute
+          # relative to the merge base", NOT "how do the two tips differ".
+          #
+          # A two-dot `git diff BASE..HEAD` counts files the BASE moved on
+          # alone, which is wrong here and would have defeated this whole fix:
+          # on data-ingestors two-dot reports 6 files (master's own commits
+          # that staging lacks) while three-dot reports 0 -- so the
+          # ancestry-only branch would never have been taken and the deadlock
+          # would have survived (Bugbot, .github#109).
+          #
+          # The API is used rather than local three-dot git because this repo's
+          # history has multiple merge bases after the mirror reconciliations,
+          # and `git diff A...B` silently picks one of them. FAIL CLOSED on any
+          # error: an uncounted range must never be treated as empty.
+          DIFF_FILES=""
+          for attempt in 1 2 3; do
+            DIFF_FILES=$(gh api "repos/$REPO_FULL/compare/$BASE_SHA...$HEAD_SHA" \
+                           --jq '.files | length' 2>/dev/null) && break
+            DIFF_FILES=""
+            sleep $((attempt * 2))
+          done
+          case "${DIFF_FILES:-}" in
+            ''|*[!0-9]*)
+              echo "::warning::could not count changed files for this range - treating it as non-empty (fail closed)."
+              DIFF_FILES=-1
+              ;;
+          esac
           echo "changed_files=$DIFF_FILES" >> "$GITHUB_OUTPUT"
-          echo "Range changes $DIFF_FILES file(s)."
+          echo "Range contributes $DIFF_FILES file(s) relative to the merge base."
           if [ -n "$UNATTRIB" ]; then
             echo "Unattributable commits (introduced by no merged PR):$UNATTRIB"
           fi
