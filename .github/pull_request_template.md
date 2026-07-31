@@ -27,3 +27,4 @@
 - [ ] No secrets / credentials in the diff
 - [ ] For security-sensitive paths: appropriate reviewer requested
 - [ ] Cross-repo issues use `Fixes tracebloc/<repo>#N` — a bare `repo#N` closes nothing
+- [ ] If this depends on a change in another repo: shipped **expand-then-contract** (additive first, consumers adopt later), or **Breaking change** ticked above with the rollout order in *Deployment notes* — repos promote independently, so the other change may not ship with this one

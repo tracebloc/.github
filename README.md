@@ -48,6 +48,41 @@ on later events, and two of them cause confusing failures if they are missing.
       tracking, planning and security work belongs in a private repo — `backend` is the
       default home for anything cross-cutting.
 
+## Cross-repo changes
+
+The release train promotes **each repo independently** — the matrix runs with
+`fail-fast: false` and there is no ordering between repos. A hop routinely merges
+some and holds others (the 2026-07-29 prod hop merged 8 of 10). That is by design,
+and it has a consequence worth internalising: **you cannot assume the rest of the
+fleet moves with you.** A change in `averaging-service` that needs a `backend`
+change ships broken for as long as backend is held — and backend can be held by
+something entirely unrelated to your work, like an unrelated review finding.
+
+Design for that rather than trying to orchestrate around it. **Expand, then
+contract:**
+
+1. **Expand** — ship the additive change first, in the *producing* repo, with the
+   old behaviour still working. A new field, a new endpoint, a new optional
+   argument. Nothing consumes it yet, so it is safe to promote alone.
+2. **Adopt** — consumers switch to the new path in a later PR, once the producer
+   is actually in production.
+3. **Contract** — remove the old path a release *after* every consumer has
+   adopted it.
+
+Every step is independently promotable and safe in any order. That is the whole
+point: it removes the dependency on promotion timing instead of managing it.
+
+**When you genuinely cannot** — a change that is breaking by nature — say so
+explicitly:
+
+- tick **Breaking change** in the PR's *Type of change*;
+- put the required rollout order in **Deployment notes**, naming the other repos'
+  PRs by owner-qualified reference (`tracebloc/backend#123`);
+- tell whoever fires the train, so the hop is sequenced by hand.
+
+Do not rely on the two PRs happening to merge in the right order. Nothing enforces
+that today.
+
 ## Scheduled checks in this repo
 
 | Workflow | Cadence | What it does |
