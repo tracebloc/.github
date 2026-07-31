@@ -102,6 +102,33 @@ on:
         description: "Run the ruff job."
         type: boolean
         default: false
+      format:
+        description: >-
+          Run the black --check job. Opt-in per repo, because a formatter is
+          only enforceable where the tree already matches it -- see
+          `black-version` for why the version is the whole story.
+        type: boolean
+        default: false
+      format-soft-fail:
+        description: >-
+          Report formatting findings but exit 0, even when `soft-fail` is false.
+          Lets a repo adopt the format job advisory-first (its lint/credential
+          gates stay blocking) and drop this flag once its tree is swept.
+        type: boolean
+        default: false
+      black-version:
+        description: >-
+          Pinned black version. black's stable style changes between releases,
+          so a version that does not match what the tree was formatted with
+          reports the whole repo as unformatted (measured 2026-07-31: every
+          tracebloc Python repo is 0-dirty under 23.1.0 and 15-168 files
+          "dirty" under 26.3.1 -- pure version skew, not unformatted code).
+          The default is therefore the version the fleet is actually formatted
+          with. Override per caller if a repo pins its own (backend pins in
+          requirements-dev.txt and gates black in its own lint.yml, so it does
+          NOT enable this job).
+        type: string
+        default: "23.1.0"
       shell:
         description: "Run the shellcheck job."
         type: boolean
@@ -286,6 +313,131 @@ jobs:
             exit 0
           fi
           exit "$RC"
+
+  # ---------------------------------------------------------------- format ----
+  # black --check on the files this PR changes (all files in all-files mode).
+  # Diff-scoped on purpose: it enforces "leave it formatted" without ever
+  # demanding a repo-wide reformat, so adopting the job costs no churn.
+  format:
+    name: format
+    if: ${{ inputs.format }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Resolve the file set
+        id: files
+        env:
+          ALL_FILES: ${{ inputs.all-files }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$ALL_FILES" = "true" ] || [ -z "${BASE_SHA:-}" ]; then
+            echo "mode=all" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Same three-dot diff + fail-open-to-all-files contract as the ruff
+          # job: never silently check nothing.
+          if ! git diff --name-only --diff-filter=ACMR "$BASE_SHA...HEAD" > /tmp/fmt-diff.txt 2>/dev/null; then
+            echo "mode=all" >> "$GITHUB_OUTPUT"
+            echo "::warning::git diff against $BASE_SHA failed - checking all files instead of skipping."
+            exit 0
+          fi
+          grep -E '\.pyi?$' /tmp/fmt-diff.txt > /tmp/fmt-files.txt || true
+          COUNT=$(wc -l < /tmp/fmt-files.txt | tr -d ' ')
+          echo "mode=diff" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Changed Python files: $COUNT"
+
+      - name: Install black
+        if: steps.files.outputs.mode == 'all' || steps.files.outputs.count != '0'
+        env:
+          BLACK_VERSION: ${{ inputs.black-version }}
+        run: |
+          set -euo pipefail
+          pipx install "black==$BLACK_VERSION"
+          black --version
+
+      - name: black --check
+        if: steps.files.outputs.mode == 'all' || steps.files.outputs.count != '0'
+        env:
+          MODE: ${{ steps.files.outputs.mode }}
+          # Either global soft-fail or the format-specific override makes this
+          # job advisory; neither means it blocks.
+          SOFT_FAIL: ${{ (inputs.soft-fail || inputs.format-soft-fail) && 'true' || 'false' }}
+        run: |
+          set -uo pipefail
+          # No --isolated: black must read the repo's own [tool.black]
+          # (line-length, target-version, exclude) or its verdict would differ
+          # from what contributors run locally.
+          RC=0
+          if [ "$MODE" = "all" ]; then
+            black --check . > /tmp/black.out 2>&1 || RC=$?
+          else
+            # NUL-delimited: paths with spaces must survive.
+            tr '\n' '\0' < /tmp/fmt-files.txt | xargs -0 --no-run-if-empty \
+              black --check > /tmp/black.out 2>&1 || RC=$?
+          fi
+
+          COUNT=$(grep -c '^would reformat' /tmp/black.out || true)
+          # An ERROR is a different thing from a formatting verdict and must
+          # never be reported as one: a black that cannot parse the tree prints
+          # these while the reformat count stays 0. (This exact conflation
+          # produced a false "0 files need formatting" during the #1303
+          # sizing -- black 23.1.0 cannot run on Python 3.12+.)
+          ERRS=$(grep -cE '^error:|would fail to reformat' /tmp/black.out || true)
+
+          {
+            echo "### format (black ${{ inputs.black-version }})"
+            echo ""
+            if [ "${ERRS:-0}" -gt 0 ]; then
+              echo "black could not process ${ERRS} file(s) -- this is an error, not a formatting verdict."
+            elif [ "${COUNT:-0}" -gt 0 ]; then
+              echo "${COUNT} file(s) need reformatting. Run \`black <file>\` (or \`pre-commit run black\`)."
+            else
+              echo "No formatting changes needed."
+            fi
+            if [ "$RC" != "0" ]; then
+              echo ""
+              echo '```'
+              head -50 /tmp/black.out
+              echo '```'
+            fi
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Decide from black's OUTPUT, not from its exit code. In diff mode
+          # black runs under xargs, and GNU xargs remaps ANY child status in
+          # 1-125 to its own 123 -- so a plain "would reformat" (black's 1)
+          # arrives as 123 and is indistinguishable from a real internal error.
+          # BSD xargs propagates 1 instead, which is why local validation on
+          # macOS passed while ubuntu CI would have hard-failed every advisory
+          # adopter. Reported by Bugbot + @aptracebloc on tracebloc/.github#115.
+          #
+          # Checked errors-first so a genuine internal error is never masked by
+          # a reformat finding in the same run.
+          if [ "${ERRS:-0}" -gt 0 ]; then
+            echo "::error::black could not process ${ERRS} file(s) - failing closed (not a formatting verdict)."
+            cat /tmp/black.out
+            exit 1
+          fi
+          if [ "${COUNT:-0}" -gt 0 ]; then
+            if [ "$SOFT_FAIL" = "true" ]; then
+              echo "soft-fail is on - reporting ${COUNT} unformatted file(s), not failing this job."
+              exit 0
+            fi
+            exit 1
+          fi
+          if [ "$RC" != "0" ]; then
+            echo "::error::black exited $RC but reported no findings - failing closed."
+            cat /tmp/black.out
+            exit 1
+          fi
+          exit 0
 
   # ----------------------------------------------------------------- shell ----
   shellcheck:
