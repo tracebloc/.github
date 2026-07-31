@@ -120,15 +120,17 @@ on:
         description: >-
           Pinned black version. black's stable style changes between releases,
           so a version that does not match what the tree was formatted with
-          reports the whole repo as unformatted (measured 2026-07-31: every
-          tracebloc Python repo is 0-dirty under 23.1.0 and 15-168 files
-          "dirty" under 26.3.1 -- pure version skew, not unformatted code).
-          The default is therefore the version the fleet is actually formatted
-          with. Override per caller if a repo pins its own (backend pins in
-          requirements-dev.txt and gates black in its own lint.yml, so it does
-          NOT enable this job).
+          reports the whole repo as unformatted. Pin it per caller and keep
+          it in step with the repo's pre-commit hook, or CI and local disagree.
+
+          The default is 26.3.1: it is the version backend -- the only repo
+          already gating black -- is clean under, and what the pre-commit
+          hooks pin. It also runs on current Python, which 23.1.0 does not:
+          23.1.0 calls `ast.Str`, removed in 3.12, so it errors on every file
+          while printing zero "would reformat" lines. Measured on 3.11, no
+          repo is 23.1.0-clean.
         type: string
-        default: "23.1.0"
+        default: "26.3.1"
       shell:
         description: "Run the shellcheck job."
         type: boolean
