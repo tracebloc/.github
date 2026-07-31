@@ -2,7 +2,7 @@
 <!-- 1–3 sentences. What does this PR do and why? -->
 
 ## Related
-<!-- Same repo: Closes #123 · Cross-repo: Fixes tracebloc/client-runtime#456 (owner-qualified — a bare client-runtime#456 closes nothing) -->
+<!-- Same repo: Closes #123 · Cross-repo: Fixes tracebloc/client-runtime#456 (owner-qualified — a bare client-runtime#456 closes nothing). PRs land on develop, not the default branch, so closing keywords do not fire on merge — confirm the issue actually closed. -->
 
 ## Type of change
 - [ ] Feature
