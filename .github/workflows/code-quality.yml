@@ -384,13 +384,24 @@ jobs:
           fi
 
           COUNT=$(grep -c '^would reformat' /tmp/black.out || true)
+          # An ERROR is a different thing from a formatting verdict and must
+          # never be reported as one: a black that cannot parse the tree prints
+          # these while the reformat count stays 0. (This exact conflation
+          # produced a false "0 files need formatting" during the #1303
+          # sizing -- black 23.1.0 cannot run on Python 3.12+.)
+          ERRS=$(grep -cE '^error:|would fail to reformat' /tmp/black.out || true)
+
           {
             echo "### format (black ${{ inputs.black-version }})"
             echo ""
-            if [ "$RC" = "0" ]; then
-              echo "No formatting changes needed."
+            if [ "${ERRS:-0}" -gt 0 ]; then
+              echo "black could not process ${ERRS} file(s) -- this is an error, not a formatting verdict."
+            elif [ "${COUNT:-0}" -gt 0 ]; then
+              echo "${COUNT} file(s) need reformatting. Run \`black <file>\` (or \`pre-commit run black\`)."
             else
-              echo "$COUNT file(s) need reformatting. Run \`black <file>\` (or \`pre-commit run black\`)."
+              echo "No formatting changes needed."
+            fi
+            if [ "$RC" != "0" ]; then
               echo ""
               echo '```'
               head -50 /tmp/black.out
@@ -399,17 +410,34 @@ jobs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # RC 123 = internal error (unparsable file), not a formatting verdict.
-          if [ "$RC" != "0" ] && [ "$RC" != "1" ]; then
-            echo "::error::black exited $RC (not a formatting failure) - failing closed."
+          # Decide from black's OUTPUT, not from its exit code. In diff mode
+          # black runs under xargs, and GNU xargs remaps ANY child status in
+          # 1-125 to its own 123 -- so a plain "would reformat" (black's 1)
+          # arrives as 123 and is indistinguishable from a real internal error.
+          # BSD xargs propagates 1 instead, which is why local validation on
+          # macOS passed while ubuntu CI would have hard-failed every advisory
+          # adopter. Reported by Bugbot + @aptracebloc on tracebloc/.github#115.
+          #
+          # Checked errors-first so a genuine internal error is never masked by
+          # a reformat finding in the same run.
+          if [ "${ERRS:-0}" -gt 0 ]; then
+            echo "::error::black could not process ${ERRS} file(s) - failing closed (not a formatting verdict)."
             cat /tmp/black.out
-            exit "$RC"
+            exit 1
           fi
-          if [ "$RC" != "0" ] && [ "$SOFT_FAIL" = "true" ]; then
-            echo "soft-fail is on - reporting only, not failing this job."
-            exit 0
+          if [ "${COUNT:-0}" -gt 0 ]; then
+            if [ "$SOFT_FAIL" = "true" ]; then
+              echo "soft-fail is on - reporting ${COUNT} unformatted file(s), not failing this job."
+              exit 0
+            fi
+            exit 1
           fi
-          exit "$RC"
+          if [ "$RC" != "0" ]; then
+            echo "::error::black exited $RC but reported no findings - failing closed."
+            cat /tmp/black.out
+            exit 1
+          fi
+          exit 0
 
   # ----------------------------------------------------------------- shell ----
   shellcheck:
