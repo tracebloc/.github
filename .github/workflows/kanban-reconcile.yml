@@ -346,39 +346,54 @@ jobs:
           while IFS=$'\t' read -r itemId optId reason label; do
             [ "$optId" = "-" ] && continue
             if [ "$optId" = "ARCHIVE" ]; then
+              # `2>&1 >/dev/null` keeps stderr (the API error) and drops the mutation
+              # payload, which we never read. Ordered the other way round it would
+              # throw away the only diagnostic a [FAIL] line has to offer.
               # shellcheck disable=SC2016  # GraphQL variables, not shell - keep literal
-              if gh api graphql -f query='
+              if err=$(gh api graphql -f query='
                   mutation($p: ID!, $i: ID!) {
                     archiveProjectV2Item(input: {projectId: $p, itemId: $i}) {
                       item { id }
                     }
-                  }' -F p="$PROJECT_ID" -F i="$itemId" > /dev/null 2>&1; then
+                  }' -F p="$PROJECT_ID" -F i="$itemId" 2>&1 >/dev/null); then
                 echo "[OK]   $reason"
                 ok=$((ok+1))
               else
-                echo "[FAIL] $reason"
+                echo "[FAIL] $reason: $err"
                 fail=$((fail+1))
               fi
               continue
             fi
             # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
-            if gh api graphql -f query='
+            if err=$(gh api graphql -f query='
                 mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
                   updateProjectV2ItemFieldValue(input: {
                     projectId: $p, itemId: $i, fieldId: $f,
                     value: {singleSelectOptionId: $o}
                   }) { projectV2Item { id } }
                 }' -F p="$PROJECT_ID" -F i="$itemId" -F f="$STATUS_FIELD" -f o="$optId" \
-                > /dev/null 2>&1; then
+                2>&1 >/dev/null); then
               echo "[OK]   $reason"
               ok=$((ok+1))
             else
-              echo "[FAIL] $reason"
+              echo "[FAIL] $reason: $err"
               fail=$((fail+1))
             fi
           done < moves.tsv
           echo ""
           echo "=== Applied: $ok ok, $fail failed ==="
+
+          # Fail closed. Every [FAIL] above is a card left in the column this pass
+          # decided was wrong, so the drift the run was supposed to remove survives
+          # it. Tomorrow's pass re-plans the identical move and, on a persistent
+          # cause (revoked project write, deleted Status option), fails identically
+          # - forever, invisibly, while the schedule reports success. The counters
+          # were already here; only the assertion was missing. Same shape as the
+          # RUN_FAILED assertion in advance-deploy-env.yml.
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::$fail of $((ok+fail)) planned move(s) failed to apply (see [FAIL] lines above)."
+            exit 1
+          fi
 
       - name: Dry-run summary
         if: env.DRY_RUN == 'true'
@@ -411,6 +426,10 @@ jobs:
         env:
           LOOKBACK_DAYS: 21
           MAX_ADDS: 60
+          # Lower bound on the discovered sweep scope. 1 is deliberately loose - it
+          # is a "did we look at anything at all" tripwire, not a coverage target,
+          # so it never fires when a repo legitimately opts out of the board.
+          MIN_SCOPE: 1
         run: |
           set -euo pipefail
 
@@ -433,12 +452,38 @@ jobs:
                                --jq '.[] | select(.archived==false) | .name')
           SCOPE=()
           for r in "${ALL[@]}"; do
-            if gh api "repos/$ORG/$r/contents/.github/workflows/add-to-kanban.yml" \
-                 >/dev/null 2>&1; then
-              SCOPE+=("$r")
-            fi
+            # Read the HTTP status rather than just gh's exit code. Exit-code-only
+            # made 404 ("this repo does not opt into the board" - the answer we
+            # want) indistinguishable from 403 / 429 / 5xx ("we could not find
+            # out"), and both silently dropped the repo from SCOPE. A repo out of
+            # scope is never swept, so its drift becomes invisible while the run
+            # still reports success. `-i --silent` returns headers without the
+            # base64 file body; on a transport failure there is no status line at
+            # all, which lands in the fatal branch - correctly, since that is also
+            # "we could not find out".
+            probe=$(gh api -i --silent \
+                      "repos/$ORG/$r/contents/.github/workflows/add-to-kanban.yml" 2>/dev/null) || true
+            http=$(awk 'NR==1 {print $2}' <<<"$probe")
+            case "$http" in
+              2??) SCOPE+=("$r") ;;
+              404) ;;  # genuinely not tracked - the one benign non-2xx
+              *)   echo "::error::Could not determine board tracking for $ORG/$r (HTTP ${http:-none}) - refusing to silently drop it from scope."
+                   exit 1 ;;
+            esac
           done
           echo "Board-tracked repos (${#SCOPE[@]}): ${SCOPE[*]}"
+
+          # Floor assertion. Everything below is a per-repo sweep, so an empty scope
+          # produces a flawless green run that inspected nothing: "Missing from
+          # board: 0" is emitted identically whether nothing is missing or nothing
+          # was looked at. The MAX_ADDS ceiling only catches the opposite failure
+          # (everything looks missing). This catches the quiet one - e.g. the repo
+          # listing above returning nothing, or the token losing org-wide contents
+          # read - where zero is an absence of evidence, not evidence of health.
+          if [ "${#SCOPE[@]}" -lt "$MIN_SCOPE" ]; then
+            echo "::error::Board-tracked scope is ${#SCOPE[@]} repo(s), below MIN_SCOPE=$MIN_SCOPE - refusing to report a clean sweep over an empty scope. Check PROJECTS_KANBAN_TOKEN still has org-wide contents:read."
+            exit 1
+          fi
 
           # Find open + recently-merged items NOT already on project #2.
           # projectItems' includeArchived defaults to true, so an archived card counts
@@ -547,6 +592,7 @@ jobs:
           }
 
           : > added.tsv
+          add_fail=0
           while IFS= read -r line; do
             TYPE=$(echo "$line" | jq -r '.__typename')
             NID=$(echo "$line"  | jq -r '.id')
@@ -587,12 +633,31 @@ jobs:
                 echo "[OK]   added $REPO#$NUM ($DESC)"
               else
                 echo "[WARN] added $REPO#$NUM but Status set failed"
+                add_fail=$((add_fail+1))
               fi
               printf '%s\t%s\n' "$REPO#$NUM" "$DESC" >> added.tsv
             else
               echo "[FAIL] could not add $REPO#$NUM"
+              add_fail=$((add_fail+1))
             fi
           done < missing.ndjson
+
+          # Fail closed. Both branches above were printed and then forgotten - no
+          # counter, no non-zero exit - so this step could fail on every single item
+          # and still go green.
+          #
+          # [WARN] is counted as a failure, not tolerated, and it is the worse of the
+          # two: the card exists on the board with no Status, so it renders in no
+          # column and is invisible in every column view. Nor does anything repair
+          # it - the classify pass above reads a null Status as "No status" and
+          # routes that to no-action for both PRs and issues, and this membership
+          # sweep skips the card because it now IS on the board. A [FAIL] card at
+          # least stays missing and gets rediscovered by tomorrow's sweep; a
+          # Status-less one counts as present and is never revisited by either pass.
+          if [ "$add_fail" -ne 0 ]; then
+            echo "::error::$add_fail item(s) could not be added, or were added without a Status (see [FAIL]/[WARN] lines above). A card with no Status appears in no column."
+            exit 1
+          fi
 
       - name: Membership summary
         if: always() && steps.membership.outputs.count != '' && steps.membership.outputs.count != '0'
