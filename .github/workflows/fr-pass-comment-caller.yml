@@ -1,9 +1,14 @@
 name: FR pass comment
 
 # Template for each active repo. Copy this file into a repo's
-# .github/workflows/ directory to enable the /fr-pass comment shortcut
-# for advancing kanban items from "FR on dev" or "FR on staging" to the
-# next column.
+# .github/workflows/ directory to enable the /fr-pass comment shortcut, which
+# advances a kanban item from "FR on staging" → "Ready for prod" — the single
+# functional-review gate.
+#
+# RFC-BACKEND-1405 D6 retired the dev-side review: "On dev" is set automatically
+# when the release train merges to develop, so there is no "FR on dev" column.
+# This file is the source the per-repo callers are copied from, so a stale
+# transition named here propagates on the next copy.
 
 on:
   issue_comment:
