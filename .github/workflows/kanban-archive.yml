@@ -103,14 +103,17 @@ jobs:
           ok=0; fail=0
           while IFS= read -r itemId; do
             [ -z "$itemId" ] && continue
+            # `2>&1 >/dev/null` keeps stderr (the API error) and drops the mutation
+            # payload, which we never read. The reverse order would discard the one
+            # thing needed to diagnose a failure. Same form as advance-deploy-env.yml.
             # shellcheck disable=SC2016  # $names are GraphQL variables, not shell - keep literal
-            if gh api graphql -f query='
+            if err=$(gh api graphql -f query='
                 mutation($p: ID!, $i: ID!) {
                   archiveProjectV2Item(input: {projectId: $p, itemId: $i}) { item { id } }
-                }' -F p="$PROJECT_ID" -F i="$itemId" > /dev/null 2>&1; then
+                }' -F p="$PROJECT_ID" -F i="$itemId" 2>&1 >/dev/null); then
               ok=$((ok+1))
             else
-              echo "::warning::failed to archive item $itemId"
+              echo "::warning::failed to archive item $itemId: $err"
               fail=$((fail+1))
             fi
           done < terminal.ids
@@ -120,3 +123,14 @@ jobs:
             echo ""
             echo "Archived $ok terminal item(s), $fail failed."
           } >> "$GITHUB_STEP_SUMMARY"
+
+          # Fail closed. A failed archive leaves terminal work on the board, which
+          # is the exact condition this workflow exists to prevent, and nothing
+          # retries it beyond tomorrow's run hitting the same error. Exiting 0 here
+          # meant the board could degrade for weeks behind an unbroken green history
+          # - at ~800 items/month reaching Prod, slowly enough to look like normal
+          # growth. The summary is written above first so it survives this exit.
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::$fail of $((ok+fail)) terminal item(s) failed to archive (see warnings above)."
+            exit 1
+          fi
