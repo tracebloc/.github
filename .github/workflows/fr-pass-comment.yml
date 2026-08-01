@@ -37,14 +37,17 @@ on:
       allow-self-signoff:
         description: >-
           Allow the PR/issue author to sign off their own promotion on ANY item.
-          The default (false) keeps D30's two-pairs-of-eyes rule for real work.
-          Release-train promotion PRs are exempt regardless of this input (see
-          the self-signoff step): the FR gate on those evaluates the contained
-          items, so the promotion PR itself carries no review value. Flipping
+          Default TRUE as of 2026-08-01 (RFC-BACKEND-1405 D6). D30's original
+          two-pairs-of-eyes rule is retired: code review already puts a second
+          human on the diff, and most implementation is now AI-assisted, so
+          requiring a *different* human for the functional review was ceremony
+          rather than a control. Functional review still requires a human to
+          assert it — it just no longer has to be a different one. Set this to
+          false on a caller to restore the stricter rule for one repo. Changing
           this default changes the policy org-wide, since the per-repo callers
           pass no inputs.
         type: boolean
-        default: false
+        default: true
 
 # GITHUB_TOKEN stays read-only and is NOT used for any write here. Two reasons it
 # cannot be: the org default is `default_workflow_permissions: read`, and a called
