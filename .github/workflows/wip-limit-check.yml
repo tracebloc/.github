@@ -1,0 +1,58 @@
+name: WIP limit check (retired)
+
+# RETIRED — this workflow is a deliberate no-op tombstone. Do not restore the logic.
+#
+# It used to count the engineer kanban's "Code review" column and post a soft
+# nudge when it exceeded 30. That threshold assumed a human-paced queue; the
+# column now sits around 50 with items turning over in days, so the nudge fired
+# on nearly every PR and carried no signal. A limit that is always exceeded is
+# noise, not a limit. Retired org-wide (tracebloc/backend#1405).
+#
+# WHY A TOMBSTONE INSTEAD OF A DELETION -- this is the load-bearing part:
+#
+# Every caller referenced this file as `@main`, and a caller pointing at a
+# DELETED reusable does not degrade quietly: it fails hard, turning a soft
+# comment into a RED CHECK on every PR in that repo.
+#
+# The callers were removed from `develop` in 15 repos on 2026-08-02, but a
+# workflow file lives on every branch it was ever merged into. Measured that
+# day, the caller was still present on:
+#
+#   - `staging` in all 10 release-train repos
+#   - the prod branch (`main`/`master`) in 14 repos
+#
+# Those copies only disappear when the deletion propagates through a staging hop
+# and then a prod hop -- i.e. two full release cycles. Until then, any PR whose
+# BASE is one of those branches still invokes this file. Promotion PRs are
+# exactly that, so deleting this file would have broken the release train's own
+# PRs in every repo.
+#
+# A no-op keeps every lingering caller green and costs a few seconds of runner
+# time per invocation. Delete this file once `grep -r wip-limit-check` across all
+# branches of all repos comes back empty -- not before.
+
+on:
+  workflow_call:
+    # Inputs kept so existing callers -- including any that pass them explicitly
+    # on an old branch -- still type-check against this signature.
+    inputs:
+      project-number:
+        type: number
+        default: 2
+      org:
+        type: string
+        default: tracebloc
+      status-name:
+        type: string
+        default: "Code review"
+      limit:
+        type: number
+        default: 30
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: WIP limits are retired
+        run: |
+          echo "::notice::WIP limits are retired org-wide (tracebloc/backend#1405). This check is a no-op."
