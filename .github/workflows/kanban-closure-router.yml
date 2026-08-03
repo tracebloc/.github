@@ -98,11 +98,26 @@ jobs:
                 --jq '((.data.repository.issue.timelineItems.nodes // [])
                        | last) as $e
                       | (($e.closer.__typename // "NONE") + "|" + ($e.closer.baseRefName // ""))' \
-                2>/dev/null) || CLOSER="NONE|"
+                2>/dev/null) || CLOSER="ERROR|"
               CLOSER_TYPE="${CLOSER%%|*}"
               CLOSING_PR_BASE="${CLOSER#*|}"
+              # A genuinely absent closer is "NONE"; a lookup that FAILED is "ERROR".
+              # Those were the same value until backend#1411, which was harmless while
+              # no-closer meant "leave unchanged" -- but now no-closer means Done, so a
+              # transient GraphQL error would move a PR-closed issue to Done, and
+              # kanban-archive (which now archives Done) would hide it the next day.
+              # Converting a fail-open default into a fail-WRONG one is worse than
+              # either (Bugbot, .github#126). Anything unexpected, including an empty
+              # read, leaves the Status alone.
+              case "$CLOSER_TYPE" in
+                PullRequest|Commit|NONE) ;;
+                *) echo "::warning::could not read the closer for #$ISSUE_NUMBER (got '${CLOSER_TYPE:-empty}') - leaving Status unchanged rather than assuming a hand-close"
+                   CLOSER_TYPE="UNREADABLE" ;;
+              esac
 
-              if [ "$CLOSER_TYPE" = "PullRequest" ]; then
+              if [ "$CLOSER_TYPE" = "UNREADABLE" ]; then
+                : # decided above: no change
+              elif [ "$CLOSER_TYPE" = "PullRequest" ]; then
                 case "$CLOSING_PR_BASE" in
                   main|master) STATUS="Prod" ;;
                   staging)     STATUS="FR on staging" ;;
