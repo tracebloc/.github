@@ -63,12 +63,13 @@ jobs:
           # leave `sed` reading stdin forever.
           COMPARE_JSON=$(mktemp) || COMPARE_JSON=
           GH_STDERR=$(mktemp) || GH_STDERR=
-          if [ -z "$COMPARE_JSON" ] || [ -z "$GH_STDERR" ]; then
+          HAYSTACK_FILE=$(mktemp) || HAYSTACK_FILE=
+          if [ -z "$COMPARE_JSON" ] || [ -z "$GH_STDERR" ] || [ -z "$HAYSTACK_FILE" ]; then
             echo "::error::mktemp failed, so this gate cannot stage the data it must scan —"
             echo "::error::failing closed (backend#1409)."
             exit 1
           fi
-          trap 'rm -f "$COMPARE_JSON" "$GH_STDERR"' EXIT
+          trap 'rm -f "$COMPARE_JSON" "$GH_STDERR" "$HAYSTACK_FILE"' EXIT
 
           # backend#1409 defect 1: this used to warn and `exit 0`. The secret
           # does not exist org-wide, so every public repo showed a passing check
@@ -150,12 +151,7 @@ jobs:
             sed 's/^/  /' "$GH_STDERR"
             exit 1
           fi
-          HAYSTACK=$(printf '%s\n%s\n%s' "${PR_TITLE:-}" "${PR_BODY:-}" "$COMMITS")
-
-          # Check each denylist term (comma-separated). Never echo the term or
-          # the matched line — only a generic error, so the gate can't leak.
-          #
-          # backend#1409 defect 2: the test was
+          # backend#1409 defect 2: the test used to be
           #   printf '%s' "$HAYSTACK" | grep -iqF -- "$t"
           # `grep -q` exits on its first match and closes the pipe, printf then
           # takes SIGPIPE, and under `pipefail` the pipeline returns 141 — so
@@ -164,16 +160,40 @@ jobs:
           # early line and a haystack past the 64KB pipe buffer:
           # `rc=141 PIPESTATUS=141 0`. Title comes first in the haystack, so an
           # early match on a large PR was the likely case, i.e. the gate was
-          # least reliable exactly when it mattered most. A herestring feeds
-          # grep from a temp file: no pipe, nothing to break.
+          # least reliable exactly when it mattered most.
+          #
+          # The fix is to give grep the haystack without a pipe. Staged in a
+          # named file rather than the `<<<"$HAYSTACK"` herestring the ticket
+          # suggests: a herestring is a temp file too, but if bash cannot create
+          # it the redirection fails, grep never runs, and the status is 1 —
+          # exactly the code that means "no match". Reading a named file, grep
+          # itself returns 2 on any read failure, so "could not check" stays
+          # distinguishable from "checked, found nothing". Written once, not
+          # once per term.
+          if ! printf '%s\n%s\n%s' "${PR_TITLE:-}" "${PR_BODY:-}" "$COMMITS" \
+            >"$HAYSTACK_FILE"; then
+            echo "::error::Could not stage the text to be scanned, so nothing was compared —"
+            echo "::error::failing closed (backend#1409)."
+            exit 1
+          fi
+
+          # Check each denylist term (comma-separated). Never echo the term or
+          # the matched line — only a generic error, so the gate can't leak.
           HIT=0
           CHECKED=0
           OLDIFS="$IFS"; IFS=','
           for term in $DENYLIST; do
-            t=$(printf '%s' "$term" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            # A failed trim would yield an empty $t, which is indistinguishable
+            # from an empty term and would skip the check silently.
+            if ! t=$(printf '%s' "$term" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); then
+              IFS="$OLDIFS"
+              echo "::error::Could not normalise a denylist term, so it was never evaluated —"
+              echo "::error::failing closed (backend#1409)."
+              exit 1
+            fi
             [ -z "$t" ] && continue
             CHECKED=$((CHECKED + 1))
-            grep -iqF -- "$t" <<<"$HAYSTACK"
+            grep -iqF -- "$t" "$HAYSTACK_FILE"
             rc=$?
             case "$rc" in
               0) HIT=1 ;;
