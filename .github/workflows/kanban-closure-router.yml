@@ -195,10 +195,10 @@ jobs:
           # Find item ID for this PR or issue
           if [ "$IS_PR" = "true" ]; then
             # shellcheck disable=SC2016  # $num is a GraphQL variable - must not expand in shell
-            FIELD_QUERY='pullRequest(number: $num) { projectItems(first: 10) { nodes { id project { number } } } }'
+            FIELD_QUERY='pullRequest(number: $num) { projectItems(first: 10) { nodes { id project { number } fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } } } } }'
           else
             # shellcheck disable=SC2016  # $num is a GraphQL variable - must not expand in shell
-            FIELD_QUERY='issue(number: $num) { projectItems(first: 10) { nodes { id project { number } } } }'
+            FIELD_QUERY='issue(number: $num) { projectItems(first: 10) { nodes { id project { number } fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } } } } }'
           fi
 
           # Retry briefly to let auto-add fire if needed
@@ -213,6 +213,9 @@ jobs:
             ITEM_ID=$(echo "$RESP" | jq -r --arg n "$PROJECT_NUMBER" '
               ([.. | objects | select(has("projectItems"))] | first).projectItems.nodes[]?
               | select(.project.number == ($n | tonumber)) | .id' | head -1)
+            CURRENT_COL=$(echo "$RESP" | jq -r --arg n "$PROJECT_NUMBER" '
+              ([.. | objects | select(has("projectItems"))] | first).projectItems.nodes[]?
+              | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' | head -1)
             if [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then break; fi
             echo "Item not yet on project, retry $i/5..."
             sleep 5
@@ -221,6 +224,23 @@ jobs:
           if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
             echo "Item #$NUMBER not on project after 5 retries — skipping."
             exit 0
+          fi
+
+          # Done means "completed, nothing deployed" (D8), so it must never overwrite a
+          # column that records a deployment. kanban-reconcile.yml refuses this and the
+          # router did not, which is an asymmetry with a real path: reopen, then
+          # hand-close an issue sitting in On dev / FR on staging / Ready for prod, and
+          # the deploy state is gone -- after which kanban-archive.yml, which now
+          # archives Done, hides the card entirely (Bugbot, .github#126).
+          #
+          # Only Done is guarded. A PR-derived Status is a deploy fact and may advance a
+          # card normally.
+          if [ "$STATUS_NAME" = "Done" ]; then
+            case "${CURRENT_COL:-}" in
+              "On dev"|"FR on staging"|"Ready for prod"|"Prod")
+                echo "::notice::#$NUMBER hand-closed but sits in '$CURRENT_COL', a deploy state - NOT setting Done (D8: follow the PR's stage)"
+                exit 0 ;;
+            esac
           fi
 
           # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
