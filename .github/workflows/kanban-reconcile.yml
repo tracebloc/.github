@@ -298,9 +298,10 @@ jobs:
                 if [ "$SR" = "NOT_PLANNED" ] || [ "$SR" = "DUPLICATE" ]; then
                   printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$CANCELLED_OPT" "$REPO#$NUM closed issue $SR ($COL -> Cancelled)" "cancelled" >> moves.tsv
                 else
-                  # Done means "completed, nothing deployed" (D8). Only a card with NO
-                  # deploy state qualifies. A closed-completed issue already sitting in
-                  # a deploy column got there from a real deploy signal -- so Done would
+                  # Done means "completed, nothing deployed" (D8), so it needs TWO things
+                  # to be true: the card carries no deploy state, AND nothing closed it.
+                  # A closed-completed issue already sitting in a deploy column got there
+                  # from a real deploy signal -- so Done would
                   # assert nothing shipped about work that did, and would overwrite what
                   # kanban-closure-router correctly set (Bugbot, .github#126).
                   #
@@ -312,9 +313,48 @@ jobs:
                   # conflict is flagged on backend#1411 for a human to settle.
                   case "$COL" in
                     "On dev"|"FR on staging"|"Ready for prod"|"Prod")
-                      echo "  [SKIP] $REPO#$NUM closed-completed in $COL - a deploy state, so NOT Done; D8 says follow the PR's stage" ;;
+                      echo "  [SKIP] $REPO#$NUM closed-completed in $COL - a deploy state, so NOT Done; D8 says follow the PR's stage"
+                      ;;
                     *)
-                      printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$DONE_OPT" "$REPO#$NUM closed issue completed ($COL -> Done)" "closed-issue-terminalized" >> moves.tsv ;;
+                      # The column is NOT sufficient evidence on its own. It was the only
+                      # check here until now, and it is circular: the column is exactly
+                      # what is wrong when kanban-closure-router misses a close -- its
+                      # closer lookup can fail, in which case it deliberately leaves
+                      # Status alone and the card stays wherever it was. Asserting Done
+                      # off that column claims "nothing deployed" about work that shipped,
+                      # and kanban-archive then hides it (Bugbot, .github#127).
+                      #
+                      # So ask the question directly: is there a closer? Only a genuinely
+                      # closer-less issue is "completed, nothing deployed".
+                      # shellcheck disable=SC2016  # $names are GraphQL variables
+                      CLOSER=$(gh api graphql -f query='
+                        query($org: String!, $repo: String!, $num: Int!) {
+                          repository(owner: $org, name: $repo) {
+                            issue(number: $num) {
+                              timelineItems(last: 10, itemTypes: [CLOSED_EVENT]) {
+                                nodes { ... on ClosedEvent { closer { __typename } } }
+                              }
+                            }
+                          }
+                        }' -F org="$ORG" -F repo="$REPO" -F num="$NUM" \
+                        --jq '((.data.repository.issue.timelineItems.nodes // []) | last)
+                              | (.closer.__typename // "NONE")' 2>/dev/null) || CLOSER="ERROR"
+                      case "$CLOSER" in
+                        NONE)
+                          printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$DONE_OPT" "$REPO#$NUM closed issue completed, no closer ($COL -> Done)" "closed-issue-terminalized" >> moves.tsv
+                          ;;
+                        PullRequest|Commit)
+                          # It shipped somewhere. The router owns the stage; if the card is
+                          # not in a deploy column the router missed it, and guessing here
+                          # is how a deployed item becomes "nothing deployed".
+                          echo "  [SKIP] $REPO#$NUM closed-completed by a $CLOSER but sits in $COL - NOT Done; the router owns the stage (re-run it or fix the card)"
+                          ;;
+                        *)
+                          # Unreadable. Not evidence of absence.
+                          echo "  [SKIP] $REPO#$NUM closed-completed but the closer lookup failed ($CLOSER) - refusing to assert Done"
+                          ;;
+                      esac
+                      ;;
                   esac
                 fi
                 continue
