@@ -642,7 +642,7 @@ repos:
 
   tracebloc-website:
     visibility: private
-    release_train: false
+    release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
