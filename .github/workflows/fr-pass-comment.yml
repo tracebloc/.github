@@ -21,6 +21,21 @@ name: FR pass comment handler
 #   about /fr-pass" filter; authorisation, self-signoff, board membership and the
 #   column check all happen in steps that can report.
 #
+# A REFUSAL IS NOT A SUCCESS  (backend#1413)
+#   Exactly three outcomes exit 0 — `advanced`, `already-advanced` and
+#   `not-a-command`. EVERY other terminating path exits 1, including
+#   `not-authorised`, `self-signoff`, `not-on-project`, `ambiguous-item`,
+#   `no-status` and `wrong-column`, where the handler worked perfectly and
+#   correctly declined to move the card.
+#
+#   Failing a deliberate refusal reads oddly, and it is the point. `gh run list`
+#   is the only place anyone reads many threads at once, and green there means
+#   "the card moved". While those six exited 0, 26 green runs concealed three
+#   cards that had not moved; the refusal was diagnosed as a bug in the advance
+#   logic and the cards were then moved by hand through the project API —
+#   bypassing the control rather than satisfying it. The 👎 and its note stay the
+#   real explanation; a red run is just the cheapest signal that one exists.
+#
 # WHY A COMMENT GATE
 #   It leaves a record on the thread, so reviewers can see who passed FR and
 #   when. Dragging the card on the kanban works too — this is the shortcut.
@@ -65,13 +80,43 @@ permissions:
 
 jobs:
   advance:
-    # The ONLY job-level condition: does this comment mention /fr-pass at all?
-    # Deliberately loose — GitHub's contains() is a case-insensitive substring
-    # test, so "/FR-PASS", leading whitespace and trailing text all get through.
-    # Loose is the point: a comment that gets in but turns out not to be the
-    # command exits silently from the first step, whereas a genuine command that
-    # never gets in can never be reported. The precise match lives in the step.
-    if: contains(github.event.comment.body, '/fr-pass')
+    # The job-level conditions are a cheap "is this even about /fr-pass" filter
+    # and nothing more; no decision lives here (see NEVER NO-OP IN SILENCE).
+    #
+    # The first is deliberately loose — GitHub's contains() is a case-insensitive
+    # substring test, so "/FR-PASS", leading whitespace and trailing text all get
+    # through. Loose is the point: a comment that gets in but turns out not to be
+    # the command exits silently from the first step, whereas a genuine command
+    # that never gets in can never be reported. The precise match lives in the
+    # step.
+    #
+    # The other two stop this handler answering itself (backend#1413). Every
+    # refusal note below contains the literal string `/fr-pass`, so posting one
+    # re-fired this workflow — 6 of the 26 runs on 2026-08-01 were the bot reading
+    # its own comment. That only ever terminated because the step's anchored grep
+    # rejects a line starting with an emoji, which is luck, not a design: reflow a
+    # note so `/fr-pass` lands first on its line and it loops until the concurrency
+    # limits bite.
+    #
+    #   * Not a bot account. This is the guard the loop *should* have needed, and
+    #     today it catches nothing — the writes use PROJECTS_KANBAN_TOKEN, a PAT
+    #     belonging to a human, so the handler's own comments arrive under that
+    #     person's login, indistinguishable from their real reviews. Keyed on the
+    #     account type rather than a login for exactly that reason: hard-coding
+    #     the login would lock out the busiest reviewer, and moving the token to a
+    #     GitHub App later makes this clause the whole fix on its own.
+    #   * Not one of our own notes. This is what actually breaks the loop, against
+    #     a marker the reporting step prepends to every note it posts, so it holds
+    #     however the wording is later reflowed. startsWith, not contains, and the
+    #     marker goes first for that reason: GitHub's "Quote reply" prefixes "> ",
+    #     so a human who quotes a refusal and issues the command underneath is
+    #     still heard. Skipping a verbatim note of our own costs nothing — there is
+    #     nobody to report to, and 👎-ing our own comment is precisely the noise the
+    #     not-a-command exception exists to avoid.
+    if: >-
+      contains(github.event.comment.body, '/fr-pass')
+      && github.event.comment.user.type != 'Bot'
+      && !startsWith(github.event.comment.body, '<!-- fr-pass-handler -->')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -172,7 +217,7 @@ jobs:
               "🚫 \`/fr-pass\` was **not** applied: @$ACTOR does not have write access to \`$REPO_FULL\`." \
               "" \
               "Functional sign-off is limited to people who can write to the repository (seen: permission \`${PERM:-unknown}\`, association \`$ASSOCIATION\`). Ask someone on the team to sign off, or move the card by hand on the [engineering kanban]($BOARD_URL)."
-            exit 0
+            exit 1
           fi
 
           # -------------------------- 3a. is this a release-train promotion?
@@ -217,7 +262,7 @@ jobs:
               "Ask another team member to comment \`/fr-pass\`, or move the card to **Ready for prod** on the [engineering kanban]($BOARD_URL) if you are deliberately overriding the rule." \
               "" \
               "_Release-train promotion PRs are exempt from this rule automatically. To allow self sign-off on everything org-wide, set \`allow-self-signoff: true\` on \`fr-pass-comment.yml\`._"
-            exit 0
+            exit 1
           fi
 
           # ----------------------------------------- 4. resolve the board item
@@ -310,7 +355,7 @@ jobs:
               "🔍 \`/fr-pass\` did nothing: this item is not on the [engineering kanban]($BOARD_URL) (project #$PROJECT_NUMBER), so there is no card to advance." \
               "" \
               "\`add-to-kanban.yml\` normally adds every new issue and PR. If it was missed, add the card, set **FR on staging**, then comment \`/fr-pass\` again. If the tracked work lives on a linked issue rather than this PR, sign off there instead."
-            exit 0
+            exit 1
           fi
 
           if [ "$ITEM_COUNT" != "1" ]; then
@@ -320,7 +365,7 @@ jobs:
               "⚠️ \`/fr-pass\` did nothing: this item resolves to $ITEM_COUNT separate cards on project #$PROJECT_NUMBER, so the handler will not guess which one to advance." \
               "" \
               "Clean up the duplicate on the [engineering kanban]($BOARD_URL) and comment \`/fr-pass\` again."
-            exit 0
+            exit 1
           fi
 
           ITEM_ID=$(printf '%s' "$NODES" | jq -r '.[0].id')
@@ -351,6 +396,9 @@ jobs:
                 "✅ Nothing to do: this card is already in **$CURRENT**, past the staging functional review." \
                 "" \
                 "No change made — you can ignore this."
+              # Stays 0: the gate is already satisfied, so the caller got the
+              # state they asked for. Nothing is left for a human to do, which is
+              # the only thing a red run is here to say.
               exit 0
               ;;
             "")
@@ -358,14 +406,14 @@ jobs:
                 "🔍 \`/fr-pass\` did nothing: this card is on the board but its \`Status\` is empty, so there is no column to advance from." \
                 "" \
                 "Set it to **FR on staging** on the [engineering kanban]($BOARD_URL) and comment \`/fr-pass\` again."
-              exit 0
+              exit 1
               ;;
             *)
               decide wrong-column \
                 "🔍 \`/fr-pass\` did nothing: this card is in **$CURRENT**, and \`/fr-pass\` only advances **FR on staging → Ready for prod** (the one functional-review gate)." \
                 "" \
                 "Promote it to **FR on staging** first — that happens automatically when the release train pushes to \`staging\`."
-              exit 0
+              exit 1
               ;;
           esac
 
@@ -469,7 +517,14 @@ jobs:
           # Explanation. Only outcomes that are a real problem carry a note; a
           # clean advance stays a bare 👍 so the happy path keeps the thread quiet.
           if [ -s "$NOTE_FILE" ]; then
-            BODY=$(cat "$NOTE_FILE")
+            # Prepend the marker the job `if` tests for, so this handler can
+            # recognise its own notes and not answer them (backend#1413). Added
+            # here, at the single place a note is posted, rather than in each
+            # `decide` call above — a note that forgets it would resurrect the
+            # loop. First line, because the job `if` uses startsWith. HTML
+            # comments are stripped when GitHub renders markdown but kept in the
+            # stored body the event carries, so the thread reads as it did before.
+            BODY=$(printf '%s\n\n%s\n' '<!-- fr-pass-handler -->' "$(cat "$NOTE_FILE")")
             COMMENT_ERR="$RUNNER_TEMP/fr-pass.comment.err"
             # REST, not `gh pr/issue comment`: a PR's conversation IS an issue, so
             # this one endpoint covers both without branching on the item type.

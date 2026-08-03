@@ -1,11 +1,40 @@
-name: WIP limit check (Code review)
+name: WIP limit check (retired)
 
-# Reusable workflow. When a PR opens, checks the engineer kanban's "Code review"
-# column count. If over the WIP limit, posts a soft nudge comment on the new PR
-# listing what's already in the queue. Doesn't block anything.
+# RETIRED — this workflow is a deliberate no-op tombstone. Do not restore the logic.
+#
+# It used to count the engineer kanban's "Code review" column and post a soft
+# nudge when it exceeded 30. That threshold assumed a human-paced queue; the
+# column now sits around 50 with items turning over in days, so the nudge fired
+# on nearly every PR and carried no signal. A limit that is always exceeded is
+# noise, not a limit. Retired org-wide (tracebloc/backend#1405).
+#
+# WHY A TOMBSTONE INSTEAD OF A DELETION -- this is the load-bearing part:
+#
+# Every caller referenced this file as `@main`, and a caller pointing at a
+# DELETED reusable does not degrade quietly: it fails hard, turning a soft
+# comment into a RED CHECK on every PR in that repo.
+#
+# The callers were removed from `develop` in 15 repos on 2026-08-02, but a
+# workflow file lives on every branch it was ever merged into. Measured that
+# day, the caller was still present on:
+#
+#   - `staging` in all 10 release-train repos
+#   - the prod branch (`main`/`master`) in 14 repos
+#
+# Those copies only disappear when the deletion propagates through a staging hop
+# and then a prod hop -- i.e. two full release cycles. Until then, any PR whose
+# BASE is one of those branches still invokes this file. Promotion PRs are
+# exactly that, so deleting this file would have broken the release train's own
+# PRs in every repo.
+#
+# A no-op keeps every lingering caller green and costs a few seconds of runner
+# time per invocation. Delete this file once `grep -r wip-limit-check` across all
+# branches of all repos comes back empty -- not before.
 
 on:
   workflow_call:
+    # Inputs kept so existing callers -- including any that pass them explicitly
+    # on an old branch -- still type-check against this signature.
     inputs:
       project-number:
         type: number
@@ -24,97 +53,6 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Count items in Code review and comment if over limit
-        env:
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
-          ORG: ${{ inputs.org }}
-          PROJECT_NUMBER: ${{ inputs.project-number }}
-          STATUS_NAME: ${{ inputs.status-name }}
-          LIMIT: ${{ inputs.limit }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO_FULL: ${{ github.repository }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+      - name: WIP limits are retired
         run: |
-          set -euo pipefail
-
-          # Fetch all project items with their Status + content (paginate)
-          cursor="null"
-          # Truncate with `: >`, not a bare `>`: a redirection needs a command, and the
-          # no-op `:` is the portable one (same form as kanban-reconcile.yml).
-          : > /tmp/items.txt
-          while true; do
-            if [ "$cursor" = "null" ]; then after=""; else after=", after: \"$cursor\""; fi
-            page=$(gh api graphql -f query="
-              query {
-                organization(login: \"$ORG\") {
-                  projectV2(number: $PROJECT_NUMBER) {
-                    items(first: 100$after) {
-                      pageInfo { hasNextPage endCursor }
-                      nodes {
-                        fieldValues(first: 30) {
-                          nodes {
-                            ... on ProjectV2ItemFieldSingleSelectValue {
-                              field { ... on ProjectV2SingleSelectField { name } }
-                              name
-                            }
-                          }
-                        }
-                        content {
-                          ... on PullRequest {
-                            number title state isDraft updatedAt
-                            repository { name }
-                            author { login }
-                            reviewRequests(first: 5) { nodes { requestedReviewer { ... on User { login } } } }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }")
-            echo "$page" | jq -c '.data.organization.projectV2.items.nodes[]' >> /tmp/items.txt
-            hasNext=$(echo "$page" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
-            cursor=$(echo "$page" | jq -r '.data.organization.projectV2.items.pageInfo.endCursor')
-            [ "$hasNext" != "true" ] && break
-          done
-
-          # Filter to PRs in target Status, currently OPEN, not draft
-          jq -c --arg s "$STATUS_NAME" '
-            select(.content.state == "OPEN" and .content.isDraft == false
-                   and (.fieldValues.nodes[]? | select(.field.name == "Status") | .name) == $s)
-          ' /tmp/items.txt > /tmp/inreview.txt
-
-          COUNT=$(wc -l < /tmp/inreview.txt | tr -d ' ')
-          echo "Code review queue depth: $COUNT (limit: $LIMIT)"
-
-          if [ "$COUNT" -le "$LIMIT" ]; then
-            echo "Within limit — no comment needed."
-            exit 0
-          fi
-
-          # Build the list of PRs in queue (oldest first), exclude this PR + the new author's own PRs
-          BODY_FILE=$(mktemp)
-          {
-            echo "👋 **Heads-up — Code review queue is at $COUNT / $LIMIT**"
-            echo ""
-            echo "Above the WIP limit. The team convention is to review existing PRs before opening new work."
-            echo ""
-            echo "Open PRs currently in Code review (oldest first):"
-            echo ""
-            jq -r --arg me "$PR_AUTHOR" --arg pr "$PR_NUMBER" --arg org "$ORG" '
-              .content as $c
-              | select($c.number != ($pr | tonumber))
-              | "- [\($c.repository.name)#\($c.number)](https://github.com/\($org)/\($c.repository.name)/pull/\($c.number)) — \($c.title) · author: @\($c.author.login) · " +
-                ((.content.reviewRequests.nodes | map(.requestedReviewer.login) | map(select(.)) | join(", @")) as $rev
-                 | if ($rev | length) > 0 then "reviewer: @\($rev)" else "no reviewer assigned" end)
-            ' /tmp/inreview.txt | sort > /tmp/inreview_sorted.txt
-            # NB: don't pipe `sort | head` directly — once head closes the pipe
-            # after 10 lines, sort gets SIGPIPE/EPIPE and exits non-zero, which
-            # under `set -o pipefail` fails the whole step. Sort to a file, then head it.
-            head -10 /tmp/inreview_sorted.txt
-            echo ""
-            echo "Pull from review before opening new work. _(This is a nudge from the kanban WIP check, not a block.)_"
-          } > "$BODY_FILE"
-
-          gh pr comment "$PR_NUMBER" --repo "$REPO_FULL" --body-file "$BODY_FILE"
-          echo "Posted WIP-overage comment on PR #$PR_NUMBER"
+          echo "::notice::WIP limits are retired org-wide (tracebloc/backend#1405). This check is a no-op."
