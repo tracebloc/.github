@@ -315,7 +315,7 @@ jobs:
           # it is AT OR BEYOND the required stage — e.g. an item already in "Prod"
           # trivially satisfies an "On dev" gate. Strict equality used to
           # falsely block already-promoted items that reappear in a later promotion's
-          # commit range. Unknown statuses (incl. "Cancelled") return empty and fall
+          # commit range. Unknown statuses return empty and fall
           # through to the strict-equality path below, preserving the old behavior.
           rank() {
             case "$1" in
@@ -328,6 +328,11 @@ jobs:
               "FR on staging")     echo 7  ;;
               "Ready for prod")    echo 8  ;;
               "Prod")              echo 9  ;;
+              # Terminal, and therefore NOT blocking. Both fell through to "" and then
+              # to the strict-equality path, so a single Done card blocked every prod
+              # promotion that carried it (RFC-BACKEND-1405 D8, backend#1411).
+              "Done")              echo 10 ;;
+              "Cancelled")         echo 10 ;;
               *)                   echo "" ;;
             esac
           }

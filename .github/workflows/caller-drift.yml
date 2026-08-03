@@ -1,0 +1,205 @@
+# Caller-inventory drift guard (tracebloc/backend#1415).
+#
+# WHY THIS EXISTS: nothing in the org detected a missing caller.
+# merge-settings-drift.yml reads three booleans. kanban-reconcile.yml:436 probes a
+# single filename to decide board scope, so a 403 there is indistinguishable from
+# "repo not tracked". Eight repos drifted unnoticed, and e2e-test-agent#1 closed
+# without routing because no closure caller exists in that repo at all. A caller
+# that is simply absent produces no run, no annotation and no red check — the
+# absence of a signal is not a signal, which is why it went unnoticed for months.
+#
+# WHAT IT COMPARES: /repo-inventory.yml, the single source of truth, against every
+# active repo in the org. Matching is on the resolved `uses:` value of a parsed
+# workflow, never on filename — two filename conventions are mixed within nearly
+# every repo, kanban-closure-router's callers match neither, and code-quality.yml:60
+# is a commented-out example that a grep would count as a caller. It reads the
+# develop-first branch: twelve of twenty repos default to main/master while work
+# lands on develop, so a default-branch audit under-reports anything in flight.
+#
+# REPORT-ONLY, like merge-settings-drift.yml. It never opens a PR and never edits a
+# repo; the sync job that opens caller PRs is deliberately deferred (backend#1415).
+# The token therefore only needs org-wide read.
+#
+# FAIL-CLOSED: every read either yields a value or is recorded as unreadable, and
+# one unreadable repo fails the run. There is no path from a 403, a rate limit, an
+# unparseable workflow, a truncated tree or a missing inventory key to a green run.
+# The final step fails on anything other than a literal exit code of 0, including
+# an absent one — a skipped or crashed audit step must not read as all-clear.
+#
+# All interpolations reach shell through `env:` and are read as quoted variables,
+# never spliced into a command line.
+
+name: Caller inventory drift
+
+on:
+  schedule:
+    - cron: '30 6 * * 1' # Mondays 06:30 UTC, right after merge-settings-drift
+  workflow_dispatch:
+  # Edits to the inventory or the guard are validated against reality on the PR
+  # that makes them, so a wrong inventory cannot reach develop unchallenged.
+  pull_request:
+    paths:
+      - repo-inventory.yml
+      - scripts/caller-drift.py
+      - scripts/tests/caller-drift-selftest.py
+      - .github/workflows/caller-drift.yml
+  push:
+    branches: [main, develop]
+    paths:
+      - repo-inventory.yml
+      - scripts/caller-drift.py
+      - scripts/tests/caller-drift-selftest.py
+      - .github/workflows/caller-drift.yml
+
+permissions:
+  contents: read
+  issues: write # the drift report lands on a tracking issue
+
+concurrency:
+  group: caller-drift-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The guard's own fail-closed paths, asserted offline with a stubbed `gh`: a 403,
+  # a rate limit, a truncated tree, an unparseable workflow and a missing inventory
+  # key must each produce a FAILURE, never "no caller found". The audit needs this,
+  # so a regression here stops the audit from reporting at all rather than letting
+  # it report all-clear from a broken comparison.
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet --disable-pip-version-check 'pyyaml==6.0.2'
+      - run: python scripts/tests/caller-drift-selftest.py
+
+  audit:
+    needs: selftest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        # The guard parses workflows as YAML rather than grepping them, so there is
+        # no degraded mode worth having. If this step fails, the audit step is
+        # skipped, its exit_code output is empty, and the final step fails on the
+        # empty value rather than letting a skipped audit look clean.
+        run: python -m pip install --quiet --disable-pip-version-check 'pyyaml==6.0.2'
+
+      - name: Check the audit token is present
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::PROJECTS_KANBAN_TOKEN is empty. Without it the org listing" \
+                 "returns nothing and every check would pass against an empty scope." >&2
+            exit 1
+          fi
+
+      - name: Compare every active repo against repo-inventory.yml
+        id: audit
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+        run: |
+          set -uo pipefail
+          # The exit code is recorded rather than raised so that the reporting step
+          # below still runs on a failure. The step itself therefore always exits 0
+          # — the run is failed by the final step, from this recorded value.
+          set +e
+          python scripts/caller-drift.py \
+            --inventory repo-inventory.yml \
+            --source-dir .
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          echo "The audit exited $code (0 clean, 1 drift, 2 could not evaluate)."
+
+      - name: Report on the tracking issue
+        # Only on scheduled and manual runs: a PR that edits the inventory gets its
+        # answer from the check itself, and a comment per push would train everyone
+        # to ignore the issue (backend#1344 — five silent failures nobody read).
+        # No all-clear comment ever, for the same reason.
+        if: >-
+          always()
+          && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+          && steps.audit.outputs.exit_code != '0'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          CODE: ${{ steps.audit.outputs.exit_code }}
+          REPORT: ${{ steps.audit.outputs.report }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          code="${CODE:-}"
+
+          # shellcheck disable=SC2016  # the backticks below are markdown code spans
+          # in the issue body, not command substitution — they must stay literal,
+          # which is exactly why these printf strings are single-quoted.
+          {
+            case "$code" in
+              1)
+                printf '## Caller inventory drift\n\n'
+                printf 'Reality has diverged from `repo-inventory.yml`. Either a repo lost a\n'
+                printf 'caller, or the inventory is out of date — the report below says which.\n\n'
+                ;;
+              2)
+                printf '## Caller inventory could NOT be evaluated\n\n'
+                printf 'This is not a clean result. Either `repo-inventory.yml` failed schema\n'
+                printf 'validation, or one or more repos could not be read. Repos that could not\n'
+                printf 'be read are **not** known to comply — fix the token or the inventory and\n'
+                printf 're-run before drawing any conclusion.\n\n'
+                ;;
+              *)
+                printf '## Caller inventory guard did not report a result\n\n'
+                printf 'The audit step produced exit code `%s`, which it should never do. Treat\n' "${code:-<empty>}"
+                printf 'the caller state across the org as UNKNOWN until this is explained.\n\n'
+                ;;
+            esac
+            if [ -n "${REPORT:-}" ]; then
+              printf '%s\n\n' "$REPORT"
+            else
+              printf 'The audit produced no report body — see the run log.\n\n'
+            fi
+            printf '[Run log](%s)\n' "$RUN_URL"
+          } > body.md
+          gh issue comment 1415 --repo tracebloc/backend --body-file body.md
+
+      - name: Fail the run unless the audit came back clean
+        # A green run must mean "the inventory matches reality", never merely "the
+        # workflow executed". Anything other than a literal 0 fails, and an absent
+        # value fails hardest: it means the audit step was skipped or died, which is
+        # exactly the failure-that-reports-success this whole guard is about.
+        if: always()
+        env:
+          CODE: ${{ steps.audit.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          code="${CODE:-}"
+          case "$code" in
+            0)
+              echo "Every active repo read; every inventory entry matched."
+              ;;
+            1)
+              echo "::error::Caller-inventory drift detected. See the run summary." >&2
+              exit 1
+              ;;
+            2)
+              echo "::error::The caller inventory could not be evaluated — bad inventory," \
+                   "failed org enumeration, or an unreadable repo. This is NOT an all-clear." >&2
+              exit 1
+              ;;
+            *)
+              echo "::error::The audit step reported no exit code ('$code'). It was skipped or" \
+                   "it crashed; caller state across the org is UNKNOWN. Failing closed." >&2
+              exit 1
+              ;;
+          esac
