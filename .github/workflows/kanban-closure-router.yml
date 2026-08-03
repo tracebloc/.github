@@ -106,7 +106,8 @@ jobs:
                 }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$ISSUE_NUMBER" \
                 --jq '((.data.repository.issue.timelineItems.nodes // [])
                        | last) as $e
-                      | (($e.closer.__typename // "NONE") + "|" + ($e.closer.baseRefName // ""))' \
+                      | if $e == null then "NOEVENT|"
+                        else (($e.closer.__typename // "NONE") + "|" + ($e.closer.baseRefName // "")) end' \
                 2>/dev/null) || CLOSER="ERROR|"
               CLOSER_TYPE="${CLOSER%%|*}"
               CLOSING_PR_BASE="${CLOSER#*|}"
@@ -118,9 +119,18 @@ jobs:
               # Converting a fail-open default into a fail-WRONG one is worse than
               # either (Bugbot, .github#126). Anything unexpected, including an empty
               # read, leaves the Status alone.
+              #
+              # "NOEVENT" is the third distinct answer, and only the jq above can tell
+              # it apart: a ClosedEvent whose closer is null means HAND-CLOSED, while no
+              # ClosedEvent at all means the timeline had nothing to say. Both used to
+              # emit "NONE" -- along with a null `issue` and a null `repository` -- and
+              # five different situations arrived here as one token (Bugbot, .github#127).
+              # Only the first is evidence of a hand-close; the rest are absence of
+              # evidence, and Done now archives what it touches. NOEVENT is deliberately
+              # NOT added to the allowlist below, so it lands in UNREADABLE.
               case "$CLOSER_TYPE" in
                 PullRequest|Commit|NONE) ;;
-                *) echo "::warning::could not read the closer for #$ISSUE_NUMBER (got '${CLOSER_TYPE:-empty}') - leaving Status unchanged rather than assuming a hand-close"
+                *) echo "::warning::could not confirm the closer for #$ISSUE_NUMBER (got '${CLOSER_TYPE:-empty}') - leaving Status unchanged rather than assuming a hand-close"
                    CLOSER_TYPE="UNREADABLE" ;;
               esac
 
