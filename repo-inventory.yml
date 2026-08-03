@@ -1,0 +1,653 @@
+# repo-inventory.yml - which tracebloc/.github reusable workflows every active
+# repo must call. THE single source of truth; `.github/workflows/caller-drift.yml`
+# fails when reality diverges from it.
+#
+# WHY THIS FILE EXISTS (tracebloc/backend#1415)
+# Nothing in the org detected a missing caller. merge-settings-drift.yml reads
+# three booleans; kanban-reconcile.yml probes one filename to decide board scope.
+# That is how eight repos drifted unnoticed and how e2e-test-agent#1 closed
+# without routing - there is no closure caller there to route it.
+#
+# THE SCHEMA DECISION: ABSENCE IS NEVER IMPLICIT.
+# Every repo carries an entry for EVERY reusable and EVERY copy. Each entry is
+# exactly one of:
+#
+#   required            the caller must be present (copies: content must match)
+#   exempt: "<reason>"  the caller must be absent, and WHY is written down
+#   divergent: "<reason>"  copies only: present, content knowingly differs
+#
+# A missing key is a GUARD FAILURE, not a default. An `exempt` with an empty or
+# absent reason is a guard failure. A repo present in the org but absent from this
+# file is a guard failure, and vice versa. There is no way to make the guard
+# quiet by leaving something out - only by writing down why.
+#
+# An exemption is a finding with a name on it, not permission. Several below say
+# UNREMEDIATED in so many words: that is the audit trail backend#1415 asked for.
+#
+# MATCHING IS ON `uses:` CONTENT, NEVER ON FILENAME.
+# Two filename conventions are mixed within nearly every repo, per-reusable:
+# fr-gate, fr-pass-comment, public-pii-gate and code-quality use `<name>-caller.yml`
+# everywhere; customer-priority-bump uses the reusable's own name everywhere;
+# advance-deploy-env, set-pr-status and kanban-closure-router use `-caller.yml` in
+# .github and the plain name in all 14-16 others; kanban-closure-router's callers
+# (`kanban-closure-caller.yml` / `kanban-closure-routing.yml`) match NEITHER
+# pattern. A filename audit cannot tell a caller from a local copy, so the guard
+# parses each workflow as YAML and reads the resolved `uses:` values. Parsing also
+# means a commented-out example line - code-quality.yml:60 - is not counted as a
+# caller. Renaming is safe: required checks reference job IDs (`gate / gate`),
+# never filenames.
+#
+# MEASURED, DEVELOP-FIRST, 2026-08-03: 110 caller references across 17 repos, all
+# pinned @main. Twelve of the twenty repos default to main/master while work lands
+# on develop, so a default-branch enumeration under-reports anything in flight.
+# `audit_branch: develop-first` below is that correction, encoded.
+
+schema_version: 1
+org: tracebloc
+
+# Every caller must pin this ref. Any other ref is drift.
+pinned_ref: main
+
+# Which branch the guard reads. `develop-first` = `develop` where that branch
+# exists, else the repo's default branch. Anything else is rejected by the guard
+# rather than silently treated as the default branch.
+audit_branch: develop-first
+
+# The repo that hosts the reusables and the canonical copies. Its `copies` entries
+# are checked against the checkout rather than against itself.
+source_repo: .github
+
+# Reusables: workflows in .github/workflows declaring `on: workflow_call`. A repo
+# calls one when any workflow of any filename resolves to
+#   uses: tracebloc/.github/.github/workflows/<name>@<pinned_ref>
+reusables:
+  - advance-deploy-env.yml
+  - code-quality.yml
+  - customer-priority-bump.yml
+  - fr-gate.yml
+  - fr-pass-comment.yml
+  - kanban-closure-router.yml
+  - public-pii-gate.yml
+  - set-pr-status.yml
+  - wip-limit-check.yml
+
+# Copies, not callers: these are duplicated into each repo, so the guard compares
+# content (git blob sha against the checked-out source) instead of looking for a
+# `uses:` reference. A copy that has silently drifted is the failure mode here.
+copies:
+  - add-to-kanban.yml
+  - stale-backlog.yml
+
+# Reasons cited by more than one repo, as YAML anchors: one edit updates every
+# citation. An alias is still a written reason - the guard resolves it and
+# rejects an empty one exactly as it would an inline string. This block holds
+# no policy; deleting an entry that is still aliased is a YAML error.
+shared_reasons:
+  wip_limit_check_has_no_callers: &wip_limit_check_has_no_callers >-
+    wip-limit-check has ZERO callers anywhere in the org (measured 2026-08-03, all 20 active
+    repos, develop-first). Its own header says to delete the reusable once nothing references
+    it. Requiring it in any repo would land this guard red on day one; the decision to wire it
+    up or delete it is backend#1415 follow-up work. Exempt everywhere, deliberately and in
+    writing.
+  private_repo_no_public_exposure: &private_repo_no_public_exposure >-
+    public-pii-gate scans PR title, body and commit messages for PII that would be world-
+    readable. This repo is private, so there is no public exposure for it to guard. Structural,
+    not a gap.
+  no_staging_branch_no_hop_to_gate: &no_staging_branch_no_hop_to_gate >-
+    fr-gate gates the staging -> prod hop. This repo has no `staging` branch, so there is no hop
+    for it to gate. Structural, not a gap.
+  code_quality_caller_missing: &code_quality_caller_missing >-
+    no code-quality caller. One of the nine missing callers named in backend#1415 and confirmed
+    by measurement. UNREMEDIATED - this exemption is the finding, not a justification.
+  customer_priority_bump_caller_missing: &customer_priority_bump_caller_missing >-
+    no customer-priority-bump caller. Measured absent 2026-08-03. The reusable also has three
+    dead inputs and hard-codes the `priority` label (backend#1408 P3), so wiring more repos to
+    it is sequenced behind that cleanup. UNREMEDIATED.
+  fr_pass_comment_caller_missing: &fr_pass_comment_caller_missing >-
+    no fr-pass-comment caller, so a kanban card in this repo can only be advanced by hand.
+    Measured absent 2026-08-03 (5 repos, not the 7 backend#1415 claims). UNREMEDIATED.
+  advance_deploy_env_caller_missing: &advance_deploy_env_caller_missing >-
+    no advance-deploy-env caller, so merges here never move a card to `On dev`. Measured absent
+    2026-08-03. UNREMEDIATED.
+  kanban_closure_router_caller_missing: &kanban_closure_router_caller_missing >-
+    no kanban-closure-router caller, so closing an issue here files nothing. UNREMEDIATED.
+  set_pr_status_caller_missing: &set_pr_status_caller_missing >-
+    no set-pr-status caller, so PRs here never post their gate status to the board.
+    UNREMEDIATED.
+  no_workflows_directory_at_all: &no_workflows_directory_at_all >-
+    no .github/workflows directory, so neither copied workflow is present. Its issues and PRs
+    therefore never reach the board. UNREMEDIATED.
+
+repos:
+  .github:
+    visibility: public
+    release_train: false
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
+      code-quality.yml:
+        exempt: >-
+          no code-quality caller in the repo that HOSTS code-quality.yml. Line 60 of that file
+          is a commented-out example `uses:` line, which is why a grep-based audit reports a
+          caller here that does not exist - the guard strips comments via a real YAML parse.
+          UNREMEDIATED (one of the nine).
+      customer-priority-bump.yml:
+        exempt: *customer_priority_bump_caller_missing
+      fr-gate.yml:
+        exempt: *no_staging_branch_no_hop_to_gate
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-caller.yml
+      public-pii-gate.yml:
+        exempt: >-
+          tracebloc/.github is PUBLIC and has no public-pii-gate caller - the only public repo
+          without one (backend#1408, backend#1415). UNREMEDIATED. Note the reusable itself is
+          currently unarmed org-wide (PII_DENYLIST unset, backend#1409), so adding the caller
+          here is sequenced behind that fix.
+      set-pr-status.yml: required   # set-pr-status-caller.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  averaging-service:
+    visibility: private
+    release_train: true
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml:
+        exempt: *private_repo_no_public_exposure
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  backend:
+    visibility: private
+    release_train: true
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml:
+        exempt: *private_repo_no_public_exposure
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  claude-skills:
+    visibility: private
+    release_train: false
+    callers:
+      advance-deploy-env.yml:
+        exempt: *advance_deploy_env_caller_missing
+      code-quality.yml:
+        exempt: *code_quality_caller_missing
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml:
+        exempt: *fr_pass_comment_caller_missing
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml:
+        exempt: *private_repo_no_public_exposure
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  cli:
+    visibility: public
+    release_train: true
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml: required   # public-pii-gate-caller.yml
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml:
+        divergent: >-
+          cli's copy has drifted: it pins actions/add-to-project@v2.0.0 where every other repo
+          pins v1.0.2. Recorded as divergent rather than required so the guard reports the drift
+          it already found instead of hiding it behind a green run. Realigning it is
+          backend#1415 follow-up work.
+      stale-backlog.yml:
+        divergent: >-
+          cli's copy has drifted: it pins actions/stale@v11 where every other repo pins v9
+          (backend#1415 says v10 - the measured value is v11). Recorded as divergent so the
+          guard reports it. Realignment is follow-up work.
+
+  client:
+    visibility: public
+    release_train: true
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml: required   # public-pii-gate-caller.yml
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  client-runtime:
+    visibility: private
+    release_train: true
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml:
+        exempt: *private_repo_no_public_exposure
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  data-ingestors:
+    visibility: public
+    release_train: true
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml: required   # public-pii-gate-caller.yml
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  design-system:
+    visibility: private
+    release_train: true
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml:
+        exempt: *private_repo_no_public_exposure
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  devex-bootstrap:
+    visibility: private
+    release_train: false
+    callers:
+      advance-deploy-env.yml:
+        exempt: >-
+          devex-bootstrap has no .github directory at all, no branch protection and no
+          CODEOWNERS, and nothing in the org references it (backend#1408). Onboarding it is a
+          separate decision from this guard; recorded so its absence is a written exemption
+          rather than an oversight.
+      code-quality.yml:
+        exempt: >-
+          devex-bootstrap has no .github directory at all, no branch protection and no
+          CODEOWNERS, and nothing in the org references it (backend#1408). Onboarding it is a
+          separate decision from this guard; recorded so its absence is a written exemption
+          rather than an oversight.
+      customer-priority-bump.yml:
+        exempt: >-
+          devex-bootstrap has no .github directory at all, no branch protection and no
+          CODEOWNERS, and nothing in the org references it (backend#1408). Onboarding it is a
+          separate decision from this guard; recorded so its absence is a written exemption
+          rather than an oversight.
+      fr-gate.yml:
+        exempt: >-
+          devex-bootstrap has no .github directory at all, no branch protection and no
+          CODEOWNERS, and nothing in the org references it (backend#1408). Onboarding it is a
+          separate decision from this guard; recorded so its absence is a written exemption
+          rather than an oversight.
+      fr-pass-comment.yml:
+        exempt: >-
+          devex-bootstrap has no .github directory at all, no branch protection and no
+          CODEOWNERS, and nothing in the org references it (backend#1408). Onboarding it is a
+          separate decision from this guard; recorded so its absence is a written exemption
+          rather than an oversight.
+      kanban-closure-router.yml:
+        exempt: >-
+          devex-bootstrap has no .github directory at all, no branch protection and no
+          CODEOWNERS, and nothing in the org references it (backend#1408). Onboarding it is a
+          separate decision from this guard; recorded so its absence is a written exemption
+          rather than an oversight.
+      public-pii-gate.yml:
+        exempt: >-
+          devex-bootstrap has no .github directory at all, no branch protection and no
+          CODEOWNERS, and nothing in the org references it (backend#1408). Onboarding it is a
+          separate decision from this guard; recorded so its absence is a written exemption
+          rather than an oversight.
+      set-pr-status.yml:
+        exempt: >-
+          devex-bootstrap has no .github directory at all, no branch protection and no
+          CODEOWNERS, and nothing in the org references it (backend#1408). Onboarding it is a
+          separate decision from this guard; recorded so its absence is a written exemption
+          rather than an oversight.
+      wip-limit-check.yml:
+        exempt: >-
+          devex-bootstrap has no .github directory at all, no branch protection and no
+          CODEOWNERS, and nothing in the org references it (backend#1408). Onboarding it is a
+          separate decision from this guard; recorded so its absence is a written exemption
+          rather than an oversight.
+    copies:
+      add-to-kanban.yml:
+        exempt: *no_workflows_directory_at_all
+      stale-backlog.yml:
+        exempt: *no_workflows_directory_at_all
+
+  docs:
+    visibility: public
+    release_train: false
+    callers:
+      advance-deploy-env.yml:
+        exempt: *advance_deploy_env_caller_missing
+      code-quality.yml:
+        exempt: *code_quality_caller_missing
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml:
+        exempt: *no_staging_branch_no_hop_to_gate
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml: required   # public-pii-gate-caller.yml
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  e2e-test-agent:
+    visibility: private
+    release_train: false
+    callers:
+      advance-deploy-env.yml:
+        exempt: >-
+          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
+          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
+          UNREMEDIATED - flip to required once the callers land.
+      code-quality.yml:
+        exempt: >-
+          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
+          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
+          UNREMEDIATED - flip to required once the callers land.
+      customer-priority-bump.yml:
+        exempt: >-
+          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
+          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
+          UNREMEDIATED - flip to required once the callers land.
+      fr-gate.yml:
+        exempt: >-
+          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
+          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
+          UNREMEDIATED - flip to required once the callers land.
+      fr-pass-comment.yml:
+        exempt: >-
+          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
+          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
+          UNREMEDIATED - flip to required once the callers land.
+      kanban-closure-router.yml:
+        exempt: >-
+          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
+          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
+          UNREMEDIATED - flip to required once the callers land.
+      public-pii-gate.yml:
+        exempt: >-
+          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
+          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
+          UNREMEDIATED - flip to required once the callers land.
+      set-pr-status.yml:
+        exempt: >-
+          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
+          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
+          UNREMEDIATED - flip to required once the callers land.
+      wip-limit-check.yml:
+        exempt: >-
+          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
+          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
+          UNREMEDIATED - flip to required once the callers land.
+    copies:
+      add-to-kanban.yml:
+        exempt: *no_workflows_directory_at_all
+      stale-backlog.yml:
+        exempt: *no_workflows_directory_at_all
+
+  frontend-app:
+    visibility: private
+    release_train: true
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml:
+        exempt: *private_repo_no_public_exposure
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  model-zoo:
+    visibility: public
+    release_train: false
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml:
+        exempt: *code_quality_caller_missing
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml: required   # public-pii-gate-caller.yml
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  release-train:
+    visibility: private
+    release_train: false
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml:
+        exempt: *code_quality_caller_missing
+      customer-priority-bump.yml:
+        exempt: *customer_priority_bump_caller_missing
+      fr-gate.yml:
+        exempt: >-
+          release-train drives the train and is exempt from riding it (RFC-BACKEND-1405 D1), so
+          it has no staging branch and no staging -> prod hop. Structural.
+      fr-pass-comment.yml:
+        exempt: *fr_pass_comment_caller_missing
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml:
+        exempt: *private_repo_no_public_exposure
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml:
+        divergent: >-
+          release-train's copy adds a header explaining why the repo is exempt from riding the
+          train, and pins actions/add-to-project@v2.0.0 rather than v1.0.2. The comment is
+          wanted; the version pin is drift. Divergent until the pin is realigned.
+      stale-backlog.yml:
+        exempt: >-
+          release-train has add-to-kanban.yml but no stale-backlog.yml. Auto-closing backlog
+          items in the repo that drives promotions is a deliberate omission - stale-backlog.yml
+          is column-blind and would close live pipeline work (backend#1408 P3).
+
+  rfcs:
+    visibility: private
+    release_train: false
+    callers:
+      advance-deploy-env.yml:
+        exempt: >-
+          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
+          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
+          - a docs-only repo still wants board and closure automation.
+      code-quality.yml:
+        exempt: >-
+          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
+          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
+          - a docs-only repo still wants board and closure automation.
+      customer-priority-bump.yml:
+        exempt: >-
+          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
+          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
+          - a docs-only repo still wants board and closure automation.
+      fr-gate.yml:
+        exempt: >-
+          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
+          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
+          - a docs-only repo still wants board and closure automation.
+      fr-pass-comment.yml:
+        exempt: >-
+          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
+          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
+          - a docs-only repo still wants board and closure automation.
+      kanban-closure-router.yml:
+        exempt: >-
+          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
+          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
+          - a docs-only repo still wants board and closure automation.
+      public-pii-gate.yml:
+        exempt: >-
+          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
+          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
+          - a docs-only repo still wants board and closure automation.
+      set-pr-status.yml:
+        exempt: >-
+          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
+          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
+          - a docs-only repo still wants board and closure automation.
+      wip-limit-check.yml:
+        exempt: >-
+          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
+          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
+          - a docs-only repo still wants board and closure automation.
+    copies:
+      add-to-kanban.yml:
+        exempt: *no_workflows_directory_at_all
+      stale-backlog.yml:
+        exempt: *no_workflows_directory_at_all
+
+  start-training:
+    visibility: public
+    release_train: false
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml:
+        exempt: *code_quality_caller_missing
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml: required   # public-pii-gate-caller.yml
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  tracebloc-engine:
+    visibility: private
+    release_train: true
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml:
+        exempt: *private_repo_no_public_exposure
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  tracebloc-py-package:
+    visibility: private
+    release_train: true
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml:
+        exempt: *private_repo_no_public_exposure
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
+
+  tracebloc-website:
+    visibility: private
+    release_train: false
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      public-pii-gate.yml:
+        exempt: *private_repo_no_public_exposure
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
