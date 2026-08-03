@@ -344,11 +344,18 @@ jobs:
                           }
                         }' -F org="$ORG" -F repo="$REPO" -F num="$NUM" \
                         --jq '((.data.repository.issue.timelineItems.nodes // []) | last) as $e
-                              | (($e.closer.__typename // "NONE") + "|" + ($e.closer.baseRefName // ""))' \
+                              | if $e == null then "NOEVENT|"
+                                else (($e.closer.__typename // "NONE") + "|" + ($e.closer.baseRefName // "")) end' \
                         2>/dev/null) || CLOSER="ERROR|"
                       CLOSER_BASE="${CLOSER#*|}"
                       CLOSER="${CLOSER%%|*}"
                       case "$CLOSER" in
+                        # NONE means the timeline HAD a ClosedEvent and its closer was
+                        # null -- an actual hand-close. "No ClosedEvent at all" is
+                        # NOEVENT, and a null issue or repository is too; those five
+                        # shapes were one token until Bugbot flagged it on .github#127.
+                        # NOEVENT falls through to the SKIP below, where absence of
+                        # evidence belongs.
                         NONE)
                           printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$DONE_OPT" "$REPO#$NUM closed issue completed, no closer ($COL -> Done)" "closed-issue-terminalized" >> moves.tsv
                           ;;
@@ -376,6 +383,11 @@ jobs:
                             *)           OPT="$ON_DEV_OPT";     DEST="On dev" ;;
                           esac
                           printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$OPT" "$REPO#$NUM closed by $CLOSER (base=${CLOSER_BASE:-none}), router missed it ($COL -> $DEST)" "closed-issue-stage-derived" >> moves.tsv
+                          ;;
+                        NOEVENT)
+                          # The read succeeded and the timeline carried no ClosedEvent at
+                          # all. Silence is not a hand-close, so it is not Done either.
+                          echo "  [SKIP] $REPO#$NUM closed-completed but its timeline carries no ClosedEvent - no evidence either way, so NOT Done"
                           ;;
                         *)
                           # Unreadable. Not evidence of absence.
