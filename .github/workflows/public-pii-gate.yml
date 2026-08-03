@@ -51,7 +51,12 @@ jobs:
           REPO_FULL: ${{ github.repository }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
-          set -uo pipefail
+          # errexit is spelled out rather than inherited. Actions runs `run:` steps
+          # as `bash -e {0}`, so `set -uo pipefail` left -e ON while reading as
+          # though it were off — and one command below was written expecting to see
+          # a non-zero status rather than die on it (Bugbot, .github#130). Making
+          # it explicit keeps the next reader from making the same inference.
+          set -euo pipefail
           # No pathname expansion: the denylist is split on ',' by word
           # splitting below, and a term containing '*' or '?' must be matched
           # literally rather than glob-expanded into filenames (backend#1409).
@@ -193,8 +198,14 @@ jobs:
             fi
             [ -z "$t" ] && continue
             CHECKED=$((CHECKED + 1))
-            grep -iqF -- "$t" "$HAYSTACK_FILE"
-            rc=$?
+            # `|| rc=$?` rather than a bare grep followed by `rc=$?`. grep returns 1
+            # for "no match", which is the ORDINARY case here, and errexit kills the
+            # step on it before rc is ever assigned — so the gate failed every clean
+            # PR, on the first term that happened to be absent (Bugbot, .github#130).
+            # As the left operand of `||` grep's status is exempt from errexit, and
+            # rc still receives 1 or 2, which is what the case below has to tell apart.
+            rc=0
+            grep -iqF -- "$t" "$HAYSTACK_FILE" || rc=$?
             case "$rc" in
               0) HIT=1 ;;
               1) ;;
