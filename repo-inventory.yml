@@ -642,7 +642,12 @@ repos:
 
   tracebloc-website:
     visibility: private
-    release_train: false
+    # release-train#14 ("enroll tracebloc-website in the release train") is merged,
+    # so release-train/repos.yml lists it and the guard reads on-train=True. The
+    # inventory was written from the pre-merge state. fr-gate.yml is already
+    # `required` below and fr-gate-caller.yml is present on develop, so the hop
+    # this field gates is not ungated — only the recorded fact was stale.
+    release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
