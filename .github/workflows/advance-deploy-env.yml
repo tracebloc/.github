@@ -192,6 +192,13 @@ jobs:
               "FR on staging")  echo 7 ;;
               "Ready for prod") echo 8 ;;
               "Prod")           echo 9 ;;
+              # Done and Cancelled are TERMINAL: nothing may demote a card out of
+              # them. Both returned 0 here, which inverted the monotonic guard below
+              # so the next push carrying an old commit demoted a Done card -- and
+              # staging->develop back-merges re-carry old commits routinely
+              # (RFC-BACKEND-1405 D8, backend#1411).
+              "Done")           echo 10 ;;
+              "Cancelled")      echo 10 ;;
               *)                echo 0 ;;
             esac
           }

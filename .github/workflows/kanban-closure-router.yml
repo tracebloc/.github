@@ -8,7 +8,7 @@ name: Route kanban Status on closure
 #   - PR closed without merging      → Cancelled
 #   - Issue closed as completed:
 #       · by a PR (any base)         → mirror the PR's resulting Status
-#       · manually (no closing PR)   → no change (see the note in the step below)
+#       · manually (no closing PR)   → Done (completed, but nothing deployed)
 #   - Issue closed as not_planned    → Cancelled
 #   - Issue closed (no state_reason) → Cancelled (default to abandoned)
 #
@@ -46,6 +46,15 @@ jobs:
           # built-in "Item closed" project workflow to set Status=Cancelled.
           ORG: ${{ inputs.org }}
           REPO_FULL: ${{ github.repository }}
+          # This step's closer lookup is a `gh api graphql` call and the step had NO
+          # token, so it failed on EVERY invocation -- silently, because a failed lookup
+          # collapsed into "no closer", and "no closer" meant "leave Status unchanged".
+          # The closed-by-PR routing here has therefore never run; kanban-reconcile.yml's
+          # cron has been doing all of it, which is exactly what its own comment says.
+          # Found by Bugbot on .github#126 while reviewing backend#1411, which needs
+          # this lookup to work. Same secret the update step uses -- the lookup is
+          # cross-repo, so it needs the PAT, not the caller's GITHUB_TOKEN.
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -98,11 +107,26 @@ jobs:
                 --jq '((.data.repository.issue.timelineItems.nodes // [])
                        | last) as $e
                       | (($e.closer.__typename // "NONE") + "|" + ($e.closer.baseRefName // ""))' \
-                2>/dev/null) || CLOSER="NONE|"
+                2>/dev/null) || CLOSER="ERROR|"
               CLOSER_TYPE="${CLOSER%%|*}"
               CLOSING_PR_BASE="${CLOSER#*|}"
+              # A genuinely absent closer is "NONE"; a lookup that FAILED is "ERROR".
+              # Those were the same value until backend#1411, which was harmless while
+              # no-closer meant "leave unchanged" -- but now no-closer means Done, so a
+              # transient GraphQL error would move a PR-closed issue to Done, and
+              # kanban-archive (which now archives Done) would hide it the next day.
+              # Converting a fail-open default into a fail-WRONG one is worse than
+              # either (Bugbot, .github#126). Anything unexpected, including an empty
+              # read, leaves the Status alone.
+              case "$CLOSER_TYPE" in
+                PullRequest|Commit|NONE) ;;
+                *) echo "::warning::could not read the closer for #$ISSUE_NUMBER (got '${CLOSER_TYPE:-empty}') - leaving Status unchanged rather than assuming a hand-close"
+                   CLOSER_TYPE="UNREADABLE" ;;
+              esac
 
-              if [ "$CLOSER_TYPE" = "PullRequest" ]; then
+              if [ "$CLOSER_TYPE" = "UNREADABLE" ]; then
+                : # decided above: no change
+              elif [ "$CLOSER_TYPE" = "PullRequest" ]; then
                 case "$CLOSING_PR_BASE" in
                   main|master) STATUS="Prod" ;;
                   staging)     STATUS="FR on staging" ;;
@@ -117,13 +141,13 @@ jobs:
                 # once the code actually reaches staging/prod.
                 STATUS="On dev"
               else
-                # No closer -> genuinely closed by hand. Do not invent a deploy
-                # state here; kanban-reconcile.yml terminalizes hand-closed
-                # completed issues (safe now that fr-gate.yml attributes
-                # promotions via commits->PRs, so a card's column cannot satisfy
-                # the gate). The project's built-in "Item closed" workflow stays
-                # disabled on project #2, so "no change" is truly no change.
-                echo "Issue #$ISSUE_NUMBER closed as completed with no PR/commit closer -- leaving Status unchanged (reconcile terminalizes)."
+                # No closer -> genuinely closed by hand, so nothing deployed. That is
+                # exactly what Done means (RFC-BACKEND-1405 D8), and it is not a deploy
+                # state, so the old objection to inventing one no longer applies.
+                # Doing it here rather than waiting for kanban-reconcile's cron means
+                # the card is terminal immediately; reconcile stays as the backstop for
+                # anything this event misses.
+                STATUS="Done"
               fi
             else
               # not_planned, or closed with no state_reason at all → abandoned.
@@ -180,10 +204,10 @@ jobs:
           # Find item ID for this PR or issue
           if [ "$IS_PR" = "true" ]; then
             # shellcheck disable=SC2016  # $num is a GraphQL variable - must not expand in shell
-            FIELD_QUERY='pullRequest(number: $num) { projectItems(first: 10) { nodes { id project { number } } } }'
+            FIELD_QUERY='pullRequest(number: $num) { projectItems(first: 10) { nodes { id project { number } fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } } } } }'
           else
             # shellcheck disable=SC2016  # $num is a GraphQL variable - must not expand in shell
-            FIELD_QUERY='issue(number: $num) { projectItems(first: 10) { nodes { id project { number } } } }'
+            FIELD_QUERY='issue(number: $num) { projectItems(first: 10) { nodes { id project { number } fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } } } } }'
           fi
 
           # Retry briefly to let auto-add fire if needed
@@ -198,6 +222,9 @@ jobs:
             ITEM_ID=$(echo "$RESP" | jq -r --arg n "$PROJECT_NUMBER" '
               ([.. | objects | select(has("projectItems"))] | first).projectItems.nodes[]?
               | select(.project.number == ($n | tonumber)) | .id' | head -1)
+            CURRENT_COL=$(echo "$RESP" | jq -r --arg n "$PROJECT_NUMBER" '
+              ([.. | objects | select(has("projectItems"))] | first).projectItems.nodes[]?
+              | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' | head -1)
             if [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then break; fi
             echo "Item not yet on project, retry $i/5..."
             sleep 5
@@ -206,6 +233,23 @@ jobs:
           if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
             echo "Item #$NUMBER not on project after 5 retries — skipping."
             exit 0
+          fi
+
+          # Done means "completed, nothing deployed" (D8), so it must never overwrite a
+          # column that records a deployment. kanban-reconcile.yml refuses this and the
+          # router did not, which is an asymmetry with a real path: reopen, then
+          # hand-close an issue sitting in On dev / FR on staging / Ready for prod, and
+          # the deploy state is gone -- after which kanban-archive.yml, which now
+          # archives Done, hides the card entirely (Bugbot, .github#126).
+          #
+          # Only Done is guarded. A PR-derived Status is a deploy fact and may advance a
+          # card normally.
+          if [ "$STATUS_NAME" = "Done" ]; then
+            case "${CURRENT_COL:-}" in
+              "On dev"|"FR on staging"|"Ready for prod"|"Prod")
+                echo "::notice::#$NUMBER hand-closed but sits in '$CURRENT_COL', a deploy state - NOT setting Done (D8: follow the PR's stage)"
+                exit 0 ;;
+            esac
           fi
 
           # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal

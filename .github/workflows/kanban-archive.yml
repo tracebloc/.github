@@ -82,7 +82,7 @@ jobs:
             fi
             echo "$OUT" | jq -r '.data.organization.projectV2.items.nodes[]
               | select(.isArchived == false)
-              | select(.fieldValueByName.name == "Prod" or .fieldValueByName.name == "Cancelled")
+              | select(.fieldValueByName.name == "Prod" or .fieldValueByName.name == "Cancelled" or .fieldValueByName.name == "Done")
               | .id' >> terminal.ids
             HAS_NEXT=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
             cursor=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.pageInfo.endCursor')
