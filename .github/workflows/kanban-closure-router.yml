@@ -8,7 +8,7 @@ name: Route kanban Status on closure
 #   - PR closed without merging      → Cancelled
 #   - Issue closed as completed:
 #       · by a PR (any base)         → mirror the PR's resulting Status
-#       · manually (no closing PR)   → no change (see the note in the step below)
+#       · manually (no closing PR)   → Done (completed, but nothing deployed)
 #   - Issue closed as not_planned    → Cancelled
 #   - Issue closed (no state_reason) → Cancelled (default to abandoned)
 #
@@ -117,13 +117,13 @@ jobs:
                 # once the code actually reaches staging/prod.
                 STATUS="On dev"
               else
-                # No closer -> genuinely closed by hand. Do not invent a deploy
-                # state here; kanban-reconcile.yml terminalizes hand-closed
-                # completed issues (safe now that fr-gate.yml attributes
-                # promotions via commits->PRs, so a card's column cannot satisfy
-                # the gate). The project's built-in "Item closed" workflow stays
-                # disabled on project #2, so "no change" is truly no change.
-                echo "Issue #$ISSUE_NUMBER closed as completed with no PR/commit closer -- leaving Status unchanged (reconcile terminalizes)."
+                # No closer -> genuinely closed by hand, so nothing deployed. That is
+                # exactly what Done means (RFC-BACKEND-1405 D8), and it is not a deploy
+                # state, so the old objection to inventing one no longer applies.
+                # Doing it here rather than waiting for kanban-reconcile's cron means
+                # the card is terminal immediately; reconcile stays as the backstop for
+                # anything this event misses.
+                STATUS="Done"
               fi
             else
               # not_planned, or closed with no state_reason at all → abandoned.

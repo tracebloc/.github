@@ -95,6 +95,7 @@ jobs:
             echo "project_id=$PROJECT_ID"
             echo "status_field=$STATUS_FIELD"
             echo "prod_opt=$(opt Prod)"
+            echo "done_opt=$(opt Done)"
             echo "cancelled_opt=$(opt Cancelled)"
             echo "backlog_opt=$(opt Backlog)"
             echo "code_review_opt=$(opt 'Code review')"
@@ -227,6 +228,7 @@ jobs:
           }
 
           PROD_OPT="${{ steps.ids.outputs.prod_opt }}"
+          DONE_OPT="${{ steps.ids.outputs.done_opt }}"
           CANCELLED_OPT="${{ steps.ids.outputs.cancelled_opt }}"
           BACKLOG_OPT="${{ steps.ids.outputs.backlog_opt }}"
 
@@ -296,7 +298,11 @@ jobs:
                 if [ "$SR" = "NOT_PLANNED" ] || [ "$SR" = "DUPLICATE" ]; then
                   printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$CANCELLED_OPT" "$REPO#$NUM closed issue $SR ($COL -> Cancelled)" "cancelled" >> moves.tsv
                 else
-                  printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$PROD_OPT" "$REPO#$NUM closed issue completed ($COL -> Prod)" "closed-issue-terminalized" >> moves.tsv
+                  # Done, not Prod. The distinguishing question is "did something
+                  # deploy?" -- and an issue closed completed with no closing PR shipped
+                  # no code, so filing it as Prod asserted a deployment that never
+                  # happened (RFC-BACKEND-1405 D8, backend#1411).
+                  printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$DONE_OPT" "$REPO#$NUM closed issue completed ($COL -> Done)" "closed-issue-terminalized" >> moves.tsv
                 fi
                 continue
               fi
