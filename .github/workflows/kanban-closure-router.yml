@@ -46,6 +46,15 @@ jobs:
           # built-in "Item closed" project workflow to set Status=Cancelled.
           ORG: ${{ inputs.org }}
           REPO_FULL: ${{ github.repository }}
+          # This step's closer lookup is a `gh api graphql` call and the step had NO
+          # token, so it failed on EVERY invocation -- silently, because a failed lookup
+          # collapsed into "no closer", and "no closer" meant "leave Status unchanged".
+          # The closed-by-PR routing here has therefore never run; kanban-reconcile.yml's
+          # cron has been doing all of it, which is exactly what its own comment says.
+          # Found by Bugbot on .github#126 while reviewing backend#1411, which needs
+          # this lookup to work. Same secret the update step uses -- the lookup is
+          # cross-repo, so it needs the PAT, not the caller's GITHUB_TOKEN.
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
         run: |
           set -euo pipefail
 
