@@ -14,6 +14,12 @@ name: Public PII gate
 #     --body "name1,name2,name3,..."
 #   (comma-separated, case-insensitive substring match)
 #
+# This gate FAILS CLOSED (backend#1409). Every path that cannot complete the
+# scan — no denylist, unreadable commit messages, a truncated commit list, a
+# grep that errors — exits non-zero. It used to warn-and-pass instead, so six
+# public repos carried a green `pii-gate / pii-check` that had never evaluated
+# anything. A guard that cannot check must refuse, not pass.
+#
 # Override a false positive: add the 'pii-gate-override' label to the PR
 # (visible in audit).
 #
@@ -46,39 +52,153 @@ jobs:
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
           set -uo pipefail
+          # No pathname expansion: the denylist is split on ',' by word
+          # splitting below, and a term containing '*' or '?' must be matched
+          # literally rather than glob-expanded into filenames (backend#1409).
+          set -f
 
-          # Gate inactive until an admin populates the secret — warn, don't block.
+          # Scratch files, so a Compare API read that FAILED can be told apart
+          # from one that legitimately returned nothing (backend#1409). Guarded:
+          # empty paths would turn every later redirect into an ambiguous one and
+          # leave `sed` reading stdin forever.
+          COMPARE_JSON=$(mktemp) || COMPARE_JSON=
+          GH_STDERR=$(mktemp) || GH_STDERR=
+          if [ -z "$COMPARE_JSON" ] || [ -z "$GH_STDERR" ]; then
+            echo "::error::mktemp failed, so this gate cannot stage the data it must scan —"
+            echo "::error::failing closed (backend#1409)."
+            exit 1
+          fi
+          trap 'rm -f "$COMPARE_JSON" "$GH_STDERR"' EXIT
+
+          # backend#1409 defect 1: this used to warn and `exit 0`. The secret
+          # does not exist org-wide, so every public repo showed a passing check
+          # that had never compared a single term. Refuse instead — an inactive
+          # guard must be visible as red, not invisible as green.
           if [ -z "${DENYLIST:-}" ]; then
-            echo "::warning::PII_DENYLIST org secret is not set — the public PII gate is INACTIVE."
-            echo "An org admin must run: gh secret set PII_DENYLIST --org tracebloc --visibility all --body \"name1,name2,...\""
-            exit 0
+            echo "::error::PII_DENYLIST is empty or unavailable — this gate cannot check anything,"
+            echo "::error::so it is failing closed (backend#1409) rather than reporting a pass."
+            echo ""
+            echo "An org admin must run:"
+            echo "  gh secret set PII_DENYLIST --org tracebloc --visibility all --body \"name1,name2,...\""
+            echo "If the org secret already exists, this caller is missing 'secrets: inherit'."
+            exit 1
           fi
 
-          # Manual override (visible in audit).
-          if printf '%s' "$LABELS" | grep -q 'pii-gate-override'; then
+          # Manual override (visible in audit). Exact match against a label
+          # name: the previous substring test meant any label merely CONTAINING
+          # 'pii-gate-override' silently disarmed the gate. A LABELS payload we
+          # cannot parse yields "no override", which is the safe direction — the
+          # scan below still runs.
+          if jq -e --arg t 'pii-gate-override' 'any(.[]?; . == $t)' <<<"$LABELS" >/dev/null 2>&1; then
             echo "::warning::PII gate bypassed via 'pii-gate-override' label."
             exit 0
           fi
 
+          # Commit messages are the bulk of the haystack, so a failed read is a
+          # failed scan. Without both endpoints there is nothing to compare.
+          if [ -z "${PR_BASE_SHA:-}" ] || [ -z "${PR_HEAD_SHA:-}" ]; then
+            echo "::error::PR base/head SHA missing from the event payload — commit messages"
+            echo "::error::cannot be read, so the gate is failing closed (backend#1409)."
+            exit 1
+          fi
+
           # Build the haystack: PR title + body + every commit message.
-          # Commits come from the Compare API (contents-scoped). It returns up
-          # to 250 commits, which is ample for PR-hygiene scanning.
-          COMMITS=$(gh api "repos/$REPO_FULL/compare/$PR_BASE_SHA...$PR_HEAD_SHA" \
-            --jq '.commits[].commit.message' 2>/dev/null || true)
+          # Commits come from the Compare API (contents-scoped).
+          #
+          # backend#1409 defect 3: this call ended in `2>/dev/null || true`, so
+          # a 404, a 403, a rate limit and a jq error all collapsed into an
+          # empty string — the gate then scanned title + body only and reported
+          # a pass. An answer we could not read is not a clean answer.
+          if ! gh api "repos/$REPO_FULL/compare/$PR_BASE_SHA...$PR_HEAD_SHA" \
+            >"$COMPARE_JSON" 2>"$GH_STDERR"; then
+            echo "::error::Could not read commit messages for $PR_BASE_SHA...$PR_HEAD_SHA."
+            echo "::error::The PII gate will not pass a haystack it failed to read (backend#1409)."
+            echo "gh reported:"
+            sed 's/^/  /' "$GH_STDERR"
+            echo ""
+            echo "This is a token-permission or rate-limit problem, not a problem with the PR."
+            echo "Re-run the job; if it persists, check that the caller grants 'contents: read'."
+            exit 1
+          fi
+
+          # The commits array is capped at 250 by the API; total_commits is the
+          # true count. Equal means the whole PR is in hand. Fewer means we are
+          # holding a TRUNCATED haystack, and calling that clean is the same
+          # fail-open in a different disguise.
+          TOTAL_COMMITS=$(jq -r '.total_commits // empty' "$COMPARE_JSON")
+          COMMIT_COUNT=$(jq -r '[.commits[]?] | length' "$COMPARE_JSON")
+          case "${TOTAL_COMMITS:-x}${COMMIT_COUNT:-x}" in
+            ''|*[!0-9]*)
+              echo "::error::Compare API response did not carry a usable commit count, so the"
+              echo "::error::gate cannot confirm it saw every commit — failing closed (backend#1409)."
+              exit 1
+              ;;
+          esac
+          if [ "$COMMIT_COUNT" -lt "$TOTAL_COMMITS" ]; then
+            echo "::error::This PR has $TOTAL_COMMITS commits but the Compare API returned only"
+            echo "::error::$COMMIT_COUNT of them (its cap is 250). The gate would be scanning a"
+            echo "::error::truncated haystack, so it is failing closed (backend#1409)."
+            echo ""
+            echo "Split the PR, or add the 'pii-gate-override' label after reviewing the"
+            echo "commit messages by hand (the override is visible in audit)."
+            exit 1
+          fi
+
+          if ! COMMITS=$(jq -r '.commits[]?.commit.message' "$COMPARE_JSON" 2>"$GH_STDERR"); then
+            echo "::error::Could not extract commit messages from the Compare API response —"
+            echo "::error::failing closed (backend#1409)."
+            sed 's/^/  /' "$GH_STDERR"
+            exit 1
+          fi
           HAYSTACK=$(printf '%s\n%s\n%s' "${PR_TITLE:-}" "${PR_BODY:-}" "$COMMITS")
 
           # Check each denylist term (comma-separated). Never echo the term or
           # the matched line — only a generic error, so the gate can't leak.
+          #
+          # backend#1409 defect 2: the test was
+          #   printf '%s' "$HAYSTACK" | grep -iqF -- "$t"
+          # `grep -q` exits on its first match and closes the pipe, printf then
+          # takes SIGPIPE, and under `pipefail` the pipeline returns 141 — so
+          # `if` saw false and THE MATCH WAS DISCARDED. Reproduced on the runner
+          # image's toolchain (bash 5.2.21, GNU grep 3.11) with a match on an
+          # early line and a haystack past the 64KB pipe buffer:
+          # `rc=141 PIPESTATUS=141 0`. Title comes first in the haystack, so an
+          # early match on a large PR was the likely case, i.e. the gate was
+          # least reliable exactly when it mattered most. A herestring feeds
+          # grep from a temp file: no pipe, nothing to break.
           HIT=0
+          CHECKED=0
           OLDIFS="$IFS"; IFS=','
           for term in $DENYLIST; do
             t=$(printf '%s' "$term" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
             [ -z "$t" ] && continue
-            if printf '%s' "$HAYSTACK" | grep -iqF -- "$t"; then
-              HIT=1
-            fi
+            CHECKED=$((CHECKED + 1))
+            grep -iqF -- "$t" <<<"$HAYSTACK"
+            rc=$?
+            case "$rc" in
+              0) HIT=1 ;;
+              1) ;;
+              # grep exits >1 on an operational error. That is "did not check",
+              # not "found nothing" — never silently downgrade it to a pass.
+              *)
+                IFS="$OLDIFS"
+                echo "::error::grep exited $rc while checking a denylist term, so this term was"
+                echo "::error::never evaluated — failing closed (backend#1409)."
+                exit 1
+                ;;
+            esac
           done
           IFS="$OLDIFS"
+
+          # A non-empty secret that parses to zero usable terms (all commas or
+          # whitespace) would pass every PR having compared nothing — the exact
+          # fail-open of an unset secret, wearing a populated secret's clothes.
+          if [ "$CHECKED" -eq 0 ]; then
+            echo "::error::PII_DENYLIST is set but yields no usable terms after trimming, so this"
+            echo "::error::gate compared nothing — failing closed (backend#1409)."
+            echo "Expected a comma-separated list: --body \"name1,name2,...\""
+            exit 1
+          fi
 
           if [ "$HIT" = "1" ]; then
             echo "::error::This PR's title, body, or commit messages contain a denylisted term"
@@ -88,4 +208,9 @@ jobs:
             echo "False positive? Add the 'pii-gate-override' label (visible in audit)."
             exit 1
           fi
-          echo "PII gate passed — no denylisted terms found."
+          # Say what was actually compared. A green check that names its inputs
+          # is auditable; the bare "passed" this replaces looked identical
+          # whether it scanned everything or nothing (backend#1409). Counts
+          # only — never the terms themselves.
+          echo "PII gate passed — $CHECKED denylist term(s) checked against the PR title, body"
+          echo "and all $TOTAL_COMMITS commit message(s). No denylisted terms found."
