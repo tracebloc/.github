@@ -30,6 +30,14 @@ DESIGN RULES, all of them learned from bugs in this repo:
     before any network call, and every repo must carry an entry for every
     reusable and every copy. An exemption without a written reason is rejected.
 
+ONE KNOWN AWKWARDNESS, documented rather than papered over: the inventory is read
+from the checkout, but every repo's state - including tracebloc/.github's own - is
+read from its audit branch over the API. So a PR that adds a caller to .github AND
+flips that entry to `required` in the same commit fails, because the caller is not
+on develop yet. That is the fail-closed direction, and reading .github's workflows
+from the checkout instead would break the develop-first policy on a run triggered
+from main. Land the caller first, flip the entry in a follow-up.
+
 Exit codes, all of which the calling workflow treats as failure except 0:
   0  every repo read, inventory matches reality
   1  drift: reality diverges from the inventory

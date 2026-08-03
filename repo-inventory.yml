@@ -54,7 +54,14 @@ pinned_ref: main
 audit_branch: develop-first
 
 # The repo that hosts the reusables and the canonical copies. Its `copies` entries
-# are checked against the checkout rather than against itself.
+# are checked for presence only - comparing its audit branch against the checkout
+# would flag every PR that edits a copy.
+#
+# Note for whoever closes one of the UNREMEDIATED gaps below in .github itself: this
+# file is read from the checkout, but .github's caller state is read from its audit
+# branch over the API. Adding a caller and flipping its entry to `required` in the
+# same PR therefore fails, because the caller is not on develop yet. Land the caller
+# first, flip the entry after.
 source_repo: .github
 
 # Reusables: workflows in .github/workflows declaring `on: workflow_call`. A repo
