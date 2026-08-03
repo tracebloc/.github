@@ -231,6 +231,10 @@ jobs:
           DONE_OPT="${{ steps.ids.outputs.done_opt }}"
           CANCELLED_OPT="${{ steps.ids.outputs.cancelled_opt }}"
           BACKLOG_OPT="${{ steps.ids.outputs.backlog_opt }}"
+          # Needed by the router-miss backstop below: when the closure router failed to
+          # set a stage, this step derives it from the closing PR's base branch.
+          ON_DEV_OPT="${{ steps.ids.outputs.on_dev_opt }}"
+          FR_STAGING_OPT="${{ steps.ids.outputs.fr_staging_opt }}"
 
           while IFS= read -r line; do
             ITEM_ID=$(echo "$line"  | jq -r '.id')
@@ -332,22 +336,46 @@ jobs:
                           repository(owner: $org, name: $repo) {
                             issue(number: $num) {
                               timelineItems(last: 10, itemTypes: [CLOSED_EVENT]) {
-                                nodes { ... on ClosedEvent { closer { __typename } } }
+                                nodes { ... on ClosedEvent {
+                                  closer { __typename ... on PullRequest { baseRefName } }
+                                } }
                               }
                             }
                           }
                         }' -F org="$ORG" -F repo="$REPO" -F num="$NUM" \
-                        --jq '((.data.repository.issue.timelineItems.nodes // []) | last)
-                              | (.closer.__typename // "NONE")' 2>/dev/null) || CLOSER="ERROR"
+                        --jq '((.data.repository.issue.timelineItems.nodes // []) | last) as $e
+                              | (($e.closer.__typename // "NONE") + "|" + ($e.closer.baseRefName // ""))' \
+                        2>/dev/null) || CLOSER="ERROR|"
+                      CLOSER_BASE="${CLOSER#*|}"
+                      CLOSER="${CLOSER%%|*}"
                       case "$CLOSER" in
                         NONE)
                           printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$DONE_OPT" "$REPO#$NUM closed issue completed, no closer ($COL -> Done)" "closed-issue-terminalized" >> moves.tsv
                           ;;
                         PullRequest|Commit)
-                          # It shipped somewhere. The router owns the stage; if the card is
-                          # not in a deploy column the router missed it, and guessing here
-                          # is how a deployed item becomes "nothing deployed".
-                          echo "  [SKIP] $REPO#$NUM closed-completed by a $CLOSER but sits in $COL - NOT Done; the router owns the stage (re-run it or fix the card)"
+                          # It shipped somewhere, and the card is NOT in a deploy column --
+                          # exactly the router-miss this job exists to backstop.
+                          #
+                          # Skipping was wrong: the card is closed, sitting in an active
+                          # column, and archive only takes terminal ones -- so it stayed
+                          # there permanently. That is the invariant this job enforces,
+                          # broken by the job itself (Bugbot, .github#127).
+                          #
+                          # So do what the router failed to do: derive the stage from the
+                          # closer. The mapping is IDENTICAL to kanban-closure-router.yml's,
+                          # deliberately -- when the two disagree the faster one wins and the
+                          # slower one silently undoes it, which was Bugbot's third finding
+                          # on .github#126.
+                          case "$CLOSER_BASE" in
+                            main|master) OPT="$PROD_OPT";       DEST="Prod" ;;
+                            staging)     OPT="$FR_STAGING_OPT"; DEST="FR on staging" ;;
+                            develop)     OPT="$ON_DEV_OPT";     DEST="On dev" ;;
+                            # A Commit closer carries no base ref, and an unrecognised base
+                            # takes the router's same default: start at On dev and let a
+                            # later deploy signal promote it.
+                            *)           OPT="$ON_DEV_OPT";     DEST="On dev" ;;
+                          esac
+                          printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$OPT" "$REPO#$NUM closed by $CLOSER (base=${CLOSER_BASE:-none}), router missed it ($COL -> $DEST)" "closed-issue-stage-derived" >> moves.tsv
                           ;;
                         *)
                           # Unreadable. Not evidence of absence.
