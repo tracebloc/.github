@@ -534,57 +534,42 @@ repos:
     visibility: private
     release_train: false
     callers:
+      # Per-caller reasons, not one blanket text (Bugbot, .github#138). The first
+      # version of this block asserted "no hop to gate" for all nine, which is only
+      # true for some of them and silently overwrote reasons that were already
+      # accurate. An exemption whose stated reason does not describe the caller is
+      # worse than no exemption: it reads as decided when it is unexamined.
       advance-deploy-env.yml:
         exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+          this repo has no `develop` and no deploy stages -- it is `main`-only by decision
+          (README: "no artifact, no deploy stages"), so there is no dev stage for a card to
+          advance INTO. Structural, not a gap.
       code-quality.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+        exempt: *code_quality_caller_missing
       customer-priority-bump.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+        exempt: *customer_priority_bump_caller_missing
       fr-gate.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+        exempt: *no_staging_branch_no_hop_to_gate
       fr-pass-comment.yml:
         exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+          fr-pass advances a card out of `FR on staging`. This repo has no `staging` branch
+          and is not on the train, so that column is unreachable for it. Structural, not a
+          gap -- and distinct from the fr_pass_comment_caller_missing repos, which DO have
+          the stage and lack the valve.
       kanban-closure-router.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+        exempt: *kanban_closure_router_caller_missing
       public-pii-gate.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
-      set-pr-status.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+        exempt: *private_repo_no_public_exposure
+      set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+        exempt: *wip_limit_check_has_no_callers
     copies:
-      add-to-kanban.yml:
-        exempt: *no_workflows_directory_at_all
+      add-to-kanban.yml: required
       stale-backlog.yml:
-        exempt: *no_workflows_directory_at_all
-
+        exempt: >-
+          no stale-backlog copy: this repo holds decision documents, not a backlog. An RFC
+          that has sat untouched is not stale in the sense the sweep measures -- it is a
+          decision nobody has taken, which is what the board card is now for (.github#138).
   start-training:
     visibility: public
     release_train: true
