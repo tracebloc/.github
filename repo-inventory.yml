@@ -106,6 +106,15 @@ shared_reasons:
   code_quality_caller_missing: &code_quality_caller_missing >-
     no code-quality caller. One of the nine missing callers named in backend#1415 and confirmed
     by measurement. UNREMEDIATED - this exemption is the finding, not a justification.
+    Down to THREE citations (claude-skills, release-train, rfcs): model-zoo and start-training
+    were remediated 2026-08-04 under backend#1420 (model-zoo#115, start-training#32), and docs
+    the same day (docs code-quality-caller.yml), so all three are now `required`. Their
+    exemptions going stale is what the drift guard caught -- adding a caller without flipping
+    its entry is the same two-file coupling as repos.yml vs release_train.
+    The previous revision of this text also said THREE and named claude-skills, docs and
+    release-train while FOUR entries pointed at the anchor: `rfcs` was added later in the same
+    session and never listed. A hand-maintained citation list drifts from its own aliases, so
+    trust `grep -n '\*code_quality_caller_missing'` over this sentence.
   customer_priority_bump_caller_missing: &customer_priority_bump_caller_missing >-
     no customer-priority-bump caller. Measured absent 2026-08-03. The reusable also has three
     dead inputs and hard-codes the `priority` label (backend#1408 P3), so wiring more repos to
@@ -128,7 +137,7 @@ shared_reasons:
 repos:
   .github:
     visibility: public
-    release_train: false
+    release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
       code-quality.yml:
@@ -139,16 +148,31 @@ repos:
           UNREMEDIATED (one of the nine).
       customer-priority-bump.yml:
         exempt: *customer_priority_bump_caller_missing
-      fr-gate.yml:
-        exempt: *no_staging_branch_no_hop_to_gate
+      fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-caller.yml
-      public-pii-gate.yml:
-        exempt: >-
-          tracebloc/.github is PUBLIC and has no public-pii-gate caller - the only public repo
-          without one (backend#1408, backend#1415). UNREMEDIATED. Note the reusable itself is
-          currently unarmed org-wide (PII_DENYLIST unset, backend#1409), so adding the caller
-          here is sequenced behind that fix.
+      # Remediated 2026-08-04 (.github#141, backend#1420): this repo was the last public
+      # repo running no PII gate on its own PRs (backend#1408, backend#1415). The caller is
+      # a SELF-reference - this repo hosts the reusable - and is pinned `@main` like every
+      # other caller, per RFC-BACKEND-1405 open question 3 (answered: branch promotion, one
+      # process for every repo).
+      #
+      # PRESENCE, NOT TEETH, and deliberately so: the reusable is unarmed org-wide because
+      # PII_DENYLIST is unset (backend#1409), which is now PARKED IN THE BACKLOG by decision
+      # - the org is likely to be restructured first. `required` here asserts the caller
+      # EXISTS, which is what this inventory tracks; it does not assert the gate can fail.
+      # When #1409 is unparked, arming the denylist arms all 15 callers at once, this one
+      # included.
+      #
+      # HOW "UNARMED" PRESENTS, since d2485830 (2026-08-03, #1409 defect 1) flipped it:
+      # the reusable on develop now FAILS CLOSED when the secret is unset - an inactive
+      # guard must be visible as red, not invisible as green (RFC-1405 property 2). While
+      # that revision is on develop/staging only, callers (pinned @main) still show green
+      # no-ops; the moment it promotes to main, every public repo's pii-check turns
+      # RED-INERT. Deliberate, and it blocks nothing: pii-check is a required status
+      # check NOWHERE (all 7 public repos x all branches, measured 2026-08-04). The red
+      # is the honest signal that the gate cannot verify anything until #1409 unparks.
+      public-pii-gate.yml: required   # public-pii-gate-caller.yml
       set-pr-status.yml: required   # set-pr-status-caller.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -383,15 +407,30 @@ repos:
 
   docs:
     visibility: public
-    release_train: false
+    # Enrolled 2026-08-04 (backend#1420, D1 5-of-5). staging created from main
+    # (256fa3e4); docs#80 backmerged main into develop and added the fr-gate
+    # caller; release-train#30 added the repos.yml entry (that side lands first,
+    # per the two-file coupling this guard audits).
+    release_train: true
     callers:
-      advance-deploy-env.yml:
-        exempt: *advance_deploy_env_caller_missing
-      code-quality.yml:
-        exempt: *code_quality_caller_missing
+      # Flipped exempt -> required 2026-08-04: the caller was added on MAIN only
+      # (docs#70, a docs-exception direct merge) where the develop-first audit
+      # could not see it. docs#80's backmerge brought it onto develop.
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      # Remediated 2026-08-04 (backend#1420): docs is public, so code-quality is
+      # its ONLY content gate. Called with python:false / shell:false
+      # (measured: 0 .py, 0 .sh), leaving gitleaks + house-rules as the real checks.
+      # soft-fail is left at its advisory default until a first green run is observed
+      # on this repo; arming it required on `main` is the follow-up, not this line —
+      # and it must wait until the caller has PROMOTED to main, or every
+      # direct-to-main docs-exception PR deadlocks on a check that cannot report.
+      code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
-      fr-gate.yml:
-        exempt: *no_staging_branch_no_hop_to_gate
+      # Flipped exempt -> required 2026-08-04: staging now exists and docs is on
+      # the train, whose settle/release poll "gate / gate" fail-closed (docs#80).
+      # The 2026-06-04 docs exception is NOT revoked: it lives beside the train
+      # path, which is why the gate arriving here is compatible with it.
+      fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
       public-pii-gate.yml: required   # public-pii-gate-caller.yml
@@ -478,11 +517,10 @@ repos:
 
   model-zoo:
     visibility: public
-    release_train: false
+    release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
-      code-quality.yml:
-        exempt: *code_quality_caller_missing
+      code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
@@ -532,64 +570,48 @@ repos:
     visibility: private
     release_train: false
     callers:
+      # Per-caller reasons, not one blanket text (Bugbot, .github#138). The first
+      # version of this block asserted "no hop to gate" for all nine, which is only
+      # true for some of them and silently overwrote reasons that were already
+      # accurate. An exemption whose stated reason does not describe the caller is
+      # worse than no exemption: it reads as decided when it is unexamined.
       advance-deploy-env.yml:
         exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
-      code-quality.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
-      customer-priority-bump.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
-      fr-gate.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
-      fr-pass-comment.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
-      kanban-closure-router.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
-      public-pii-gate.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
-      set-pr-status.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
-      wip-limit-check.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
-    copies:
-      add-to-kanban.yml:
-        exempt: *no_workflows_directory_at_all
-      stale-backlog.yml:
-        exempt: *no_workflows_directory_at_all
-
-  start-training:
-    visibility: public
-    release_train: false
-    callers:
-      advance-deploy-env.yml: required   # advance-deploy-env.yml
+          this repo has no `develop` and no deploy stages -- it is `main`-only by decision
+          (README: "no artifact, no deploy stages"), so there is no dev stage for a card to
+          advance INTO. Structural, not a gap.
       code-quality.yml:
         exempt: *code_quality_caller_missing
+      customer-priority-bump.yml:
+        exempt: *customer_priority_bump_caller_missing
+      fr-gate.yml:
+        exempt: *no_staging_branch_no_hop_to_gate
+      fr-pass-comment.yml:
+        exempt: >-
+          fr-pass advances a card out of `FR on staging`. This repo has no `staging` branch
+          and is not on the train, so that column is unreachable for it. Structural, not a
+          gap -- and distinct from the fr_pass_comment_caller_missing repos, which DO have
+          the stage and lack the valve.
+      kanban-closure-router.yml:
+        exempt: *kanban_closure_router_caller_missing
+      public-pii-gate.yml:
+        exempt: *private_repo_no_public_exposure
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+    copies:
+      add-to-kanban.yml: required
+      stale-backlog.yml:
+        exempt: >-
+          no stale-backlog copy: this repo holds decision documents, not a backlog. An RFC
+          that has sat untouched is not stale in the sense the sweep measures -- it is a
+          decision nobody has taken, which is what the board card is now for (.github#138).
+  start-training:
+    visibility: public
+    release_train: true
+    callers:
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
