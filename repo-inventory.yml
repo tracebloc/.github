@@ -398,19 +398,30 @@ repos:
 
   docs:
     visibility: public
-    release_train: false
+    # Enrolled 2026-08-04 (backend#1420, D1 5-of-5). staging created from main
+    # (256fa3e4); docs#80 backmerged main into develop and added the fr-gate
+    # caller; release-train#30 added the repos.yml entry (that side lands first,
+    # per the two-file coupling this guard audits).
+    release_train: true
     callers:
-      advance-deploy-env.yml:
-        exempt: *advance_deploy_env_caller_missing
-      # Remediated 2026-08-04 (backend#1420): docs is public and off-train, so
-      # code-quality is its ONLY content gate. Called with python:false / shell:false
+      # Flipped exempt -> required 2026-08-04: the caller was added on MAIN only
+      # (docs#70, a docs-exception direct merge) where the develop-first audit
+      # could not see it. docs#80's backmerge brought it onto develop.
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      # Remediated 2026-08-04 (backend#1420): docs is public, so code-quality is
+      # its ONLY content gate. Called with python:false / shell:false
       # (measured: 0 .py, 0 .sh), leaving gitleaks + house-rules as the real checks.
       # soft-fail is left at its advisory default until a first green run is observed
-      # on this repo; arming it required on `main` is the follow-up, not this line.
+      # on this repo; arming it required on `main` is the follow-up, not this line —
+      # and it must wait until the caller has PROMOTED to main, or every
+      # direct-to-main docs-exception PR deadlocks on a check that cannot report.
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
-      fr-gate.yml:
-        exempt: *no_staging_branch_no_hop_to_gate
+      # Flipped exempt -> required 2026-08-04: staging now exists and docs is on
+      # the train, whose settle/release poll "gate / gate" fail-closed (docs#80).
+      # The 2026-06-04 docs exception is NOT revoked: it lives beside the train
+      # path, which is why the gate arriving here is compatible with it.
+      fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
       public-pii-gate.yml: required   # public-pii-gate-caller.yml
