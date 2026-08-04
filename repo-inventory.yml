@@ -159,10 +159,19 @@ repos:
       #
       # PRESENCE, NOT TEETH, and deliberately so: the reusable is unarmed org-wide because
       # PII_DENYLIST is unset (backend#1409), which is now PARKED IN THE BACKLOG by decision
-      # - the org is likely to be restructured first. So this gate runs green on every PR
-      # without inspecting anything. `required` here asserts the caller EXISTS, which is what
-      # this inventory tracks; it does not assert the gate can fail. When #1409 is unparked,
-      # arming the denylist arms all 15 callers at once, this one included.
+      # - the org is likely to be restructured first. `required` here asserts the caller
+      # EXISTS, which is what this inventory tracks; it does not assert the gate can fail.
+      # When #1409 is unparked, arming the denylist arms all 15 callers at once, this one
+      # included.
+      #
+      # HOW "UNARMED" PRESENTS, since d2485830 (2026-08-03, #1409 defect 1) flipped it:
+      # the reusable on develop now FAILS CLOSED when the secret is unset - an inactive
+      # guard must be visible as red, not invisible as green (RFC-1405 property 2). While
+      # that revision is on develop/staging only, callers (pinned @main) still show green
+      # no-ops; the moment it promotes to main, every public repo's pii-check turns
+      # RED-INERT. Deliberate, and it blocks nothing: pii-check is a required status
+      # check NOWHERE (all 7 public repos x all branches, measured 2026-08-04). The red
+      # is the honest signal that the gate cannot verify anything until #1409 unparks.
       public-pii-gate.yml: required   # public-pii-gate-caller.yml
       set-pr-status.yml: required   # set-pr-status-caller.yml
       wip-limit-check.yml:
