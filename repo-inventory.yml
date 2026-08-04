@@ -478,7 +478,7 @@ repos:
 
   model-zoo:
     visibility: public
-    release_train: false
+    release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml:
@@ -585,7 +585,7 @@ repos:
 
   start-training:
     visibility: public
-    release_train: false
+    release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml:
