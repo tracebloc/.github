@@ -106,10 +106,15 @@ shared_reasons:
   code_quality_caller_missing: &code_quality_caller_missing >-
     no code-quality caller. One of the nine missing callers named in backend#1415 and confirmed
     by measurement. UNREMEDIATED - this exemption is the finding, not a justification.
-    Down to THREE citations (claude-skills, docs, release-train): model-zoo and start-training
-    were remediated 2026-08-04 under backend#1420 (model-zoo#115, start-training#32) and are now
-    `required`. Their exemptions going stale is what the drift guard caught -- adding a caller
-    without flipping its entry is the same two-file coupling as repos.yml vs release_train.
+    Down to THREE citations (claude-skills, release-train, rfcs): model-zoo and start-training
+    were remediated 2026-08-04 under backend#1420 (model-zoo#115, start-training#32), and docs
+    the same day (docs code-quality-caller.yml), so all three are now `required`. Their
+    exemptions going stale is what the drift guard caught -- adding a caller without flipping
+    its entry is the same two-file coupling as repos.yml vs release_train.
+    The previous revision of this text also said THREE and named claude-skills, docs and
+    release-train while FOUR entries pointed at the anchor: `rfcs` was added later in the same
+    session and never listed. A hand-maintained citation list drifts from its own aliases, so
+    trust `grep -n '\*code_quality_caller_missing'` over this sentence.
   customer_priority_bump_caller_missing: &customer_priority_bump_caller_missing >-
     no customer-priority-bump caller. Measured absent 2026-08-03. The reusable also has three
     dead inputs and hard-codes the `priority` label (backend#1408 P3), so wiring more repos to
@@ -146,12 +151,19 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-caller.yml
-      public-pii-gate.yml:
-        exempt: >-
-          tracebloc/.github is PUBLIC and has no public-pii-gate caller - the only public repo
-          without one (backend#1408, backend#1415). UNREMEDIATED. Note the reusable itself is
-          currently unarmed org-wide (PII_DENYLIST unset, backend#1409), so adding the caller
-          here is sequenced behind that fix.
+      # Remediated 2026-08-04 (.github#141, backend#1420): this repo was the last public
+      # repo running no PII gate on its own PRs (backend#1408, backend#1415). The caller is
+      # a SELF-reference - this repo hosts the reusable - and is pinned `@main` like every
+      # other caller, per RFC-BACKEND-1405 open question 3 (answered: branch promotion, one
+      # process for every repo).
+      #
+      # PRESENCE, NOT TEETH, and deliberately so: the reusable is unarmed org-wide because
+      # PII_DENYLIST is unset (backend#1409), which is now PARKED IN THE BACKLOG by decision
+      # - the org is likely to be restructured first. So this gate runs green on every PR
+      # without inspecting anything. `required` here asserts the caller EXISTS, which is what
+      # this inventory tracks; it does not assert the gate can fail. When #1409 is unparked,
+      # arming the denylist arms all 15 callers at once, this one included.
+      public-pii-gate.yml: required   # public-pii-gate-caller.yml
       set-pr-status.yml: required   # set-pr-status-caller.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -390,8 +402,12 @@ repos:
     callers:
       advance-deploy-env.yml:
         exempt: *advance_deploy_env_caller_missing
-      code-quality.yml:
-        exempt: *code_quality_caller_missing
+      # Remediated 2026-08-04 (backend#1420): docs is public and off-train, so
+      # code-quality is its ONLY content gate. Called with python:false / shell:false
+      # (measured: 0 .py, 0 .sh), leaving gitleaks + house-rules as the real checks.
+      # soft-fail is left at its advisory default until a first green run is observed
+      # on this repo; arming it required on `main` is the follow-up, not this line.
+      code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
       fr-gate.yml:
         exempt: *no_staging_branch_no_hop_to_gate
