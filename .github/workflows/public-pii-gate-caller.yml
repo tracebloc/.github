@@ -1,0 +1,19 @@
+name: Public PII gate
+
+# Per-repo caller for the public-repo PII gate. Blocks PRs whose title/body/
+# commits contain a denylisted customer/partner name or known secret.
+# Logic lives in tracebloc/.github/.github/workflows/public-pii-gate.yml.
+#
+# This repo HOSTS that reusable, so this caller is a self-reference, pinned
+# `@main` like every other caller (RFC-BACKEND-1405 open question 3, answered:
+# branch promotion, one standard process for every repo). `.github` is public
+# and was the only public repo running no PII gate on its own PRs (backend#1420).
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+
+jobs:
+  pii-gate:
+    uses: tracebloc/.github/.github/workflows/public-pii-gate.yml@main
+    secrets: inherit
