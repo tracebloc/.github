@@ -532,71 +532,42 @@ repos:
     visibility: private
     release_train: false
     callers:
+      # Per-caller reasons, not one blanket text (Bugbot, .github#138). The first
+      # version of this block asserted "no hop to gate" for all nine, which is only
+      # true for some of them and silently overwrote reasons that were already
+      # accurate. An exemption whose stated reason does not describe the caller is
+      # worse than no exemption: it reads as decided when it is unexamined.
       advance-deploy-env.yml:
         exempt: >-
-          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
-          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
-          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
-          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
-          sense that it is written down; it is not a gap.
+          this repo has no `develop` and no deploy stages -- it is `main`-only by decision
+          (README: "no artifact, no deploy stages"), so there is no dev stage for a card to
+          advance INTO. Structural, not a gap.
       code-quality.yml:
-        exempt: >-
-          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
-          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
-          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
-          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
-          sense that it is written down; it is not a gap.
+        exempt: *code_quality_caller_missing
       customer-priority-bump.yml:
-        exempt: >-
-          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
-          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
-          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
-          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
-          sense that it is written down; it is not a gap.
+        exempt: *customer_priority_bump_caller_missing
       fr-gate.yml:
-        exempt: >-
-          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
-          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
-          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
-          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
-          sense that it is written down; it is not a gap.
+        exempt: *no_staging_branch_no_hop_to_gate
       fr-pass-comment.yml:
         exempt: >-
-          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
-          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
-          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
-          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
-          sense that it is written down; it is not a gap.
+          fr-pass advances a card out of `FR on staging`. This repo has no `staging` branch
+          and is not on the train, so that column is unreachable for it. Structural, not a
+          gap -- and distinct from the fr_pass_comment_caller_missing repos, which DO have
+          the stage and lack the valve.
       kanban-closure-router.yml:
-        exempt: >-
-          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
-          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
-          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
-          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
-          sense that it is written down; it is not a gap.
+        exempt: *kanban_closure_router_caller_missing
       public-pii-gate.yml:
-        exempt: >-
-          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
-          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
-          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
-          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
-          sense that it is written down; it is not a gap.
+        exempt: *private_repo_no_public_exposure
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
-        exempt: >-
-          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
-          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
-          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
-          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
-          sense that it is written down; it is not a gap.
+        exempt: *wip_limit_check_has_no_callers
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml:
         exempt: >-
-          rfcs has a .github/workflows directory now, but no stale-backlog copy: this repo holds
-          decision documents, not a backlog, so nothing here goes stale in the sense that sweep
-          measures. Structural, not a gap.
-
+          no stale-backlog copy: this repo holds decision documents, not a backlog. An RFC
+          that has sat untouched is not stale in the sense the sweep measures -- it is a
+          decision nobody has taken, which is what the board card is now for (.github#138).
   start-training:
     visibility: public
     release_train: true
