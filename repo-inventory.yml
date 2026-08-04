@@ -534,54 +534,68 @@ repos:
     callers:
       advance-deploy-env.yml:
         exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
+          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
+          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
+          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
+          sense that it is written down; it is not a gap.
       code-quality.yml:
         exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
+          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
+          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
+          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
+          sense that it is written down; it is not a gap.
       customer-priority-bump.yml:
         exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
+          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
+          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
+          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
+          sense that it is written down; it is not a gap.
       fr-gate.yml:
         exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
+          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
+          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
+          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
+          sense that it is written down; it is not a gap.
       fr-pass-comment.yml:
         exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
+          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
+          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
+          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
+          sense that it is written down; it is not a gap.
       kanban-closure-router.yml:
         exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
+          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
+          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
+          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
+          sense that it is written down; it is not a gap.
       public-pii-gate.yml:
         exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
-      set-pr-status.yml:
-        exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
+          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
+          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
+          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
+          sense that it is written down; it is not a gap.
+      set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: >-
-          rfcs was created 2026-08-01 and has no .github/workflows directory yet. It is the
-          'repo number 20' case merge-settings-drift.yml was written to anticipate. UNREMEDIATED
-          - a docs-only repo still wants board and closure automation.
+          rfcs now HAS a .github/workflows directory (add-to-kanban + set-pr-status, added
+          2026-08-04 so RFC PRs are visible on the board). This caller is still absent, and
+          deliberately: rfcs publishes no artifact, has no deploy stages and is `main`-only by
+          decision, so there is no hop for it to gate or advance. UNREMEDIATED only in the
+          sense that it is written down; it is not a gap.
     copies:
-      add-to-kanban.yml:
-        exempt: *no_workflows_directory_at_all
+      add-to-kanban.yml: required
       stale-backlog.yml:
-        exempt: *no_workflows_directory_at_all
+        exempt: >-
+          rfcs has a .github/workflows directory now, but no stale-backlog copy: this repo holds
+          decision documents, not a backlog, so nothing here goes stale in the sense that sweep
+          measures. Structural, not a gap.
 
   start-training:
     visibility: public
