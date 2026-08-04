@@ -128,7 +128,7 @@ shared_reasons:
 repos:
   .github:
     visibility: public
-    release_train: false
+    release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
       code-quality.yml:
