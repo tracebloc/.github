@@ -132,7 +132,7 @@ shared_reasons:
 repos:
   .github:
     visibility: public
-    release_train: false
+    release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
       code-quality.yml:
@@ -143,8 +143,7 @@ repos:
           UNREMEDIATED (one of the nine).
       customer-priority-bump.yml:
         exempt: *customer_priority_bump_caller_missing
-      fr-gate.yml:
-        exempt: *no_staging_branch_no_hop_to_gate
+      fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-caller.yml
       public-pii-gate.yml:
