@@ -106,6 +106,10 @@ shared_reasons:
   code_quality_caller_missing: &code_quality_caller_missing >-
     no code-quality caller. One of the nine missing callers named in backend#1415 and confirmed
     by measurement. UNREMEDIATED - this exemption is the finding, not a justification.
+    Down to THREE citations (claude-skills, docs, release-train): model-zoo and start-training
+    were remediated 2026-08-04 under backend#1420 (model-zoo#115, start-training#32) and are now
+    `required`. Their exemptions going stale is what the drift guard caught -- adding a caller
+    without flipping its entry is the same two-file coupling as repos.yml vs release_train.
   customer_priority_bump_caller_missing: &customer_priority_bump_caller_missing >-
     no customer-priority-bump caller. Measured absent 2026-08-03. The reusable also has three
     dead inputs and hard-codes the `priority` label (backend#1408 P3), so wiring more repos to
@@ -481,8 +485,7 @@ repos:
     release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
-      code-quality.yml:
-        exempt: *code_quality_caller_missing
+      code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
@@ -588,8 +591,7 @@ repos:
     release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
-      code-quality.yml:
-        exempt: *code_quality_caller_missing
+      code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
