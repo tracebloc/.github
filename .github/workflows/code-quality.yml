@@ -62,14 +62,20 @@ name: Code quality
 #           python: true          # repos with Python
 #           shell: true           # repos with shell scripts
 #           # soft-fail: false    # flip once the backlog is clear
-#         secrets: inherit        # see note below
 #
 #   This workflow uses NO secrets and asks only for `contents: read`, so it runs
 #   under a minimal caller and the org default workflow-token permission of "read".
-#   Callers still pass `secrets: inherit` for fleet consistency (backend#1420): it
-#   is a harmless no-op here — nothing is referenced — and it clears a recurring
-#   Cursor Bugbot false positive that flags the omission. It grants no real access:
-#   the job's `permissions:` block, not the secret set, is what bounds this workflow.
+#   Callers pass NO `secrets:` line at all — decided under RFC-BACKEND-1405 Q5
+#   (backend#1420, unwound in backend#1526). `inherit` was briefly the convention
+#   ("harmless no-op, nothing is referenced"), but the no-op is conditional on this
+#   file staying secretless, and callers pin `@main`: the day this workflow gains a
+#   `${{ secrets.X }}` step, every inheriting caller hands it that repo's ENTIRE
+#   secret set (`toJSON(secrets)` dumps it). If a secret is ever genuinely needed
+#   here, callers switch to explicit per-secret passing (`secrets: { name: ... }`),
+#   never `inherit` — the need stays visible in every caller diff. Cursor Bugbot's
+#   recurring nag about the "missing" line is suppressed per-repo in
+#   `.cursor/BUGBOT.md` (the backend#1304 flywheel); the inverse — a caller that
+#   ADDS `secrets: inherit` — is what deserves a finding.
 #
 # SUPPLY CHAIN
 #   gitleaks is installed from its release tarball pinned by version AND
