@@ -780,6 +780,11 @@ jobs:
           TB_MAIN = re.compile(r"^tracebloc/[\w.-]+(/[\w./-]+)*@main$")
           DOCKER_DIGEST = re.compile(r"^docker://\S+@sha256:[0-9a-f]{64}$")
 
+          # Built from parts so this SOURCE never contains a literal GitHub
+          # expression opener - actionlint validates expressions inside run:
+          # blocks and rejects the bare sequence even inside a Python string.
+          EXPR_MARKER = "$" + "{{"
+
           findings = []
           files = sorted(glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"))
           for f in files:
@@ -795,11 +800,16 @@ jobs:
                   ref = m.group(1).strip().strip("'\"")
                   if ref.startswith("./"):
                       continue
-                  if SHA_PIN.match(ref) or TB_MAIN.match(ref) or DOCKER_DIGEST.match(ref):
-                      continue
+                  # tracebloc/* is judged FIRST: the org convention is @main and
+                  # nothing else, so a tracebloc ref frozen on a SHA is drift,
+                  # not a pin (Bugbot, .github#159) - SHA_PIN must never see it.
                   if ref.startswith("tracebloc/"):
+                      if TB_MAIN.match(ref):
+                          continue
                       why = "tracebloc/* must be @main (Q3) - any other ref is drift"
-                  elif "${{" in ref:
+                  elif SHA_PIN.match(ref) or DOCKER_DIGEST.match(ref):
+                      continue
+                  elif EXPR_MARKER in ref:
                       why = "expression ref - cannot be verified, so it is refused (property 2)"
                   else:
                       why = "not pinned to a 40-char commit SHA (D10)"
