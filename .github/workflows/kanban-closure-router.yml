@@ -63,13 +63,25 @@ jobs:
           # a real column or deliberately leaves STATUS empty.
           STATUS=""
 
+          SIBLING="false"
           if [ "$EVENT_NAME" = "pull_request" ]; then
             if [ "$PR_MERGED" = "true" ]; then
               case "$BASE_REF" in
                 main|master) STATUS="Prod" ;;
                 staging)     STATUS="FR on staging" ;;
                 develop)     STATUS="On dev" ;;
-                *)           STATUS="On dev" ;;
+                *)
+                  # A PR merged into a SIBLING feature branch deploys nothing by
+                  # itself — its content travels onward inside the parent PR, and
+                  # a card parked in "On dev" here strands forever (this exact
+                  # fallthrough stranded 6 cards; backend#1437 mechanism 1).
+                  # Leave Status alone and make the condition VISIBLE instead of
+                  # silent: the sibling-merge label below flags the card for the
+                  # weekly board pass, and the parent's own merge advances the
+                  # content through the normal columns.
+                  STATUS=""
+                  SIBLING="true"
+                  ;;
               esac
             else
               STATUS="Cancelled"
@@ -168,7 +180,24 @@ jobs:
           fi
 
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
-          echo "Routing decision: status=${STATUS:-(unchanged)}"
+          echo "sibling=$SIBLING" >> "$GITHUB_OUTPUT"
+          echo "Routing decision: status=${STATUS:-(unchanged)} sibling=$SIBLING"
+
+      # Visibility for backend#1437 mechanism 1: a sibling-based merge gets a
+      # label instead of a column move, so the weekly board pass can see the
+      # condition instead of hand-diagnosing a stranded card. PAT rather than
+      # the caller's GITHUB_TOKEN: caller permission sets vary per repo, and the
+      # ensure-label call must not fail silently on a read-only token.
+      - name: Label sibling-merged PR
+        if: steps.target.outputs.sibling == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          REPO_FULL: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO_FULL/labels/sibling-merge" >/dev/null 2>&1 ||             gh api "repos/$REPO_FULL/labels" -f name=sibling-merge -f color=bfdadc               -f description="Merged into a sibling feature branch; content ships via the parent PR (backend#1437)" >/dev/null ||             echo "::warning::could not ensure the sibling-merge label"
+          gh api -X POST "repos/$REPO_FULL/issues/$NUMBER/labels" -f "labels[]=sibling-merge" >/dev/null             || echo "::warning::could not label PR #$NUMBER as sibling-merge"
 
       - name: Update Status on the kanban
         if: steps.target.outputs.status != ''
