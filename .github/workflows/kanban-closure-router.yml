@@ -72,14 +72,16 @@ jobs:
                 develop)     STATUS="On dev" ;;
                 *)
                   # A PR merged into a SIBLING feature branch deploys nothing by
-                  # itself — its content travels onward inside the parent PR, and
-                  # a card parked in "On dev" here strands forever (this exact
-                  # fallthrough stranded 6 cards; backend#1437 mechanism 1).
-                  # Leave Status alone and make the condition VISIBLE instead of
-                  # silent: the sibling-merge label below flags the card for the
-                  # weekly board pass, and the parent's own merge advances the
-                  # content through the normal columns.
-                  STATUS=""
+                  # itself — its content travels onward inside the parent PR
+                  # (this fallthrough silently stranded 6 such cards;
+                  # backend#1437 mechanism 1). The sibling-merge label below
+                  # makes the condition VISIBLE for the weekly board pass. The
+                  # Status write is deliberately KEPT: skipping it lets the
+                  # project's built-in "Item closed" automation set closed items
+                  # to Cancelled, archiving shipped-via-parent work as abandoned
+                  # (Bugbot, .github#157). On dev + label is the non-terminal
+                  # holding state the weekly pass dispositions.
+                  STATUS="On dev"
                   SIBLING="true"
                   ;;
               esac
@@ -196,8 +198,14 @@ jobs:
           NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          gh api "repos/$REPO_FULL/labels/sibling-merge" >/dev/null 2>&1 ||             gh api "repos/$REPO_FULL/labels" -f name=sibling-merge -f color=bfdadc               -f description="Merged into a sibling feature branch; content ships via the parent PR (backend#1437)" >/dev/null ||             echo "::warning::could not ensure the sibling-merge label"
-          gh api -X POST "repos/$REPO_FULL/issues/$NUMBER/labels" -f "labels[]=sibling-merge" >/dev/null             || echo "::warning::could not label PR #$NUMBER as sibling-merge"
+          # Write failures FAIL this step (the PROJECTS_KANBAN_TOKEN write
+          # rule): a swallowed error means the card silently loses its only
+          # visibility marker (Bugbot, .github#157). Only the ensure-label
+          # probe may miss quietly - a 404 there just means create it.
+          if ! gh api "repos/$REPO_FULL/labels/sibling-merge" >/dev/null 2>&1; then
+            gh api "repos/$REPO_FULL/labels" -f name=sibling-merge -f color=bfdadc -f description="Merged into a sibling feature branch; content ships via the parent PR (backend#1437)" >/dev/null
+          fi
+          gh api -X POST "repos/$REPO_FULL/issues/$NUMBER/labels" -f "labels[]=sibling-merge" >/dev/null
 
       - name: Update Status on the kanban
         if: steps.target.outputs.status != ''
