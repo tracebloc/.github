@@ -84,6 +84,25 @@ mkfixture() {
   export STUB_COMPARE_FIXTURE="$WORK/fixture.json"
 }
 
+# mkfixture_big <commit_count>
+# Padding for the defect-3 regression case, generated straight into the fixture
+# file by python. It must NOT travel via argv or the environment: Linux caps a
+# single exec argument/env string at 128KB (MAX_ARG_STRLEN), so a ~150KB
+# PR_BODY export made every later exec in this script die with E2BIG — green on
+# macOS, "Argument list too long" on the runner. Padding via commit messages is
+# also the faithful shape: backend#1409 describes the haystack as title + body
+# + up to 250 commit messages, title first.
+mkfixture_big() {
+  python3 - "$1" "$WORK/fixture.json" <<'PY'
+import json, sys
+n = int(sys.argv[1])
+pad = "padding line to fill the pipe buffer\n" * 8
+commits = [{"commit": {"message": f"chore: routine commit {i}\n{pad}"}} for i in range(n)]
+json.dump({"total_commits": n, "commits": commits}, open(sys.argv[2], "w"))
+PY
+  export STUB_COMPARE_FIXTURE="$WORK/fixture.json"
+}
+
 # check <name> <expected_rc> <expected_substring>
 check() {
   local name=$1 want_rc=$2 want_txt=$3 out rc ok=1
@@ -154,10 +173,19 @@ echo "#1409 defect 3 regression — an early match in a haystack past the pipe b
 # 64KB pipe buffer. `grep -q` exited on the match and closed the pipe, `printf`
 # took SIGPIPE, `pipefail` surfaced 141, and `if` read that as "no match" — so
 # the gate was least reliable exactly when the PR was largest.
-base; DENYLIST="acme"; PR_TITLE="Acme Corp early match"
-PR_BODY=$(python3 -c 'print("padding line to fill the pipe buffer\n" * 4000, end="")')
-export PR_BODY
-check "an early match in a ~150KB haystack still blocks" 1 "contain a denylisted term"
+base; DENYLIST="acme"; PR_TITLE="Acme Corp early match"; mkfixture_big 250
+# Assert the haystack actually clears the pipe buffer. Without this the case
+# could quietly stop reproducing the bug — and a regression test that no longer
+# reaches the defect is green for the wrong reason, which is the whole failure
+# mode #1409 is about.
+HAY_BYTES=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(sum(len(c["commit"]["message"]) for c in d["commits"]))' "$WORK/fixture.json")
+if [ "$HAY_BYTES" -le 65536 ]; then
+  printf '  FAIL regression fixture is only %s bytes — under the 64KB pipe buffer,\n' "$HAY_BYTES"
+  printf '       so this case no longer exercises defect 3. Raise the commit count.\n'
+  fail=$((fail + 1))
+else
+  check "an early match in a >64KB haystack ($HAY_BYTES B) still blocks" 1 "contain a denylisted term"
+fi
 
 echo
 printf '%d passed, %d failed\n' "$pass" "$fail"
