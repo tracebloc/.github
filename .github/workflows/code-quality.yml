@@ -153,6 +153,19 @@ on:
         description: "Run the org house-rules checker."
         type: boolean
         default: true
+      action-pins:
+        description: "Run the whole-tree action-pin gate (backend#1492, D10)."
+        type: boolean
+        default: true
+      action-pins-soft-fail:
+        description: >-
+          Report pin findings but exit 0, even when `soft-fail` is false.
+          Defaults TRUE so arming code-quality does not instantly redden every
+          repo that still carries the pre-#1491 unpinned backlog — same
+          migration shape as format-soft-fail. Flip to false per caller (or
+          change this default) once the #1491 sweep has merged fleet-wide.
+        type: boolean
+        default: true
       ruff-version:
         description: "Pinned ruff version."
         type: string
@@ -714,3 +727,100 @@ jobs:
           fi
 
           "$CHECKER" "$@"
+
+  # Whole-tree action-pin gate (backend#1492, D10). Hand-pinning does not hold:
+  # while one PR pinned jlumbroso/free-disk-space, a second PR added a NEW
+  # unpinned call site of the same action in a non-overlapping hunk of the same
+  # file — both merged cleanly, no conflict, caught only by a human reading the
+  # diff (#1446/#1449). This job makes that silent recurrence impossible.
+  #
+  # WHOLE-TREE, NEVER DIFF-SCOPED — deliberately. A guard that inspects only
+  # what a PR adds reports clean forever over the existing backlog (the exact
+  # failure mode of PR-mode gitleaks on frontend-app). Every run scans every
+  # workflow file in the checkout.
+  #
+  # THE GRAMMAR, and why not a YAML parse: pin-checking needs the `uses:` REF
+  # STRINGS, not the workflow's semantic structure. A strict line grammar
+  # (comment lines excluded; quoted refs unwrapped) covers every real workflow
+  # in the fleet, and anything it cannot parse — e.g. `uses: ${{ ... }}`
+  # expressions — is REPORTED as a finding rather than skipped: a guard that
+  # cannot verify must refuse to claim it did (RFC-1405 property 2; with
+  # soft-fail off, that refusal is red).
+  #
+  # ALLOWED forms (everything else is a finding):
+  #   ./local/path                      repo-local actions
+  #   tracebloc/<...>@main              org reusables float on @main BY DECISION
+  #                                     (RFC-1405 Q3; any other tracebloc ref is
+  #                                     drift, same rule as caller-drift's)
+  #   owner/action[/path]@<40-hex sha>  D10 pin (trailing "# vX.Y.Z" comment is
+  #                                     convention but not enforced here)
+  #   docker://image@sha256:<digest>    digest-pinned images only
+  action-pins:
+    name: action-pins
+    if: ${{ inputs.action-pins }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Scan every workflow for unpinned action refs
+        env:
+          # Either global soft-fail or the pin-specific override keeps this
+          # advisory; both must be false for findings to fail the job.
+          SOFT_FAIL: ${{ (inputs.soft-fail || inputs.action-pins-soft-fail) && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, os, re, sys
+
+          USES = re.compile(r"^\s*-?\s*uses:\s*(.+?)\s*$")
+          SHA_PIN = re.compile(r"^[\w.-]+/[\w.-]+(/[\w./-]+)?@[0-9a-f]{40}$")
+          TB_MAIN = re.compile(r"^tracebloc/[\w.-]+(/[\w./-]+)*@main$")
+          DOCKER_DIGEST = re.compile(r"^docker://\S+@sha256:[0-9a-f]{64}$")
+
+          findings = []
+          files = sorted(glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"))
+          for f in files:
+              for lineno, raw in enumerate(open(f, encoding="utf-8"), 1):
+                  stripped = raw.lstrip()
+                  if stripped.startswith("#"):
+                      continue
+                  # drop a trailing comment BEFORE matching, so "@sha # v4" parses
+                  code = re.split(r"\s#", raw, 1)[0]
+                  m = USES.match(code)
+                  if not m:
+                      continue
+                  ref = m.group(1).strip().strip("'\"")
+                  if ref.startswith("./"):
+                      continue
+                  if SHA_PIN.match(ref) or TB_MAIN.match(ref) or DOCKER_DIGEST.match(ref):
+                      continue
+                  if ref.startswith("tracebloc/"):
+                      why = "tracebloc/* must be @main (Q3) - any other ref is drift"
+                  elif "${{" in ref:
+                      why = "expression ref - cannot be verified, so it is refused (property 2)"
+                  else:
+                      why = "not pinned to a 40-char commit SHA (D10)"
+                  findings.append((f, lineno, ref, why))
+
+          if not files:
+              # An empty workflows dir yields a green no-op legitimately, but say so.
+              print("no workflow files found - nothing to scan")
+
+          level = "warning" if os.environ.get("SOFT_FAIL") == "true" else "error"
+          for f, lineno, ref, why in findings:
+              print(f"::{level} file={f},line={lineno}::unpinned action ref '{ref}' - {why} (backend#1492)")
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as out:
+                  out.write(f"## action-pins\n\nscanned {len(files)} workflow file(s), {len(findings)} finding(s)\n")
+
+          print(f"action-pins: {len(files)} file(s) scanned, {len(findings)} finding(s)")
+          if findings and os.environ.get("SOFT_FAIL") != "true":
+              sys.exit(1)
+          if findings:
+              print("soft-fail is on - reporting only, not failing this job.")
+          PY
