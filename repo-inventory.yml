@@ -441,60 +441,37 @@ repos:
       add-to-kanban.yml: required
       stale-backlog.yml: required
 
+  # Remediated 2026-08-05 by e2e-test-agent#13, which added the .github/workflows
+  # directory this repo had lacked since it was created on 2026-06-03. The nine
+  # UNREMEDIATED exemptions below were the largest single-repo block in this file
+  # (11 of 21 org-wide, next worst 3), and the harm they recorded was real: no
+  # issue or PR in the repo had ever reached the board.
+  #
+  # RFC-BACKEND-1405 D1 always required this ("Exempt never means ungoverned"),
+  # so the flip is compliance catching up, not a change of policy.
+  #
+  # release_train stays FALSE until the repo is listed in release-train/repos.yml.
+  # caller-drift.py:562 verifies this field against that file, so flipping it early
+  # fails the guard. RFC-BACKEND-1552 D2 amends D1 to enrol it; the flip to true
+  # follows the repos.yml entry, not this PR.
   e2e-test-agent:
     visibility: private
     release_train: false
     callers:
-      advance-deploy-env.yml:
-        exempt: >-
-          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
-          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
-          UNREMEDIATED - flip to required once the callers land.
-      code-quality.yml:
-        exempt: >-
-          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
-          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
-          UNREMEDIATED - flip to required once the callers land.
-      customer-priority-bump.yml:
-        exempt: >-
-          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
-          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
-          UNREMEDIATED - flip to required once the callers land.
-      fr-gate.yml:
-        exempt: >-
-          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
-          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
-          UNREMEDIATED - flip to required once the callers land.
-      fr-pass-comment.yml:
-        exempt: >-
-          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
-          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
-          UNREMEDIATED - flip to required once the callers land.
-      kanban-closure-router.yml:
-        exempt: >-
-          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
-          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
-          UNREMEDIATED - flip to required once the callers land.
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
       public-pii-gate.yml:
-        exempt: >-
-          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
-          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
-          UNREMEDIATED - flip to required once the callers land.
-      set-pr-status.yml:
-        exempt: >-
-          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
-          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
-          UNREMEDIATED - flip to required once the callers land.
+        exempt: *private_repo_no_public_exposure
+      set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
-        exempt: >-
-          e2e-test-agent has no .github/workflows directory. This is the concrete harm described
-          in backend#1415: with no closure caller, e2e-test-agent#1 did not route on close.
-          UNREMEDIATED - flip to required once the callers land.
+        exempt: *wip_limit_check_has_no_callers
     copies:
-      add-to-kanban.yml:
-        exempt: *no_workflows_directory_at_all
-      stale-backlog.yml:
-        exempt: *no_workflows_directory_at_all
+      add-to-kanban.yml: required
+      stale-backlog.yml: required
 
   frontend-app:
     visibility: private
