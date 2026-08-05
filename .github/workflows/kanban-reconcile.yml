@@ -718,16 +718,16 @@ jobs:
                 # (backend#1437 / .github#157) - the dual-workflow mapping must
                 # stay synchronized or a sibling missed by auto-add returns to
                 # the silently-stranded state on the next sweep. On dev is still
-                # the holding column, but the card gets the visibility label.
-                # Label writes hard-fail (PROJECTS_KANBAN_TOKEN write rule).
+                # the holding column; the card gets the visibility label. Only
+                # CLASSIFIED here - the actual label write happens next to the
+                # other mutations, inside the DRY_RUN guard (Bugbot, #157: a
+                # dry run must not mutate labels either).
+                SIB=0
                 case "$BASE" in
                   develop|staging|master|main|"") : ;;
                   *)
+                    SIB=1
                     DESC="merged sibling-base PR -> On dev + sibling-merge label"
-                    if ! gh api "repos/$ORG/$REPO/labels/sibling-merge" >/dev/null 2>&1; then
-                      gh api "repos/$ORG/$REPO/labels" -f name=sibling-merge -f color=bfdadc -f description="Merged into a sibling feature branch; content ships via the parent PR (backend#1437)" >/dev/null
-                    fi
-                    gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=sibling-merge" >/dev/null
                     ;;
                 esac
                 if sha_on_branch "$REPO" "staging" "$SHA"; then
@@ -750,6 +750,16 @@ jobs:
               else
                 echo "[WARN] added $REPO#$NUM but Status set failed"
                 add_fail=$((add_fail+1))
+              fi
+              # Sibling visibility label - written AFTER the status so a label
+              # failure can never cost the card its column (.github#157's
+              # ordering lesson), and inside the wet path so dry runs skip it.
+              # Hard-fails per the PROJECTS_KANBAN_TOKEN write rule.
+              if [ "${SIB:-0}" = "1" ]; then
+                if ! gh api "repos/$ORG/$REPO/labels/sibling-merge" >/dev/null 2>&1; then
+                  gh api "repos/$ORG/$REPO/labels" -f name=sibling-merge -f color=bfdadc -f description="Merged into a sibling feature branch; content ships via the parent PR (backend#1437)" >/dev/null
+                fi
+                gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=sibling-merge" >/dev/null
               fi
               printf '%s\t%s\n' "$REPO#$NUM" "$DESC" >> added.tsv
             else
