@@ -697,6 +697,10 @@ jobs:
             NID=$(echo "$line"  | jq -r '.id')
             REPO=$(echo "$line" | jq -r '.repository.name')
             NUM=$(echo "$line"  | jq -r '.number')
+            # Per-ITEM reset: initializing this inside the merged-PR branch let
+            # the flag leak to whatever the loop visited next - an issue after
+            # a sibling PR inherited SIB=1 and got mislabeled (Bugbot, #157).
+            SIB=0
 
             if [ "$TYPE" = "Issue" ]; then
               OPT="$BACKLOG_OPT"; DESC="issue -> Backlog"
@@ -722,7 +726,6 @@ jobs:
                 # CLASSIFIED here - the actual label write happens next to the
                 # other mutations, inside the DRY_RUN guard (Bugbot, #157: a
                 # dry run must not mutate labels either).
-                SIB=0
                 case "$BASE" in
                   develop|staging|master|main|"") : ;;
                   *)
