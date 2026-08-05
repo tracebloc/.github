@@ -599,7 +599,7 @@ jobs:
                       pageInfo { hasNextPage endCursor }
                       nodes {
                         __typename
-                        ... on PullRequest { id number isDraft state headRefName mergeCommit { oid }
+                        ... on PullRequest { id number isDraft state headRefName baseRefName mergeCommit { oid }
                           repository { name defaultBranchRef { name } }
                           projectItems(first: 10) { nodes { project { number } } } }
                         ... on Issue { id number state repository { name }
@@ -615,7 +615,7 @@ jobs:
                       pageInfo { hasNextPage endCursor }
                       nodes {
                         __typename
-                        ... on PullRequest { id number isDraft state headRefName mergeCommit { oid }
+                        ... on PullRequest { id number isDraft state headRefName baseRefName mergeCommit { oid }
                           repository { name defaultBranchRef { name } }
                           projectItems(first: 10) { nodes { project { number } } } }
                         ... on Issue { id number state repository { name }
@@ -711,8 +711,25 @@ jobs:
               else
                 SHA=$(echo "$line" | jq -r '.mergeCommit.oid // ""')
                 DEF=$(echo "$line" | jq -r '.repository.defaultBranchRef.name // "main"')
+                BASE=$(echo "$line" | jq -r '.baseRefName // ""')
                 PB=$(resolve_prod_branch "$REPO" "$DEF")
                 OPT="$ON_DEV_OPT"; DESC="merged PR -> On dev"
+                # Sibling-based merge: same rule as the closure router
+                # (backend#1437 / .github#157) - the dual-workflow mapping must
+                # stay synchronized or a sibling missed by auto-add returns to
+                # the silently-stranded state on the next sweep. On dev is still
+                # the holding column, but the card gets the visibility label.
+                # Label writes hard-fail (PROJECTS_KANBAN_TOKEN write rule).
+                case "$BASE" in
+                  develop|staging|master|main|"") : ;;
+                  *)
+                    DESC="merged sibling-base PR -> On dev + sibling-merge label"
+                    if ! gh api "repos/$ORG/$REPO/labels/sibling-merge" >/dev/null 2>&1; then
+                      gh api "repos/$ORG/$REPO/labels" -f name=sibling-merge -f color=bfdadc -f description="Merged into a sibling feature branch; content ships via the parent PR (backend#1437)" >/dev/null
+                    fi
+                    gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=sibling-merge" >/dev/null
+                    ;;
+                esac
                 if sha_on_branch "$REPO" "staging" "$SHA"; then
                   OPT="$FR_STAGING_OPT"; DESC="merged PR -> FR on staging"
                 fi
