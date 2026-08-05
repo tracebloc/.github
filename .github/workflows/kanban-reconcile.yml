@@ -599,7 +599,7 @@ jobs:
                       pageInfo { hasNextPage endCursor }
                       nodes {
                         __typename
-                        ... on PullRequest { id number isDraft state headRefName mergeCommit { oid }
+                        ... on PullRequest { id number isDraft state headRefName baseRefName mergeCommit { oid }
                           repository { name defaultBranchRef { name } }
                           projectItems(first: 10) { nodes { project { number } } } }
                         ... on Issue { id number state repository { name }
@@ -615,7 +615,7 @@ jobs:
                       pageInfo { hasNextPage endCursor }
                       nodes {
                         __typename
-                        ... on PullRequest { id number isDraft state headRefName mergeCommit { oid }
+                        ... on PullRequest { id number isDraft state headRefName baseRefName mergeCommit { oid }
                           repository { name defaultBranchRef { name } }
                           projectItems(first: 10) { nodes { project { number } } } }
                         ... on Issue { id number state repository { name }
@@ -697,6 +697,10 @@ jobs:
             NID=$(echo "$line"  | jq -r '.id')
             REPO=$(echo "$line" | jq -r '.repository.name')
             NUM=$(echo "$line"  | jq -r '.number')
+            # Per-ITEM reset: initializing this inside the merged-PR branch let
+            # the flag leak to whatever the loop visited next - an issue after
+            # a sibling PR inherited SIB=1 and got mislabeled (Bugbot, #157).
+            SIB=0
 
             if [ "$TYPE" = "Issue" ]; then
               OPT="$BACKLOG_OPT"; DESC="issue -> Backlog"
@@ -711,8 +715,24 @@ jobs:
               else
                 SHA=$(echo "$line" | jq -r '.mergeCommit.oid // ""')
                 DEF=$(echo "$line" | jq -r '.repository.defaultBranchRef.name // "main"')
+                BASE=$(echo "$line" | jq -r '.baseRefName // ""')
                 PB=$(resolve_prod_branch "$REPO" "$DEF")
                 OPT="$ON_DEV_OPT"; DESC="merged PR -> On dev"
+                # Sibling-based merge: same rule as the closure router
+                # (backend#1437 / .github#157) - the dual-workflow mapping must
+                # stay synchronized or a sibling missed by auto-add returns to
+                # the silently-stranded state on the next sweep. On dev is still
+                # the holding column; the card gets the visibility label. Only
+                # CLASSIFIED here - the actual label write happens next to the
+                # other mutations, inside the DRY_RUN guard (Bugbot, #157: a
+                # dry run must not mutate labels either).
+                case "$BASE" in
+                  develop|staging|master|main|"") : ;;
+                  *)
+                    SIB=1
+                    DESC="merged sibling-base PR -> On dev + sibling-merge label"
+                    ;;
+                esac
                 if sha_on_branch "$REPO" "staging" "$SHA"; then
                   OPT="$FR_STAGING_OPT"; DESC="merged PR -> FR on staging"
                 fi
@@ -733,6 +753,16 @@ jobs:
               else
                 echo "[WARN] added $REPO#$NUM but Status set failed"
                 add_fail=$((add_fail+1))
+              fi
+              # Sibling visibility label - written AFTER the status so a label
+              # failure can never cost the card its column (.github#157's
+              # ordering lesson), and inside the wet path so dry runs skip it.
+              # Hard-fails per the PROJECTS_KANBAN_TOKEN write rule.
+              if [ "${SIB:-0}" = "1" ]; then
+                if ! gh api "repos/$ORG/$REPO/labels/sibling-merge" >/dev/null 2>&1; then
+                  gh api "repos/$ORG/$REPO/labels" -f name=sibling-merge -f color=bfdadc -f description="Merged into a sibling feature branch; content ships via the parent PR (backend#1437)" >/dev/null
+                fi
+                gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=sibling-merge" >/dev/null
               fi
               printf '%s\t%s\n' "$REPO#$NUM" "$DESC" >> added.tsv
             else
