@@ -63,9 +63,19 @@ name: Code quality
 #           shell: true           # repos with shell scripts
 #           # soft-fail: false    # flip once the backlog is clear
 #
-#   `secrets: inherit` is NOT needed — this workflow uses no secrets and asks
-#   only for `contents: read`, so it runs under a minimal caller and under the
-#   org default workflow-token permission of "read".
+#   This workflow uses NO secrets and asks only for `contents: read`, so it runs
+#   under a minimal caller and the org default workflow-token permission of "read".
+#   Callers pass NO `secrets:` line at all — decided under RFC-BACKEND-1405 Q5
+#   (backend#1420, unwound in backend#1526). `inherit` was briefly the convention
+#   ("harmless no-op, nothing is referenced"), but the no-op is conditional on this
+#   file staying secretless, and callers pin `@main`: the day this workflow gains a
+#   `${{ secrets.X }}` step, every inheriting caller hands it that repo's ENTIRE
+#   secret set (`toJSON(secrets)` dumps it). If a secret is ever genuinely needed
+#   here, callers switch to explicit per-secret passing (`secrets: { name: ... }`),
+#   never `inherit` — the need stays visible in every caller diff. Cursor Bugbot's
+#   recurring nag about the "missing" line is suppressed per-repo in
+#   `.cursor/BUGBOT.md` (the backend#1304 flywheel); the inverse — a caller that
+#   ADDS `secrets: inherit` — is what deserves a finding.
 #
 # SUPPLY CHAIN
 #   gitleaks is installed from its release tarball pinned by version AND
@@ -582,6 +592,16 @@ jobs:
           fi
           # A .gitleaks.toml at the repo root is picked up automatically.
 
+          # EVERY invocation below is `gitleaks git` — commit-scoped — and the
+          # per-repo baselines DEPEND on that: baseline fingerprints embed the
+          # commit SHA that introduced each finding, so they only match findings
+          # produced by a git-mode scan. Switching any branch here to `gitleaks
+          # dir`/`detect` (path-scoped fingerprints) silently invalidates every
+          # baseline entry fleet-wide at once — 277 suppressions un-suppress in
+          # a single run (backend#1404 §4). Permanent fixtures live in per-repo
+          # `.gitleaks.toml` allowlists instead (auto-loaded from the checkout
+          # root, commit-INDEPENDENT); only genuine historical exposure stays
+          # baselined, tracked for rotation in backend#1355.
           RC=0
           if [ "$ALL_FILES" = "true" ] || [ -z "${BASE_SHA:-}" ]; then
             echo "Scanning the full history."
