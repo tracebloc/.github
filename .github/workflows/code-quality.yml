@@ -816,17 +816,30 @@ jobs:
                   findings.append((f, lineno, ref, why))
 
           if not files:
-              # An empty workflows dir yields a green no-op legitimately, but say so.
-              print("no workflow files found - nothing to scan")
+              # Any repo CALLING this reusable necessarily has at least one
+              # workflow file (its own caller), so an empty glob means the
+              # checkout or working directory is wrong - a malfunction, not a
+              # clean tree. Malfunctions fail even under soft-fail: that flag
+              # governs FINDINGS, never the scan's own integrity (Bugbot,
+              # .github#159; the watchdog's findings-vs-malfunction split).
+              print("::error::action-pins scanned ZERO workflow files - the checkout or cwd is wrong; refusing to report a pass (backend#1492)")
+              sys.exit(2)
 
           level = "warning" if os.environ.get("SOFT_FAIL") == "true" else "error"
           for f, lineno, ref, why in findings:
               print(f"::{level} file={f},line={lineno}::unpinned action ref '{ref}' - {why} (backend#1492)")
 
+          # The summary carries the FULL list, like ruff/format/gitleaks do:
+          # annotations cap at ten per step, so a backlog-carrying repo would
+          # otherwise show ten warnings and a bare number (Bugbot, .github#159).
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           if summary:
               with open(summary, "a", encoding="utf-8") as out:
-                  out.write(f"## action-pins\n\nscanned {len(files)} workflow file(s), {len(findings)} finding(s)\n")
+                  out.write(f"## action-pins\n\nscanned {len(files)} workflow file(s), {len(findings)} finding(s)\n\n")
+                  if findings:
+                      out.write("| file | line | ref | why |\n|---|---|---|---|\n")
+                      for f, lineno, ref, why in findings:
+                          out.write(f"| {f} | {lineno} | `{ref}` | {why} |\n")
 
           print(f"action-pins: {len(files)} file(s) scanned, {len(findings)} finding(s)")
           if findings and os.environ.get("SOFT_FAIL") != "true":
