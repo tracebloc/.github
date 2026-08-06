@@ -372,15 +372,24 @@ jobs:
                   }
                 }' -F org="$iowner" -F repo="$irepo" -F num="$inum" 2>"$ERRF"); then
                 IERRTXT=$(cat "$ERRF" 2>/dev/null)
-                # Same split as the PR read: a reference that does not resolve is
-                # data, not an outage (Bugbot, #181).
-                case "$IERRTXT" in
-                  *"Could not resolve to an Issue"*|*"Could not resolve to a Repository"*)
-                    echo "::notice::$iowner/$irepo#$inum does not resolve - skipping"
-                    continue ;;
-                esac
-                # Same rule as the closing-issue read above: unreadable is not
-                # "not on the project" (Bugbot, #166).
+                # NO BENIGN CASE ON THIS PATH -- deliberately, and this is the
+                # opposite correction to the one above (Bugbot, #180 High).
+                #
+                # These owner/repo/number triples come from closingIssuesReferences,
+                # which GitHub itself already resolved, so the issue and its repo
+                # exist by construction. A resolution failure here therefore is NOT
+                # missing data -- it is missing ACCESS. And GitHub returns the very
+                # same "Could not resolve to a Repository" for a private repo the
+                # token cannot see (missing scope, expired SSO), which is exactly
+                # the cross-repo case this block exists for: a client/website PR
+                # closing a `backend` issue. Skipping on that text would restore the
+                # fail-open hole on the one route it was added to close.
+                #
+                # The scraped-PR read above keeps its benign case for the opposite
+                # reason: those numbers come from commit subjects, nothing resolved
+                # them, and the repo is the one running the workflow.
+                #
+                # Unreadable is not "not on the project" (Bugbot, #166).
                 echo "::warning::could not read issue $iowner/$irepo#$inum: $IERRTXT"
                 RUN_FAILED=1
                 continue
