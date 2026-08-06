@@ -306,7 +306,14 @@ jobs:
             # issues" and silently skip advancement -- the exact drift this block
             # exists to fix (Bugbot .github#166). totalCount surfaces a PR that
             # closes more issues than one page instead of silently truncating.
-            if ! CIS=$(gh api graphql -f query='
+            # Capture stdout+stderr so a benign "this number is not a PR" (an issue
+            # ref or bogus number grepped from a commit -- pullRequest(number) then
+            # errors "Could not resolve to a PullRequest") is skipped QUIETLY, while a
+            # real infra failure (token / rate limit / transport) still fails CLOSED.
+            # The earlier blanket fail-closed reddened every promotion carrying a
+            # non-PR number (Bugbot .github#181); the earlier blanket {} fallback hid
+            # real failures (Bugbot .github#166). This distinguishes the two.
+            cis_out=$(gh api graphql -f query='
               query($org: String!, $repo: String!, $num: Int!) {
                 repository(owner: $org, name: $repo) {
                   pullRequest(number: $num) {
@@ -316,11 +323,16 @@ jobs:
                     }
                   }
                 }
-              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$cpr" 2>/dev/null); then
-              echo "::warning::could not read closing issues for PR #$cpr -- failing the run so lagging cards are visible, not silently skipped"
+              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$cpr" 2>&1)
+            if [ $? -ne 0 ]; then
+              if printf '%s' "$cis_out" | grep -qiE "Could not resolve to a PullRequest|Not Found"; then
+                continue   # benign: $cpr is not a PR -- nothing to advance
+              fi
+              echo "::warning::could not read closing issues for PR #$cpr -- real lookup failure; failing the run so lagging cards are visible, not silently skipped"
               RUN_FAILED=1
               continue
             fi
+            CIS="$cis_out"
             ci_total=$(echo "$CIS" | jq -r '.data.repository.pullRequest.closingIssuesReferences.totalCount // 0' 2>/dev/null)
             if [ "${ci_total:-0}" -gt 100 ]; then
               echo "::warning::PR #$cpr closes $ci_total issues; only the first 100 were advanced -- paginate if this ever fires"
@@ -340,6 +352,7 @@ jobs:
                     issue(number: $num) {
                       state
                       projectItems(first: 20) {
+                        totalCount
                         nodes {
                           id isArchived project { number }
                           status: fieldValueByName(name: "Status") {
@@ -353,6 +366,10 @@ jobs:
                 echo "::warning::could not read project items for issue $iowner/$irepo#$inum -- failing the run so a lagging card is visible"
                 RUN_FAILED=1
                 continue
+              fi
+              pi_total=$(echo "$IRESP" | jq -r '.data.repository.issue.projectItems.totalCount // 0' 2>/dev/null)
+              if [ "${pi_total:-0}" -gt 20 ]; then
+                echo "::warning::issue $irepo#$inum is on $pi_total projects; only the first 20 were checked -- surfaced, not silently truncated"
               fi
               ITEM_ID=$(echo "$IRESP" | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.issue.projectItems.nodes[]?
                     | select(.project.number == ($n | tonumber)) | .id' 2>/dev/null | head -1)
