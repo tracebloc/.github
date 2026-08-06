@@ -40,6 +40,10 @@ on:
         description: "GitHub org owning the project"
         type: string
         default: tracebloc
+      dry_run:
+        description: "Log intended card moves without writing them (test mode)"
+        type: boolean
+        default: false
 
 jobs:
   advance:
@@ -51,7 +55,7 @@ jobs:
     if: github.event.created != true && github.event.deleted != true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -130,6 +134,7 @@ jobs:
           STATUS_NAME: ${{ steps.env.outputs.status_name }}
           REPO_FULL: ${{ github.repository }}
           PR_NUMBERS: ${{ steps.prs.outputs.prs }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           REPO_NAME="${REPO_FULL#*/}"
@@ -212,6 +217,10 @@ jobs:
           RUN_FAILED=0
           update_field() {   # $1=fieldId  $2=optionId  $3=human label
             local err
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              echo "[DRY] would set $3 on item $ITEM_ID"
+              return 0
+            fi
             # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
             if err=$(gh api graphql -f query='
               mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
@@ -280,6 +289,73 @@ jobs:
               echo "-> PR #$prnum: Status = $STATUS_NAME"
               update_field "$STATUS_FIELD" "$STATUS_OPT" "Status=$STATUS_NAME"
             fi
+          done
+
+          # -- Advance the ISSUES each promoted PR closes (backend#1600) --------
+          # advance-deploy-env historically advanced only PRs, so an issue closed
+          # by a develop-merged PR was parked at "On dev" by the closure-router and
+          # NEVER advanced when its code shipped to staging/prod -- it drifted
+          # permanently (2026-08-06: all 20 drifted cards were closed issues, 0 PRs).
+          # For each PR in the push, resolve its closing issues (CROSS-REPO aware --
+          # a client/website PR routinely closes a `backend` issue) and advance each
+          # with the SAME monotonic guard, archived-skip, and dry-run behaviour.
+          for cpr in $PR_NUMBERS; do
+            # shellcheck disable=SC2016
+            CIS=$(gh api graphql -f query='
+              query($org: String!, $repo: String!, $num: Int!) {
+                repository(owner: $org, name: $repo) {
+                  pullRequest(number: $num) {
+                    closingIssuesReferences(first: 30) {
+                      nodes { number repository { name owner { login } } }
+                    }
+                  }
+                }
+              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$cpr" 2>/dev/null) || CIS='{}'
+            ISSUES=$(echo "$CIS" | jq -rc '.data.repository.pullRequest.closingIssuesReferences.nodes[]?
+                  | [.repository.owner.login, .repository.name, .number] | @tsv' 2>/dev/null)
+            # here-string (not a pipe) so update_field's RUN_FAILED reaches this shell
+            while IFS="$(printf '\t')" read -r iowner irepo inum; do
+              [ -z "${inum:-}" ] && continue
+              # shellcheck disable=SC2016
+              IRESP=$(gh api graphql -f query='
+                query($org: String!, $repo: String!, $num: Int!) {
+                  repository(owner: $org, name: $repo) {
+                    issue(number: $num) {
+                      projectItems(first: 10) {
+                        nodes {
+                          id isArchived project { number }
+                          status: fieldValueByName(name: "Status") {
+                            ... on ProjectV2ItemFieldSingleSelectValue { name }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }' -F org="$iowner" -F repo="$irepo" -F num="$inum" 2>/dev/null) || IRESP='{}'
+              ITEM_ID=$(echo "$IRESP" | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.issue.projectItems.nodes[]?
+                    | select(.project.number == ($n | tonumber)) | .id' 2>/dev/null | head -1)
+              if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
+                echo "issue $iowner/$irepo#$inum not on project - skipping"; continue
+              fi
+              IARCH=$(echo "$IRESP" | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.issue.projectItems.nodes[]?
+                    | select(.project.number == ($n | tonumber)) | .isArchived' 2>/dev/null | head -1)
+              if [ "$IARCH" = "true" ]; then
+                echo "::notice::issue $irepo#$inum project item is archived -- skipping"; continue
+              fi
+              ICUR=$(echo "$IRESP" | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.issue.projectItems.nodes[]?
+                    | select(.project.number == ($n | tonumber)) | .status.name // ""' 2>/dev/null | head -1)
+              if [ "$TARGET_RANK" -gt 0 ] && [ "$(rank "$ICUR")" -ge "$TARGET_RANK" ]; then
+                echo "::notice::issue $irepo#$inum already at '${ICUR:-none}' (>= '$STATUS_NAME') -- not demoting"; continue
+              fi
+              # prnum drives update_field's warning label
+              prnum="$irepo#$inum (closed by PR #$cpr)"
+              echo "-> issue $irepo#$inum (closed by PR #$cpr): Deploy env = $DEPLOY_ENV"
+              update_field "$DEPLOY_FIELD" "$DEPLOY_OPT" "Deploy env=$DEPLOY_ENV"
+              if [ "$SKIP_STATUS" != "1" ]; then
+                echo "-> issue $irepo#$inum: Status = $STATUS_NAME"
+                update_field "$STATUS_FIELD" "$STATUS_OPT" "Status=$STATUS_NAME"
+              fi
+            done <<< "$ISSUES"
           done
 
           if [ "$RUN_FAILED" -ne 0 ]; then
