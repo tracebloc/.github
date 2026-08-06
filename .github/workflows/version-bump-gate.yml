@@ -124,7 +124,9 @@ name: Version bump gate
 #     opens the PR: `release-train/anything` alone is an exemption anybody can
 #     mint, from a fork even. The base branch and the head repository are
 #     properties of a real promotion rather than claims made by its author, and
-#     a promotion never targets `develop`. A PR that merely borrows the name is
+#     a promotion never targets `develop`. The fork test demands a CONFIRMED
+#     `false` rather than merely "not true" - an exemption must not be granted
+#     on a field that could not be read. A PR that merely borrows the name is
 #     evaluated normally, with a warning naming the mismatch - a bypass that
 #     does not apply should be visible, not silently absent.
 #
@@ -394,11 +396,23 @@ jobs:
             release-train/*|hotfix-backmerge/*)
               case "${PR_BASE_REF:-}" in
                 staging|main|master)
-                  if [ "${IS_FORK:-}" = "true" ]; then
-                    echo "::warning::Head ref '${PR_HEAD_REF}' looks like a promotion branch, but this PR comes from a FORK - the release train never promotes from one. Evaluating it as an ordinary PR."
-                  else
-                    verified "Release-train promotion PR (head '${PR_HEAD_REF}' -> '${PR_BASE_REF}', same repository). The train runs the authoritative version preflight on this exact content, scoped per hop, and the PRs this promotion carries were each gated on their way into develop."
-                  fi
+                  # Exempt only on a CONFIRMED same-repo head. `true` and "anything
+                  # we could not read" are different problems but the same answer
+                  # here, because this is an exemption: the unknown case (an absent
+                  # head.repo on a deleted fork, a payload we did not get) must not
+                  # buy one. Evaluating a genuine promotion by mistake costs a
+                  # re-run; exempting a fork by mistake costs the gate.
+                  case "${IS_FORK:-}" in
+                    false)
+                      verified "Release-train promotion PR (head '${PR_HEAD_REF}' -> '${PR_BASE_REF}', same repository). The train runs the authoritative version preflight on this exact content, scoped per hop, and the PRs this promotion carries were each gated on their way into develop."
+                      ;;
+                    true)
+                      echo "::warning::Head ref '${PR_HEAD_REF}' looks like a promotion branch, but this PR comes from a FORK - the release train never promotes from one. Evaluating it as an ordinary PR."
+                      ;;
+                    *)
+                      echo "::warning::Head ref '${PR_HEAD_REF}' looks like a promotion branch, but the head repository could not be confirmed (head.repo.fork was '${IS_FORK:-unset}'). An exemption is not something to grant on an unread field. Evaluating it as an ordinary PR."
+                      ;;
+                  esac
                   ;;
                 *)
                   echo "::warning::Head ref '${PR_HEAD_REF}' looks like a promotion branch, but this PR targets '${PR_BASE_REF:-?}' rather than staging/main/master. The release train does not promote there, so this is evaluated as an ordinary PR."

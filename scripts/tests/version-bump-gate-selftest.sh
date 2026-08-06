@@ -286,6 +286,8 @@ base; PR_HEAD_REF=release-train/to-staging; PR_BASE_REF=staging; IS_FORK=true
 check "a FORK cannot claim the exemption even with the right base" 1 "comes from a FORK"
 base; PR_HEAD_REF=release-train/to-staging; PR_BASE_REF=staging; IS_FORK=true
 check "...and is then evaluated like any other PR" 1 "Bump pyproject.toml"
+base; PR_HEAD_REF=release-train/to-staging; PR_BASE_REF=staging; IS_FORK=""
+check "an UNREADABLE head.repo does not buy an exemption either" 1 "could not be confirmed"
 
 echo
 echo "fail-closed paths - 'could not evaluate' must never read as 'nothing found'"
