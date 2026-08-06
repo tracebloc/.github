@@ -48,7 +48,9 @@ concurrency:
 jobs:
   gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Above the 40-minute poll budget below, so the budget's own error message
+    # is what a caller sees rather than an opaque job timeout.
+    timeout-minutes: 45
     steps:
       - name: Require the conformance audit when the contract changes
         env:
@@ -64,8 +66,15 @@ jobs:
             scripts/tests/caller-drift-selftest.py
             .github/workflows/caller-drift.yml
           AUDIT_WORKFLOW: caller-drift.yml
+          # The budget MUST exceed the worst case of what it waits for, or
+          # fail-closed degrades into fail-annoying and people learn to bypass
+          # the gate. caller-drift is selftest (timeout 5m) + audit (timeout
+          # 30m) = 35m worst case; the old 40x30s = 20m budget would have gone
+          # red on a legitimately slow audit and blocked the PR pending a manual
+          # re-run. 80x30s = 40m, with the job timeout above it (Bugbot,
+          # .github#173).
           POLL_SECONDS: 30
-          POLL_TRIES: 40
+          POLL_TRIES: 80
         run: |
           set -euo pipefail
 
@@ -73,7 +82,15 @@ jobs:
           # --paginate, because a PR over one page would otherwise look like it
           # touches only the first 30 files -- a truncated read that says "not
           # guarded" is the silent pass this whole file exists to prevent.
-          if ! FILES=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq '.[].filename'); then
+          # BOTH .filename and .previous_filename. A RENAME reports the new path in
+          # .filename only, so reading that alone lets `git mv repo-inventory.yml
+          # elsewhere.yml` sail through as "not guarded" -- the contract file
+          # moves out from under the audit and the gate waves it past. This is the
+          # same reason promote-repo.sh's publishable_delta matches both fields
+          # (a file renamed OUT of a published tree is still a publish-path
+          # change). Bugbot, .github#173.
+          if ! FILES=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+                --jq '.[] | .filename, (.previous_filename // empty)'); then
             echo "::error::could not list this PR's changed files - refusing to guess whether the contract changed"
             exit 1
           fi
