@@ -1,0 +1,69 @@
+name: Code quality
+
+# This repo publishes `code-quality.yml` to the whole org and, until now, was
+# the one repo that never ran it (backend#1603). The gap was invisible because
+# `actionlint.yml` looks like coverage: it type-checks expressions, validates
+# needs/uses wiring and shellchecks every `run:` block -- but it does not look
+# at action REFS at all. So the pinning rule this repo defines was the one rule
+# this repo was exempt from, and on 2026-08-06 a PR here reverted
+# `actions/checkout` from its commit SHA to the mutable `@v4` tag with nothing
+# in CI to catch it (.github#168, caught in human review).
+#
+# `actionlint.yml` stays as a SEPARATE hard gate rather than folding in here.
+# The two have different postures on purpose: actionlint has been blocking
+# since day one against a tree that was cleaned in the same change, while
+# code-quality ships `soft-fail: true` by default for repos still clearing a
+# backlog. Merging them would force one posture onto both.
+#
+# No `paths:` filter, deliberately. A path-filtered job never reports on a PR
+# that touches nothing it watches, and a required check that never reports
+# leaves that PR waiting forever -- the trap `actionlint.yml`'s own header
+# warns about before requiring it.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  # Manual whole-tree scan (gitleaks baseline etc.) -- runs every enabled
+  # job in all-files mode instead of a PR diff.
+  workflow_dispatch:
+    inputs:
+      all-files:
+        description: "Scan the whole repo, not a diff"
+        type: boolean
+        default: true
+
+concurrency:
+  group: code-quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# No `secrets: inherit` -- RFC-BACKEND-1405 Q5. This caller sits in the same
+# repo as the callee, which makes inheriting look harmless; it is not. The
+# rule is about what a `secrets.X` reference added later would silently gain,
+# and it applies here for the same reason it applies everywhere else.
+jobs:
+  quality:
+    uses: tracebloc/.github/.github/workflows/code-quality.yml@main
+    with:
+      python: true          # scripts/caller-drift.py + its selftest
+      shell: true           # scripts/house-rules.sh, scripts/tests/pii-gate-selftest.sh
+
+      # Armed from day one rather than soft-failed into a backlog. Measured on
+      # develop before writing this file: shellcheck --severity=error CLEAN over
+      # both shell scripts, house-rules.sh CLEAN over the same, and 24 `uses:`
+      # refs across 23 workflows with ZERO pin violations. The two checks I
+      # could not run locally -- ruff and gitleaks -- get their first honest
+      # look on this PR; anything they surface is fixed or baselined here
+      # rather than the gate being softened, which is the same bargain
+      # e2e-test-agent's caller records.
+      soft-fail: false
+
+      # Hard-armed explicitly, not by inheriting soft-fail: this is the check
+      # whose absence let .github#168 through, and it is the one check this
+      # repo has a special duty to enforce on itself, since every other repo
+      # consumes these workflows at @main and inherits whatever refs they pin.
+      action-pins-soft-fail: false
+
+      all-files: ${{ inputs.all-files || false }}
