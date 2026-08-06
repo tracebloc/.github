@@ -189,6 +189,40 @@ jobs:
           done
           echo "Found $(wc -l < items.ndjson) non-terminal items to evaluate"
 
+      - name: Shield North Stars from the stale sweep
+        # stale-backlog.yml is column-blind (backend#1597, from the #1408
+        # audit): a North Stars epic quiet for 6+8 weeks gets warned, closed,
+        # and routed to Cancelled - a strategic priority silently archived.
+        # The stale sweep already exempts the `keep-open` label, so this step
+        # keeps that label in sync with the board: every ISSUE currently in
+        # North Stars gets keep-open (idempotent - adding an existing label is
+        # a no-op). One-way by design: removal stays with humans, because the
+        # label is also applied manually and an auto-remove would fight them.
+        # Write failures FAIL the step (the PROJECTS_KANBAN_TOKEN write rule).
+        run: |
+          set -euo pipefail
+          SHIELDED=0
+          while IFS= read -r line; do
+            STATUS=$(echo "$line" | jq -r '.fieldValueByName.name // "No status"')
+            TYPE=$(echo "$line" | jq -r '.content.__typename // ""')
+            if [ "$STATUS" != "North Stars" ] || [ "$TYPE" != "Issue" ]; then
+              continue
+            fi
+            REPO=$(echo "$line" | jq -r '.content.repository.name')
+            NUM=$(echo "$line" | jq -r '.content.number')
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[DRY] would ensure keep-open on $REPO#$NUM"
+              continue
+            fi
+            if ! gh api "repos/$ORG/$REPO/labels/keep-open" >/dev/null 2>&1; then
+              gh api "repos/$ORG/$REPO/labels" -f name=keep-open -f color=0e8a16 -f description="Exempt from the stale-backlog sweep" >/dev/null
+            fi
+            gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=keep-open" >/dev/null
+            SHIELDED=$((SHIELDED+1))
+            echo "[OK] keep-open ensured on $REPO#$NUM (North Stars)"
+          done < items.ndjson
+          echo "North Stars shield: $SHIELDED issue(s) ensured"
+
       - name: Classify + plan moves
         id: plan
         run: |
