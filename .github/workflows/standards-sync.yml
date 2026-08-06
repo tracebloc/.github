@@ -1,0 +1,208 @@
+# Org-standards sync guard (tracebloc/backend#1602).
+#
+# WHY THIS EXISTS: the org's working rules were per-repo prose islands. Measured
+# 2026-08-06: 5 of 14 repo CLAUDE.mds carried the develop-only rule in five
+# phrasings, client/CLAUDE.md mandated a retired assignee policy, model-zoo's
+# named a default branch that no longer exists, and five active repos had no
+# CLAUDE.md at all. A rule that drifts per repo is re-litigated per PR — the
+# same failure class caller-drift.yml exists for, so this is the same shape:
+# one canonical file (/org-standards.md), one guard, absence never implicit.
+#
+# WHAT IT COMPARES: the canon in the CHECKOUT against the block between
+# `<!-- org-standards:begin/end -->` markers in every active repo's CLAUDE.md,
+# read develop-first over the API (repo list from repo-inventory.yml).
+#
+# REPORT-ONLY on schedule. The `create-prs` dispatch input is the remediation:
+# it pushes a `docs/1602-org-standards-sync` branch per drifted repo and opens
+# a PR against that repo's develop. It never pushes to develop directly and it
+# never edits a file with malformed markers (those fail closed, exit 2).
+#
+# WHY THE AUDIT DOES NOT RUN ON PRs: the canon is read from the checkout, so a
+# PR editing org-standards.md legitimately sees the whole fleet as behind — a
+# red check there would block every canon change by construction. PRs run the
+# offline selftest, which asserts the splice logic and its fail-closed paths.
+#
+# TOKEN: report-only needs org-wide read. create-prs needs Contents: RW +
+# Pull requests: RW on the target repos. If PROJECTS_KANBAN_TOKEN lacks
+# contents-write, mint a fine-grained STANDARDS_SYNC_TOKEN (active repos only)
+# and swap it in below — the script fails closed (exit 2) on the first refused
+# write, so a short-scoped token cannot produce a silent partial rollout.
+#
+# All interpolations reach shell through `env:` and are read as quoted
+# variables, never spliced into a command line. No event-controlled text
+# (titles, bodies, branch names) is interpolated anywhere in this file.
+
+name: Org-standards sync
+
+on:
+  schedule:
+    - cron: '0 7 * * 1' # Mondays 07:00 UTC, after caller-drift at 06:30
+  workflow_dispatch:
+    inputs:
+      create-prs:
+        description: "Open/refresh per-repo sync PRs (default: report only)"
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - org-standards.md
+      - scripts/standards-sync.py
+      - scripts/tests/standards-sync-selftest.py
+      - .github/workflows/standards-sync.yml
+  push:
+    branches: [main, develop]
+    paths:
+      - org-standards.md
+      - scripts/standards-sync.py
+      - scripts/tests/standards-sync-selftest.py
+      - .github/workflows/standards-sync.yml
+
+permissions:
+  contents: read
+  issues: write # the drift report lands on the tracking issue (via the PAT)
+
+concurrency:
+  group: standards-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The splice logic edits files other people own, so its fail-closed paths are
+  # asserted offline before any audit: malformed markers never spliced, an
+  # empty or marker-carrying canon rejected, repo-owned prose preserved
+  # byte-for-byte around the block, stale exemptions fail the run.
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - run: python scripts/tests/standards-sync-selftest.py
+
+  audit:
+    needs: selftest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        # The repo list comes from repo-inventory.yml parsed as YAML; there is
+        # no degraded mode worth having. If this fails, the audit is skipped,
+        # its exit_code output stays empty, and the final step fails on that.
+        run: python -m pip install --quiet --disable-pip-version-check 'pyyaml==6.0.2'
+
+      - name: Check the sync token is present
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::PROJECTS_KANBAN_TOKEN is empty. Without it every repo read" \
+                 "fails and the audit would report nothing as if it were something." >&2
+            exit 1
+          fi
+
+      - name: Compare every active repo's CLAUDE.md block against the canon
+        id: audit
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          CREATE_PRS: ${{ github.event_name == 'workflow_dispatch' && inputs.create-prs == true }}
+        run: |
+          set -uo pipefail
+          # The exit code is recorded rather than raised so the reporting step
+          # still runs on a failure; the final step fails the run from it.
+          args=(--canonical org-standards.md --inventory repo-inventory.yml
+                --issue 1602 --report-file report.md)
+          if [ "${CREATE_PRS}" = "true" ]; then
+            args+=(--create-prs)
+          fi
+          set +e
+          python scripts/standards-sync.py "${args[@]}"
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          echo "The sync exited $code (0 clean/remediated, 1 drift, 2 could not evaluate)."
+
+      - name: Report on the tracking issue
+        # Only scheduled/manual runs reach this job, and it never posts an
+        # all-clear — the same no-noise rule as caller-drift (backend#1344:
+        # comments nobody reads train everyone to ignore the issue).
+        if: always() && steps.audit.outputs.exit_code != '0'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          CODE: ${{ steps.audit.outputs.exit_code }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          code="${CODE:-}"
+
+          # shellcheck disable=SC2016  # the backticks below are markdown code
+          # spans in the issue body, not command substitution — they must stay
+          # literal, which is exactly why these printf strings are single-quoted.
+          {
+            case "$code" in
+              1)
+                printf '## Org-standards drift\n\n'
+                printf 'One or more repos are behind (or ahead of) the canon in\n'
+                printf '`tracebloc/.github/org-standards.md`. Dispatch this workflow with\n'
+                printf '`create-prs: true` to open the sync PRs.\n\n'
+                ;;
+              2)
+                printf '## Org-standards state could NOT be evaluated\n\n'
+                printf 'Not a clean result: an unreadable repo, malformed markers, or a\n'
+                printf 'refused write. Repos that could not be read are **not** known to\n'
+                printf 'comply — fix the cause and re-run before drawing any conclusion.\n\n'
+                ;;
+              *)
+                printf '## Org-standards guard did not report a result\n\n'
+                printf 'The audit step produced exit code `%s`, which it never should.\n' "${code:-<empty>}"
+                printf 'Treat fleet state as UNKNOWN until this is explained.\n\n'
+                ;;
+            esac
+            if [ -s report.md ]; then
+              cat report.md
+              printf '\n'
+            else
+              printf 'The audit produced no report body — see the run log.\n\n'
+            fi
+            printf '[Run log](%s)\n' "$RUN_URL"
+          } > body.md
+          gh issue comment 1602 --repo tracebloc/backend --body-file body.md
+
+      - name: Fail the run unless the audit came back clean
+        # Green must mean "fleet in sync" (or "every sync PR opened"), never
+        # merely "the workflow executed". An absent exit code fails hardest:
+        # it means the audit step was skipped or died.
+        if: always()
+        env:
+          CODE: ${{ steps.audit.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          code="${CODE:-}"
+          case "$code" in
+            0)
+              echo "Fleet in sync with the canon (or every sync PR opened/refreshed)."
+              ;;
+            1)
+              echo "::error::Org-standards drift detected. See the run summary; dispatch" \
+                   "with create-prs to remediate." >&2
+              exit 1
+              ;;
+            2)
+              echo "::error::Org-standards state could not be evaluated — unreadable repo," \
+                   "malformed markers, or a refused write. NOT an all-clear." >&2
+              exit 1
+              ;;
+            *)
+              echo "::error::The audit reported no exit code ('$code'); it was skipped or" \
+                   "crashed. Fleet state is UNKNOWN. Failing closed." >&2
+              exit 1
+              ;;
+          esac
