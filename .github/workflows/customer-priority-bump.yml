@@ -1,20 +1,15 @@
 name: Bump priority on customer-flagged issue
 
-# Reusable workflow. Called from each active repo on any issue label change.
-# When the 'from:customer' label is applied, adds the 'priority' label (D5).
+# Reusable workflow, called by a thin `customer-priority-bump.yml` caller in
+# each wired repo on issues.types=labeled (callers pass `secrets: inherit` and
+# no inputs). When the trigger label (default 'from:customer') is added to an
+# issue, this adds the binary 'priority' label to that same issue (D5).
+# It writes no board field — the Priority single-select was removed from the
+# board under D5.
 
 on:
   workflow_call:
     inputs:
-      project-number:
-        type: number
-        default: 2
-      org:
-        type: string
-        default: tracebloc
-      target-priority:
-        type: string
-        default: "P1"
       trigger-label:
         type: string
         default: "from:customer"
