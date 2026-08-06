@@ -325,7 +325,12 @@ jobs:
                 }
               }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$cpr" 2>&1)
             if [ $? -ne 0 ]; then
-              if printf '%s' "$cis_out" | grep -qiE "Could not resolve to a PullRequest|Not Found"; then
+              # Match ONLY GitHub's exact not-a-PR error. "Not Found" is too broad --
+              # a scoped-down / expired token also returns it, and skipping that as
+              # "benign" would silently advance nothing while the run stays green,
+              # re-opening the fail-open (Bugbot .github#181). A real access failure
+              # falls through to RUN_FAILED below.
+              if printf '%s' "$cis_out" | grep -qi "Could not resolve to a PullRequest"; then
                 continue   # benign: $cpr is not a PR -- nothing to advance
               fi
               echo "::warning::could not read closing issues for PR #$cpr -- real lookup failure; failing the run so lagging cards are visible, not silently skipped"
