@@ -321,6 +321,7 @@ jobs:
                 query($org: String!, $repo: String!, $num: Int!) {
                   repository(owner: $org, name: $repo) {
                     issue(number: $num) {
+                      state
                       projectItems(first: 10) {
                         nodes {
                           id isArchived project { number }
@@ -336,6 +337,17 @@ jobs:
                     | select(.project.number == ($n | tonumber)) | .id' 2>/dev/null | head -1)
               if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
                 echo "issue $iowner/$irepo#$inum not on project - skipping"; continue
+              fi
+              # Only advance a CLOSED closing-issue. Because PRs merge to develop
+              # (not the default branch), GitHub does NOT auto-close the referenced
+              # issues, so closingIssuesReferences lists still-OPEN, in-progress
+              # cards. Advancing those into a deploy column would be wrong -- and
+              # kanban-reconcile would then treat them as misplaced and send them to
+              # Backlog (Bugbot .github#168 High). A closed issue is the done-work
+              # signal this advancement is meant for.
+              ISTATE=$(echo "$IRESP" | jq -r '.data.repository.issue.state // ""' 2>/dev/null)
+              if [ "$ISTATE" != "CLOSED" ]; then
+                echo "issue $irepo#$inum is $ISTATE (PR merged to develop, not default) -- not advancing an open card"; continue
               fi
               IARCH=$(echo "$IRESP" | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.issue.projectItems.nodes[]?
                     | select(.project.number == ($n | tonumber)) | .isArchived' 2>/dev/null | head -1)
