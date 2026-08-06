@@ -43,6 +43,11 @@ on later events, and two of them cause confusing failures if they are missing.
       (including `version_file` if it should be tagged), rather than adding a
       repo-local tagging workflow. A repo-local workflow pushing tags as
       `github-actions[bot]` will be refused by the `v*` tag ruleset (backend#1345).
+      If that entry carries a `version_file`, also add a `version-bump-gate-caller.yml`
+      passing the same `version_file` and `publish_paths` values. It fails a PR that
+      changes published paths while the version they would ship under is already
+      released — the train's prod-hop refusal, moved to the PR that causes it
+      (backend#1563; the refusal it front-runs cost a release leg in backend#1561).
 
 - [ ] **Confirm it is private unless it genuinely must be public.** Org-internal
       tracking, planning and security work belongs in a private repo — `backend` is the
