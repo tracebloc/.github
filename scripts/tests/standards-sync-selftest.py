@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -131,6 +132,30 @@ with tempfile.TemporaryDirectory() as tmp:
     record(org == "tracebloc" and targets == ["backend"],
            "inventory: exempt repo excluded from targets",
            f"targets={targets} (devex-bootstrap exempt with written reason)")
+
+# ----------------------------------------------------------- crash semantics
+# An operational crash must exit 2 ("could not evaluate"), never 1 — the
+# workflow reads 1 as confirmed drift and would report a crash as a drift
+# finding. Run the guard as a subprocess with `gh` stripped from PATH: the
+# first repo read raises FileNotFoundError, and the entry point must map it.
+with tempfile.TemporaryDirectory() as tmp:
+    canon_path = os.path.join(tmp, "canon.md")
+    with open(canon_path, "w", encoding="utf-8") as handle:
+        handle.write(CANON)
+    inv_path = os.path.join(tmp, "inv.yml")
+    with open(inv_path, "w", encoding="utf-8") as handle:
+        handle.write("org: tracebloc\nrepos:\n  backend: {}\n  devex-bootstrap: {}\n")
+    empty_bin = os.path.join(tmp, "bin")
+    os.makedirs(empty_bin)
+    env = dict(os.environ, PATH=empty_bin)  # no gh anywhere on PATH
+    env.pop("GITHUB_STEP_SUMMARY", None)
+    proc = subprocess.run(
+        [sys.executable, GUARD, "--canonical", canon_path,
+         "--inventory", inv_path, "--repo", "backend"],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    record(proc.returncode == 2, "crash: gh unavailable exits 2, not 1",
+           f"exited {proc.returncode} (want 2 — a crash must never read as drift)")
 
 # ---------------------------------------------------------------------- tally
 failed = [name for ok, name, _ in RESULTS if not ok]

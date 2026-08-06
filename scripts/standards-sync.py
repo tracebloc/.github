@@ -359,4 +359,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — deliberate catch-all at the edge
+        # An unhandled crash (malformed API payload, filesystem error, missing
+        # gh binary) must read as "could not evaluate" (2), never as drift —
+        # Python's default exit code for a traceback is 1, which this guard
+        # reserves for confirmed drift (Bugbot, .github#170).
+        sys.stderr.write(f"::error::standards-sync crashed before completing: {exc!r}\n")
+        raise SystemExit(2)
