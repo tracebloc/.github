@@ -63,13 +63,27 @@ jobs:
           # a real column or deliberately leaves STATUS empty.
           STATUS=""
 
+          SIBLING="false"
           if [ "$EVENT_NAME" = "pull_request" ]; then
             if [ "$PR_MERGED" = "true" ]; then
               case "$BASE_REF" in
                 main|master) STATUS="Prod" ;;
                 staging)     STATUS="FR on staging" ;;
                 develop)     STATUS="On dev" ;;
-                *)           STATUS="On dev" ;;
+                *)
+                  # A PR merged into a SIBLING feature branch deploys nothing by
+                  # itself — its content travels onward inside the parent PR
+                  # (this fallthrough silently stranded 6 such cards;
+                  # backend#1437 mechanism 1). The sibling-merge label below
+                  # makes the condition VISIBLE for the weekly board pass. The
+                  # Status write is deliberately KEPT: skipping it lets the
+                  # project's built-in "Item closed" automation set closed items
+                  # to Cancelled, archiving shipped-via-parent work as abandoned
+                  # (Bugbot, .github#157). On dev + label is the non-terminal
+                  # holding state the weekly pass dispositions.
+                  STATUS="On dev"
+                  SIBLING="true"
+                  ;;
               esac
             else
               STATUS="Cancelled"
@@ -168,8 +182,15 @@ jobs:
           fi
 
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
-          echo "Routing decision: status=${STATUS:-(unchanged)}"
+          echo "sibling=$SIBLING" >> "$GITHUB_OUTPUT"
+          echo "Routing decision: status=${STATUS:-(unchanged)} sibling=$SIBLING"
 
+      # Visibility for backend#1437 mechanism 1. Runs AFTER the Status update
+      # so a label failure can never suppress the column write - with the label
+      # first, its hard-fail skipped the update via the implicit success()
+      # condition and left the card wherever the built-in automation put it
+      # (Bugbot, .github#157). PAT rather than the caller's GITHUB_TOKEN:
+      # caller permission sets vary per repo.
       - name: Update Status on the kanban
         if: steps.target.outputs.status != ''
         env:
@@ -272,3 +293,20 @@ jobs:
             }' -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$STATUS_FIELD" -f o="$STATUS_OPT" > /dev/null
 
           echo "→ #$NUMBER → Status=$STATUS_NAME"
+      - name: Label sibling-merged PR
+        if: steps.target.outputs.sibling == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          REPO_FULL: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Write failures FAIL this step (the PROJECTS_KANBAN_TOKEN write
+          # rule): a swallowed error means the card silently loses its only
+          # visibility marker (Bugbot, .github#157). Only the ensure-label
+          # probe may miss quietly - a 404 there just means create it.
+          if ! gh api "repos/$REPO_FULL/labels/sibling-merge" >/dev/null 2>&1; then
+            gh api "repos/$REPO_FULL/labels" -f name=sibling-merge -f color=bfdadc -f description="Merged into a sibling feature branch; content ships via the parent PR (backend#1437)" >/dev/null
+          fi
+          gh api -X POST "repos/$REPO_FULL/issues/$NUMBER/labels" -f "labels[]=sibling-merge" >/dev/null
+
