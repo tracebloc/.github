@@ -50,6 +50,7 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REPO_FULL: ${{ github.repository }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
         run: |
           # errexit is spelled out rather than inherited. Actions runs `run:` steps
           # as `bash -e {0}`, so `set -uo pipefail` left -e ON while reading as
@@ -76,6 +77,49 @@ jobs:
           fi
           trap 'rm -f "$COMPARE_JSON" "$GH_STDERR" "$HAYSTACK_FILE"' EXIT
 
+          # Manual override (visible in audit). Exact match against a label
+          # name: the previous substring test meant any label merely CONTAINING
+          # 'pii-gate-override' silently disarmed the gate. A LABELS payload we
+          # cannot parse yields "no override", which is the safe direction — the
+          # scan below still runs.
+          #
+          # THIS IS CHECKED FIRST, and that ordering is the fix, not a tidy-up.
+          # It used to sit BELOW the unset-secret refusal, so on a PR where
+          # PII_DENYLIST was missing the label could not rescue anything — the
+          # refusal exited first. Both this file's own header and backend#1409's
+          # remediation note advertise the label as the per-PR escape hatch from
+          # exactly that state, and it did not work. An override is a statement
+          # that this PR should not be evaluated, so it belongs before every
+          # reason the evaluation might refuse.
+          if jq -e --arg t 'pii-gate-override' 'any(.[]?; . == $t)' <<<"$LABELS" >/dev/null 2>&1; then
+            echo "::warning::PII gate bypassed via 'pii-gate-override' label."
+            exit 0
+          fi
+
+          # A fork PR cannot be scanned, and no admin action changes that:
+          # GitHub does not pass secrets to `pull_request` runs from a forked
+          # repository, so DENYLIST is empty here no matter what the org secret
+          # contains. Handled before the refusal below purely so the message is
+          # TRUE — that path tells the reader to go set an org secret, which for
+          # a fork is advice that cannot work.
+          #
+          # Still fails closed. Compared against exactly "true": any other value
+          # (including an absent head.repo on a deleted fork) falls through to
+          # the paths below, which refuse on an empty denylist and refuse again
+          # on a Compare read they cannot complete — so an unknown fork status
+          # cannot buy a pass.
+          if [ "${IS_FORK:-}" = "true" ]; then
+            echo "::error::This PR comes from a fork, and GitHub does not pass org secrets to"
+            echo "::error::fork runs — so this gate has no denylist to compare against and is"
+            echo "::error::failing closed (backend#1409). Setting the org secret will NOT fix"
+            echo "::error::this; it is a property of the event, not of the configuration."
+            echo ""
+            echo "A maintainer must read this PR's title, body and commit messages by hand,"
+            echo "then apply the 'pii-gate-override' label to record that review (visible in"
+            echo "audit). This check is deliberately NOT required for fork PRs."
+            exit 1
+          fi
+
           # backend#1409 defect 1: this used to warn and `exit 0`. The secret
           # does not exist org-wide, so every public repo showed a passing check
           # that had never compared a single term. Refuse instead — an inactive
@@ -88,16 +132,6 @@ jobs:
             echo "  gh secret set PII_DENYLIST --org tracebloc --visibility all --body \"name1,name2,...\""
             echo "If the org secret already exists, this caller is missing 'secrets: inherit'."
             exit 1
-          fi
-
-          # Manual override (visible in audit). Exact match against a label
-          # name: the previous substring test meant any label merely CONTAINING
-          # 'pii-gate-override' silently disarmed the gate. A LABELS payload we
-          # cannot parse yields "no override", which is the safe direction — the
-          # scan below still runs.
-          if jq -e --arg t 'pii-gate-override' 'any(.[]?; . == $t)' <<<"$LABELS" >/dev/null 2>&1; then
-            echo "::warning::PII gate bypassed via 'pii-gate-override' label."
-            exit 0
           fi
 
           # Commit messages are the bulk of the haystack, so a failed read is a
