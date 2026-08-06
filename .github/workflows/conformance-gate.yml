@@ -88,7 +88,16 @@ jobs:
           TOUCHED=""
           while IFS= read -r guarded; do
             [ -z "${guarded}" ] && continue
-            if printf '%s\n' "${FILES}" | grep -qxF "${guarded}"; then
+            # A here-string, NOT `printf ... | grep -q`. Under pipefail, grep -q
+            # closes the pipe on its first match; if the file list is large enough
+            # to still be buffering, printf takes SIGPIPE, the PIPELINE returns
+            # 141, and `if` reads a real hit as a miss -- so the gate reports "not
+            # guarded" and passes GREEN. That is exactly the silent pass this file
+            # exists to prevent, and it gets MORE likely the bigger the PR is.
+            # Measured: 20k filenames with the guarded path first -> rc=141, gate
+            # green. Same defect class as the PII gate's (backend#1409).
+            # A here-string is one command, so the status is grep's own.
+            if grep -qxF "${guarded}" <<< "${FILES}"; then
               TOUCHED="${TOUCHED}${guarded} "
             fi
           done <<< "${GUARDED}"
