@@ -215,6 +215,11 @@ jobs:
           # items are already skipped above; this is defense-in-depth for any other
           # per-item error -- log it, flag the run, but keep processing the rest.
           RUN_FAILED=0
+          # stderr sink: the reads below must DISTINGUISH "this number is not a PR"
+          # from "the API is failing", and 2>/dev/null threw away the only evidence
+          # that could tell them apart (Bugbot, #181).
+          ERRF="$(mktemp)"
+          trap 'rm -f "$ERRF"' EXIT
           update_field() {   # $1=fieldId  $2=optionId  $3=human label
             local err
             if [ "${DRY_RUN:-false}" = "true" ]; then
@@ -311,13 +316,28 @@ jobs:
                     }
                   }
                 }
-              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$cpr" 2>/dev/null); then
+              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$cpr" 2>"$ERRF"); then
+              ERRTXT=$(cat "$ERRF" 2>/dev/null)
+              # NOT EVERY FAILURE IS AN INFRASTRUCTURE FAILURE. PR_NUMBERS is
+              # scraped from commit subjects, so it legitimately carries numbers
+              # that are not PRs in this repo -- a hand-written `(#47)` issue
+              # reference, or a subject carried in from another repo. The loop
+              # above already documents that. Treating those as RUN_FAILED would
+              # redden ordinary pushes (Bugbot, #181). Skip them; fail only on
+              # errors that really do hide work.
+              case "$ERRTXT" in
+                *"Could not resolve to a PullRequest"*)
+                  echo "::notice::#$cpr is not a pull request in $REPO_NAME - skipping"
+                  continue ;;
+              esac
               # A FAILED READ IS NOT "NO ISSUES" (Bugbot, #166). This used to fall
               # back to '{}', so an expired token, a rate limit or a cross-repo
               # permission error was indistinguishable from a PR that closes
               # nothing: the cards stayed behind and the run reported success --
               # exactly the silent drift this advancement exists to eliminate.
-              echo "::warning::could not read closing issues for #$cpr - not treating as 'closes nothing'"
+              # The error text is echoed, not swallowed: a red run nobody can
+              # diagnose is barely better than a silent one (Bugbot, #181).
+              echo "::warning::could not read closing issues for #$cpr: $ERRTXT"
               RUN_FAILED=1
               continue
             fi
@@ -350,10 +370,18 @@ jobs:
                       }
                     }
                   }
-                }' -F org="$iowner" -F repo="$irepo" -F num="$inum" 2>/dev/null); then
+                }' -F org="$iowner" -F repo="$irepo" -F num="$inum" 2>"$ERRF"); then
+                IERRTXT=$(cat "$ERRF" 2>/dev/null)
+                # Same split as the PR read: a reference that does not resolve is
+                # data, not an outage (Bugbot, #181).
+                case "$IERRTXT" in
+                  *"Could not resolve to an Issue"*|*"Could not resolve to a Repository"*)
+                    echo "::notice::$iowner/$irepo#$inum does not resolve - skipping"
+                    continue ;;
+                esac
                 # Same rule as the closing-issue read above: unreadable is not
                 # "not on the project" (Bugbot, #166).
-                echo "::warning::could not read issue $iowner/$irepo#$inum - not treating as 'not on project'"
+                echo "::warning::could not read issue $iowner/$irepo#$inum: $IERRTXT"
                 RUN_FAILED=1
                 continue
               fi
