@@ -205,7 +205,11 @@ jobs:
           while IFS= read -r line; do
             STATUS=$(echo "$line" | jq -r '.fieldValueByName.name // "No status"')
             TYPE=$(echo "$line" | jq -r '.content.__typename // ""')
-            if [ "$STATUS" != "North Stars" ] || [ "$TYPE" != "Issue" ]; then
+            STATE=$(echo "$line" | jq -r '.content.state // ""')
+            # Only OPEN North Stars issues need the stale-sweep shield; a CLOSED
+            # issue would get a sticky, human-removal-only keep-open that the same
+            # run's classify step may then terminalize (Bugbot .github#166).
+            if [ "$STATUS" != "North Stars" ] || [ "$TYPE" != "Issue" ] || [ "$STATE" = "CLOSED" ]; then
               continue
             fi
             REPO=$(echo "$line" | jq -r '.content.repository.name')
