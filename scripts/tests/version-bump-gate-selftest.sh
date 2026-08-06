@@ -199,6 +199,7 @@ base() {
   export PUBLISH_PATHS='tracebloc/* pyproject.toml'
   export SOFT_FAIL=false
   export PR_BASE_SHA=basesha PR_HEAD_SHA=headsha PR_HEAD_REF=feat/some-work
+  export PR_BASE_REF=develop IS_FORK=false
   export LABELS='[]'
   export GITHUB_STEP_SUMMARY="$WORK/summary.md"
   : > "$WORK/summary.md"
@@ -242,9 +243,11 @@ version = "0.18.0"
 check "a PR that bumps to an unreleased version passes" 0 "bumped 0.17.0 -> 0.18.0"
 base; mktags 0.16.0
 check "an unchanged version that is NOT released passes - no bump is owed" 0 "no bump is owed"
-base; PR_HEAD_REF=release-train/to-staging
+base; PR_HEAD_REF=release-train/to-staging; PR_BASE_REF=staging
 check "a release-train promotion PR is green with a stated reason" 0 "Release-train promotion PR"
-base; PR_HEAD_REF=hotfix-backmerge/prod-fix
+base; PR_HEAD_REF=release-train/to-master; PR_BASE_REF=master
+check "a promotion into a prod branch is green too" 0 "Release-train promotion PR"
+base; PR_HEAD_REF=hotfix-backmerge/prod-fix; PR_BASE_REF=main
 check "a hotfix backmerge is green for the same reason" 0 "Release-train promotion PR"
 base; STUB_BASE_STATUS=404; mkversion head '[project]
 version = "0.19.0"
@@ -274,6 +277,17 @@ base; mkcompare "vendor/_linking.py:tracebloc/_linking.py"
 check "the PRE-rename path counts as a published change" 1 "renamed to vendor/_linking.py"
 
 echo
+echo "the promotion exemption is not mintable - a branch name is not a credential"
+base; PR_HEAD_REF=release-train/looks-official; PR_BASE_REF=develop
+check "borrowing the name to reach develop does NOT exempt" 1 "Bump pyproject.toml"
+base; PR_HEAD_REF=release-train/looks-official; PR_BASE_REF=develop
+check "...and the mismatch is warned about, not silently absent" 1 "does not promote there"
+base; PR_HEAD_REF=release-train/to-staging; PR_BASE_REF=staging; IS_FORK=true
+check "a FORK cannot claim the exemption even with the right base" 1 "comes from a FORK"
+base; PR_HEAD_REF=release-train/to-staging; PR_BASE_REF=staging; IS_FORK=true
+check "...and is then evaluated like any other PR" 1 "Bump pyproject.toml"
+
+echo
 echo "fail-closed paths - 'could not evaluate' must never read as 'nothing found'"
 base; VERSION_FILE=""
 check "no version-file input refuses" 1 "supplied no 'version-file'"
@@ -290,7 +304,7 @@ check "ZERO files scanned is a malfunction, not a pass" 1 "zero files scanned is
 base; mkcompare_at_cap
 check "300 files with no match refuses - the page cap has no truncation flag" 1 "page cap"
 base; STUB_HEAD_STATUS=500
-check "an unreadable version file on head refuses" 1 "after 3 attempts"
+check "an unreadable version file on head refuses" 1 "unreadable or EMPTY at headsha on all 3 attempts"
 base; STUB_HEAD_STATUS=404
 check "a version file missing on head refuses, and says so distinctly" 1 "does not exist on this PR's head"
 base; mkversion head 'name = "tracebloc"

@@ -111,13 +111,22 @@ name: Version bump gate
 #     unreleased bump. The message says which, so nobody reads it as a bump they
 #     do not have.
 #   - the PR introduces the version file (absent at the merge base).
-#   - a release-train promotion PR (`release-train/*`, `hotfix-backmerge/*`).
-#     Not a courtesy: the train runs the authoritative preflight on this exact
-#     content, and `tag_expected` scopes it per hop - py-package and
-#     data-ingestors declare no `rc_tag`, so their develop -> staging hop
-#     deliberately runs NO version preflight. Gating that PR here would block a
-#     promotion the train is entitled to make, which is the disagreement this
-#     whole file exists to avoid. The cargo PRs were each gated on their way in.
+#   - a release-train promotion PR (`release-train/*`, `hotfix-backmerge/*`)
+#     FROM THIS REPOSITORY INTO staging/main/master. Not a courtesy: the train
+#     runs the authoritative preflight on this exact content, and `tag_expected`
+#     scopes it per hop - py-package and data-ingestors declare no `rc_tag`, so
+#     their develop -> staging hop deliberately runs NO version preflight. Gating
+#     that PR here would block a promotion the train is entitled to make, which
+#     is the disagreement this whole file exists to avoid. The cargo PRs were
+#     each gated on their way in.
+#
+#     All three conditions are checked, because a head ref is chosen by whoever
+#     opens the PR: `release-train/anything` alone is an exemption anybody can
+#     mint, from a fork even. The base branch and the head repository are
+#     properties of a real promotion rather than claims made by its author, and
+#     a promotion never targets `develop`. A PR that merely borrows the name is
+#     evaluated normally, with a warning naming the mismatch - a bypass that
+#     does not apply should be visible, not silently absent.
 #
 # OVERRIDE
 #   Add the `skip-version-gate` label (visible in audit). Checked FIRST, ahead of
@@ -267,6 +276,8 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
           # errexit spelled out rather than inherited. Actions runs `run:` steps as
@@ -370,9 +381,29 @@ jobs:
           # their develop -> staging hop deliberately runs no version preflight at
           # all. A second, differently-scoped copy of the check could only disagree,
           # and would block a promotion the train is entitled to make.
+          #
+          # THE BRANCH NAME IS NOT THE CREDENTIAL. A head ref is chosen by whoever
+          # opens the PR, so `release-train/anything` on its own is an exemption
+          # anybody can mint - from a fork, even. Two further facts have to hold,
+          # both of them properties of a real promotion rather than claims made by
+          # its author: the head is in THIS repository (never a fork), and the base
+          # is a promotion target. A promotion never targets `develop`, so a PR that
+          # merely borrows the name to reach `develop` is evaluated like any other -
+          # loudly, so the mismatch is visible rather than silently absent.
           case "${PR_HEAD_REF:-}" in
             release-train/*|hotfix-backmerge/*)
-              verified "Release-train promotion PR (head '${PR_HEAD_REF}'). The train runs the authoritative version preflight on this exact content, scoped per hop, and the PRs this promotion carries were each gated on their way into develop."
+              case "${PR_BASE_REF:-}" in
+                staging|main|master)
+                  if [ "${IS_FORK:-}" = "true" ]; then
+                    echo "::warning::Head ref '${PR_HEAD_REF}' looks like a promotion branch, but this PR comes from a FORK - the release train never promotes from one. Evaluating it as an ordinary PR."
+                  else
+                    verified "Release-train promotion PR (head '${PR_HEAD_REF}' -> '${PR_BASE_REF}', same repository). The train runs the authoritative version preflight on this exact content, scoped per hop, and the PRs this promotion carries were each gated on their way into develop."
+                  fi
+                  ;;
+                *)
+                  echo "::warning::Head ref '${PR_HEAD_REF}' looks like a promotion branch, but this PR targets '${PR_BASE_REF:-?}' rather than staging/main/master. The release train does not promote there, so this is evaluated as an ordinary PR."
+                  ;;
+              esac
               ;;
           esac
 
@@ -409,10 +440,13 @@ jobs:
 
           # --- read_version, promote-repo.sh's rules ----------------------------
           # Sets RAW and RSTATUS in {ok, absent, unreadable}. `absent` is a definite
-          # answer (HTTP 404) and is handled by the caller; anything else that fails
-          # is retried, because the Contents API can lag a freshly pushed sha by a
-          # few seconds - the same replication lag that once left py-package
-          # untagged on an otherwise clean promotion.
+          # answer (HTTP 404) and is handled by the caller; anything else is retried.
+          # An EMPTY read counts as a failure and is retried too, deliberately: that
+          # is the exact symptom of the Contents API lagging a freshly pushed sha,
+          # which once left py-package untagged on an otherwise clean promotion
+          # (2026-07-29). So an emptiness that survives all three attempts is
+          # reported as unreadable rather than as "no version", which is why the
+          # message below names both possibilities.
           RAW=""
           RSTATUS=""
           fetch_version_file() {
@@ -466,7 +500,7 @@ jobs:
               ;;
             *)
               malfunction \
-                "Could not read $VERSION_FILE at $PR_HEAD_SHA after 3 attempts - failing closed rather than guessing a version." \
+                "$VERSION_FILE came back unreadable or EMPTY at $PR_HEAD_SHA on all 3 attempts - failing closed rather than guessing a version." \
                 "gh reported: $(tr '\n' ' ' <"$GH_ERR")"
               ;;
           esac
@@ -495,7 +529,7 @@ jobs:
               ;;
             *)
               malfunction \
-                "Could not read $VERSION_FILE at the merge base ($MERGE_BASE) after 3 attempts - failing closed." \
+                "$VERSION_FILE came back unreadable or EMPTY at the merge base ($MERGE_BASE) on all 3 attempts - failing closed." \
                 "gh reported: $(tr '\n' ' ' <"$GH_ERR")"
               ;;
           esac
