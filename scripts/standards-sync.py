@@ -181,7 +181,11 @@ def build_desired(text: "str | None", canon: str, state: str) -> str:
 
 
 def resolve_branch(org: str, repo: str) -> str:
-    code, out, err = gh("api", f"repos/{org}/{repo}/branches/develop", "--jq", ".name")
+    # Exact-match ref lookup (git/ref/heads/...), not /branches/{name}: the same
+    # endpoint remediate() trusts for the base sha, so existence and base-sha
+    # reads can never disagree about what "develop exists" means (Bugbot,
+    # .github#170).
+    code, out, err = gh("api", f"repos/{org}/{repo}/git/ref/heads/develop", "--jq", ".object.sha")
     if code == 0 and out.strip():
         return "develop"
     if http_status(err) == 404:
