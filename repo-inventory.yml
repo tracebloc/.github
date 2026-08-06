@@ -6,7 +6,10 @@
 # Nothing in the org detected a missing caller. merge-settings-drift.yml reads
 # three booleans; kanban-reconcile.yml probes one filename to decide board scope.
 # That is how eight repos drifted unnoticed and how e2e-test-agent#1 closed
-# without routing - there is no closure caller there to route it.
+# without routing - at the time that repo had no closure caller to route it.
+# e2e-test-agent#13 added one on 2026-08-05, which is why its entry below now
+# reads `required`: the motivating gap is closed, the detection gap is why this
+# file exists.
 #
 # THE SCHEMA DECISION: ABSENCE IS NEVER IMPLICIT.
 # Every repo carries an entry for EVERY reusable and EVERY copy. Each entry is
