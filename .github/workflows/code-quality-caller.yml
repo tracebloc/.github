@@ -60,10 +60,24 @@ jobs:
       # e2e-test-agent's caller records.
       soft-fail: false
 
-      # Hard-armed explicitly, not by inheriting soft-fail: this is the check
-      # whose absence let .github#168 through, and it is the one check this
-      # repo has a special duty to enforce on itself, since every other repo
-      # consumes these workflows at @main and inherits whatever refs they pin.
-      action-pins-soft-fail: false
+      # -- action-pins is NOT armed here yet, and cannot be. ------------------
+      # The job and its two inputs were added in #159, which is on `develop`;
+      # `main` still carries the five-job version. Callers must reference @main
+      # (Q3), and passing an input the @main callee does not declare fails the
+      # whole call with a startup_failure -- measured on this branch's first
+      # push (run 31086491251), where every other check reported normally and
+      # the reusable call never started. So the caller may only pass inputs
+      # that exist on `main`, no matter what `develop` offers.
+      #
+      # This is the same merge-order trap as the #160 audit red: a change is
+      # only consumable by @main callers once it has been PROMOTED, not once
+      # it has been merged. Arming lands with the promotion, as a two-line
+      # diff here:
+      #
+      #     action-pins: true                 # (already the callee default)
+      #     action-pins-soft-fail: false
+      #
+      # Until then the other five jobs still run armed, which closes most of
+      # backend#1603 immediately. Tracked so the residue is not forgotten.
 
       all-files: ${{ inputs.all-files || false }}
