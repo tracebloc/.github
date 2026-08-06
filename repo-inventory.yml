@@ -2,6 +2,13 @@
 # repo must call. THE single source of truth; `.github/workflows/caller-drift.yml`
 # fails when reality diverges from it.
 #
+# EDITING THIS FILE IS GATED (tracebloc/backend#1608). caller-drift.yml has always
+# RUN on PRs that touch this file, but it was not a required check - so a PR that
+# put the inventory out of step with reality went red and could still merge.
+# `.github/workflows/conformance-gate.yml` is the required check that closes that:
+# it reports on every PR, is green in seconds when this file is untouched, and
+# when it IS touched it refuses unless the audit passed on that exact head sha.
+#
 # WHY THIS FILE EXISTS (tracebloc/backend#1415)
 # Nothing in the org detected a missing caller. merge-settings-drift.yml reads
 # three booleans; kanban-reconcile.yml probes one filename to decide board scope.
@@ -143,12 +150,16 @@ repos:
     release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
-      code-quality.yml:
-        exempt: >-
-          no code-quality caller in the repo that HOSTS code-quality.yml. Line 60 of that file
-          is a commented-out example `uses:` line, which is why a grep-based audit reports a
-          caller here that does not exist - the guard strips comments via a real YAML parse.
-          UNREMEDIATED (one of the nine).
+      # Remediated 2026-08-06 (.github#171, backend#1603). The repo that HOSTS
+      # code-quality.yml was the only repo not running it, so the action-pins job
+      # it publishes to 19 others did not apply here - and that is how .github#168
+      # reverted actions/checkout from a pinned SHA to the mutable @v4 tag with
+      # nothing in CI to object. Armed soft-fail:false against a measured-clean
+      # tree; ruff, gitleaks, shellcheck and house-rules were all green on the
+      # first run. action-pins itself stays unarmed until #159 reaches main - a
+      # caller may only pass inputs the @main callee declares, or the whole call
+      # dies with startup_failure.
+      code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml:
         exempt: *customer_priority_bump_caller_missing
       fr-gate.yml: required   # fr-gate-caller.yml
