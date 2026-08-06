@@ -2,6 +2,13 @@
 # repo must call. THE single source of truth; `.github/workflows/caller-drift.yml`
 # fails when reality diverges from it.
 #
+# EDITING THIS FILE IS GATED (tracebloc/backend#1608). caller-drift.yml has always
+# RUN on PRs that touch this file, but it was not a required check - so a PR that
+# put the inventory out of step with reality went red and could still merge.
+# `.github/workflows/conformance-gate.yml` is the required check that closes that:
+# it reports on every PR, is green in seconds when this file is untouched, and
+# when it IS touched it refuses unless the audit passed on that exact head sha.
+#
 # WHY THIS FILE EXISTS (tracebloc/backend#1415)
 # Nothing in the org detected a missing caller. merge-settings-drift.yml reads
 # three booleans; kanban-reconcile.yml probes one filename to decide board scope.

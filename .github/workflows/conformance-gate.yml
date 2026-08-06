@@ -1,0 +1,147 @@
+name: Conformance gate
+
+# The required check that gives caller-drift.yml teeth (backend#1608).
+#
+# THE HOLE THIS FILLS
+#   caller-drift.yml already runs on PRs that touch repo-inventory.yml, and it
+#   already fails when the inventory disagrees with reality. But it is not a
+#   required status check, so a PR that adds a repo to the train with drift goes
+#   red and can still be merged. The gate existed in trigger form with no teeth.
+#
+# WHY NOT JUST REQUIRE caller-drift ITSELF
+#   It carries a `paths:` filter. A path-filtered job never reports on a PR that
+#   misses the filter, and a required check that never reports leaves that PR
+#   pending forever -- the trap actionlint.yml's header documents. Dropping the
+#   filter instead would run a 20-repo API audit on every PR in this repo, which
+#   is why the filter is there.
+#
+#   So: this job always runs and always reports. On a PR that does not touch the
+#   contract it is green in seconds with zero audit API calls. On a PR that does,
+#   it requires the audit's verdict for THIS head sha.
+#
+# WHY IT KEYS ON THE WORKFLOW FILE, NOT THE CHECK NAME
+#   Check-run names are not unique across workflows -- caller-drift.yml and
+#   standards-sync.yml both expose a job called `selftest`, so polling by name
+#   would happily accept the wrong workflow's verdict. Querying
+#   actions/workflows/caller-drift.yml/runs?head_sha=... is unambiguous.
+#
+# FAIL CLOSED (RFC-1405 property 2)
+#   Every branch that is not "the audit ran on this sha and succeeded" is RED,
+#   with a named reason: no run found before the timeout, a non-success
+#   conclusion, or an unreadable API. "Could not verify" and "verified" must
+#   never look alike -- an inventory change is exactly where a green that
+#   checked nothing is most expensive.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  actions: read       # read caller-drift's run conclusion
+  pull-requests: read # list the PR's changed files
+
+concurrency:
+  group: conformance-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Require the conformance audit when the contract changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Changing any of these changes what the org's repos are contractually
+          # required to have, so the audit must have passed on this exact head.
+          GUARDED: |
+            repo-inventory.yml
+            scripts/caller-drift.py
+            scripts/tests/caller-drift-selftest.py
+            .github/workflows/caller-drift.yml
+          AUDIT_WORKFLOW: caller-drift.yml
+          POLL_SECONDS: 30
+          POLL_TRIES: 40
+        run: |
+          set -euo pipefail
+
+          # --- which files does this PR touch? -------------------------------
+          # --paginate, because a PR over one page would otherwise look like it
+          # touches only the first 30 files -- a truncated read that says "not
+          # guarded" is the silent pass this whole file exists to prevent.
+          if ! FILES=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq '.[].filename'); then
+            echo "::error::could not list this PR's changed files - refusing to guess whether the contract changed"
+            exit 1
+          fi
+          # A PR that genuinely changes nothing is not a thing GitHub creates, so
+          # an empty list means the read failed in a way that did not set a
+          # non-zero exit. Treat it as unreadable, not as "touches nothing".
+          if [ -z "${FILES}" ]; then
+            echo "::error::the changed-file list came back empty - unreadable, not 'no files'"
+            exit 1
+          fi
+
+          TOUCHED=""
+          while IFS= read -r guarded; do
+            [ -z "${guarded}" ] && continue
+            if printf '%s\n' "${FILES}" | grep -qxF "${guarded}"; then
+              TOUCHED="${TOUCHED}${guarded} "
+            fi
+          done <<< "${GUARDED}"
+
+          if [ -z "${TOUCHED}" ]; then
+            echo "This PR does not touch the repo contract - nothing to verify."
+            {
+              echo "### Conformance gate"
+              echo
+              echo "Not guarded - this PR touches none of the contract files."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "Contract files touched: ${TOUCHED}"
+          echo "Requiring ${AUDIT_WORKFLOW} to have PASSED on ${HEAD_SHA}."
+
+          # --- poll for the audit's verdict on THIS sha ----------------------
+          # The audit is triggered by the same event, so it may not have been
+          # created yet when this job starts. Absence is never success: if no run
+          # for this sha appears within the budget, that is RED.
+          i=0
+          CONCLUSION=""
+          STATUS=""
+          while [ "$i" -lt "${POLL_TRIES}" ]; do
+            if ! RESP=$(gh api "repos/${REPO}/actions/workflows/${AUDIT_WORKFLOW}/runs?head_sha=${HEAD_SHA}&per_page=100"); then
+              echo "::error::could not read ${AUDIT_WORKFLOW} runs for ${HEAD_SHA} - failing closed"
+              exit 1
+            fi
+            STATUS=$(printf '%s' "$RESP" | jq -r '[.workflow_runs[]?] | sort_by(.run_started_at) | last | .status // ""')
+            CONCLUSION=$(printf '%s' "$RESP" | jq -r '[.workflow_runs[]?] | sort_by(.run_started_at) | last | .conclusion // ""')
+            if [ "${STATUS}" = "completed" ]; then
+              break
+            fi
+            i=$((i + 1))
+            echo "  audit status='${STATUS:-<no run yet>}' - waiting (${i}/${POLL_TRIES})"
+            sleep "${POLL_SECONDS}"
+          done
+
+          if [ "${STATUS}" != "completed" ]; then
+            echo "::error::${AUDIT_WORKFLOW} did not complete for ${HEAD_SHA} within the poll budget (status='${STATUS:-none}'). Refusing to pass a contract change whose audit never reported."
+            exit 1
+          fi
+          if [ "${CONCLUSION}" != "success" ]; then
+            echo "::error::${AUDIT_WORKFLOW} concluded '${CONCLUSION}' for ${HEAD_SHA}. A contract change must not merge on a failed or skipped audit."
+            exit 1
+          fi
+
+          echo "Audit passed on ${HEAD_SHA}."
+          {
+            echo "### Conformance gate"
+            echo
+            echo "Contract files touched: ${TOUCHED}"
+            echo
+            echo "${AUDIT_WORKFLOW} concluded success on ${HEAD_SHA}."
+          } >> "$GITHUB_STEP_SUMMARY"
