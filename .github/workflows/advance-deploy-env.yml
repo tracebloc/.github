@@ -301,28 +301,46 @@ jobs:
           # with the SAME monotonic guard, archived-skip, and dry-run behaviour.
           for cpr in $PR_NUMBERS; do
             # shellcheck disable=SC2016
-            CIS=$(gh api graphql -f query='
+            if ! CIS=$(gh api graphql -f query='
               query($org: String!, $repo: String!, $num: Int!) {
                 repository(owner: $org, name: $repo) {
                   pullRequest(number: $num) {
                     closingIssuesReferences(first: 30) {
+                      totalCount
                       nodes { number repository { name owner { login } } }
                     }
                   }
                 }
-              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$cpr" 2>/dev/null) || CIS='{}'
+              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$cpr" 2>/dev/null); then
+              # A FAILED READ IS NOT "NO ISSUES" (Bugbot, #166). This used to fall
+              # back to '{}', so an expired token, a rate limit or a cross-repo
+              # permission error was indistinguishable from a PR that closes
+              # nothing: the cards stayed behind and the run reported success --
+              # exactly the silent drift this advancement exists to eliminate.
+              echo "::warning::could not read closing issues for #$cpr - not treating as 'closes nothing'"
+              RUN_FAILED=1
+              continue
+            fi
+            # Truncation is also silent unless counted. Past `first: 30` the
+            # remainder simply looks like it does not exist (Bugbot, #166).
+            CIS_TOTAL=$(echo "$CIS" | jq -r '.data.repository.pullRequest.closingIssuesReferences.totalCount // 0' 2>/dev/null)
+            if [ "${CIS_TOTAL:-0}" -gt 30 ]; then
+              echo "::warning::#$cpr closes $CIS_TOTAL issues, more than the 30 read - the rest would be silently skipped"
+              RUN_FAILED=1
+            fi
             ISSUES=$(echo "$CIS" | jq -rc '.data.repository.pullRequest.closingIssuesReferences.nodes[]?
                   | [.repository.owner.login, .repository.name, .number] | @tsv' 2>/dev/null)
             # here-string (not a pipe) so update_field's RUN_FAILED reaches this shell
             while IFS="$(printf '\t')" read -r iowner irepo inum; do
               [ -z "${inum:-}" ] && continue
               # shellcheck disable=SC2016
-              IRESP=$(gh api graphql -f query='
+              if ! IRESP=$(gh api graphql -f query='
                 query($org: String!, $repo: String!, $num: Int!) {
                   repository(owner: $org, name: $repo) {
                     issue(number: $num) {
                       state
                       projectItems(first: 10) {
+                        totalCount
                         nodes {
                           id isArchived project { number }
                           status: fieldValueByName(name: "Status") {
@@ -332,7 +350,18 @@ jobs:
                       }
                     }
                   }
-                }' -F org="$iowner" -F repo="$irepo" -F num="$inum" 2>/dev/null) || IRESP='{}'
+                }' -F org="$iowner" -F repo="$irepo" -F num="$inum" 2>/dev/null); then
+                # Same rule as the closing-issue read above: unreadable is not
+                # "not on the project" (Bugbot, #166).
+                echo "::warning::could not read issue $iowner/$irepo#$inum - not treating as 'not on project'"
+                RUN_FAILED=1
+                continue
+              fi
+              IPI_TOTAL=$(echo "$IRESP" | jq -r '.data.repository.issue.projectItems.totalCount // 0' 2>/dev/null)
+              if [ "${IPI_TOTAL:-0}" -gt 10 ]; then
+                echo "::warning::issue $irepo#$inum is on $IPI_TOTAL projects, more than the 10 read - the kanban item may not be among them"
+                RUN_FAILED=1
+              fi
               ITEM_ID=$(echo "$IRESP" | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.issue.projectItems.nodes[]?
                     | select(.project.number == ($n | tonumber)) | .id' 2>/dev/null | head -1)
               if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
