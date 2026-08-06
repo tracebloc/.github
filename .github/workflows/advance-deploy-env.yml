@@ -301,28 +301,45 @@ jobs:
           # with the SAME monotonic guard, archived-skip, and dry-run behaviour.
           for cpr in $PR_NUMBERS; do
             # shellcheck disable=SC2016
-            CIS=$(gh api graphql -f query='
+            # Fail CLOSED on a lookup failure: an expired token / rate limit /
+            # cross-repo permission error must NOT read as "this PR closes no
+            # issues" and silently skip advancement -- the exact drift this block
+            # exists to fix (Bugbot .github#166). totalCount surfaces a PR that
+            # closes more issues than one page instead of silently truncating.
+            if ! CIS=$(gh api graphql -f query='
               query($org: String!, $repo: String!, $num: Int!) {
                 repository(owner: $org, name: $repo) {
                   pullRequest(number: $num) {
-                    closingIssuesReferences(first: 30) {
+                    closingIssuesReferences(first: 100) {
+                      totalCount
                       nodes { number repository { name owner { login } } }
                     }
                   }
                 }
-              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$cpr" 2>/dev/null) || CIS='{}'
+              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$cpr" 2>/dev/null); then
+              echo "::warning::could not read closing issues for PR #$cpr -- failing the run so lagging cards are visible, not silently skipped"
+              RUN_FAILED=1
+              continue
+            fi
+            ci_total=$(echo "$CIS" | jq -r '.data.repository.pullRequest.closingIssuesReferences.totalCount // 0' 2>/dev/null)
+            if [ "${ci_total:-0}" -gt 100 ]; then
+              echo "::warning::PR #$cpr closes $ci_total issues; only the first 100 were advanced -- paginate if this ever fires"
+              RUN_FAILED=1
+            fi
             ISSUES=$(echo "$CIS" | jq -rc '.data.repository.pullRequest.closingIssuesReferences.nodes[]?
                   | [.repository.owner.login, .repository.name, .number] | @tsv' 2>/dev/null)
             # here-string (not a pipe) so update_field's RUN_FAILED reaches this shell
             while IFS="$(printf '\t')" read -r iowner irepo inum; do
               [ -z "${inum:-}" ] && continue
               # shellcheck disable=SC2016
-              IRESP=$(gh api graphql -f query='
+              # Fail CLOSED here too: a failed per-issue lookup must not read as
+              # "not on the project" and skip the card (Bugbot .github#166).
+              if ! IRESP=$(gh api graphql -f query='
                 query($org: String!, $repo: String!, $num: Int!) {
                   repository(owner: $org, name: $repo) {
                     issue(number: $num) {
                       state
-                      projectItems(first: 10) {
+                      projectItems(first: 20) {
                         nodes {
                           id isArchived project { number }
                           status: fieldValueByName(name: "Status") {
@@ -332,7 +349,11 @@ jobs:
                       }
                     }
                   }
-                }' -F org="$iowner" -F repo="$irepo" -F num="$inum" 2>/dev/null) || IRESP='{}'
+                }' -F org="$iowner" -F repo="$irepo" -F num="$inum" 2>/dev/null); then
+                echo "::warning::could not read project items for issue $iowner/$irepo#$inum -- failing the run so a lagging card is visible"
+                RUN_FAILED=1
+                continue
+              fi
               ITEM_ID=$(echo "$IRESP" | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.issue.projectItems.nodes[]?
                     | select(.project.number == ($n | tonumber)) | .id' 2>/dev/null | head -1)
               if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
