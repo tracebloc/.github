@@ -1,0 +1,693 @@
+name: Version bump gate
+
+# Reusable workflow. Called on every PR in a repo the release train publishes
+# from a `version_file`. Fails the PR when the delta touches files the repo
+# PUBLISHES while the version those files would ship under is ALREADY RELEASED.
+#
+# WHY (tracebloc/backend#1563, prompted by backend#1561)
+#   The train already enforces this. `scripts/promote-repo.sh:version_preflight`
+#   refuses a hop with
+#     "NOT tagged - v$ver already exists and the delta DOES touch published files"
+#   because publishing would ship different bytes under a version that has been
+#   released - the thing the tag ruleset exists to prevent. Correct, and far too
+#   late: the refusal lands during a prod hop, days after the offending PR
+#   merged, on someone who did not write it. On 2026-08-05 that cost a whole
+#   release leg plus a hand diagnosis (backend#1561 -> py-package#389).
+#
+#   This moves the SAME question to the moment it is cheap to answer: the PR that
+#   changes the published files. A red X on the author's own diff, with the file
+#   to edit named in the message.
+#
+# WHAT IT ACTUALLY ASSERTS, AND WHY NOT "the version file changed"
+#   backend#1563 words Layer 1 as "fails when published paths change but the
+#   version file is unchanged vs base". Implemented literally that would demand a
+#   bump on EVERY published-path PR, and the train has never asked for that: one
+#   bump covers every PR in a release cycle. So the first PR after a release must
+#   bump, and every later one rides the already-bumped, still-unreleased version.
+#   A check that reddened all of those would be measuring the wrong thing, and a
+#   linter that is wrong on the common case gets removed rather than obeyed
+#   (code-quality.yml's soft-fail note is the same lesson).
+#
+#   The enforced rule is therefore version_preflight's, verbatim:
+#
+#     delta touches publish_paths  AND  v<version-on-this-PR> is already tagged
+#         -> FAIL
+#
+#   which is red for exactly the case backend#1561 hit and green for exactly the
+#   cases the train promotes. A PR that bumps to an unreleased version passes; so
+#   does a PR that changes nothing published; so does a PR riding a bump somebody
+#   else already landed on the base branch.
+#
+# PARITY WITH THE TRAIN - the point of this file
+#   A guard that disagrees with the gate it front-runs is worse than no guard:
+#   it either blocks work the train would ship, or greenlights work the train
+#   will refuse. So the version parse and the delta probe below are
+#   promote-repo.sh's `read_version` and `publishable_delta`, copied rule for
+#   rule, including the parts that look like details:
+#
+#     *.json        jq '.version', then ^X.Y.Z(-pre)? - package.json
+#     *.yaml|*.yml  first LINE-ANCHORED '^version:'   - Chart.yaml (the anchor is
+#                   what keeps `appVersion:` out of the answer)
+#     *.toml        first '^version *= *"'            - pyproject.toml
+#     *.py          first '^__version__ *= *["'']'    - tracebloc_ingestor/__init__.py
+#                   (anchored so a dependency pin cannot be read as the version)
+#     anything else first ^X.Y.Z at the START of a line - bare VERSION file
+#                   (anchored: an unanchored match reads a version out of a
+#                   leading comment, backend#1427)
+#
+#     publishable_delta: publish_paths are space-separated globs matched with
+#     shell `case` against BOTH `.filename` and `.previous_filename` of every
+#     file in the compare (a file renamed OUT of a published tree left the
+#     package, and GitHub reports only its new path in `.filename`). Returns
+#     yes / no / CANNOT-TELL, and cannot-tell is treated exactly like yes -
+#     an unanswerable question is not permission to skip a guard (backend#1439).
+#
+#   TWO DELIBERATE DIVERGENCES, both strictly tighter, neither able to disagree
+#   on an answer the train can actually read:
+#
+#     1. `set -f`. `for pat in $PUBLISH_PATHS` is a glob context: bash expands
+#        `cmd/*` against the working directory before the loop body sees it.
+#        promote-repo.sh is saved only by running from a checkout where no
+#        publish path happens to exist. A coincidence of $PWD is not a property.
+#     2. "is v$ver released" is answered from ONE paginated `matching-refs/tags/v`
+#        read, not a per-version `git/ref/tags/v$ver` probe. The probe collapses
+#        404 (not released) and 403 / rate limit (could not tell) into the same
+#        falsy result, i.e. it fail-OPENS on a bad day. One listing either reads
+#        or it does not, and it also feeds the regression guard below, so both
+#        questions are answered from the same authoritative bytes.
+#
+# FAIL CLOSED - every one of these is red, and says which one it is
+#   - `version-file` or `publish-paths` not supplied by the caller
+#   - PR base/head SHA missing from the event payload
+#   - the Compare API read failed, or returned NO file list (zero files scanned
+#     is a malfunction, not a pass: GitHub omits the file list on very large
+#     compares, so empty cannot be told apart from "changed nothing")
+#   - the compare reported no merge base
+#   - the version file could not be read on head, or read but did not parse
+#   - the version file could not be read at the merge base (absent there is a
+#     different thing: a PR that INTRODUCES the file, which passes and says so)
+#   - the tag listing could not be read, or grep failed while searching it
+#   - 300 files in the compare with no match: that is the API's page cap with no
+#     truncation flag, so "no published file changed" cannot be asserted. Note
+#     the asymmetry - a MATCH is sound on a truncated list, so a large compare
+#     that does match still gets a precise answer instead of a refusal.
+#
+#   `soft-fail` does NOT apply to any of them. It downgrades the VERDICT, never
+#   the machinery: a gate that cannot evaluate is broken, and broken must look
+#   different from clean in both modes (backend#1409's whole finding was six
+#   repos carrying a green check that had never compared anything).
+#
+# THE PASSES, spelled out because "why is this green" is the question a gate
+# gets asked most
+#   - docs-only / CI-only / test-only PR. The delta matches no publish path, so
+#     nothing this repo ships changed. Green even with the version untouched and
+#     already released - that is precisely the no-publishable-delta no-op the
+#     train grew in backend#1439, and refusing here would leave such a PR with no
+#     green path at all. The pass message names the file count it scanned and the
+#     globs it scanned them against, so a green check is auditable rather than
+#     merely quiet.
+#   - the PR bumps the version to something unreleased.
+#   - the PR changes published files but the base branch already carries an
+#     unreleased bump. The message says which, so nobody reads it as a bump they
+#     do not have.
+#   - the PR introduces the version file (absent at the merge base).
+#   - a release-train promotion PR (`release-train/*`, `hotfix-backmerge/*`)
+#     FROM THIS REPOSITORY INTO staging/main/master. Not a courtesy: the train
+#     runs the authoritative preflight on this exact content, and `tag_expected`
+#     scopes it per hop - py-package and data-ingestors declare no `rc_tag`, so
+#     their develop -> staging hop deliberately runs NO version preflight. Gating
+#     that PR here would block a promotion the train is entitled to make, which
+#     is the disagreement this whole file exists to avoid. The cargo PRs were
+#     each gated on their way in.
+#
+#     All three conditions are checked, because a head ref is chosen by whoever
+#     opens the PR: `release-train/anything` alone is an exemption anybody can
+#     mint, from a fork even. The base branch and the head repository are
+#     properties of a real promotion rather than claims made by its author, and
+#     a promotion never targets `develop`. The fork test demands a CONFIRMED
+#     `false` rather than merely "not true" - an exemption must not be granted
+#     on a field that could not be read. A PR that merely borrows the name is
+#     evaluated normally, with a warning naming the mismatch - a bypass that
+#     does not apply should be visible, not silently absent.
+#
+# OVERRIDE
+#   Add the `skip-version-gate` label (visible in audit). Checked FIRST, ahead of
+#   every refusal - public-pii-gate.yml shipped its override BELOW the refusals,
+#   so on exactly the PRs that needed rescuing the refusal exited first and the
+#   label could not reach anything. It buys a merge, not a release: the train
+#   still refuses at the prod hop, so this is a way to land unrelated work past a
+#   misbehaving gate, never a way to publish over a released version.
+#
+# BLOCKING BEHAVIOUR - read before marking it required
+#   `soft-fail` defaults TRUE: findings are annotated and summarised, the job
+#   exits 0. Same migration shape as code-quality.yml. The ladder is
+#     1. add the caller with the defaults
+#     2. watch a few PRs - confirm the verdicts match what the train does
+#     3. flip `soft-fail: false`
+#     4. mark `version-bump-gate / version-check` required in branch protection
+#   Step 3 is the point. A guard that only ever warns changes nothing, and if a
+#   repo is still on the default months from now, that is the finding.
+#
+#   There is deliberately NO `paths:` filter on the caller and NO job-level
+#   `if:` here. A path-filtered required check never reports on a PR that touches
+#   nothing matching, and a required check that never reports leaves that PR
+#   waiting forever; a skipped job has the same shape. All of the path judgment
+#   happens INSIDE the job, where "not applicable" is a green result with a
+#   reason attached rather than an absent one.
+#
+# WHERE THE CONFIG COMES FROM, AND THE DRIFT THAT IMPLIES
+#   `version_file` and `publish_paths` live in tracebloc/release-train's
+#   repos.yml, which is the authority. This workflow cannot read it: that repo is
+#   PRIVATE, and a reusable called from another repo runs with that repo's
+#   GITHUB_TOKEN, which has no access to it. Handing five repos a cross-repo PAT
+#   to run a PR check costs more than the drift it would close, so the caller
+#   declares the values instead and this job echoes both into the summary on
+#   every run, where a wrong one is visible rather than silent. Keeping them in
+#   step is a two-file edit, exactly like repos.yml vs repo-inventory.yml's
+#   `release_train` flag. Measured from repos.yml@main on 2026-08-06, the five
+#   version_file repos and their exact values are:
+#
+#     tracebloc-py-package  pyproject.toml                  tracebloc/* pyproject.toml
+#     cli                   VERSION                         cmd/* internal/* go.mod go.sum VERSION
+#     design-system         package.json                    src/*
+#     data-ingestors        tracebloc_ingestor/__init__.py  tracebloc_ingestor/*
+#     client                client/Chart.yaml               client/*
+#
+# OUT OF SCOPE, on purpose
+#   version_preflight also refuses a PRERELEASE version on a prod hop. That is a
+#   different mistake with a different remedy, it is caught by the hop that
+#   actually publishes, and read_version keeps the `-prerelease` suffix on
+#   purpose for the staging channel - so flagging it at PR time would guess at
+#   intent. Layer 2 (backend#1563) is the auto-bump bot; this file only refuses,
+#   it never edits a version.
+#
+# ADOPTION - drop this in as `.github/workflows/version-bump-gate-caller.yml`
+#
+#     name: Version bump gate
+#
+#     on:
+#       pull_request:
+#         # No `paths:` filter - see BLOCKING BEHAVIOUR above.
+#         types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
+#
+#     concurrency:
+#       group: version-bump-gate-${{ github.workflow }}-${{ github.ref }}
+#       cancel-in-progress: true
+#
+#     permissions:
+#       contents: read
+#
+#     jobs:
+#       version-bump-gate:
+#         uses: tracebloc/.github/.github/workflows/version-bump-gate.yml@main
+#         with:
+#           version-file: VERSION
+#           publish-paths: "cmd/* internal/* go.mod go.sum VERSION"
+#           # soft-fail: false   # flip once the verdicts have been watched
+#
+#   `labeled`/`unlabeled` are in the list so applying `skip-version-gate` re-runs
+#   the check; without them the label lands and the red stays red.
+#
+#   This workflow uses NO secrets and asks only for `contents: read`, so it runs
+#   under a minimal caller and the org default workflow-token permission of
+#   "read". Callers pass NO `secrets:` line - RFC-BACKEND-1405 Q5 (backend#1420,
+#   unwound in backend#1526): `inherit` is a no-op only for as long as this file
+#   stays secretless, and callers pin `@main`.
+#
+# SUPPLY CHAIN
+#   This job uses no actions at all - no checkout, no setup. It reads the version
+#   file, the compare and the tag list over the API, which is also what makes the
+#   parse identical to the train's (same bytes, same greps) and what lets it work
+#   on a fork PR head. Nothing to pin, because there is no `uses:` (D10).
+#
+# TEST
+#   scripts/tests/version-bump-gate-selftest.sh runs the decision table below
+#   offline against a stubbed `gh`, including every fail-closed path and the
+#   per-file-type parse of all five repos' real version file shapes. Locally:
+#     bash scripts/tests/version-bump-gate-selftest.sh
+
+on:
+  workflow_call:
+    inputs:
+      version-file:
+        description: >-
+          Path to this repo's version file, EXACTLY as release-train's repos.yml
+          spells it (e.g. VERSION, pyproject.toml, client/Chart.yaml). The
+          extension selects the parse, so Chart.yaml and Chart.yml are the same
+          rule but VERSION is not.
+        type: string
+        required: true
+      publish-paths:
+        description: >-
+          Space-separated globs naming what this repo PUBLISHES, copied from
+          repos.yml's publish_paths. Matched with shell `case` against every path
+          in the PR's compare. Absent is never permission to skip the guard
+          (backend#1439), so this is required rather than defaulted to empty.
+        type: string
+        required: true
+      soft-fail:
+        description: >-
+          Report the verdict but exit 0. Migration setting - flip to false to
+          make this a real gate. Never applies to fail-closed paths: a gate that
+          could not evaluate reports red in both modes.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # ONE step, entirely env-driven: no `${{ }}` reaches the script body, which
+      # is what lets the selftest extract and execute it. If a future edit
+      # interpolates an expression here, the selftest fails loudly rather than
+      # quietly covering less. It is also the injection-safe shape - every
+      # attacker-controlled value (branch name, label names) arrives as an
+      # environment variable and is read as a quoted shell variable, never
+      # spliced into the script text.
+      - name: Version bump guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_FULL: ${{ github.repository }}
+          VERSION_FILE: ${{ inputs.version-file }}
+          PUBLISH_PATHS: ${{ inputs.publish-paths }}
+          SOFT_FAIL: ${{ inputs.soft-fail }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          # errexit spelled out rather than inherited. Actions runs `run:` steps as
+          # `bash -e {0}`, so `set -uo pipefail` leaves -e ON while reading as though
+          # it were off, and the next person edits on the wrong assumption
+          # (Bugbot, .github#130).
+          set -euo pipefail
+          # Pathname expansion OFF for the whole script. `for pat in $PUBLISH_PATHS`
+          # splits on whitespace deliberately, but it is also a glob context: without
+          # this, bash expands `cmd/*` against the working directory before the loop
+          # body ever runs.
+          set -f
+
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+          # Three exits, so no path can end ambiguously.
+          #   malfunction  the gate could not evaluate. NEVER soft-failable.
+          #   violation    the gate evaluated and the answer is no. Soft-failable.
+          #   verified     the gate evaluated and the answer is yes.
+          # $1 is the one-line headline (it becomes the annotation), $2 the detail.
+          malfunction() {
+            printf '::error::%s\n' "$1"
+            printf '%s\n' "${2:-}"
+            {
+              printf '### Version bump gate: CANNOT EVALUATE\n\n'
+              printf '%s\n\n' "$1"
+              printf '%s\n' "${2:-}"
+            } >> "$SUMMARY"
+            exit 1
+          }
+
+          violation() {
+            {
+              printf '### Version bump gate: this version has already been released\n\n'
+              printf '%s\n\n' "$1"
+              printf '%s\n' "${2:-}"
+            } >> "$SUMMARY"
+            if [ "${SOFT_FAIL:-true}" = "true" ]; then
+              printf '::warning::%s\n' "$1"
+              printf '%s\n' "${2:-}"
+              echo "soft-fail is on, so this run is green. Flip 'soft-fail: false' in the caller to make it a gate."
+              printf '\nsoft-fail is on, so this run is green. Flip soft-fail to false in the caller.\n' >> "$SUMMARY"
+              exit 0
+            fi
+            printf '::error::%s\n' "$1"
+            printf '%s\n' "${2:-}"
+            exit 1
+          }
+
+          verified() {
+            printf '%s\n' "$1"
+            {
+              printf '### Version bump gate: passed\n\n'
+              printf '%s\n' "$1"
+            } >> "$SUMMARY"
+            exit 0
+          }
+
+          # --- override, ahead of every refusal ---------------------------------
+          # public-pii-gate.yml shipped this BELOW its refusals, so on exactly the
+          # PRs that needed rescuing the refusal exited first. An override is a
+          # statement that this PR should not be evaluated, so it belongs before
+          # every reason the evaluation might refuse. Exact match on a label name:
+          # a substring test lets any label merely CONTAINING the word disarm the
+          # gate. A LABELS payload that will not parse yields "no override", which
+          # is the safe direction - the checks below still run.
+          if jq -e --arg t 'skip-version-gate' 'any(.[]?; . == $t)' \
+               <<<"${LABELS:-[]}" >/dev/null 2>&1; then
+            echo "::warning::Version bump gate bypassed via the 'skip-version-gate' label."
+            echo "This buys a merge, not a release: the release train still refuses to publish"
+            echo "changed bytes under an already-released version."
+            exit 0
+          fi
+
+          # --- config, supplied by the caller from repos.yml ---------------------
+          if [ -z "${VERSION_FILE:-}" ]; then
+            malfunction \
+              "The caller supplied no 'version-file', so there is nothing to read a version from." \
+              "Copy the value from tracebloc/release-train's repos.yml, e.g. version-file: pyproject.toml"
+          fi
+          if [ -z "${PUBLISH_PATHS:-}" ]; then
+            malfunction \
+              "The caller supplied no 'publish-paths', so this gate cannot tell a published change from a docs change." \
+              "Absent is never permission to skip the version guard (backend#1439). Copy publish_paths from repos.yml, e.g. publish-paths: 'tracebloc/* pyproject.toml'"
+          fi
+          if [ -z "${REPO_FULL:-}" ]; then
+            malfunction \
+              "github.repository is empty, so no API call below can be addressed." \
+              "This workflow must be called as a reusable workflow from a repository event."
+          fi
+          if [ -z "${PR_BASE_SHA:-}" ] || [ -z "${PR_HEAD_SHA:-}" ]; then
+            malfunction \
+              "PR base/head SHA missing from the event payload, so neither the delta nor the version can be read." \
+              "This workflow must be called from a 'pull_request' event."
+          fi
+
+          # --- release-train promotion PRs --------------------------------------
+          # Evaluated, not skipped, and green with a stated reason. The train runs
+          # the authoritative preflight on this exact content and scopes it per hop
+          # (tag_expected): py-package and data-ingestors declare no rc_tag, so
+          # their develop -> staging hop deliberately runs no version preflight at
+          # all. A second, differently-scoped copy of the check could only disagree,
+          # and would block a promotion the train is entitled to make.
+          #
+          # THE BRANCH NAME IS NOT THE CREDENTIAL. A head ref is chosen by whoever
+          # opens the PR, so `release-train/anything` on its own is an exemption
+          # anybody can mint - from a fork, even. Two further facts have to hold,
+          # both of them properties of a real promotion rather than claims made by
+          # its author: the head is in THIS repository (never a fork), and the base
+          # is a promotion target. A promotion never targets `develop`, so a PR that
+          # merely borrows the name to reach `develop` is evaluated like any other -
+          # loudly, so the mismatch is visible rather than silently absent.
+          case "${PR_HEAD_REF:-}" in
+            release-train/*|hotfix-backmerge/*)
+              case "${PR_BASE_REF:-}" in
+                staging|main|master)
+                  # Exempt only on a CONFIRMED same-repo head. `true` and "anything
+                  # we could not read" are different problems but the same answer
+                  # here, because this is an exemption: the unknown case (an absent
+                  # head.repo on a deleted fork, a payload we did not get) must not
+                  # buy one. Evaluating a genuine promotion by mistake costs a
+                  # re-run; exempting a fork by mistake costs the gate.
+                  case "${IS_FORK:-}" in
+                    false)
+                      verified "Release-train promotion PR (head '${PR_HEAD_REF}' -> '${PR_BASE_REF}', same repository). The train runs the authoritative version preflight on this exact content, scoped per hop, and the PRs this promotion carries were each gated on their way into develop."
+                      ;;
+                    true)
+                      echo "::warning::Head ref '${PR_HEAD_REF}' looks like a promotion branch, but this PR comes from a FORK - the release train never promotes from one. Evaluating it as an ordinary PR."
+                      ;;
+                    *)
+                      echo "::warning::Head ref '${PR_HEAD_REF}' looks like a promotion branch, but the head repository could not be confirmed (head.repo.fork was '${IS_FORK:-unset}'). An exemption is not something to grant on an unread field. Evaluating it as an ordinary PR."
+                      ;;
+                  esac
+                  ;;
+                *)
+                  echo "::warning::Head ref '${PR_HEAD_REF}' looks like a promotion branch, but this PR targets '${PR_BASE_REF:-?}' rather than staging/main/master. The release train does not promote there, so this is evaluated as an ordinary PR."
+                  ;;
+              esac
+              ;;
+          esac
+
+          SCRATCH=$(mktemp -d) || SCRATCH=
+          if [ -z "$SCRATCH" ]; then
+            malfunction \
+              "mktemp failed, so this gate cannot stage the data it must read - failing closed." \
+              "A runner problem, not a problem with this PR. Re-run the job."
+          fi
+          trap 'rm -rf "$SCRATCH"' EXIT
+          COMPARE_JSON="$SCRATCH/compare.json"
+          TAGS_FILE="$SCRATCH/tags.txt"
+          GH_ERR="$SCRATCH/gh.err"
+
+          # --- the delta ---------------------------------------------------------
+          # base...head is the three-dot compare, i.e. this PR's own changes and not
+          # whatever else landed on the base branch meanwhile.
+          if ! gh api "repos/$REPO_FULL/compare/$PR_BASE_SHA...$PR_HEAD_SHA" \
+                 >"$COMPARE_JSON" 2>"$GH_ERR"; then
+            malfunction \
+              "Could not read the compare $PR_BASE_SHA...$PR_HEAD_SHA, so this PR's delta is unknown - failing closed." \
+              "gh reported: $(tr '\n' ' ' <"$GH_ERR")"
+          fi
+
+          # The version at the MERGE BASE, not at the base branch tip. The compare is
+          # three-dot, so the merge base is the commit this PR's delta is measured
+          # from; reading the version anywhere else would describe a different diff.
+          MERGE_BASE=$(jq -r '.merge_base_commit.sha // empty' "$COMPARE_JSON" 2>/dev/null) || MERGE_BASE=""
+          if [ -z "$MERGE_BASE" ]; then
+            malfunction \
+              "The compare response carried no merge base, so there is no commit to read the previous version from - failing closed." \
+              "Re-run the job; if it persists the base branch may have been force-pushed out from under this PR."
+          fi
+
+          # --- read_version, promote-repo.sh's rules ----------------------------
+          # Sets RAW and RSTATUS in {ok, absent, unreadable}. `absent` is a definite
+          # answer (HTTP 404) and is handled by the caller; anything else is retried.
+          # An EMPTY read counts as a failure and is retried too, deliberately: that
+          # is the exact symptom of the Contents API lagging a freshly pushed sha,
+          # which once left py-package untagged on an otherwise clean promotion
+          # (2026-07-29). So an emptiness that survives all three attempts is
+          # reported as unreadable rather than as "no version", which is why the
+          # message below names both possibilities.
+          RAW=""
+          RSTATUS=""
+          fetch_version_file() {
+            local ref="$1" attempt rc
+            RAW=""
+            RSTATUS="unreadable"
+            for attempt in 1 2 3; do
+              : >"$GH_ERR"
+              rc=0
+              RAW=$(gh api "repos/$REPO_FULL/contents/$VERSION_FILE?ref=$ref" \
+                      --jq '.content' 2>"$GH_ERR" | base64 -d 2>/dev/null) || rc=$?
+              if [ "$rc" = 0 ] && [ -n "$RAW" ]; then
+                RSTATUS="ok"
+                return 0
+              fi
+              if grep -q 'HTTP 404' "$GH_ERR" 2>/dev/null; then
+                RAW=""
+                RSTATUS="absent"
+                return 0
+              fi
+              if [ "$attempt" -lt 3 ]; then sleep 3; fi
+            done
+            RAW=""
+            return 0
+          }
+
+          # promote-repo.sh:read_version's case table, rule for rule -- plus the
+          # trailing `head -1` on every branch, which read_version is MISSING
+          # (release-train#40). `grep -oE` prints one line PER MATCH, so a version
+          # line carrying a second semver in a trailing comment
+          #     version = "1.2.3"  # bumped from 1.0.0
+          # yields a two-line value. Here that would make the regression guard's
+          # `!= "$HEAD_VER"` compare against a multi-line string and refuse a
+          # legitimate bump; in the train it is worse, because the tag probe
+          # interpolates the value into a URL and a malformed one 404s, which the
+          # caller reads as "not released" -- fail-OPEN on the exact check that
+          # stops a re-publish. Fixed there in release-train#40; kept identical
+          # here so the two never diverge (Bugbot, .github#172).
+          #
+          # The anchors are
+          # the load-bearing part: '^version:' is what keeps Chart.yaml's appVersion
+          # out of the answer, '^__version__' is what stops a dependency pin being
+          # read as the package version, and the bare-file '^X.Y.Z' is what stops a
+          # version in a leading comment winning over the real one (backend#1427).
+          parse_version() {
+            local raw="$1"
+            local semver='[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?'
+            case "$VERSION_FILE" in
+              *.json)       printf '%s' "$raw" | jq -r '.version // empty' 2>/dev/null | grep -oE "^$semver" || true ;;
+              *.yaml|*.yml) printf '%s' "$raw" | grep -E '^version:' | head -1 | grep -oE "$semver" | head -1 || true ;;
+              *.toml)       printf '%s' "$raw" | grep -E '^version *= *"' | head -1 | grep -oE "$semver" | head -1 || true ;;
+              *.py)         printf '%s' "$raw" | grep -E '^__version__ *= *["'"'"']' | head -1 | grep -oE "$semver" | head -1 || true ;;
+              *)            printf '%s' "$raw" | grep -oE "^$semver" | head -1 || true ;;
+            esac
+          }
+
+          fetch_version_file "$PR_HEAD_SHA"
+          case "$RSTATUS" in
+            ok) ;;
+            absent)
+              malfunction \
+                "$VERSION_FILE does not exist on this PR's head ($PR_HEAD_SHA), so there is no version to check." \
+                "Either the caller's version-file input is wrong, or this PR deletes the file the release train tags from."
+              ;;
+            *)
+              malfunction \
+                "$VERSION_FILE came back unreadable or EMPTY at $PR_HEAD_SHA on all 3 attempts - failing closed rather than guessing a version." \
+                "gh reported: $(tr '\n' ' ' <"$GH_ERR")"
+              ;;
+          esac
+          HEAD_VER=$(parse_version "$RAW")
+          if [ -z "$HEAD_VER" ]; then
+            malfunction \
+              "Read $VERSION_FILE at this PR's head but found no version in it." \
+              "The release train parses this file with the same rule and would fail its next hop the same way. Expected an X.Y.Z on a line the parser anchors to - see this gate's header for the per-extension table."
+          fi
+
+          fetch_version_file "$MERGE_BASE"
+          BASE_ABSENT=0
+          BASE_VER=""
+          case "$RSTATUS" in
+            ok)
+              BASE_VER=$(parse_version "$RAW")
+              if [ -z "$BASE_VER" ]; then
+                malfunction \
+                  "Read $VERSION_FILE at the merge base ($MERGE_BASE) but found no version in it, so this gate cannot say what the version was before this PR." \
+                  "That file is already unparseable on the base branch, so the train would fail its next hop on it too - fix it there, or in this PR."
+              fi
+              ;;
+            absent)
+              # This PR introduces the version file. A definite answer, not a failure.
+              BASE_ABSENT=1
+              ;;
+            *)
+              malfunction \
+                "$VERSION_FILE came back unreadable or EMPTY at the merge base ($MERGE_BASE) on all 3 attempts - failing closed." \
+                "gh reported: $(tr '\n' ' ' <"$GH_ERR")"
+              ;;
+          esac
+
+          # --- publishable_delta, promote-repo.sh's rules -----------------------
+          # 0 = the delta touches published files, 1 = it does not, 2 = cannot tell.
+          # 2 is treated exactly like 0 by the caller below.
+          PD_REASON=""
+          MATCHED=""
+          FILES=""
+          FILE_COUNT=0
+          publishable_delta() {
+            local pat f prev
+            if ! FILES=$(jq -r '.files[]? | [.filename, (.previous_filename // "")] | @tsv' \
+                           "$COMPARE_JSON" 2>"$GH_ERR"); then
+              PD_REASON="The compare response could not be parsed for a file list, so this PR's delta is unknown."
+              return 2
+            fi
+            # An absent file list yields empty, which is indistinguishable from "no
+            # files" - GitHub omits it on very large compares. Zero files scanned is
+            # a malfunction, not a pass.
+            if [ -z "$FILES" ]; then
+              PD_REASON="The compare $PR_BASE_SHA...$PR_HEAD_SHA returned no file list. GitHub omits it on very large compares, so empty cannot be told apart from 'this PR changed nothing' - and zero files scanned is a malfunction, not a pass."
+              return 2
+            fi
+            # One LINE per file, tab-separated, rather than one line per path: the
+            # 300-file cap check below counts lines, and emitting two lines per
+            # rename would make it refuse at fewer than 300 actual files.
+            FILE_COUNT=0
+            while IFS= read -r _; do FILE_COUNT=$((FILE_COUNT + 1)); done <<EOF
+          $FILES
+          EOF
+            for pat in $PUBLISH_PATHS; do
+              while IFS="$(printf '\t')" read -r f prev; do
+                # shellcheck disable=SC2254  # $pat is a glob on purpose
+                case "$f" in $pat) MATCHED="$f (matches '$pat')"; return 0 ;; esac
+                # The pre-rename path counts too: a file moved OUT of a published
+                # tree left the package, and GitHub reports only its NEW path in
+                # the file entry.
+                if [ -n "${prev:-}" ]; then
+                  # shellcheck disable=SC2254  # $pat is a glob on purpose
+                  case "$prev" in $pat) MATCHED="$prev (renamed to $f, matches '$pat')"; return 0 ;; esac
+                fi
+              done <<EOF
+          $FILES
+          EOF
+            done
+            # A negative verdict is only worth anything if we saw the WHOLE delta. The
+            # compare API caps its file list at 300 and reports no truncation flag, so
+            # a list sitting exactly at the cap cannot be told apart from one cut
+            # short. The asymmetry is why this is checked here and not up front: a
+            # MATCH above is sound either way, so a big compare that does match still
+            # gets a precise answer instead of a refusal.
+            if [ "$FILE_COUNT" -ge 300 ]; then
+              PD_REASON="The compare returned $FILE_COUNT files - the API's page cap, with no truncation flag - and none matched [$PUBLISH_PATHS]. A file past the window could be the one that matches, so 'nothing published changed' cannot be asserted."
+              return 2
+            fi
+            return 1
+          }
+
+          # `|| pd=$?` keeps errexit out of it: this function uses its exit status as
+          # an ANSWER, not as success/failure, and every interesting case is non-zero.
+          pd=0
+          publishable_delta || pd=$?
+
+          if [ "$pd" = "2" ]; then
+            malfunction \
+              "$PD_REASON" \
+              "Failing closed: an unanswerable question is not permission to skip a version guard (backend#1439). Re-run the job; if it persists, split the PR, or apply the 'skip-version-gate' label after checking by hand."
+          fi
+
+          if [ "$pd" = "1" ]; then
+            verified "No publishable delta - $FILE_COUNT file(s) in this PR, none matching [$PUBLISH_PATHS]. $VERSION_FILE stays at $HEAD_VER, and that is correct: docs, CI, tests and scripts are not part of what this repo ships, so the train promotes them and cuts no tag (backend#1439)."
+          fi
+
+          # --- is that version already released ---------------------------------
+          # One paginated listing answers both questions below, so they can never be
+          # answered from different reads - and unlike a per-version git/ref probe it
+          # cannot confuse "not released" with "could not ask".
+          if ! gh api "repos/$REPO_FULL/git/matching-refs/tags/v" --paginate \
+                 --jq '.[].ref' >"$TAGS_FILE" 2>"$GH_ERR"; then
+            malfunction \
+              "Could not list this repo's v* tags, so the gate cannot tell whether v$HEAD_VER is already released - failing closed." \
+              "gh reported: $(tr '\n' ' ' <"$GH_ERR")"
+          fi
+
+          # promote-repo.sh:latest_final. Final vX.Y.Z only - sort -V orders a
+          # prerelease against a final differently on GNU and BSD, so prereleases are
+          # deliberately not ranked here either.
+          LATEST=$(sed 's|refs/tags/v||' "$TAGS_FILE" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+
+          # grep exits >1 on an operational error. That is "did not check", never
+          # "found nothing" - the pii-gate lesson, applied to the tag list.
+          rc=0
+          grep -qxF "refs/tags/v$HEAD_VER" "$TAGS_FILE" || rc=$?
+          case "$rc" in
+            0) TAG_EXISTS=1 ;;
+            1) TAG_EXISTS=0 ;;
+            *)
+              malfunction \
+                "grep exited $rc while searching the tag list, so this gate never established whether v$HEAD_VER is released - failing closed." \
+                "A runner problem, not a problem with this PR. Re-run the job."
+              ;;
+          esac
+
+          if [ "$TAG_EXISTS" = "1" ]; then
+            if [ "$BASE_ABSENT" = "0" ] && [ "$BASE_VER" = "$HEAD_VER" ]; then
+              violation \
+                "$VERSION_FILE still says $HEAD_VER, v$HEAD_VER is ALREADY RELEASED, and this PR changes a published file: $MATCHED." \
+                "Bump $VERSION_FILE in this PR. The release train reads that file and cuts the tag from it - it never bumps for you, so leaving it stale does not fail here, it fails the next prod hop days later on somebody else (backend#1561). Highest released final version: ${LATEST:-none}. $FILE_COUNT file(s) scanned against [$PUBLISH_PATHS]."
+            fi
+            violation \
+              "$VERSION_FILE says $HEAD_VER on this PR, v$HEAD_VER is ALREADY RELEASED, and the delta changes a published file: $MATCHED." \
+              "This PR does change the version, but to one that has already shipped - publishing it would put different bytes under an existing release, which is exactly what the train refuses at the prod hop. Pick a version above every released tag (highest released final version: ${LATEST:-none})."
+          fi
+
+          # --- version regression guard ------------------------------------------
+          # promote-repo.sh:latest_final's guard. On GitHub 'latest' is the most
+          # RECENT stable release, so shipping a version BELOW one already out
+          # hijacks the installer bootstrap even though its own tag is free.
+          if [ -n "$LATEST" ] && [ "$(printf '%s\n%s\n' "$HEAD_VER" "$LATEST" | sort -V | tail -1)" != "$HEAD_VER" ]; then
+            violation \
+              "$VERSION_FILE says $HEAD_VER but v$LATEST is already released, and this PR changes a published file: $MATCHED." \
+              "v$HEAD_VER is untagged, so it would tag - and then sit BELOW the current release, where GitHub's 'latest' and the installer bootstrap would still point at v$LATEST. Bump $VERSION_FILE above $LATEST."
+          fi
+
+          # --- green -------------------------------------------------------------
+          if [ "$BASE_ABSENT" = "1" ]; then
+            verified "This PR introduces $VERSION_FILE at $HEAD_VER, and v$HEAD_VER is not released. $FILE_COUNT file(s) scanned against [$PUBLISH_PATHS]; the delta is publishable ($MATCHED)."
+          fi
+          if [ "$BASE_VER" != "$HEAD_VER" ]; then
+            verified "$VERSION_FILE bumped $BASE_VER -> $HEAD_VER, and v$HEAD_VER is not released. $FILE_COUNT file(s) scanned against [$PUBLISH_PATHS]; the delta is publishable ($MATCHED), so the bump is exactly what the train needs."
+          fi
+          verified "$VERSION_FILE is unchanged at $HEAD_VER and this PR does change a published file ($MATCHED) - but v$HEAD_VER has NOT been released, so no bump is owed: this PR ships under the pending $HEAD_VER together with everything else already merged for it. $FILE_COUNT file(s) scanned against [$PUBLISH_PATHS]."

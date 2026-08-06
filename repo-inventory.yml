@@ -2,11 +2,21 @@
 # repo must call. THE single source of truth; `.github/workflows/caller-drift.yml`
 # fails when reality diverges from it.
 #
+# EDITING THIS FILE IS GATED (tracebloc/backend#1608). caller-drift.yml has always
+# RUN on PRs that touch this file, but it was not a required check - so a PR that
+# put the inventory out of step with reality went red and could still merge.
+# `.github/workflows/conformance-gate.yml` is the required check that closes that:
+# it reports on every PR, is green in seconds when this file is untouched, and
+# when it IS touched it refuses unless the audit passed on that exact head sha.
+#
 # WHY THIS FILE EXISTS (tracebloc/backend#1415)
 # Nothing in the org detected a missing caller. merge-settings-drift.yml reads
 # three booleans; kanban-reconcile.yml probes one filename to decide board scope.
 # That is how eight repos drifted unnoticed and how e2e-test-agent#1 closed
-# without routing - there is no closure caller there to route it.
+# without routing - at the time that repo had no closure caller to route it.
+# e2e-test-agent#13 added one on 2026-08-05, which is why its entry below now
+# reads `required`: the motivating gap is closed, the detection gap is why this
+# file exists.
 #
 # THE SCHEMA DECISION: ABSENCE IS NEVER IMPLICIT.
 # Every repo carries an entry for EVERY reusable and EVERY copy. Each entry is
@@ -140,12 +150,16 @@ repos:
     release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
-      code-quality.yml:
-        exempt: >-
-          no code-quality caller in the repo that HOSTS code-quality.yml. Line 60 of that file
-          is a commented-out example `uses:` line, which is why a grep-based audit reports a
-          caller here that does not exist - the guard strips comments via a real YAML parse.
-          UNREMEDIATED (one of the nine).
+      # Remediated 2026-08-06 (.github#171, backend#1603). The repo that HOSTS
+      # code-quality.yml was the only repo not running it, so the action-pins job
+      # it publishes to 19 others did not apply here - and that is how .github#168
+      # reverted actions/checkout from a pinned SHA to the mutable @v4 tag with
+      # nothing in CI to object. Armed soft-fail:false against a measured-clean
+      # tree; ruff, gitleaks, shellcheck and house-rules were all green on the
+      # first run. action-pins itself stays unarmed until #159 reaches main - a
+      # caller may only pass inputs the @main callee declares, or the whole call
+      # dies with startup_failure.
+      code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml:
         exempt: *customer_priority_bump_caller_missing
       fr-gate.yml: required   # fr-gate-caller.yml
@@ -451,13 +465,14 @@ repos:
   # RFC-BACKEND-1405 D1 always required this ("Exempt never means ungoverned"),
   # so the flip is compliance catching up, not a change of policy.
   #
-  # release_train stays FALSE until the repo is listed in release-train/repos.yml.
-  # caller-drift.py:562 verifies this field against that file, so flipping it early
-  # fails the guard. RFC-BACKEND-1552 D2 amends D1 to enrol it; the flip to true
-  # follows the repos.yml entry, not this PR.
+  # release_train flipped to TRUE on 2026-08-06, after release-train#34 merged and
+  # listed this repo (16 on the train). caller-drift.py:562 verifies this field
+  # against that file, which is why it could not be set in the same PR as the
+  # caller flip. RFC-BACKEND-1552 D2 is the decision; it amends RFC-BACKEND-1405
+  # D1, which had named this repo in its exempt list.
   e2e-test-agent:
     visibility: private
-    release_train: false
+    release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
