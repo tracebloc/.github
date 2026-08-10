@@ -206,6 +206,31 @@ expect_schema_failure("protection divergent cannot override block_deletions",
                       lambda d: d["repos"]["hub"]["protection"].update(
                           {"prod": {"divergent": {"reason": "x", "block_deletions": False}}}))
 
+# Override VALUES are validated too, not just the key names. Without this a cell
+# that looks like a narrow documented divergence can neutralise the assertion it
+# claims merely to adjust. (Bugbot, .github#196.)
+expect_schema_failure("divergent min_reviews cannot be negative",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "min_reviews": -1}}}))
+expect_schema_failure("divergent min_reviews cannot be a bool (bool is an int in Python)",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "min_reviews": True}}}))
+expect_schema_failure("divergent min_reviews cannot be a string",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "min_reviews": "0"}}}))
+expect_schema_failure("divergent enforce_admins cannot be null (that un-asserts it)",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "enforce_admins": None}}}))
+expect_schema_failure("divergent strict cannot be null",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "strict": None}}}))
+expect_schema_failure("divergent strict cannot be a string",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "strict": "false"}}}))
+# The same bool-is-int trap at policy level.
+expect_schema_failure("policy min_reviews cannot be a bool",
+                      lambda d: d["protection_policy"]["develop"].update({"min_reviews": True}))
+
 # A well-formed inventory must still load, or the tests above prove nothing.
 with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as _h:
     yaml.safe_dump(copy.deepcopy(MINIMAL), _h)
@@ -439,11 +464,19 @@ record(guard.blob_sha(b"hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a",
 # whole time. A guard that cannot tell those apart is worse than none.
 
 def _prot(args) -> bool:
-    return "/branches/" in args[1] and args[1].endswith("/protection")
+    # Scan ALL args, not args[1]: the rules read now carries --paginate/--jq
+    # flags ahead of the path, so positional indexing would silently stop
+    # matching and every stub would fall through to the default.
+    return any(a.endswith("/protection") for a in args)
 
 
 def _rules(args) -> bool:
-    return "/rules/branches/" in args[1]
+    return any("/rules/branches/" in a for a in args)
+
+
+def ndjson(*objs) -> str:
+    """What `gh api --paginate --jq '.[]'` emits: one compact object per line."""
+    return "".join(json.dumps(o) + "\n" for o in objs)
 
 
 CLASSIC = json.dumps({
@@ -460,13 +493,13 @@ def _ruleset_only(args):
     if _prot(args):
         raise guard.GhError(404, "Branch not protected (HTTP 404)")
     if _rules(args):
-        return json.dumps([
+        return ndjson(
             {"type": "pull_request", "ruleset_source": "promotion-branches",
              "parameters": {"required_approving_review_count": 2,
                             "required_review_thread_resolution": True}},
             {"type": "deletion", "ruleset_source": "promotion-branches",
              "parameters": {}},
-        ])
+        )
     return "{}"
 
 
@@ -486,8 +519,8 @@ def _pr_rule_only(args):
     if _prot(args):
         raise guard.GhError(404, "Branch not protected (HTTP 404)")
     if _rules(args):
-        return json.dumps([{"type": "pull_request", "ruleset_source": "x",
-                            "parameters": {}}])
+        return ndjson({"type": "pull_request", "ruleset_source": "x",
+                       "parameters": {}})
     return "{}"
 
 
@@ -502,7 +535,7 @@ def _prot_500(args):
     if _prot(args):
         raise guard.GhError(500, "server error (HTTP 500)")
     if _rules(args):
-        return "[]"
+        return ""
     return "{}"
 
 
@@ -534,7 +567,7 @@ def _no_checks_object(args):
         payload.pop("required_status_checks")
         return json.dumps(payload)
     if _rules(args):
-        return "[]"
+        return ""
     return "{}"
 
 
@@ -612,7 +645,7 @@ def _unprotected(args):
     if _prot(args):
         raise guard.GhError(404, "Branch not protected (HTTP 404)")
     if _rules(args):
-        return "[]"
+        return ""
     return "{}"
 
 
@@ -622,6 +655,51 @@ guard.evaluate_protection("repo", _exempt_entry(), POLICY, {"develop", "main"}, 
 record(not f and not u,
        "a genuinely unprotected branch leaves its exemption intact",
        f"findings={f} unreadable={u}")
+
+
+# --- the ruleset read must be PAGINATED --------------------------------------
+# `rules/branches/{b}` defaults to 30 per page. A rule dropped off page 2 is a
+# partial view of a branch's protection that this guard would then report as a
+# verdict - the exact failure mode read_protection()'s header describes.
+# Asserted on the CALL, because pagination itself is gh's job and is stubbed out
+# here. (Bugbot, .github#196.)
+SEEN_ARGS = []
+
+
+def _capture(args):
+    SEEN_ARGS.append(list(args))
+    if _prot(args):
+        raise guard.GhError(404, "Branch not protected (HTTP 404)")
+    if _rules(args):
+        return ""
+    return "{}"
+
+
+stub(_capture)
+guard.read_protection("acme", "repo", "main")
+rules_calls = [a for a in SEEN_ARGS if _rules(a)]
+record(len(rules_calls) == 1 and "--paginate" in rules_calls[0],
+       "the ruleset read passes --paginate, so page 2 is never silently dropped",
+       f"call={rules_calls[0] if rules_calls else None}")
+
+# And the NDJSON reassembly must actually reassemble multiple elements.
+def _two_pages(args):
+    if _prot(args):
+        raise guard.GhError(404, "Branch not protected (HTTP 404)")
+    if _rules(args):
+        # what gh emits for a 2-page result with --jq '.[]': one object per line
+        return ndjson({"type": "pull_request", "ruleset_source": "p1",
+                       "parameters": {"required_approving_review_count": 1}},
+                      {"type": "deletion", "ruleset_source": "p2",
+                       "parameters": {}})
+    return "{}"
+
+
+stub(_two_pages)
+got = guard.read_protection("acme", "repo", "main")
+record(got.block_deletions and got.min_reviews == 1 and got.error is None,
+       "elements streamed across pages are all reassembled, not just the first",
+       f"del={got.block_deletions} reviews={got.min_reviews} rulesets={got.rulesets}")
 
 failed = [row for row in RESULTS if not row[0]]
 print(f"\npass={len(RESULTS) - len(failed)} fail={len(failed)}")

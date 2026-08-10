@@ -164,6 +164,33 @@ def gh_json(args: "list[str]"):
         raise GhError(None, f"gh returned unparseable JSON: {exc}") from exc
 
 
+def gh_json_array(path: str) -> "list":
+    """Read a paginated ARRAY endpoint completely.
+
+    `gh api --paginate` on an array endpoint concatenates one JSON array per
+    page, which `json.loads` cannot parse -- so this streams elements with
+    `--jq '.[]'` (element-wise, NOT an aggregating filter, which --paginate would
+    re-run per page) and reassembles them.
+
+    Pagination is not optional here. `rules/branches/{b}` defaults to 30 items
+    per page, and a rule dropped off page 2 is a silently PARTIAL view of a
+    branch's protection -- which this guard would then report as a verdict.
+    Exactly the failure mode the header of read_protection() describes.
+    (Bugbot, .github#196.)
+    """
+    raw = gh(["api", "--paginate", "--jq", ".[]", path])
+    out = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            raise GhError(None, f"gh returned an unparseable element: {exc}") from exc
+    return out
+
+
 # --------------------------------------------------------------------- schema
 
 
@@ -198,6 +225,44 @@ def _reason_entry(value, where: str, allowed: "set[str]") -> "tuple[str, str]":
     return (state, reason.strip())
 
 
+def _policy_value(key: str, value, where: str, allow_null: bool) -> None:
+    """Validate ONE policy value.
+
+    Shared by the fleet policy and by per-repo `divergent` overrides on purpose.
+    Validating the override KEY NAMES but not their VALUES let a cell that looked
+    like a narrow, documented divergence quietly neutralise the assertion instead
+    of restating it -- `min_reviews: -1` can never fail, and `enforce_admins:
+    null` stops asserting it at all. (Bugbot, .github#196.)
+
+    `allow_null` is False for overrides: naming a key means stating a DIFFERENT
+    value for it, not switching the assertion off. Not asserting something is a
+    fleet-policy decision, not a per-repo one.
+    """
+    if key == "min_reviews":
+        # bool is a subclass of int in Python, so `min_reviews: true` would slip
+        # through a bare isinstance(value, int) check.
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            die(f"{where}.min_reviews: must be a non-negative integer.")
+        return
+    if key in ("classic_protection", "block_force_pushes", "block_deletions"):
+        if not isinstance(value, bool):
+            die(f"{where}.{key}: must be true or false (it cannot be un-asserted).")
+        return
+    if key in ("enforce_admins", "require_conversation_resolution", "strict"):
+        if value is None:
+            if allow_null:
+                return
+            die(
+                f"{where}.{key}: `null` is not allowed in a `divergent` override. "
+                "Naming a key means stating a different value for it; switching "
+                "the assertion off is a protection_policy decision."
+            )
+        if not isinstance(value, bool):
+            die(f"{where}.{key}: must be true, false, or null (not asserted).")
+        return
+    die(f"{where}.{key}: unknown policy key.")
+
+
 def _policy_block(value, where: str) -> dict:
     """Validate one branch-role policy. Every POLICY_KEY must be stated."""
     if not isinstance(value, dict):
@@ -211,14 +276,8 @@ def _policy_block(value, where: str) -> dict:
             f"{where}: missing policy key(s) {sorted(missing)}. Absence is never "
             "implicit here either - state the value, or `null` to not assert it."
         )
-    if not isinstance(value["min_reviews"], int) or value["min_reviews"] < 0:
-        die(f"{where}.min_reviews: must be a non-negative integer.")
-    for key in ("classic_protection", "block_force_pushes", "block_deletions"):
-        if not isinstance(value[key], bool):
-            die(f"{where}.{key}: must be true or false (it cannot be un-asserted).")
-    for key in ("enforce_admins", "require_conversation_resolution", "strict"):
-        if value[key] is not None and not isinstance(value[key], bool):
-            die(f"{where}.{key}: must be true, false, or null (not asserted).")
+    for key in POLICY_KEYS:
+        _policy_value(key, value[key], where, allow_null=True)
     return dict(value)
 
 
@@ -278,6 +337,10 @@ def _protection_entry(value, where: str) -> "tuple[str, str, dict]":
             "`classic_protection` or the force-push/deletion blocks is `exempt`, "
             "not `divergent`."
         )
+    # The VALUES matter as much as the key names. Without this the cell could
+    # neutralise the assertion it claims merely to adjust (Bugbot, .github#196).
+    for key, val in overrides.items():
+        _policy_value(key, val, where, allow_null=False)
     return ("divergent", reason.strip(), overrides)
 
 
@@ -712,12 +775,9 @@ def read_protection(org: str, name: str, branch: str) -> BranchProtection:
     # `rules/branches/{b}` resolves every ruleset that targets this branch,
     # including org-level ones, so it does not need the repo ruleset list too.
     try:
-        rules = gh_json(["api", f"repos/{org}/{name}/rules/branches/{branch}"])
+        rules = gh_json_array(f"repos/{org}/{name}/rules/branches/{branch}")
     except GhError as exc:
         out.error = f"ruleset rules unreadable ({exc.detail})"
-        return out
-    if not isinstance(rules, list):
-        out.error = "ruleset rules endpoint did not return a list"
         return out
 
     for rule in rules:
