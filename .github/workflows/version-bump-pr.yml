@@ -1,0 +1,402 @@
+name: Version bump PR
+
+# Reusable workflow. Opens a PR bumping this repo's version file when develop
+# carries publishable changes that the declared version has already shipped.
+# Layer 2 of backend#1563.
+#
+# THE PROBLEM IT REMOVES
+#   The release train reads `version_file` as the DECLARED NEXT RELEASE. It cuts
+#   vX.Y.Z from whatever the file says and it never writes the file back. So the
+#   instant a release succeeds, version_file equals the version that just
+#   shipped -- and the NEXT prod hop hits version_preflight's "v$ver already
+#   exists and the delta touches published files" refusal. Every successful
+#   release arms the next one to fail, and nothing prevented it. That is
+#   backend#1440's mechanism; it stalled the tracebloc-py-package prod leg on
+#   2026-08-05 (backend#1561), costing a release leg plus a hand diagnosis
+#   before anyone realised the train was right and the file was stale.
+#
+#   Layer 1 (the version-bump gate, .github#172) catches the omission at PR time
+#   when an author changes published files. It cannot catch this case, because
+#   nobody authored anything -- the staleness is created BY the release itself.
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+#   It never tags and never publishes. The release train is the single
+#   publisher -- it owns the prod tag and the release-managers token in the tag
+#   ruleset -- and backend#1563 names "two competing publishers" as the failure
+#   to avoid. This opens a PR; a human merges it. That is why release-please was
+#   not adopted: we want its "open the bump PR" half and specifically not its
+#   "tag and publish" half.
+#
+# WHY A PR AND NOT A PUSH
+#   develop is protected on every train repo (1 approving review). A push would
+#   need admin bypass, making this a second thing that writes to develop
+#   unreviewed. The bump is a one-line diff; a PR costs a click.
+#
+# WHEN IT DOES NOTHING, which is most of the time
+#   - the declared version is already ahead of every released tag  (normal state)
+#   - nothing under publish_paths changed since that tag           (docs/CI only)
+#   - a bump PR is already open                                    (idempotent)
+#
+# REFUSES RATHER THAN GUESSES
+#   Every failed read, and every version it cannot parse, exits non-zero with a
+#   named reason instead of opening a PR. A wrong bump is worse than no bump: it
+#   would ship a version nobody chose, under the train's own tag.
+
+on:
+  workflow_call:
+    inputs:
+      version-file:
+        description: "Path to the file holding the declared next version. Must match repos.yml."
+        required: true
+        type: string
+      publish-paths:
+        description: "Space-separated globs of what this repo publishes. Must match repos.yml."
+        required: true
+        type: string
+      base-branch:
+        description: "Branch the bump PR targets (where the next cycle starts)."
+        type: string
+        default: develop
+    secrets:
+      pr-token:
+        description: >-
+          A PAT (or App token) used to push the bump branch and open the PR.
+          REQUIRED, and deliberately not defaulted to GITHUB_TOKEN: events
+          authored with GITHUB_TOKEN do not start workflow runs, so the bump PR
+          would get zero checks. On a repo with required checks that PR is
+          unmergeable forever -- which would defeat the whole reason this opens
+          a PR instead of pushing to develop. The release train hit this first
+          and uses RELEASE_TRAIN_PR_TOKEN for the same reason.
+        required: true
+
+# READ ONLY, and that is load-bearing rather than tidy. Every write here goes
+# through `pr-token`: the branch push uses the credential checkout persisted from
+# it, and `gh pr create` names it explicitly. Nothing uses the ambient token to
+# write, so granting it write would only remove the 403 that catches a future
+# edit which forgets -- and that mistake produces a PR authored by GITHUB_TOKEN,
+# which starts no workflow runs, so its required checks never report and it can
+# never merge. This is exactly the failure the pr-token guard exists to prevent,
+# so the permissions block should fail fast on it rather than let it succeed.
+permissions:
+  contents: read         # list tags, read the compare
+  pull-requests: read    # the idempotency check for an existing bump PR
+
+concurrency:
+  # One bump PR at a time. Two pushes landing together must not race into two
+  # branches proposing different versions.
+  group: version-bump-pr-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.base-branch }}
+          # The PAT, so the persisted credential used by the push below belongs
+          # to it. What decides whether a push starts workflow runs is the
+          # identity that performed it, not the commit author.
+          token: ${{ secrets.pr-token }}
+
+      - name: Open a version bump PR if the declared version has already shipped
+        env:
+          # Reads run on the ambient token (least privilege). Only the two
+          # WRITE operations use the PAT, named explicitly at their call sites
+          # the way promote-repo.sh does it.
+          GH_TOKEN: ${{ github.token }}
+          PR_TOKEN: ${{ secrets.pr-token }}
+          REPO: ${{ github.repository }}
+          VERSION_FILE: ${{ inputs.version-file }}
+          PUBLISH_PATHS: ${{ inputs.publish-paths }}
+          BASE: ${{ inputs.base-branch }}
+          BUMP_BRANCH: chore/version-bump
+        run: |
+          set -euo pipefail
+          # Refuse up front rather than discovering it after the branch exists.
+          # An empty PR_TOKEN would fall back to the ambient token, whose PRs
+          # start no workflow runs -- so the bump PR would sit with zero checks
+          # on a repo that requires them, unmergeable, which is precisely the
+          # outcome opening a PR was meant to avoid.
+          # `required: true` on a workflow_call input still permits "". An empty
+          # publish-paths would make `for pat in $PUBLISH_PATHS` never iterate,
+          # so MATCHED stays empty and this exits 0 as though nothing publishable
+          # changed -- silently skipping the very bump it exists to open. Layer 1
+          # refuses the same case for the same reason: absent is never permission
+          # to skip the version guard (backend#1439).
+          if [ -z "${PUBLISH_PATHS:-}" ]; then
+            echo "::error::publish-paths is empty. An empty pattern list matches nothing, which would look identical to 'nothing publishable changed' and skip a bump that is owed. Copy publish_paths from repos.yml, e.g. publish-paths: 'tracebloc/* pyproject.toml'"
+            exit 1
+          fi
+          if [ -z "${VERSION_FILE:-}" ]; then
+            echo "::error::version-file is empty. Copy version_file from repos.yml, e.g. version-file: pyproject.toml"
+            exit 1
+          fi
+          if [ -z "${BASE:-}" ]; then
+            echo "::error::base-branch is empty, so there is no branch to compare against or open a PR into."
+            exit 1
+          fi
+          if [ -z "${PR_TOKEN:-}" ]; then
+            echo "::error::pr-token is empty. A bump PR opened with the ambient GITHUB_TOKEN starts no workflow runs, so its required checks never report and it cannot be merged. Pass a PAT (the release train uses RELEASE_TRAIN_PR_TOKEN)."
+            exit 1
+          fi
+          # No pathname expansion: publish_paths are matched with `case`, and a
+          # glob must stay a pattern rather than expand against the checkout.
+          set -f
+
+          # read_version's case table from release-train's promote-repo.sh, rule
+          # for rule. A parser that disagreed with the train's would propose a
+          # bump the train then rejects. Each branch ends in `head -1` because
+          # `grep -oE` prints one line per MATCH: a version line with a trailing
+          # comment otherwise yields a two-line value (release-train#41).
+          semver='[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?'
+          read_version() {
+            local raw
+            raw=$(cat "$1" 2>/dev/null) || return 1
+            case "$1" in
+              *.json)       printf '%s' "$raw" | jq -r '.version // empty' 2>/dev/null | grep -oE "^$semver" | head -1 || true ;;
+              *.yaml|*.yml) printf '%s' "$raw" | grep -E '^version:' | head -1 | grep -oE "$semver" | head -1 || true ;;
+              *.toml)       printf '%s' "$raw" | grep -E '^version *= *"' | head -1 | grep -oE "$semver" | head -1 || true ;;
+              *.py)         printf '%s' "$raw" | grep -E '^__version__ *= *["'"'"']' | head -1 | grep -oE "$semver" | head -1 || true ;;
+              *)            printf '%s' "$raw" | grep -oE "^$semver" | head -1 || true ;;
+            esac
+          }
+
+          if [ ! -f "$VERSION_FILE" ]; then
+            echo "::error::$VERSION_FILE does not exist on $BASE - refusing to guess where the version lives"
+            exit 1
+          fi
+          DECLARED=$(read_version "$VERSION_FILE")
+          if [ -z "$DECLARED" ]; then
+            echo "::error::could not parse a version out of $VERSION_FILE - refusing to propose a bump from an unread file"
+            exit 1
+          fi
+          echo "declared version on $BASE: $DECLARED"
+
+          # The highest already-released FINAL version. Plain vX.Y.Z only: an rc
+          # tag is not a release, and treating one as the ceiling would bump past
+          # a version that never shipped.
+          if ! REFS=$(gh api "repos/$REPO/git/matching-refs/tags/v" --paginate --jq '.[].ref'); then
+            echo "::error::could not list v* tags - refusing to decide 'already shipped' without them"
+            exit 1
+          fi
+          LATEST=$(printf '%s\n' "$REFS" | sed 's|refs/tags/v||' \
+                   | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+          if [ -z "$LATEST" ]; then
+            echo "No final release exists yet, so no version can have shipped. Nothing to do."
+            exit 0
+          fi
+          echo "highest released final version: $LATEST"
+
+          if [ "$DECLARED" != "$LATEST" ] \
+             && [ "$(printf '%s\n%s\n' "$DECLARED" "$LATEST" | sort -V | tail -1)" = "$DECLARED" ]; then
+            echo "Declared $DECLARED is ahead of released $LATEST - the next hop can tag. Nothing to do."
+            exit 0
+          fi
+
+          # COMPARE FROM THE DECLARED VERSION'S TAG, NOT THE LATEST ONE.
+          # version_preflight refuses on "v$DECLARED already exists AND the delta
+          # touches published files" -- it keys on the DECLARED version, so that
+          # is the tag whose delta decides whether the train stalls. The two are
+          # the same tag in the common case (declared == latest), and differ
+          # exactly when the file has fallen BEHIND a release: reverted, or a
+          # stale branch. Measuring from v$LATEST there asks a question the train
+          # never asks, and can answer "nothing publishable changed" about a
+          # window the train is not looking at.
+          # Answered from $REFS, which is the ALREADY-GUARDED matching-refs read
+          # above -- not a second probe. A separate `gh api git/ref/tags/...`
+          # would have to treat its own failure as an answer, and any non-404
+          # (rate limit, 5xx) would then read as "not tagged" and silently pick
+          # the wrong baseline: precisely the fail-open this comparison exists to
+          # close. Reusing a read that already refused on failure means there is
+          # no second failure mode to get wrong.
+          #
+          # A here-string, not `printf | grep -q`: under pipefail grep -q closes
+          # the pipe on its first match and the producer takes SIGPIPE, so a real
+          # hit returns 141 and reads as a miss (the .github#173 defect).
+          if grep -qxF "refs/tags/v$DECLARED" <<< "$REFS"; then
+            CMP_BASE="v$DECLARED"
+          else
+            # Declared is <= LATEST and not itself released, so the newest thing
+            # that IS released is the honest baseline for "changed since we last
+            # shipped".
+            CMP_BASE="v$LATEST"
+            echo "v$DECLARED is not among the repo's v* tags; comparing from v$LATEST instead"
+          fi
+          echo "measuring the publishable delta from $CMP_BASE"
+
+
+          # Did anything PUBLISHABLE change since that release? If only docs or
+          # CI moved, the train promotes the content untagged and no bump is
+          # owed -- the same publishable_delta question the train asks, so this
+          # proposes a bump exactly when the train would otherwise refuse. Both
+          # filename and previous_filename, because a file renamed OUT of a
+          # published tree is still a publish-path change.
+          # Fetched ONCE and kept, because three different questions are answered
+          # from the same response and re-fetching could see three different
+          # states.
+          if ! CMP=$(gh api "repos/$REPO/compare/$CMP_BASE...$BASE"); then
+            echo "::error::could not compare $CMP_BASE...$BASE - refusing to call the delta unpublishable from a failed read"
+            exit 1
+          fi
+          AHEAD=$(printf '%s' "$CMP" | jq -r '.ahead_by // empty')
+          CMP_STATUS=$(printf '%s' "$CMP" | jq -r '.status // empty')
+          if [ -z "$AHEAD" ] || [ -z "$CMP_STATUS" ]; then
+            echo "::error::the compare $CMP_BASE...$BASE carried no status/ahead_by - refusing to reason about a response this shape"
+            exit 1
+          fi
+
+          # AN EMPTY FILE LIST HAS TWO CAUSES AND THEY ARE OPPOSITES.
+          #   ahead_by == 0  -> $BASE holds nothing the tag does not. Right after
+          #                     a release that is the NORMAL state ("identical" /
+          #                     "behind"), and there is genuinely nothing to bump.
+          #   files omitted  -> GitHub drops the array entirely on very large
+          #                     compares. Nothing was scanned, so no conclusion
+          #                     about published paths is available.
+          # Treating the first as a malfunction would fail this job red on an
+          # ordinary post-release day; treating the second as clean would skip a
+          # bump that is owed. `ahead_by` separates them, and `files` being NULL
+          # (absent) rather than [] confirms it.
+          if [ "$AHEAD" = "0" ]; then
+            echo "$BASE is '$CMP_STATUS' relative to $CMP_BASE (ahead_by=0) - nothing has landed since the release. Nothing to do."
+            exit 0
+          fi
+          if [ "$(printf '%s' "$CMP" | jq -r 'if has("files") and (.files != null) then "present" else "absent" end')" = "absent" ]; then
+            echo "::error::the compare $CMP_BASE...$BASE is $AHEAD commits ahead but carries NO files array. GitHub omits it on very large compares, so nothing was scanned and no conclusion about published paths is available."
+            exit 1
+          fi
+          # One LINE per file, tab-separated, NOT one line per path: the 300-cap
+          # check below counts lines, and emitting two lines for a rename would
+          # make it refuse at fewer than 300 actual files. Same shape Layer 1
+          # uses, for the same reason.
+          FILES=$(printf '%s' "$CMP" | jq -r '.files[]? | [.filename, (.previous_filename // "")] | @tsv')
+          # Ahead by real commits, files array present, yet empty: possible with
+          # commits that change nothing (empty or merge-only). Nothing published
+          # can have changed, so this is a clean "nothing to do".
+          if [ -z "$FILES" ]; then
+            echo "$BASE is $AHEAD commits ahead of $CMP_BASE but those commits change no files. Nothing to do."
+            exit 0
+          fi
+          FILE_COUNT=0
+          while IFS= read -r _; do FILE_COUNT=$((FILE_COUNT + 1)); done <<EOF
+          $FILES
+          EOF
+          MATCHED=""
+          while IFS="$(printf '\t')" read -r f prev; do
+            [ -z "${f:-}" ] && continue
+            for pat in $PUBLISH_PATHS; do
+              # shellcheck disable=SC2254  # $pat is a glob on purpose
+              case "$f" in $pat) MATCHED="$f"; break 2 ;; esac
+              # A file moved OUT of a published tree left the package, and the
+              # compare reports only its NEW path in the entry.
+              if [ -n "${prev:-}" ]; then
+                # shellcheck disable=SC2254
+                case "$prev" in $pat) MATCHED="$prev (renamed to $f)"; break 2 ;; esac
+              fi
+            done
+          done <<EOF
+          $FILES
+          EOF
+          if [ -z "$MATCHED" ]; then
+            # The compare endpoint caps `files` at 300 and does NOT paginate that
+            # array (--paginate walks commits, not files), and there is no
+            # truncation flag. So at the cap, "nothing published changed" is not
+            # something this can asserted -- and asserting it would SKIP the bump
+            # and leave exactly the stall this workflow exists to clear.
+            #
+            # Note the asymmetry, which is why the cap is only checked here: a
+            # MATCH is sound on a truncated list, so a large compare that does
+            # match still gets a precise answer instead of a refusal.
+            if [ "$FILE_COUNT" -ge 300 ]; then
+              echo "::error::the compare $CMP_BASE...$BASE returned $FILE_COUNT files, the API's page cap, with no publish-path match. The file array is capped at 300 and does not paginate, so 'nothing published changed' cannot be asserted from it - refusing rather than skipping the bump."
+              exit 1
+            fi
+            echo "Nothing under [$PUBLISH_PATHS] changed since $CMP_BASE ($FILE_COUNT files compared) - the train promotes untagged. Nothing to do."
+            exit 0
+          fi
+          echo "publishable change since $CMP_BASE: $MATCHED ($FILE_COUNT files compared)"
+
+          # `if ! var=$(...)` like the sibling reads above, not a bare assignment.
+          # Under set -e a bare one still fails the step -- so this is about the
+          # OPERATOR, not about safety: without it the run dies at an unnamed
+          # line, breaking this file's own "every failed read exits with a named
+          # reason" contract. An unreadable PR list is also specifically
+          # dangerous to guess at: assuming "none open" would open a second bump
+          # PR alongside the first.
+          if ! OPEN=$(gh pr list --repo "$REPO" --head "$BUMP_BRANCH" --state open --json number --jq '.[0].number // ""'); then
+            echo "::error::could not list open PRs for $BUMP_BRANCH - refusing to open a bump PR without knowing whether one already exists, since guessing 'none' would open a duplicate."
+            exit 1
+          fi
+          if [ -n "$OPEN" ]; then
+            echo "Bump PR #$OPEN is already open. Leaving it alone."
+            exit 0
+          fi
+
+          # PATCH, deliberately. This is a FLOOR that unblocks the next hop, not
+          # a judgement about what the release deserves: a human who wants a
+          # minor or major edits the PR before merging. Computing it from commit
+          # types needs Conventional Commits, which backend#1563 sequences as a
+          # separate step and which no repo has adopted yet.
+          MAJOR=${LATEST%%.*}; REST=${LATEST#*.}; MINOR=${REST%%.*}; PATCH=${REST#*.}
+          case "$MAJOR$MINOR$PATCH" in
+            *[!0-9]*) echo "::error::released version v$LATEST is not X.Y.Z - refusing to compute a bump from it"; exit 1 ;;
+          esac
+          NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
+          echo "proposing $DECLARED -> $NEXT"
+
+          case "$VERSION_FILE" in
+            *.json) tmp=$(mktemp); jq --arg v "$NEXT" '.version = $v' "$VERSION_FILE" > "$tmp" && mv "$tmp" "$VERSION_FILE" ;;
+            *.yaml|*.yml) sed -i -E "0,/^version:.*/s//version: $NEXT/" "$VERSION_FILE" ;;
+            *.toml) sed -i -E "0,/^version *= *\".*\"/s//version = \"$NEXT\"/" "$VERSION_FILE" ;;
+            *.py)   sed -i -E "0,/^__version__ *= *[\"'].*[\"']/s//__version__ = \"$NEXT\"/" "$VERSION_FILE" ;;
+            *)      printf '%s\n' "$NEXT" > "$VERSION_FILE" ;;
+          esac
+
+          # Read it back with the SAME parser the train uses. A sed that silently
+          # matched nothing would otherwise open a PR containing no change.
+          WROTE=$(read_version "$VERSION_FILE")
+          if [ "$WROTE" != "$NEXT" ]; then
+            echo "::error::wrote $NEXT to $VERSION_FILE but it reads back as '${WROTE:-<unparseable>}' - refusing to open a PR whose diff does not say what it claims"
+            exit 1
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BUMP_BRANCH"
+          git add "$VERSION_FILE"
+          COMMIT_BODY="v$DECLARED is already released, and $MATCHED changed since it shipped, so
+          the next prod hop would refuse to tag: the train reads $VERSION_FILE as the
+          declared NEXT release and never writes it back (backend#1440, backend#1561).
+
+          Patch is a floor that unblocks the hop, not a judgement - edit this PR if the
+          release deserves a minor or major.
+
+          Opened by version-bump-pr.yml (backend#1563 Layer 2). This workflow never tags
+          and never publishes; the release train stays the single publisher."
+          git commit -m "chore(release): bump $VERSION_FILE $DECLARED -> $NEXT" -m "$COMMIT_BODY"
+          git push -u origin "$BUMP_BRANCH" --force-with-lease
+
+          PR_BODY="\`v$DECLARED\` is **already released**, and \`$MATCHED\` has changed since it shipped — so the next prod hop would refuse to tag with *\"v$DECLARED already exists and the delta touches published files\"*.
+
+          That is not a mistake anyone made. The train reads \`$VERSION_FILE\` as the **declared next release** and never writes it back, so every successful release leaves the file naming the version that just went out, arming the next hop to refuse (backend#1440). It stalled a real release leg on 2026-08-05 (backend#1561).
+
+          | | |
+          |---|---|
+          | declared on \`$BASE\` | \`$DECLARED\` |
+          | highest released | \`v$LATEST\` |
+          | proposed | **\`$NEXT\`** |
+          | publishable change since the release | \`$MATCHED\` |
+
+          **Patch is a floor, not a judgement.** It unblocks the hop; edit this PR if the release deserves a minor or major. Computing that automatically needs Conventional Commits, which backend#1563 sequences separately.
+
+          This workflow **never tags and never publishes** — the release train remains the single publisher (backend#1563's stated constraint). Merging this PR is the bump; the train does the rest."
+          GH_TOKEN="$PR_TOKEN" gh pr create --repo "$REPO" --base "$BASE" --head "$BUMP_BRANCH" \
+            --title "chore(release): bump $VERSION_FILE to $NEXT" --body "$PR_BODY"
+
+          {
+            echo "### Version bump PR opened"
+            echo
+            echo "\`$DECLARED\` is released and \`$MATCHED\` changed since — proposed \`$NEXT\`."
+          } >> "$GITHUB_STEP_SUMMARY"
