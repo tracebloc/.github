@@ -132,7 +132,7 @@ name: Version bump gate
 #
 # OVERRIDE
 #   Add the `skip-version-gate` label (visible in audit). Checked FIRST, ahead of
-#   every refusal - public-pii-gate.yml shipped its override BELOW the refusals,
+#   every refusal - the retired public-pii-gate shipped its override BELOW the refusals,
 #   so on exactly the PRs that needed rescuing the refusal exited first and the
 #   label could not reach anything. It buys a merge, not a release: the train
 #   still refuses at the prod hop, so this is a way to land unrelated work past a
@@ -339,7 +339,7 @@ jobs:
           }
 
           # --- override, ahead of every refusal ---------------------------------
-          # public-pii-gate.yml shipped this BELOW its refusals, so on exactly the
+          # the retired public-pii-gate shipped this BELOW its refusals, so on exactly the
           # PRs that needed rescuing the refusal exited first. An override is a
           # statement that this PR should not be evaluated, so it belongs before
           # every reason the evaluation might refuse. Exact match on a label name:

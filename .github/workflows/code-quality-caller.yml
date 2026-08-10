@@ -48,7 +48,7 @@ jobs:
     uses: tracebloc/.github/.github/workflows/code-quality.yml@main
     with:
       python: true          # scripts/caller-drift.py + its selftest
-      shell: true           # scripts/house-rules.sh, scripts/tests/pii-gate-selftest.sh
+      shell: true           # scripts/house-rules.sh
 
       # Armed from day one rather than soft-failed into a backlog. Measured on
       # develop before writing this file: shellcheck --severity=error CLEAN over

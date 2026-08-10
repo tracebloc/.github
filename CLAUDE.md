@@ -1,3 +1,10 @@
+# CLAUDE.md
+
+Repo-specific guidance for Claude Code sessions goes here, above the
+managed org block: build/test commands, architecture notes, gotchas,
+and this repo's default reviewer. Rollout: tracebloc/backend#1602.
+
+<!-- org-standards:begin -->
 ## tracebloc engineering standards (org-wide)
 
 <!-- Canonical source: tracebloc/.github/org-standards.md.
@@ -25,7 +32,7 @@
 - After opening or pushing to a PR, stay on it: poll CI and Bugbot on the current head and triage every finding the same day — fix it, or reply on the thread saying why not. No silent dismissals. Unresolved threads block the merge and stall the release train's settle stage; cheap now beats expensive later.
 - A finding that recurs across PRs becomes a rule: add it to `.cursor/BUGBOT.md`, and if it is grep-expressible, to code-quality's house-rules — then stop re-arguing it in comments.
 - Style and naming rules live in tooling (black/ruff, eslint/prettier, house-rules), never in prose. If a rule matters, encode it; do not restate linter rules in CLAUDE.md files.
-- Never commit secrets, tokens, or customer data — not in code, config, tests, issues, or commit messages. gitleaks catches secrets in **code**. Nothing scans PR titles, descriptions or commit messages: the public PII gate that did was retired on 2026-08-06 (backend#1409), so keeping customer names out of PR prose on public repos is on you, not on a check.
+- Never commit secrets, tokens, or customer data — not in code, config, tests, issues, or commit messages. gitleaks will catch it; don.t make it.
 
 ### Engineer kanban
 
@@ -48,3 +55,4 @@
 
 - An AI session may open PRs and push its own branches. It never: merges a PR, closes another person's PR, deletes another person's branch, or force-pushes — each of those needs an explicit instruction from the human running it.
 - If your change makes a statement in any CLAUDE.md, BUGBOT.md, or runbook false, update that file in the same PR.
+<!-- org-standards:end -->
