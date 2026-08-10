@@ -390,12 +390,18 @@ jobs:
                 continue
               fi
               pi_total=$(echo "$IRESP" | jq -r '.data.repository.issue.projectItems.totalCount // 0' 2>/dev/null)
-              if [ "${pi_total:-0}" -gt 20 ]; then
-                echo "::warning::issue $irepo#$inum is on $pi_total projects; only the first 20 were checked -- surfaced, not silently truncated"
-              fi
               ITEM_ID=$(echo "$IRESP" | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.issue.projectItems.nodes[]?
                     | select(.project.number == ($n | tonumber)) | .id' 2>/dev/null | head -1)
               if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
+                # Fail CLOSED on truncation, matching the closingIssuesReferences
+                # guard above: if the issue is on >20 projects we only fetched the
+                # first 20, so "not on project" may be wrong -- the kanban card
+                # could be beyond that page. Surface it (fail the run) instead of
+                # silently skipping a possibly-lagging card (Bugbot .github#190).
+                if [ "${pi_total:-0}" -gt 20 ]; then
+                  echo "::warning::issue $irepo#$inum is on $pi_total projects; kanban card not in the first 20 fetched -- failing the run rather than silently skipping (paginate if this fires)"
+                  RUN_FAILED=1
+                fi
                 echo "issue $iowner/$irepo#$inum not on project - skipping"; continue
               fi
               # Only advance a CLOSED closing-issue. Because PRs merge to develop
