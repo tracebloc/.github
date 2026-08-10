@@ -82,6 +82,9 @@ jobs:
               # Keep Deploy environment field consistent with the override
               case "$OVERRIDE" in
                 "Prod")          DEPLOY_ENV="prod" ;;
+                # The agent stage runs against staging, so a card there is on
+                # staging. Read-side only: nothing sets this Status yet (#1578).
+                "Staging (agent review)") DEPLOY_ENV="staging" ;;
                 "Staging (human review)"|"FR on staging") DEPLOY_ENV="staging" ;;
                 "On dev")        DEPLOY_ENV="dev" ;;
               esac
@@ -210,18 +213,26 @@ jobs:
               "In progress")    echo 4 ;;
               "Code review")    echo 5 ;;
               "On dev")         echo 6 ;;
+              # RANK 7: the agent stage, between `On dev` and human FR. READ-ONLY for
+              # now -- nothing writes this value yet (#1578 does that, in a LATER
+              # hop). An unknown Status returns "" here, the guard below fails, and
+              # evaluation falls through to strict equality: the card BLOCKS every
+              # prod promotion carrying it. That is the backend#1411 shape, and the
+              # column already EXISTS on the board, so this was a live landmine
+              # waiting for the first card to land in it (#1577, RFC-BACKEND-1552 D5).
+              "Staging (agent review)")  echo 7  ;;
               # Both names rank the same so the monotonic guard is stable across
               # the #1592 rename instant.
-              "Staging (human review)"|"FR on staging")  echo 7 ;;
-              "Ready for prod") echo 8 ;;
-              "Prod")           echo 9 ;;
+              "Staging (human review)"|"FR on staging")  echo 8 ;;
+              "Ready for prod") echo 9 ;;
+              "Prod")           echo 10 ;;
               # Done and Cancelled are TERMINAL: nothing may demote a card out of
               # them. Both returned 0 here, which inverted the monotonic guard below
               # so the next push carrying an old commit demoted a Done card -- and
               # staging->develop back-merges re-carry old commits routinely
               # (RFC-BACKEND-1405 D8, backend#1411).
-              "Done")           echo 10 ;;
-              "Cancelled")      echo 10 ;;
+              "Done")           echo 11 ;;
+              "Cancelled")      echo 11 ;;
               *)                echo 0 ;;
             esac
           }
