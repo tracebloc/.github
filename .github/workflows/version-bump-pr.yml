@@ -57,6 +57,17 @@ on:
         description: "Branch the bump PR targets (where the next cycle starts)."
         type: string
         default: develop
+    secrets:
+      pr-token:
+        description: >-
+          A PAT (or App token) used to push the bump branch and open the PR.
+          REQUIRED, and deliberately not defaulted to GITHUB_TOKEN: events
+          authored with GITHUB_TOKEN do not start workflow runs, so the bump PR
+          would get zero checks. On a repo with required checks that PR is
+          unmergeable forever -- which would defeat the whole reason this opens
+          a PR instead of pushing to develop. The release train hit this first
+          and uses RELEASE_TRAIN_PR_TOKEN for the same reason.
+        required: true
 
 permissions:
   contents: write        # create the bump branch
@@ -77,10 +88,18 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.base-branch }}
+          # The PAT, so the persisted credential used by the push below belongs
+          # to it. What decides whether a push starts workflow runs is the
+          # identity that performed it, not the commit author.
+          token: ${{ secrets.pr-token }}
 
       - name: Open a version bump PR if the declared version has already shipped
         env:
+          # Reads run on the ambient token (least privilege). Only the two
+          # WRITE operations use the PAT, named explicitly at their call sites
+          # the way promote-repo.sh does it.
           GH_TOKEN: ${{ github.token }}
+          PR_TOKEN: ${{ secrets.pr-token }}
           REPO: ${{ github.repository }}
           VERSION_FILE: ${{ inputs.version-file }}
           PUBLISH_PATHS: ${{ inputs.publish-paths }}
@@ -88,6 +107,15 @@ jobs:
           BUMP_BRANCH: chore/version-bump
         run: |
           set -euo pipefail
+          # Refuse up front rather than discovering it after the branch exists.
+          # An empty PR_TOKEN would fall back to the ambient token, whose PRs
+          # start no workflow runs -- so the bump PR would sit with zero checks
+          # on a repo that requires them, unmergeable, which is precisely the
+          # outcome opening a PR was meant to avoid.
+          if [ -z "${PR_TOKEN:-}" ]; then
+            echo "::error::pr-token is empty. A bump PR opened with the ambient GITHUB_TOKEN starts no workflow runs, so its required checks never report and it cannot be merged. Pass a PAT (the release train uses RELEASE_TRAIN_PR_TOKEN)."
+            exit 1
+          fi
           # No pathname expansion: publish_paths are matched with `case`, and a
           # glob must stay a pattern rather than expand against the checkout.
           set -f
@@ -267,7 +295,7 @@ jobs:
           **Patch is a floor, not a judgement.** It unblocks the hop; edit this PR if the release deserves a minor or major. Computing that automatically needs Conventional Commits, which backend#1563 sequences separately.
 
           This workflow **never tags and never publishes** — the release train remains the single publisher (backend#1563's stated constraint). Merging this PR is the bump; the train does the rest."
-          gh pr create --repo "$REPO" --base "$BASE" --head "$BUMP_BRANCH" \
+          GH_TOKEN="$PR_TOKEN" gh pr create --repo "$REPO" --base "$BASE" --head "$BUMP_BRANCH" \
             --title "chore(release): bump $VERSION_FILE to $NEXT" --body "$PR_BODY"
 
           {
