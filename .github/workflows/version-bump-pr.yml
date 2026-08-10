@@ -205,13 +205,25 @@ jobs:
           # stale branch. Measuring from v$LATEST there asks a question the train
           # never asks, and can answer "nothing publishable changed" about a
           # window the train is not looking at.
-          CMP_BASE="v$DECLARED"
-          if ! gh api "repos/$REPO/git/ref/tags/v$DECLARED" >/dev/null 2>&1; then
-            # The declared version is not itself tagged. It is <= LATEST and not
-            # released, so the newest thing that IS released is the honest
-            # baseline for "what has changed since we last shipped".
+          # Answered from $REFS, which is the ALREADY-GUARDED matching-refs read
+          # above -- not a second probe. A separate `gh api git/ref/tags/...`
+          # would have to treat its own failure as an answer, and any non-404
+          # (rate limit, 5xx) would then read as "not tagged" and silently pick
+          # the wrong baseline: precisely the fail-open this comparison exists to
+          # close. Reusing a read that already refused on failure means there is
+          # no second failure mode to get wrong.
+          #
+          # A here-string, not `printf | grep -q`: under pipefail grep -q closes
+          # the pipe on its first match and the producer takes SIGPIPE, so a real
+          # hit returns 141 and reads as a miss (the .github#173 defect).
+          if grep -qxF "refs/tags/v$DECLARED" <<< "$REFS"; then
+            CMP_BASE="v$DECLARED"
+          else
+            # Declared is <= LATEST and not itself released, so the newest thing
+            # that IS released is the honest baseline for "changed since we last
+            # shipped".
             CMP_BASE="v$LATEST"
-            echo "v$DECLARED is not tagged; comparing from v$LATEST instead"
+            echo "v$DECLARED is not among the repo's v* tags; comparing from v$LATEST instead"
           fi
           echo "measuring the publishable delta from $CMP_BASE"
 
