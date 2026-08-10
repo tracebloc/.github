@@ -375,7 +375,18 @@ jobs:
           # renamed before (RFC-BACKEND-0008 collapsed the dev-side FR columns).
           # Check they still exist, so the next rename fails loudly here instead
           # of reporting "wrong column" for every card on the board.
-          for WANT in "FR on staging" "Ready for prod"; do
+          # Rename window (backend#1592): the staging-review column is "Staging
+          # (human review)" after the UI rename and "FR on staging" before it, and
+          # the rename is a single instant with no overlap. So resolve it to
+          # whichever exists and keep the loud failure for the case where NEITHER
+          # does -- which is the check this block was written for.
+          if printf '%s' "$PROJ" | jq -e '.data.organization.projectV2.field.options[]
+                | select(.name == "Staging (human review)")' > /dev/null; then
+            STAGING_REVIEW="Staging (human review)"
+          else
+            STAGING_REVIEW="FR on staging"
+          fi
+          for WANT in "$STAGING_REVIEW" "Ready for prod"; do
             if ! printf '%s' "$PROJ" \
               | jq -e --arg s "$WANT" '.data.organization.projectV2.field.options[] | select(.name == $s)' > /dev/null; then
               decide missing-option \
@@ -388,7 +399,7 @@ jobs:
 
           # ------------------------------------------------------ 5. the column
           case "$CURRENT" in
-            "FR on staging")
+            "Staging (human review)"|"FR on staging")
               NEXT="Ready for prod"
               ;;
             "Ready for prod" | "Prod")

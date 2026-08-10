@@ -325,7 +325,8 @@ jobs:
               "In progress")       echo 4  ;;
               "Code review")       echo 5  ;;
               "On dev")            echo 6  ;;
-              "FR on staging")     echo 7  ;;
+              # Both names, for the #1592 rename window.
+              "Staging (human review)"|"FR on staging")     echo 7  ;;
               "Ready for prod")    echo 8  ;;
               "Prod")              echo 9  ;;
               # Terminal, and therefore NOT blocking. Both fell through to "" and then
