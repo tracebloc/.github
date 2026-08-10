@@ -67,12 +67,42 @@ except ImportError:  # pragma: no cover - the workflow installs it explicitly
 
 TOP_LEVEL_KEYS = {
     "schema_version", "org", "pinned_ref", "audit_branch", "source_repo",
-    "reusables", "copies", "shared_reasons", "repos",
+    "reusables", "copies", "shared_reasons", "repos", "protection_policy",
 }
 REQUIRED_TOP_LEVEL = TOP_LEVEL_KEYS - {"shared_reasons"}
-REPO_KEYS = {"visibility", "release_train", "callers", "copies"}
-SUPPORTED_SCHEMA = 1
+REPO_KEYS = {"visibility", "release_train", "callers", "copies", "protection"}
+SUPPORTED_SCHEMA = 2
 SUPPORTED_AUDIT_BRANCH = "develop-first"
+
+# ------------------------------------------------------------------- protection
+#
+# The three branch ROLES every repo is measured against. `prod` resolves per repo
+# to `main` or `master` from the BRANCH LIST -- never by probing
+# `branches/main` then `branches/master`, because GitHub follows rename
+# redirects: `GET branches/master` on a repo renamed master -> main returns 200
+# for a branch that does not exist. Only the list tells the truth.
+PROTECTION_ROLES = ("develop", "staging", "prod")
+
+# What a policy may assert. `null` means "not asserted" -- used for
+# enforce_admins on develop/staging, which backend#1276 deliberately leaves open
+# as the cheap escape hatch. Not asserting is different from asserting false:
+# a repo that hardens develop must not be reported as drift.
+POLICY_KEYS = {
+    "classic_protection",              # bool: the classic protection object exists
+    "min_reviews",                     # int: effective approving reviews >= this
+    "enforce_admins",                  # bool | null
+    "block_force_pushes",              # bool
+    "block_deletions",                 # bool
+    "require_conversation_resolution",  # bool
+    "strict",                          # bool | null: required_status_checks.strict
+}
+# Which policy keys a per-repo `divergent` entry may override. Deliberately NOT
+# every key: a repo may document a weaker review count or admin posture, but it
+# may not opt out of `classic_protection` -- that is `exempt`, which is a louder
+# word and shows up differently in the report.
+OVERRIDABLE = {
+    "min_reviews", "enforce_admins", "require_conversation_resolution", "strict",
+}
 
 WORKFLOW_PATH = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
 ORG_USES = re.compile(
@@ -168,6 +198,89 @@ def _reason_entry(value, where: str, allowed: "set[str]") -> "tuple[str, str]":
     return (state, reason.strip())
 
 
+def _policy_block(value, where: str) -> dict:
+    """Validate one branch-role policy. Every POLICY_KEY must be stated."""
+    if not isinstance(value, dict):
+        die(f"{where}: must be a mapping of policy keys.")
+    unknown = set(value) - POLICY_KEYS
+    if unknown:
+        die(f"{where}: unknown policy key(s) {sorted(unknown)}.")
+    missing = POLICY_KEYS - set(value)
+    if missing:
+        die(
+            f"{where}: missing policy key(s) {sorted(missing)}. Absence is never "
+            "implicit here either - state the value, or `null` to not assert it."
+        )
+    if not isinstance(value["min_reviews"], int) or value["min_reviews"] < 0:
+        die(f"{where}.min_reviews: must be a non-negative integer.")
+    for key in ("classic_protection", "block_force_pushes", "block_deletions"):
+        if not isinstance(value[key], bool):
+            die(f"{where}.{key}: must be true or false (it cannot be un-asserted).")
+    for key in ("enforce_admins", "require_conversation_resolution", "strict"):
+        if value[key] is not None and not isinstance(value[key], bool):
+            die(f"{where}.{key}: must be true, false, or null (not asserted).")
+    return dict(value)
+
+
+def _protection_entry(value, where: str) -> "tuple[str, str, dict]":
+    """Validate one repo x branch-role cell. Returns (state, reason, overrides).
+
+    `required`                      the role's branch exists and meets the policy
+    `exempt: "<reason>"`            the branch legitimately does not exist / is
+                                    not held to the policy at all
+    `divergent: {reason:, <key>:}`  the branch exists and is held to the policy
+                                    EXCEPT the named keys, each written down
+
+    `divergent` takes a mapping rather than a bare string on purpose. A blanket
+    "this one is different" would switch off every assertion at once, which is
+    how an exemption written for one reason silently covers a second, unrelated
+    regression later. Naming the deviating key keeps every other assertion live.
+    """
+    if value == "required":
+        return ("required", "", {})
+    if isinstance(value, str):
+        die(
+            f"{where}: {value!r} is not a valid state. Use `required`, "
+            "`exempt` with a reason, or `divergent` with a reason plus the "
+            "specific policy keys that differ."
+        )
+    if not isinstance(value, dict) or len(value) != 1:
+        die(f"{where}: expected exactly one of required/exempt/divergent, got {value!r}.")
+    state, payload = next(iter(value.items()))
+
+    if state == "exempt":
+        if not isinstance(payload, str) or not payload.strip():
+            die(f"{where}: `exempt` carries no written reason.")
+        return ("exempt", payload.strip(), {})
+
+    if state != "divergent":
+        die(f"{where}: unknown state {state!r}; expected required/exempt/divergent.")
+    if not isinstance(payload, dict):
+        die(
+            f"{where}: `divergent` must be a mapping with a `reason` and the "
+            "policy keys that differ."
+        )
+    reason = payload.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        die(f"{where}: `divergent` carries no written reason.")
+    overrides = {k: v for k, v in payload.items() if k != "reason"}
+    if not overrides:
+        die(
+            f"{where}: `divergent` names no differing policy key. If nothing "
+            "differs, state `required`; if the branch is out of scope entirely, "
+            "use `exempt`."
+        )
+    illegal = set(overrides) - OVERRIDABLE
+    if illegal:
+        die(
+            f"{where}: {sorted(illegal)} cannot be overridden per-repo. "
+            f"Overridable keys are {sorted(OVERRIDABLE)}; dropping "
+            "`classic_protection` or the force-push/deletion blocks is `exempt`, "
+            "not `divergent`."
+        )
+    return ("divergent", reason.strip(), overrides)
+
+
 def load_inventory(path: str) -> dict:
     if not os.path.isfile(path):
         die(f"inventory not found at {path}.")
@@ -225,6 +338,18 @@ def load_inventory(path: str) -> dict:
     if overlap:
         die(f"{path}: {sorted(overlap)} listed as both a reusable and a copy.")
 
+    policy = data["protection_policy"]
+    if not isinstance(policy, dict):
+        die(f"{path}: `protection_policy` must be a mapping keyed by branch role.")
+    unknown = set(policy) - set(PROTECTION_ROLES)
+    if unknown:
+        die(f"{path}: protection_policy has unknown role(s) {sorted(unknown)}.")
+    missing = set(PROTECTION_ROLES) - set(policy)
+    if missing:
+        die(f"{path}: protection_policy is missing role(s) {sorted(missing)}.")
+    for role in PROTECTION_ROLES:
+        policy[role] = _policy_block(policy[role], f"{path}: protection_policy.{role}")
+
     repos = data["repos"]
     if not isinstance(repos, dict) or not repos:
         die(f"{path}: `repos` must be a non-empty mapping.")
@@ -268,6 +393,23 @@ def load_inventory(path: str) -> dict:
                 )
             for key, value in cells.items():
                 cells[key] = _reason_entry(value, f"{where}.{section}.{key}", allowed)
+
+        prot = entry["protection"]
+        if not isinstance(prot, dict):
+            die(f"{where}.protection: must be a mapping keyed by branch role.")
+        absent = set(PROTECTION_ROLES) - set(prot)
+        if absent:
+            die(
+                f"{where}.protection: no entry for {sorted(absent)}. Same rule as "
+                "callers - a missing role is a guard failure, not a default."
+            )
+        extra = set(prot) - set(PROTECTION_ROLES)
+        if extra:
+            die(f"{where}.protection: unknown role(s) {sorted(extra)}.")
+        for role in PROTECTION_ROLES:
+            prot[role] = _protection_entry(
+                prot[role], f"{where}.protection.{role}"
+            )
 
     return data
 
@@ -492,6 +634,222 @@ def read_repo(org: str, name: str, meta: dict, copies: "list[str]") -> RepoRead:
     return out
 
 
+# ------------------------------------------------------------------ protection
+#
+# GITHUB RUNS TWO INDEPENDENT BRANCH-PROTECTION SYSTEMS AND THE CLASSIC API ONLY
+# SEES ONE OF THEM. This is not a footnote; it is the reason this family exists
+# in the shape it does.
+#
+# A branch protected solely by a RULESET returns
+#   404 {"message": "Branch not protected"}
+# from `branches/{b}/protection`, while `GET /branches` reports
+# `"protected": true` for that same branch. Reading only the classic endpoint
+# therefore reports a protected branch as unprotected. Measured 2026-08-10 on
+# docs/staging, where it produced a wrong finding on backend#1276 before being
+# caught: the fleet-wide `promotion-branches-merge-commit-only` ruleset was
+# covering it the whole time.
+#
+# Rules also do NOT compose the way classic settings do. A `pull_request` rule
+# requires changes to arrive via a PR -- which blocks direct and force pushes --
+# but it does NOT block deletion; `deletion` and `non_fast_forward` are separate
+# rule types. So "has a ruleset" never means "equivalently protected", and the
+# merge below is per-property rather than per-system.
+
+
+class BranchProtection:
+    """Effective protection on one branch, merged across BOTH systems."""
+
+    def __init__(self, branch: str):
+        self.branch = branch
+        self.classic_present = False
+        self.min_reviews = 0
+        self.enforce_admins = False
+        self.block_force_pushes = False
+        self.block_deletions = False
+        self.conversation_resolution = False
+        self.strict: "bool | None" = None
+        self.rulesets: "list[str]" = []
+        self.error: "str | None" = None
+
+
+def read_protection(org: str, name: str, branch: str) -> BranchProtection:
+    out = BranchProtection(branch)
+
+    # --- classic ------------------------------------------------------------
+    # A 404 here is a FACT ("no classic protection"), not a read failure. Any
+    # other error is a read failure and must not be reported as "unprotected" --
+    # that is the fail-open this whole guard exists to eliminate.
+    try:
+        classic = gh_json(["api", f"repos/{org}/{name}/branches/{branch}/protection"])
+    except GhError as exc:
+        if exc.status == 404:
+            classic = None
+        else:
+            out.error = f"classic protection unreadable ({exc.detail})"
+            return out
+    if classic is not None:
+        out.classic_present = True
+        reviews = classic.get("required_pull_request_reviews") or {}
+        out.min_reviews = reviews.get("required_approving_review_count") or 0
+        out.enforce_admins = bool((classic.get("enforce_admins") or {}).get("enabled"))
+        # The classic API states these as ALLOW flags; the policy states them as
+        # BLOCK flags. Invert here so the comparison downstream reads plainly.
+        out.block_force_pushes = not (
+            classic.get("allow_force_pushes") or {}
+        ).get("enabled", False)
+        out.block_deletions = not (
+            classic.get("allow_deletions") or {}
+        ).get("enabled", False)
+        out.conversation_resolution = bool(
+            (classic.get("required_conversation_resolution") or {}).get("enabled")
+        )
+        checks = classic.get("required_status_checks")
+        # `strict` is only meaningful when a required-status-checks object exists.
+        # Absent object -> None ("nothing to assert"), NOT False.
+        out.strict = checks.get("strict") if isinstance(checks, dict) else None
+
+    # --- rulesets -----------------------------------------------------------
+    # `rules/branches/{b}` resolves every ruleset that targets this branch,
+    # including org-level ones, so it does not need the repo ruleset list too.
+    try:
+        rules = gh_json(["api", f"repos/{org}/{name}/rules/branches/{branch}"])
+    except GhError as exc:
+        out.error = f"ruleset rules unreadable ({exc.detail})"
+        return out
+    if not isinstance(rules, list):
+        out.error = "ruleset rules endpoint did not return a list"
+        return out
+
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        rtype = rule.get("type")
+        params = rule.get("parameters") or {}
+        src = rule.get("ruleset_source") or str(rule.get("ruleset_id") or "?")
+        if src not in out.rulesets:
+            out.rulesets.append(src)
+        if rtype == "pull_request":
+            # Changes must arrive via a PR, so direct AND force pushes are
+            # blocked. Deletion is NOT covered -- that is the `deletion` rule.
+            out.block_force_pushes = True
+            out.min_reviews = max(
+                out.min_reviews,
+                params.get("required_approving_review_count") or 0,
+            )
+            if params.get("required_review_thread_resolution"):
+                out.conversation_resolution = True
+        elif rtype == "non_fast_forward":
+            out.block_force_pushes = True
+        elif rtype == "deletion":
+            out.block_deletions = True
+        elif rtype == "required_status_checks":
+            if params.get("strict_required_status_checks_policy"):
+                out.strict = True
+
+    return out
+
+
+def resolve_role_branch(role: str, branches: "set[str]") -> "str | None":
+    """Map a policy role onto a real branch name, from the BRANCH LIST only.
+
+    `prod` is whichever of main/master exists. Never probe `branches/master`
+    to decide: GitHub follows rename redirects, so that call returns 200 on a
+    repo renamed master -> main and every repo looks like it has a `master`
+    (measured 2026-08-10, all 16 train repos reported one; none of the 13
+    main-prod repos has it).
+    """
+    if role in ("develop", "staging"):
+        return role if role in branches else None
+    if "main" in branches:
+        return "main"
+    if "master" in branches:
+        return "master"
+    return None
+
+
+def evaluate_protection(
+    name: str, entry: dict, policy: dict, branches: "set[str]",
+    org: str, findings: "list[str]", unreadable: "list[str]",
+) -> None:
+    """Assert one repo's three branch roles against the policy."""
+    for role in PROTECTION_ROLES:
+        state, reason, overrides = entry["protection"][role]
+        branch = resolve_role_branch(role, branches)
+
+        if state == "exempt":
+            # An exemption claims the role is out of scope. If the branch turns
+            # out to exist and be protected anyway, the exemption is stale and
+            # says so -- the same staleness check the caller family applies.
+            if branch is not None:
+                probe = read_protection(org, name, branch)
+                if probe.error is None and probe.classic_present:
+                    findings.append(
+                        f"{name}: protection.{role} is `exempt` but {branch} exists "
+                        f"and carries classic protection. The exemption is stale - "
+                        f"promote it to `required`. (reason on file: {reason[:80]})"
+                    )
+            continue
+
+        if branch is None:
+            findings.append(
+                f"{name}: protection.{role} is `{state}` but no branch fills that "
+                f"role ({'main/master' if role == 'prod' else role} absent). Either "
+                "create it or exempt the role with a written reason."
+            )
+            continue
+
+        got = read_protection(org, name, branch)
+        if got.error:
+            unreadable.append(f"{name}: protection of {branch} - {got.error}")
+            continue
+
+        want = dict(policy[role])
+        want.update(overrides)
+
+        def fail(what: str) -> None:
+            tail = f" [divergent: {reason[:60]}]" if state == "divergent" else ""
+            findings.append(f"{name}: {branch} ({role}) {what}{tail}")
+
+        if want["classic_protection"] and not got.classic_present:
+            # Say what DID cover it, so the reader is not sent to re-derive the
+            # ruleset story by hand.
+            cover = (
+                f" A ruleset does cover it ({', '.join(got.rulesets)}), but the "
+                "policy asks for the classic layer too."
+                if got.rulesets else " No ruleset covers it either."
+            )
+            fail(f"has NO classic branch protection.{cover}")
+        if got.min_reviews < want["min_reviews"]:
+            fail(
+                f"requires {got.min_reviews} approving review(s), policy wants "
+                f">= {want['min_reviews']}."
+            )
+        if want["enforce_admins"] is not None and got.enforce_admins != want["enforce_admins"]:
+            fail(
+                f"enforce_admins={got.enforce_admins}, policy wants "
+                f"{want['enforce_admins']} (backend#1276)."
+            )
+        if want["block_force_pushes"] and not got.block_force_pushes:
+            fail("allows force pushes.")
+        if want["block_deletions"] and not got.block_deletions:
+            fail("allows deletion.")
+        if want["require_conversation_resolution"] is not None and (
+            got.conversation_resolution != want["require_conversation_resolution"]
+        ):
+            fail(
+                f"conversation resolution={got.conversation_resolution}, policy "
+                f"wants {want['require_conversation_resolution']}."
+            )
+        # `strict` is asserted only where the policy states a bool AND the branch
+        # actually has a required-status-checks object to carry it.
+        if want["strict"] is not None and got.strict is not None:
+            if got.strict != want["strict"]:
+                fail(
+                    f"required_status_checks.strict={got.strict}, policy wants "
+                    f"{want['strict']} (backend#1276 decision 2)."
+                )
+
+
 # ------------------------------------------------------------------ evaluation
 
 
@@ -639,6 +997,13 @@ def main() -> int:
                     "The exemption is stale."
                 )
 
+        # Protection is read from the branch LIST already gathered by read_repo,
+        # so it costs no extra enumeration and inherits its pagination.
+        evaluate_protection(
+            name, entry, inventory["protection_policy"], read.branches,
+            org, findings, unreadable,
+        )
+
     evaluated = len(audited) - len({line.split(":", 1)[0] for line in unreadable})
     if evaluated <= 0:
         die(
@@ -647,11 +1012,16 @@ def main() -> int:
         )
 
     report = [
-        "### Caller inventory drift",
+        "### Repo conformance drift",
         "",
         f"Inventory: **{len(inventory['repos'])}** repos x **{len(reusables)}** "
-        f"reusables + **{len(copies)}** copies. Audited **{evaluated}** of "
-        f"**{len(audited)}** on the develop-first branch.",
+        f"reusables + **{len(copies)}** copies + **{len(PROTECTION_ROLES)}** "
+        f"branch-protection roles. Audited **{evaluated}** of **{len(audited)}** "
+        "on the develop-first branch.",
+        "",
+        "Protection is read from **both** GitHub protection systems (classic + "
+        "rulesets); a ruleset-only branch 404s on the classic endpoint and would "
+        "otherwise read as unprotected.",
         "",
     ]
     if findings:
@@ -710,7 +1080,7 @@ def main() -> int:
         return 2
     if findings:
         sys.stderr.write(
-            f"::error::{len(findings)} caller-inventory drift finding(s).\n"
+            f"::error::{len(findings)} repo-conformance drift finding(s).\n"
         )
         return 1
     return 0
