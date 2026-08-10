@@ -187,6 +187,7 @@ jobs:
             echo "$OUT" | jq -c '.data.organization.projectV2.items.nodes[]
               | select((.fieldValueByName.name // "No status") as $s
                        | ["Code review","On dev",
+                          "Staging (agent review)",
                           "Staging (human review)","FR on staging","Ready for prod",
                           "Backlog","In progress","No status",
                           "Ready","North Stars"] | index($s))' \
@@ -363,7 +364,7 @@ jobs:
                   # false is the worse of the two, so this reports and moves on; the
                   # conflict is flagged on backend#1411 for a human to settle.
                   case "$COL" in
-                    "On dev"|"Staging (human review)"|"FR on staging"|"Ready for prod"|"Prod")
+                    "On dev"|"Staging (agent review)"|"Staging (human review)"|"FR on staging"|"Ready for prod"|"Prod")
                       echo "  [SKIP] $REPO#$NUM closed-completed in $COL - a deploy state, so NOT Done; D8 says follow the PR's stage"
                       ;;
                     *)
