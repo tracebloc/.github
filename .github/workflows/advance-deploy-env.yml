@@ -40,6 +40,10 @@ on:
         description: "GitHub org owning the project"
         type: string
         default: tracebloc
+      dry_run:
+        description: "Log intended card moves without writing them (test mode)"
+        type: boolean
+        default: false
 
 jobs:
   advance:
@@ -64,7 +68,7 @@ jobs:
           # Default mapping
           case "$BRANCH" in
             develop)     DEPLOY_ENV="dev";     STATUS_NAME="On dev" ;;
-            staging)     DEPLOY_ENV="staging"; STATUS_NAME="FR on staging" ;;
+            staging)     DEPLOY_ENV="staging"; STATUS_NAME="Staging (human review)" ;;
             master|main) DEPLOY_ENV="prod";    STATUS_NAME="Prod" ;;
             *)           DEPLOY_ENV="";        STATUS_NAME="" ;;
           esac
@@ -78,7 +82,7 @@ jobs:
               # Keep Deploy environment field consistent with the override
               case "$OVERRIDE" in
                 "Prod")          DEPLOY_ENV="prod" ;;
-                "FR on staging") DEPLOY_ENV="staging" ;;
+                "Staging (human review)"|"FR on staging") DEPLOY_ENV="staging" ;;
                 "On dev")        DEPLOY_ENV="dev" ;;
               esac
             fi
@@ -130,6 +134,7 @@ jobs:
           STATUS_NAME: ${{ steps.env.outputs.status_name }}
           REPO_FULL: ${{ github.repository }}
           PR_NUMBERS: ${{ steps.prs.outputs.prs }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           REPO_NAME="${REPO_FULL#*/}"
@@ -159,6 +164,22 @@ jobs:
             | select(.name=="Status") | .id')
           STATUS_OPT=$(echo "$PROJ" | jq -r --arg s "$STATUS_NAME" '.data.organization.projectV2.fields.nodes[]
             | select(.name=="Status") | .options[] | select(.name==$s) | .id')
+          # Rename window (backend#1592). "FR on staging" becomes "Staging (human
+          # review)" via a UI rename, which is a single instant the board flips --
+          # there is no period where both options exist. So resolution asks for the
+          # NEW name and falls back to the OLD one, and this file works on either
+          # side of that instant. The fallback is removed in step 3 of #1592.
+          if [ -z "$STATUS_OPT" ] || [ "$STATUS_OPT" = "null" ]; then
+            case "$STATUS_NAME" in
+              "Staging (human review)") FALLBACK="FR on staging" ;;
+              *)                        FALLBACK="" ;;
+            esac
+            if [ -n "$FALLBACK" ]; then
+              STATUS_OPT=$(echo "$PROJ" | jq -r --arg s "$FALLBACK" '.data.organization.projectV2.fields.nodes[]
+                | select(.name=="Status") | .options[] | select(.name==$s) | .id')
+              [ -n "$STATUS_OPT" ] && [ "$STATUS_OPT" != "null" ] && STATUS_NAME="$FALLBACK"
+            fi
+          fi
 
           if [ -z "$DEPLOY_OPT" ] || [ "$DEPLOY_OPT" = "null" ]; then
             echo "Could not resolve Deploy environment option for '$DEPLOY_ENV' - aborting"
@@ -189,7 +210,9 @@ jobs:
               "In progress")    echo 4 ;;
               "Code review")    echo 5 ;;
               "On dev")         echo 6 ;;
-              "FR on staging")  echo 7 ;;
+              # Both names rank the same so the monotonic guard is stable across
+              # the #1592 rename instant.
+              "Staging (human review)"|"FR on staging")  echo 7 ;;
               "Ready for prod") echo 8 ;;
               "Prod")           echo 9 ;;
               # Done and Cancelled are TERMINAL: nothing may demote a card out of
@@ -212,6 +235,10 @@ jobs:
           RUN_FAILED=0
           update_field() {   # $1=fieldId  $2=optionId  $3=human label
             local err
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              echo "[DRY] would set $3 on item $ITEM_ID"
+              return 0
+            fi
             # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
             if err=$(gh api graphql -f query='
               mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
@@ -280,6 +307,133 @@ jobs:
               echo "-> PR #$prnum: Status = $STATUS_NAME"
               update_field "$STATUS_FIELD" "$STATUS_OPT" "Status=$STATUS_NAME"
             fi
+          done
+
+          # -- Advance the ISSUES each promoted PR closes (backend#1600) --------
+          # advance-deploy-env historically advanced only PRs, so an issue closed
+          # by a develop-merged PR was parked at "On dev" by the closure-router and
+          # NEVER advanced when its code shipped to staging/prod -- it drifted
+          # permanently (2026-08-06: all 20 drifted cards were closed issues, 0 PRs).
+          # For each PR in the push, resolve its closing issues (CROSS-REPO aware --
+          # a client/website PR routinely closes a `backend` issue) and advance each
+          # with the SAME monotonic guard, archived-skip, and dry-run behaviour.
+          for cpr in $PR_NUMBERS; do
+            # shellcheck disable=SC2016
+            # Fail CLOSED on a lookup failure: an expired token / rate limit /
+            # cross-repo permission error must NOT read as "this PR closes no
+            # issues" and silently skip advancement -- the exact drift this block
+            # exists to fix (Bugbot .github#166). totalCount surfaces a PR that
+            # closes more issues than one page instead of silently truncating.
+            # Capture stdout+stderr so a benign "this number is not a PR" (an issue
+            # ref or bogus number grepped from a commit -- pullRequest(number) then
+            # errors "Could not resolve to a PullRequest") is skipped QUIETLY, while a
+            # real infra failure (token / rate limit / transport) still fails CLOSED.
+            # The earlier blanket fail-closed reddened every promotion carrying a
+            # non-PR number (Bugbot .github#181); the earlier blanket {} fallback hid
+            # real failures (Bugbot .github#166). This distinguishes the two.
+            if ! cis_out=$(gh api graphql -f query='
+              query($org: String!, $repo: String!, $num: Int!) {
+                repository(owner: $org, name: $repo) {
+                  pullRequest(number: $num) {
+                    closingIssuesReferences(first: 100) {
+                      totalCount
+                      nodes { number repository { name owner { login } } }
+                    }
+                  }
+                }
+              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$cpr" 2>&1); then
+              # Match ONLY GitHub's exact not-a-PR error. "Not Found" is too broad --
+              # a scoped-down / expired token also returns it, and skipping that as
+              # "benign" would silently advance nothing while the run stays green,
+              # re-opening the fail-open (Bugbot .github#181). A real access failure
+              # falls through to RUN_FAILED below.
+              if grep -qi "Could not resolve to a PullRequest" <<< "$cis_out"; then
+                continue   # benign: $cpr is not a PR -- nothing to advance
+              fi
+              echo "::warning::could not read closing issues for PR #$cpr -- real lookup failure; failing the run so lagging cards are visible, not silently skipped"
+              RUN_FAILED=1
+              continue
+            fi
+            CIS="$cis_out"
+            ci_total=$(echo "$CIS" | jq -r '.data.repository.pullRequest.closingIssuesReferences.totalCount // 0' 2>/dev/null)
+            if [ "${ci_total:-0}" -gt 100 ]; then
+              echo "::warning::PR #$cpr closes $ci_total issues; only the first 100 were advanced -- paginate if this ever fires"
+              RUN_FAILED=1
+            fi
+            ISSUES=$(echo "$CIS" | jq -rc '.data.repository.pullRequest.closingIssuesReferences.nodes[]?
+                  | [.repository.owner.login, .repository.name, .number] | @tsv' 2>/dev/null)
+            # here-string (not a pipe) so update_field's RUN_FAILED reaches this shell
+            while IFS="$(printf '\t')" read -r iowner irepo inum; do
+              [ -z "${inum:-}" ] && continue
+              # shellcheck disable=SC2016
+              # Fail CLOSED here too: a failed per-issue lookup must not read as
+              # "not on the project" and skip the card (Bugbot .github#166).
+              if ! IRESP=$(gh api graphql -f query='
+                query($org: String!, $repo: String!, $num: Int!) {
+                  repository(owner: $org, name: $repo) {
+                    issue(number: $num) {
+                      state
+                      projectItems(first: 20) {
+                        totalCount
+                        nodes {
+                          id isArchived project { number }
+                          status: fieldValueByName(name: "Status") {
+                            ... on ProjectV2ItemFieldSingleSelectValue { name }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }' -F org="$iowner" -F repo="$irepo" -F num="$inum" 2>/dev/null); then
+                echo "::warning::could not read project items for issue $iowner/$irepo#$inum -- failing the run so a lagging card is visible"
+                RUN_FAILED=1
+                continue
+              fi
+              pi_total=$(echo "$IRESP" | jq -r '.data.repository.issue.projectItems.totalCount // 0' 2>/dev/null)
+              ITEM_ID=$(echo "$IRESP" | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.issue.projectItems.nodes[]?
+                    | select(.project.number == ($n | tonumber)) | .id' 2>/dev/null | head -1)
+              if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
+                # Fail CLOSED on truncation, matching the closingIssuesReferences
+                # guard above: if the issue is on >20 projects we only fetched the
+                # first 20, so "not on project" may be wrong -- the kanban card
+                # could be beyond that page. Surface it (fail the run) instead of
+                # silently skipping a possibly-lagging card (Bugbot .github#190).
+                if [ "${pi_total:-0}" -gt 20 ]; then
+                  echo "::warning::issue $irepo#$inum is on $pi_total projects; kanban card not in the first 20 fetched -- failing the run rather than silently skipping (paginate if this fires)"
+                  RUN_FAILED=1
+                fi
+                echo "issue $iowner/$irepo#$inum not on project - skipping"; continue
+              fi
+              # Only advance a CLOSED closing-issue. Because PRs merge to develop
+              # (not the default branch), GitHub does NOT auto-close the referenced
+              # issues, so closingIssuesReferences lists still-OPEN, in-progress
+              # cards. Advancing those into a deploy column would be wrong -- and
+              # kanban-reconcile would then treat them as misplaced and send them to
+              # Backlog (Bugbot .github#168 High). A closed issue is the done-work
+              # signal this advancement is meant for.
+              ISTATE=$(echo "$IRESP" | jq -r '.data.repository.issue.state // ""' 2>/dev/null)
+              if [ "$ISTATE" != "CLOSED" ]; then
+                echo "issue $irepo#$inum is $ISTATE (PR merged to develop, not default) -- not advancing an open card"; continue
+              fi
+              IARCH=$(echo "$IRESP" | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.issue.projectItems.nodes[]?
+                    | select(.project.number == ($n | tonumber)) | .isArchived' 2>/dev/null | head -1)
+              if [ "$IARCH" = "true" ]; then
+                echo "::notice::issue $irepo#$inum project item is archived -- skipping"; continue
+              fi
+              ICUR=$(echo "$IRESP" | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.issue.projectItems.nodes[]?
+                    | select(.project.number == ($n | tonumber)) | .status.name // ""' 2>/dev/null | head -1)
+              if [ "$TARGET_RANK" -gt 0 ] && [ "$(rank "$ICUR")" -ge "$TARGET_RANK" ]; then
+                echo "::notice::issue $irepo#$inum already at '${ICUR:-none}' (>= '$STATUS_NAME') -- not demoting"; continue
+              fi
+              # prnum drives update_field's warning label
+              prnum="$irepo#$inum (closed by PR #$cpr)"
+              echo "-> issue $irepo#$inum (closed by PR #$cpr): Deploy env = $DEPLOY_ENV"
+              update_field "$DEPLOY_FIELD" "$DEPLOY_OPT" "Deploy env=$DEPLOY_ENV"
+              if [ "$SKIP_STATUS" != "1" ]; then
+                echo "-> issue $irepo#$inum: Status = $STATUS_NAME"
+                update_field "$STATUS_FIELD" "$STATUS_OPT" "Status=$STATUS_NAME"
+              fi
+            done <<< "$ISSUES"
           done
 
           if [ "$RUN_FAILED" -ne 0 ]; then

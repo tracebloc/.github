@@ -68,7 +68,7 @@ jobs:
             if [ "$PR_MERGED" = "true" ]; then
               case "$BASE_REF" in
                 main|master) STATUS="Prod" ;;
-                staging)     STATUS="FR on staging" ;;
+                staging)     STATUS="Staging (human review)" ;;
                 develop)     STATUS="On dev" ;;
                 *)
                   # A PR merged into a SIBLING feature branch deploys nothing by
@@ -153,7 +153,7 @@ jobs:
               elif [ "$CLOSER_TYPE" = "PullRequest" ]; then
                 case "$CLOSING_PR_BASE" in
                   main|master) STATUS="Prod" ;;
-                  staging)     STATUS="FR on staging" ;;
+                  staging)     STATUS="Staging (human review)" ;;
                   develop)     STATUS="On dev" ;;
                   # Unrecognised base: mirror the pull_request branch's default so
                   # the issue and its PR agree.
@@ -226,6 +226,15 @@ jobs:
             | select(.name=="Status") | .id')
           STATUS_OPT=$(echo "$PROJ" | jq -r --arg s "$STATUS_NAME" '.data.organization.projectV2.fields.nodes[]
             | select(.name=="Status") | .options[] | select(.name==$s) | .id')
+          # Rename window (backend#1592): prefer the new column name, fall back to
+          # the old. Removed in step 3.
+          if [ -z "$STATUS_OPT" ] || [ "$STATUS_OPT" = "null" ]; then
+            if [ "$STATUS_NAME" = "Staging (human review)" ]; then
+              STATUS_OPT=$(echo "$PROJ" | jq -r --arg s "FR on staging" '.data.organization.projectV2.fields.nodes[]
+                | select(.name=="Status") | .options[] | select(.name==$s) | .id')
+              [ -n "$STATUS_OPT" ] && [ "$STATUS_OPT" != "null" ] && STATUS_NAME="FR on staging"
+            fi
+          fi
 
           if [ -z "$STATUS_OPT" ] || [ "$STATUS_OPT" = "null" ]; then
             echo "Could not resolve Status option '$STATUS_NAME' — aborting"
@@ -277,7 +286,7 @@ jobs:
           # card normally.
           if [ "$STATUS_NAME" = "Done" ]; then
             case "${CURRENT_COL:-}" in
-              "On dev"|"FR on staging"|"Ready for prod"|"Prod")
+              "On dev"|"Staging (human review)"|"FR on staging"|"Ready for prod"|"Prod")
                 echo "::notice::#$NUMBER hand-closed but sits in '$CURRENT_COL', a deploy state - NOT setting Done (D8: follow the PR's stage)"
                 exit 0 ;;
             esac

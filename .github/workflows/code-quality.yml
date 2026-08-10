@@ -1,7 +1,7 @@
 name: Code quality
 
 # Reusable workflow. The org's first *code* quality gate — every other reusable
-# workflow in this repo automates process (kanban, FR gate, WIP, PII), and none
+# workflow in this repo automates process (kanban, FR gate, WIP), and none
 # of them looks at what the code does.
 #
 # WHY (measured over 60 days of automated code review)
@@ -213,7 +213,7 @@ on:
         default: "main"
 
 # Only `contents: read`. Requesting more would exceed a minimal caller's grant
-# and fail the run at startup with no jobs — see public-pii-gate.yml.
+# and fail the run at startup with no jobs.
 permissions:
   contents: read
 

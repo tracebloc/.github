@@ -1,0 +1,51 @@
+name: Version bump gate selftest
+
+# version-bump-gate.yml is a `workflow_call` reusable, so it cannot host a test
+# job of its own - this workflow runs its decision table instead.
+#
+# Why it exists: the gate front-runs the release train's own version preflight
+# (release-train scripts/promote-repo.sh:version_preflight), so the two must
+# agree. What can drift is the version PARSE - five repos, five file formats,
+# every anchor there for a reason - and the FAIL-CLOSED paths, where "could not
+# evaluate" quietly becomes "found nothing". Neither is visible in a diff and
+# both are obvious in a run, which is what this is. The gate is consumed at
+# @main by every version_file repo, so a regression here reaches all of them on
+# its first successful run.
+#
+# scripts/tests/version-bump-gate-selftest.sh extracts the gate's `run:` block
+# and executes it against a stubbed `gh`. It asserts the exit status AND a
+# distinguishing phrase per case, because several paths share a status while
+# needing to say different things: a docs-only PR and a PR riding somebody
+# else's bump both exit 0, and only one of them is about this PR at all.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/version-bump-gate.yml
+      - .github/workflows/version-bump-gate-selftest.yml
+      - scripts/tests/version-bump-gate-selftest.sh
+  push:
+    branches: [main, develop, staging]
+    paths:
+      - .github/workflows/version-bump-gate.yml
+      - .github/workflows/version-bump-gate-selftest.yml
+      - scripts/tests/version-bump-gate-selftest.sh
+
+permissions:
+  contents: read
+
+concurrency:
+  group: version-bump-gate-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet --disable-pip-version-check 'pyyaml==6.0.2'
+      - run: bash scripts/tests/version-bump-gate-selftest.sh

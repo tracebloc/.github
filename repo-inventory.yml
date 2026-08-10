@@ -2,11 +2,21 @@
 # repo must call. THE single source of truth; `.github/workflows/caller-drift.yml`
 # fails when reality diverges from it.
 #
+# EDITING THIS FILE IS GATED (tracebloc/backend#1608). caller-drift.yml has always
+# RUN on PRs that touch this file, but it was not a required check - so a PR that
+# put the inventory out of step with reality went red and could still merge.
+# `.github/workflows/conformance-gate.yml` is the required check that closes that:
+# it reports on every PR, is green in seconds when this file is untouched, and
+# when it IS touched it refuses unless the audit passed on that exact head sha.
+#
 # WHY THIS FILE EXISTS (tracebloc/backend#1415)
 # Nothing in the org detected a missing caller. merge-settings-drift.yml reads
 # three booleans; kanban-reconcile.yml probes one filename to decide board scope.
 # That is how eight repos drifted unnoticed and how e2e-test-agent#1 closed
-# without routing - there is no closure caller there to route it.
+# without routing - at the time that repo had no closure caller to route it.
+# e2e-test-agent#13 added one on 2026-08-05, which is why its entry below now
+# reads `required`: the motivating gap is closed, the detection gap is why this
+# file exists.
 #
 # THE SCHEMA DECISION: ABSENCE IS NEVER IMPLICIT.
 # Every repo carries an entry for EVERY reusable and EVERY copy. Each entry is
@@ -26,7 +36,7 @@
 #
 # MATCHING IS ON `uses:` CONTENT, NEVER ON FILENAME.
 # Two filename conventions are mixed within nearly every repo, per-reusable:
-# fr-gate, fr-pass-comment, public-pii-gate and code-quality use `<name>-caller.yml`
+# fr-gate, fr-pass-comment and code-quality use `<name>-caller.yml`
 # everywhere; customer-priority-bump uses the reusable's own name everywhere;
 # advance-deploy-env, set-pr-status and kanban-closure-router use `-caller.yml` in
 # .github and the plain name in all 14-16 others; kanban-closure-router's callers
@@ -74,7 +84,6 @@ reusables:
   - fr-gate.yml
   - fr-pass-comment.yml
   - kanban-closure-router.yml
-  - public-pii-gate.yml
   - set-pr-status.yml
   - wip-limit-check.yml
 
@@ -96,10 +105,6 @@ shared_reasons:
     it. Requiring it in any repo would land this guard red on day one; the decision to wire it
     up or delete it is backend#1415 follow-up work. Exempt everywhere, deliberately and in
     writing.
-  private_repo_no_public_exposure: &private_repo_no_public_exposure >-
-    public-pii-gate scans PR title, body and commit messages for PII that would be world-
-    readable. This repo is private, so there is no public exposure for it to guard. Structural,
-    not a gap.
   no_staging_branch_no_hop_to_gate: &no_staging_branch_no_hop_to_gate >-
     fr-gate gates the staging -> prod hop. This repo has no `staging` branch, so there is no hop
     for it to gate. Structural, not a gap.
@@ -140,40 +145,28 @@ repos:
     release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
-      code-quality.yml:
-        exempt: >-
-          no code-quality caller in the repo that HOSTS code-quality.yml. Line 60 of that file
-          is a commented-out example `uses:` line, which is why a grep-based audit reports a
-          caller here that does not exist - the guard strips comments via a real YAML parse.
-          UNREMEDIATED (one of the nine).
+      # Remediated 2026-08-06 (.github#171, backend#1603). The repo that HOSTS
+      # code-quality.yml was the only repo not running it, so the action-pins job
+      # it publishes to 19 others did not apply here - and that is how .github#168
+      # reverted actions/checkout from a pinned SHA to the mutable @v4 tag with
+      # nothing in CI to object. Armed soft-fail:false against a measured-clean
+      # tree; ruff, gitleaks, shellcheck and house-rules were all green on the
+      # first run. action-pins itself stays unarmed until #159 reaches main - a
+      # caller may only pass inputs the @main callee declares, or the whole call
+      # dies with startup_failure.
+      code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml:
         exempt: *customer_priority_bump_caller_missing
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-caller.yml
-      # Remediated 2026-08-04 (.github#141, backend#1420): this repo was the last public
-      # repo running no PII gate on its own PRs (backend#1408, backend#1415). The caller is
-      # a SELF-reference - this repo hosts the reusable - and is pinned `@main` like every
-      # other caller, per RFC-BACKEND-1405 open question 3 (answered: branch promotion, one
-      # process for every repo).
-      #
-      # PRESENCE, NOT TEETH, and deliberately so: the reusable is unarmed org-wide because
-      # PII_DENYLIST is unset (backend#1409), which is now PARKED IN THE BACKLOG by decision
-      # - the org is likely to be restructured first. `required` here asserts the caller
-      # EXISTS, which is what this inventory tracks; it does not assert the gate can fail.
-      # When #1409 is unparked, arming the denylist arms all 15 callers at once, this one
-      # included.
-      #
-      # HOW "UNARMED" PRESENTS, since d2485830 (2026-08-03, #1409 defect 1) flipped it
-      # and the 2026-08-05 prod promotion carried it to main (backend#1556): the
-      # reusable FAILS CLOSED when the secret is unset - an inactive guard must be
-      # visible as red, not invisible as green (RFC-1405 property 2). Callers pin
-      # @main, so every public repo's pii-check now runs RED-INERT, live. Deliberate,
-      # and it blocks nothing: pii-check is a required status check NOWHERE (all 7
-      # public repos x all branches, measured 2026-08-04). The red is the honest
-      # signal that the gate cannot verify anything until #1409 unparks, and the
-      # check's own log names the fix (set the org secret).
-      public-pii-gate.yml: required   # public-pii-gate-caller.yml
+      # public-pii-gate is RETIRED (Lukas, 2026-08-06, backend#1409) and no longer
+      # appears in this inventory. It never had a denylist - PII_DENYLIST was never
+      # created - so it failed closed on every PR in all 7 public repos while being a
+      # required check NOWHERE: a permanent red that blocked nothing and taught the org
+      # to filter it out. The reusable and its selftest remain in this repo, dormant with
+      # no callers. Restoring it is three steps: set the org secret, restore the 7
+      # callers, re-add the reusable here with its per-repo entries.
       set-pr-status.yml: required   # set-pr-status-caller.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -191,8 +184,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml:
-        exempt: *private_repo_no_public_exposure
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -210,8 +201,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml:
-        exempt: *private_repo_no_public_exposure
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -232,8 +221,6 @@ repos:
       fr-pass-comment.yml:
         exempt: *fr_pass_comment_caller_missing
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml:
-        exempt: *private_repo_no_public_exposure
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -251,7 +238,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml: required   # public-pii-gate-caller.yml
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -278,7 +264,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml: required   # public-pii-gate-caller.yml
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -296,8 +281,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml:
-        exempt: *private_repo_no_public_exposure
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -315,7 +298,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml: required   # public-pii-gate-caller.yml
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -333,8 +315,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml:
-        exempt: *private_repo_no_public_exposure
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -377,12 +357,6 @@ repos:
           separate decision from this guard; recorded so its absence is a written exemption
           rather than an oversight.
       kanban-closure-router.yml:
-        exempt: >-
-          devex-bootstrap has no .github directory at all, no branch protection and no
-          CODEOWNERS, and nothing in the org references it (backend#1408). Onboarding it is a
-          separate decision from this guard; recorded so its absence is a written exemption
-          rather than an oversight.
-      public-pii-gate.yml:
         exempt: >-
           devex-bootstrap has no .github directory at all, no branch protection and no
           CODEOWNERS, and nothing in the org references it (backend#1408). Onboarding it is a
@@ -434,7 +408,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml: required   # public-pii-gate-caller.yml
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -451,13 +424,14 @@ repos:
   # RFC-BACKEND-1405 D1 always required this ("Exempt never means ungoverned"),
   # so the flip is compliance catching up, not a change of policy.
   #
-  # release_train stays FALSE until the repo is listed in release-train/repos.yml.
-  # caller-drift.py:562 verifies this field against that file, so flipping it early
-  # fails the guard. RFC-BACKEND-1552 D2 amends D1 to enrol it; the flip to true
-  # follows the repos.yml entry, not this PR.
+  # release_train flipped to TRUE on 2026-08-06, after release-train#34 merged and
+  # listed this repo (16 on the train). caller-drift.py:562 verifies this field
+  # against that file, which is why it could not be set in the same PR as the
+  # caller flip. RFC-BACKEND-1552 D2 is the decision; it amends RFC-BACKEND-1405
+  # D1, which had named this repo in its exempt list.
   e2e-test-agent:
     visibility: private
-    release_train: false
+    release_train: true
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -465,8 +439,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml:
-        exempt: *private_repo_no_public_exposure
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -484,8 +456,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml:
-        exempt: *private_repo_no_public_exposure
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -503,7 +473,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml: required   # public-pii-gate-caller.yml
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -527,8 +496,6 @@ repos:
       fr-pass-comment.yml:
         exempt: *fr_pass_comment_caller_missing
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml:
-        exempt: *private_repo_no_public_exposure
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -572,8 +539,6 @@ repos:
           the stage and lack the valve.
       kanban-closure-router.yml:
         exempt: *kanban_closure_router_caller_missing
-      public-pii-gate.yml:
-        exempt: *private_repo_no_public_exposure
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -594,7 +559,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml: required   # public-pii-gate-caller.yml
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -612,8 +576,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml:
-        exempt: *private_repo_no_public_exposure
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -631,8 +593,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml:
-        exempt: *private_repo_no_public_exposure
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
@@ -655,8 +615,6 @@ repos:
       fr-gate.yml: required   # fr-gate-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      public-pii-gate.yml:
-        exempt: *private_repo_no_public_exposure
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers

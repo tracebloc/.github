@@ -556,7 +556,7 @@ def main() -> int:
             findings.append(
                 f"{name}: visibility is {meta['visibility']!r} in {org}, "
                 f"{entry['visibility']!r} in the inventory. Visibility decides "
-                "whether public-pii-gate is required here."
+                "which caller set applies here."
             )
         on_train = name in train
         if on_train != entry["release_train"]:
