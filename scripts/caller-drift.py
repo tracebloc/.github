@@ -1124,9 +1124,23 @@ def main() -> int:
         report.extend(f"- {line}" for line in findings)
         report.append("")
     if unreadable:
+        # Name WHICH family failed. `unreadable` now carries both, and a message
+        # that says "caller state is unknown" after a protection-only outage
+        # misstates what happened and quietly undoes the separation above
+        # (Bugbot, .github#196).
+        caller_failed = len(unreadable) - len(protection_unreadable)
+        bits = []
+        if caller_failed:
+            bits.append(f"**{caller_failed} repo read(s) FAILED** (caller/copy state UNKNOWN)")
+        if protection_unreadable:
+            bits.append(
+                f"**{len(protection_unreadable)} branch-protection read(s) FAILED** "
+                "(protection state UNKNOWN; caller/copy state for those repos WAS read)"
+            )
         report.append(
-            f"**{len(unreadable)} repo read(s) FAILED.** These are not known to "
-            "comply; the run fails on them rather than reporting all-clear:"
+            " and ".join(bits)
+            + ". These are not known to comply; the run fails on them rather than "
+            "reporting all-clear:"
         )
         report.append("")
         report.extend(f"- {line}" for line in unreadable)
@@ -1167,10 +1181,16 @@ def main() -> int:
             die(f"could not write step outputs: {exc}")
 
     if unreadable:
-        sys.stderr.write(
-            f"::error::{len(unreadable)} repo(s) could not be read. Caller state is "
-            "UNKNOWN there.\n"
-        )
+        caller_failed = len(unreadable) - len(protection_unreadable)
+        parts = []
+        if caller_failed:
+            parts.append(f"{caller_failed} repo read(s) failed - caller/copy state UNKNOWN")
+        if protection_unreadable:
+            parts.append(
+                f"{len(protection_unreadable)} branch-protection read(s) failed - "
+                "protection state UNKNOWN"
+            )
+        sys.stderr.write("::error::" + "; ".join(parts) + ".\n")
         return 2
     if findings:
         sys.stderr.write(
