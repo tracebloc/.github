@@ -176,21 +176,50 @@ jobs:
           # proposes a bump exactly when the train would otherwise refuse. Both
           # filename and previous_filename, because a file renamed OUT of a
           # published tree is still a publish-path change.
+          # Fetched ONCE and kept, because three different questions are answered
+          # from the same response and re-fetching could see three different
+          # states.
+          if ! CMP=$(gh api "repos/$REPO/compare/v$LATEST...$BASE"); then
+            echo "::error::could not compare v$LATEST...$BASE - refusing to call the delta unpublishable from a failed read"
+            exit 1
+          fi
+          AHEAD=$(printf '%s' "$CMP" | jq -r '.ahead_by // empty')
+          CMP_STATUS=$(printf '%s' "$CMP" | jq -r '.status // empty')
+          if [ -z "$AHEAD" ] || [ -z "$CMP_STATUS" ]; then
+            echo "::error::the compare v$LATEST...$BASE carried no status/ahead_by - refusing to reason about a response this shape"
+            exit 1
+          fi
+
+          # AN EMPTY FILE LIST HAS TWO CAUSES AND THEY ARE OPPOSITES.
+          #   ahead_by == 0  -> $BASE holds nothing the tag does not. Right after
+          #                     a release that is the NORMAL state ("identical" /
+          #                     "behind"), and there is genuinely nothing to bump.
+          #   files omitted  -> GitHub drops the array entirely on very large
+          #                     compares. Nothing was scanned, so no conclusion
+          #                     about published paths is available.
+          # Treating the first as a malfunction would fail this job red on an
+          # ordinary post-release day; treating the second as clean would skip a
+          # bump that is owed. `ahead_by` separates them, and `files` being NULL
+          # (absent) rather than [] confirms it.
+          if [ "$AHEAD" = "0" ]; then
+            echo "$BASE is '$CMP_STATUS' relative to v$LATEST (ahead_by=0) - nothing has landed since the release. Nothing to do."
+            exit 0
+          fi
+          if [ "$(printf '%s' "$CMP" | jq -r 'if has("files") and (.files != null) then "present" else "absent" end')" = "absent" ]; then
+            echo "::error::the compare v$LATEST...$BASE is $AHEAD commits ahead but carries NO files array. GitHub omits it on very large compares, so nothing was scanned and no conclusion about published paths is available."
+            exit 1
+          fi
           # One LINE per file, tab-separated, NOT one line per path: the 300-cap
           # check below counts lines, and emitting two lines for a rename would
           # make it refuse at fewer than 300 actual files. Same shape Layer 1
           # uses, for the same reason.
-          if ! FILES=$(gh api "repos/$REPO/compare/v$LATEST...$BASE" \
-                        --jq '.files[]? | [.filename, (.previous_filename // "")] | @tsv'); then
-            echo "::error::could not compare v$LATEST...$BASE - refusing to call the delta unpublishable from a failed read"
-            exit 1
-          fi
-          # GitHub omits `files` entirely on very large compares, so empty cannot
-          # be told apart from "nothing changed" -- and zero files scanned is a
-          # malfunction, not a clean answer.
+          FILES=$(printf '%s' "$CMP" | jq -r '.files[]? | [.filename, (.previous_filename // "")] | @tsv')
+          # Ahead by real commits, files array present, yet empty: possible with
+          # commits that change nothing (empty or merge-only). Nothing published
+          # can have changed, so this is a clean "nothing to do".
           if [ -z "$FILES" ]; then
-            echo "::error::the compare v$LATEST...$BASE returned no file list. GitHub omits it on very large compares, so empty cannot be distinguished from 'nothing changed'."
-            exit 1
+            echo "$BASE is $AHEAD commits ahead of v$LATEST but those commits change no files. Nothing to do."
+            exit 0
           fi
           FILE_COUNT=0
           while IFS= read -r _; do FILE_COUNT=$((FILE_COUNT + 1)); done <<EOF
