@@ -286,7 +286,17 @@ jobs:
           fi
           echo "publishable change since v$LATEST: $MATCHED ($FILE_COUNT files compared)"
 
-          OPEN=$(gh pr list --repo "$REPO" --head "$BUMP_BRANCH" --state open --json number --jq '.[0].number // ""')
+          # `if ! var=$(...)` like the sibling reads above, not a bare assignment.
+          # Under set -e a bare one still fails the step -- so this is about the
+          # OPERATOR, not about safety: without it the run dies at an unnamed
+          # line, breaking this file's own "every failed read exits with a named
+          # reason" contract. An unreadable PR list is also specifically
+          # dangerous to guess at: assuming "none open" would open a second bump
+          # PR alongside the first.
+          if ! OPEN=$(gh pr list --repo "$REPO" --head "$BUMP_BRANCH" --state open --json number --jq '.[0].number // ""'); then
+            echo "::error::could not list open PRs for $BUMP_BRANCH - refusing to open a bump PR without knowing whether one already exists, since guessing 'none' would open a duplicate."
+            exit 1
+          fi
           if [ -n "$OPEN" ]; then
             echo "Bump PR #$OPEN is already open. Leaving it alone."
             exit 0
