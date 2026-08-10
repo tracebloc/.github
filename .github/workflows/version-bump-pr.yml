@@ -112,6 +112,24 @@ jobs:
           # start no workflow runs -- so the bump PR would sit with zero checks
           # on a repo that requires them, unmergeable, which is precisely the
           # outcome opening a PR was meant to avoid.
+          # `required: true` on a workflow_call input still permits "". An empty
+          # publish-paths would make `for pat in $PUBLISH_PATHS` never iterate,
+          # so MATCHED stays empty and this exits 0 as though nothing publishable
+          # changed -- silently skipping the very bump it exists to open. Layer 1
+          # refuses the same case for the same reason: absent is never permission
+          # to skip the version guard (backend#1439).
+          if [ -z "${PUBLISH_PATHS:-}" ]; then
+            echo "::error::publish-paths is empty. An empty pattern list matches nothing, which would look identical to 'nothing publishable changed' and skip a bump that is owed. Copy publish_paths from repos.yml, e.g. publish-paths: 'tracebloc/* pyproject.toml'"
+            exit 1
+          fi
+          if [ -z "${VERSION_FILE:-}" ]; then
+            echo "::error::version-file is empty. Copy version_file from repos.yml, e.g. version-file: pyproject.toml"
+            exit 1
+          fi
+          if [ -z "${BASE:-}" ]; then
+            echo "::error::base-branch is empty, so there is no branch to compare against or open a PR into."
+            exit 1
+          fi
           if [ -z "${PR_TOKEN:-}" ]; then
             echo "::error::pr-token is empty. A bump PR opened with the ambient GITHUB_TOKEN starts no workflow runs, so its required checks never report and it cannot be merged. Pass a PAT (the release train uses RELEASE_TRAIN_PR_TOKEN)."
             exit 1
