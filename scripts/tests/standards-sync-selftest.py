@@ -224,6 +224,32 @@ try:
     record(err is not None and len(stub.calls) == 3,
            "race: a second rejection fails closed",
            f"err={(err or '')[:70]}")
+
+    # The second-rejection message used to be UNREACHABLE: attempt 2 fell through
+    # to the generic return inside the loop, so the one failure worth naming was
+    # the one nobody could see (Bugbot .github#197).
+    record("racing this branch" in (err or ""),
+           "race: a second rejection SAYS it is a real conflict, not a generic error",
+           f"err={(err or '')[:90]}")
+
+    # A REUSED sync branch may predate CLAUDE.md on the base, so a 404 on it is
+    # honest and permanent. Treating file_on_base alone as expect_file made the
+    # read retry five times and fail closed, so the sha-less create could never
+    # run and that repo was stuck forever (Bugbot .github#197).
+    stub = GhScript([
+        (0, "sha_of_base", ""),                       # resolve base head
+        (1, "", "gh: Reference already exists (HTTP 422)"),   # branch REUSED, not fresh
+        NOT_FOUND, NOT_FOUND,                          # CLAUDE.md genuinely absent on it
+        (0, "{}", ""),                                 # sha-less PUT creates it
+        (0, "[]", ""),                                 # pr list
+        (0, "https://x/pull/1", ""),                   # pr create
+    ])
+    sync.gh = stub
+    err = sync.remediate("o", "r", "develop", "content", 1602, file_on_base=True)
+    puts = [c for c in stub.calls if any("PUT" == a for a in c)]
+    record(err is None and puts and not any("sha=" in a for a in puts[0]),
+           "reused branch: a genuine 404 creates the file instead of failing closed",
+           f"err={err} put_carried_sha={any('sha=' in a for a in (puts[0] if puts else []))}")
 finally:
     sync.gh, sync.time.sleep = _real_gh, _real_sleep
 

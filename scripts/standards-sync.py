@@ -286,8 +286,21 @@ def _write_head_file(full: str, head: str, desired: str, head_sha: "str | None",
             if rerr:
                 return f"write rejected (HTTP {http_status(err)}) and the sha refresh then failed: {rerr}"
             continue
+        if attempt == 2 and http_status(err) in (409, 422):
+            # A REAL conflict, not the consistency window: we refreshed the sha
+            # and were rejected anyway, so something else is writing this branch.
+            # This used to fall through to the generic message below, leaving the
+            # specific one after the loop UNREACHABLE (Bugbot, #197) -- so the one
+            # failure worth distinguishing was the one nobody could see.
+            return (f"cannot write CLAUDE.md on {head}: rejected twice "
+                    f"(HTTP {http_status(err)}) with a freshly-read sha — "
+                    "another writer is racing this branch")
         return f"cannot write CLAUDE.md on {head}: {err.strip()}"
-    return f"cannot write CLAUDE.md on {head}: rejected twice with a fresh sha"
+    # Unreachable by construction: every path in the loop returns or continues,
+    # and `continue` on attempt 2 is impossible. Kept as a fail-closed backstop
+    # rather than falling off the end and returning None, which would read as
+    # SUCCESS.
+    return f"cannot write CLAUDE.md on {head}: exhausted retries"
 
 
 def remediate(org: str, repo: str, base: str, desired: str, issue: int, file_on_base: bool) -> "str | None":
@@ -302,10 +315,23 @@ def remediate(org: str, repo: str, base: str, desired: str, issue: int, file_on_
 
     code, _, err = gh("api", "-X", "POST", f"repos/{full}/git/refs",
                       "-f", f"ref=refs/heads/{head}", "-f", f"sha={base_sha}")
+    branch_is_fresh = code == 0
     if code != 0 and http_status(err) != 422:  # 422: branch already exists — reuse it
         return f"cannot create branch {head}: {err.strip()}"
 
-    head_sha, current, rerr = _read_head_file(full, head, expect_file=file_on_base)
+    # expect_file means "a 404 here CANNOT be true", and that holds only when the
+    # ref was cut from a base that has the file MOMENTS ago -- the eventual
+    # consistency window the retry exists for.
+    #
+    # A REUSED branch is a different situation. It may have been cut before
+    # CLAUDE.md existed on the base, in which case a 404 is honest and permanent.
+    # Passing file_on_base alone made _read_head_file retry five times and then
+    # fail CLOSED, so the sha-less create could never happen and that repo was
+    # stuck forever (Bugbot, #197). The previous code read the 404 as absence and
+    # created the file, which was right for this case.
+    head_sha, current, rerr = _read_head_file(
+        full, head, expect_file=file_on_base and branch_is_fresh
+    )
     if rerr:
         return rerr
     if current is not None and current == desired:
