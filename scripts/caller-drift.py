@@ -780,13 +780,31 @@ def evaluate_protection(
             # An exemption claims the role is out of scope. If the branch turns
             # out to exist and be protected anyway, the exemption is stale and
             # says so -- the same staleness check the caller family applies.
+            #
+            # Order matters here, and the obvious ordering is wrong. Gating on
+            # `probe.error is None` FIRST would let a failed read decide a
+            # negative: an unreadable probe would silently mean "not stale" and
+            # the run would stay green. It is also strictly worse than that --
+            # read_protection() sets `error` when the RULESET call fails even
+            # though the classic read already succeeded, so `classic_present`
+            # can be known true while the whole finding is suppressed.
+            #
+            # So: decide on what IS known first, and only fall back to
+            # unreadable when nothing was established. (Bugbot, .github#196 --
+            # the same defect class this file's header documents, found in the
+            # change that documents it.)
             if branch is not None:
                 probe = read_protection(org, name, branch)
-                if probe.error is None and probe.classic_present:
+                if probe.classic_present:
                     findings.append(
                         f"{name}: protection.{role} is `exempt` but {branch} exists "
                         f"and carries classic protection. The exemption is stale - "
                         f"promote it to `required`. (reason on file: {reason[:80]})"
+                    )
+                elif probe.error:
+                    unreadable.append(
+                        f"{name}: protection of {branch} ({role}, exempt staleness "
+                        f"probe) - {probe.error}"
                     )
             continue
 

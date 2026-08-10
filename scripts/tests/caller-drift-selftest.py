@@ -558,6 +558,71 @@ record(guard.resolve_role_branch("prod", {"develop"}) is None,
 record(guard.resolve_role_branch("staging", {"develop"}) is None,
        "absent staging resolves to None rather than falling back", "None")
 
+
+# --- the `exempt` staleness probe must not let a failed read decide -----------
+# Bugbot, .github#196. Gating the staleness check on `error is None` first meant
+# an unreadable probe silently read as "not stale" - a failed read deciding a
+# negative, in the change that documents that exact defect class.
+
+POLICY = {role: _policy() for role in guard.PROTECTION_ROLES}
+POLICY["prod"]["enforce_admins"] = True
+
+
+def _exempt_entry():
+    return {"protection": {
+        "develop": ("exempt", "documented reason", {}),
+        "staging": ("exempt", "documented reason", {}),
+        "prod": ("exempt", "documented reason", {}),
+    }}
+
+
+# both reads fail -> UNREADABLE, never "the exemption holds"
+def _all_500(args):
+    if _prot(args) or _rules(args):
+        raise guard.GhError(500, "server error (HTTP 500)")
+    return "{}"
+
+
+stub(_all_500)
+f, u = [], []
+guard.evaluate_protection("repo", _exempt_entry(), POLICY, {"develop", "main"}, "acme", f, u)
+record(len(u) >= 1 and not f,
+       "exempt + unreadable probe records UNREADABLE, not a silent pass",
+       f"findings={len(f)} unreadable={u[:1]}")
+
+# classic read SUCCEEDS, ruleset read fails -> we already know enough to call the
+# exemption stale, and suppressing that on the ruleset error is the worse half.
+def _classic_ok_rules_500(args):
+    if _prot(args):
+        return CLASSIC
+    if _rules(args):
+        raise guard.GhError(500, "server error (HTTP 500)")
+    return "{}"
+
+
+stub(_classic_ok_rules_500)
+f, u = [], []
+guard.evaluate_protection("repo", _exempt_entry(), POLICY, {"develop", "main"}, "acme", f, u)
+record(any("exemption is stale" in x for x in f),
+       "exempt + classic-present-but-ruleset-unreadable STILL reports the stale exemption",
+       f"findings={f[:1]}")
+
+# a genuinely unprotected branch leaves the exemption intact and says nothing
+def _unprotected(args):
+    if _prot(args):
+        raise guard.GhError(404, "Branch not protected (HTTP 404)")
+    if _rules(args):
+        return "[]"
+    return "{}"
+
+
+stub(_unprotected)
+f, u = [], []
+guard.evaluate_protection("repo", _exempt_entry(), POLICY, {"develop", "main"}, "acme", f, u)
+record(not f and not u,
+       "a genuinely unprotected branch leaves its exemption intact",
+       f"findings={f} unreadable={u}")
+
 failed = [row for row in RESULTS if not row[0]]
 print(f"\npass={len(RESULTS) - len(failed)} fail={len(failed)}")
 if failed:
