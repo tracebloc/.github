@@ -1,6 +1,16 @@
-# repo-inventory.yml - which tracebloc/.github reusable workflows every active
-# repo must call. THE single source of truth; `.github/workflows/caller-drift.yml`
-# fails when reality diverges from it.
+# repo-inventory.yml - the per-repo CONTRACT every active repo must meet. THE
+# single source of truth; `.github/workflows/caller-drift.yml` fails when reality
+# diverges from it.
+#
+# Two property families so far (backend#1608 - one checker, one contract, one
+# report, deliberately NOT a third audit to keep in step):
+#   callers / copies   which tracebloc/.github reusable workflows a repo must call,
+#                      and which duplicated files must match the canonical copy
+#   protection         branch protection per branch ROLE (develop/staging/prod),
+#                      holding the backend#1276 decisions of record
+#
+# Adding a property means adding a row for ALL 20 repos. That is the point: it is
+# the forcing function that stops a new repo arriving with a gap nobody notices.
 #
 # EDITING THIS FILE IS GATED (tracebloc/backend#1608). caller-drift.yml has always
 # RUN on PRs that touch this file, but it was not a required check - so a PR that
@@ -52,7 +62,7 @@
 # on develop, so a default-branch enumeration under-reports anything in flight.
 # `audit_branch: develop-first` below is that correction, encoded.
 
-schema_version: 1
+schema_version: 2
 org: tracebloc
 
 # Every caller must pin this ref. Any other ref is drift.
@@ -93,6 +103,55 @@ reusables:
 copies:
   - add-to-kanban.yml
   - stale-backlog.yml
+
+# BRANCH PROTECTION, BY BRANCH ROLE (backend#1608 increment 2).
+#
+# The three roles every repo is measured against. `prod` resolves per repo to
+# whichever of main/master is IN THE BRANCH LIST -- never by probing
+# `branches/master`, which follows rename redirects and returns 200 for a branch
+# that does not exist (measured 2026-08-10: all 16 train repos reported a
+# `master`; only 3 have one).
+#
+# Values are the decisions of record from backend#1276, so that the two ways a
+# protection setting can be wrong -- someone changes it, or someone "fixes" a
+# deliberate choice back to the default -- both become findings.
+#
+#   null  =  NOT ASSERTED, which is different from asserting false. `enforce_admins`
+#            on develop/staging is null because #1276 deliberately leaves the cheap
+#            escape hatch open there; a repo that chooses to harden its own develop
+#            must not be reported as drift for doing something stricter.
+#
+# PROTECTION IS READ FROM BOTH OF GITHUB'S SYSTEMS. A ruleset-only branch 404s on
+# `branches/{b}/protection` while `GET /branches` says `protected: true`; reading
+# only the classic endpoint reports it as unprotected. That mistake produced a
+# wrong finding on backend#1276 before it was caught. See the header comment on
+# `read_protection()` in scripts/caller-drift.py for how the merge works and why
+# it is per-property rather than per-system.
+protection_policy:
+  develop:
+    classic_protection: true
+    min_reviews: 1
+    enforce_admins: null            # deliberate escape hatch (backend#1276 D1)
+    block_force_pushes: true
+    block_deletions: true
+    require_conversation_resolution: true
+    strict: false                   # backend#1276 D2 - the train solves stale bases better
+  staging:
+    classic_protection: true
+    min_reviews: 1
+    enforce_admins: null
+    block_force_pushes: true
+    block_deletions: true
+    require_conversation_resolution: true
+    strict: false
+  prod:
+    classic_protection: true
+    min_reviews: 1
+    enforce_admins: true            # backend#1276 D1 - closed on every train prod branch
+    block_force_pushes: true
+    block_deletions: true
+    require_conversation_resolution: true
+    strict: false
 
 # Reasons cited by more than one repo, as YAML anchors: one edit updates every
 # citation. An alias is still a written reason - the guard resolves it and
@@ -139,10 +198,50 @@ shared_reasons:
     no .github/workflows directory, so neither copied workflow is present. Its issues and PRs
     therefore never reach the board. UNREMEDIATED.
 
+  # --- branch-protection reasons (backend#1608 increment 2, backend#1276) -----
+  docs_no_required_review: &docs_no_required_review >-
+    docs is exempt from required review on `staging` and `main` (Lukas, 2026-06-04): docs are
+    content-only and low-risk, exempt from both the develop-only rule and the FR-gate. Every OTHER
+    protection assertion still applies here - this divergence names `min_reviews` alone so a
+    regression in force-push, deletion or admin posture is still caught. `docs/staging` got its
+    classic-protection layer on 2026-08-10 (backend#1276), mirroring `docs/main` rather than the
+    fleet shape, which is why one reason covers both branches.
+  not_a_pipeline_prod_branch: &not_a_pipeline_prod_branch >-
+    not on the release train, so this `main` is a WORKING branch, not a pipeline prod branch, and
+    backend#1276's `enforce_admins: true` decision does not reach it. Deliberate for release-train
+    specifically: it is the tool used to REPAIR the pipeline, so locking it hardest is
+    self-defeating. Measured false on claude-skills, release-train and rfcs, 2026-08-10.
+  no_develop_branch_single_branch_repo: &no_develop_branch_single_branch_repo >-
+    single-branch repo: `main` is the only integration branch, so there is no `develop` to protect.
+    Structural, not a gap. Precise staleness rule, because an earlier draft of this note overstated
+    it (Bugbot, .github#196): the guard flags an exemption when the role's branch appears AND
+    carries protection. A `develop` created and left UNPROTECTED is not flagged - the checker
+    cannot distinguish that from `develop_unprotected_non_train` below, which is an exemption
+    written precisely about an existing unprotected branch. The case this reason is about is still
+    covered: enrolling in the train means a protected `develop`, which does trip the check.
+  no_staging_branch_not_on_train: &no_staging_branch_not_on_train >-
+    not on the release train, so there is no develop -> staging -> prod lane and no `staging`
+    branch to hold to a policy. Distinct from `no_staging_branch_no_hop_to_gate`, which is about
+    the fr-gate caller rather than protection.
+  develop_unprotected_non_train: &develop_unprotected_non_train >-
+    `develop` exists but carries no branch protection, and the repo is not on the train so nothing
+    promotes out of it. UNREMEDIATED - recorded as an exemption with a name on it rather than
+    quietly dropped, per this file's schema decision. Protecting it is cheap; the reason it has not
+    happened is that nothing depends on it.
+  devex_bootstrap_undisposed: &devex_bootstrap_undisposed >-
+    devex-bootstrap has no protection on any branch and its disposition is still open
+    (backend#1597). Exempt on all three roles until that ticket decides whether the repo joins the
+    train, stays a scratch repo, or is archived. UNREMEDIATED, deliberately: arming protection on a
+    repo we may archive is work we would throw away.
+
 repos:
   .github:
     visibility: public
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
       # Remediated 2026-08-06 (.github#171, backend#1603). The repo that HOSTS
@@ -177,6 +276,10 @@ repos:
   averaging-service:
     visibility: private
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -194,6 +297,10 @@ repos:
   backend:
     visibility: private
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -211,6 +318,15 @@ repos:
   claude-skills:
     visibility: private
     release_train: false
+    protection:
+      develop:
+        exempt: *develop_unprotected_non_train
+      staging:
+        exempt: *no_staging_branch_not_on_train
+      prod:
+        divergent:
+          reason: *not_a_pipeline_prod_branch
+          enforce_admins: false
     callers:
       advance-deploy-env.yml:
         exempt: *advance_deploy_env_caller_missing
@@ -231,6 +347,10 @@ repos:
   cli:
     visibility: public
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -257,6 +377,10 @@ repos:
   client:
     visibility: public
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -274,6 +398,10 @@ repos:
   client-runtime:
     visibility: private
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -291,6 +419,10 @@ repos:
   data-ingestors:
     visibility: public
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -308,6 +440,10 @@ repos:
   design-system:
     visibility: private
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -325,6 +461,13 @@ repos:
   devex-bootstrap:
     visibility: private
     release_train: false
+    protection:
+      develop:
+        exempt: *devex_bootstrap_undisposed
+      staging:
+        exempt: *devex_bootstrap_undisposed
+      prod:
+        exempt: *devex_bootstrap_undisposed
     callers:
       advance-deploy-env.yml:
         exempt: >-
@@ -387,6 +530,16 @@ repos:
     # caller; release-train#30 added the repos.yml entry (that side lands first,
     # per the two-file coupling this guard audits).
     release_train: true
+    protection:
+      develop: required
+      staging:
+        divergent:
+          reason: *docs_no_required_review
+          min_reviews: 0
+      prod:
+        divergent:
+          reason: *docs_no_required_review
+          min_reviews: 0
     callers:
       # Flipped exempt -> required 2026-08-04: the caller was added on MAIN only
       # (docs#70, a docs-exception direct merge) where the develop-first audit
@@ -432,6 +585,10 @@ repos:
   e2e-test-agent:
     visibility: private
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -449,6 +606,10 @@ repos:
   frontend-app:
     visibility: private
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -466,6 +627,10 @@ repos:
   model-zoo:
     visibility: public
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -483,6 +648,15 @@ repos:
   release-train:
     visibility: private
     release_train: false
+    protection:
+      develop:
+        exempt: *no_develop_branch_single_branch_repo
+      staging:
+        exempt: *no_staging_branch_not_on_train
+      prod:
+        divergent:
+          reason: *not_a_pipeline_prod_branch
+          enforce_admins: false
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml:
@@ -514,6 +688,16 @@ repos:
   rfcs:
     visibility: private
     release_train: false
+    protection:
+      develop:
+        exempt: *no_develop_branch_single_branch_repo
+      staging:
+        exempt: *no_staging_branch_not_on_train
+      prod:
+        divergent:
+          reason: *not_a_pipeline_prod_branch
+          enforce_admins: false
+          require_conversation_resolution: false
     callers:
       # Per-caller reasons, not one blanket text (Bugbot, .github#138). The first
       # version of this block asserted "no hop to gate" for all nine, which is only
@@ -552,6 +736,10 @@ repos:
   start-training:
     visibility: public
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -569,6 +757,10 @@ repos:
   tracebloc-engine:
     visibility: private
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -586,6 +778,10 @@ repos:
   tracebloc-py-package:
     visibility: private
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
@@ -608,6 +804,10 @@ repos:
     # `required` below and fr-gate-caller.yml is present on develop, so the hop
     # this field gates is not ungated — only the recorded fact was stale.
     release_train: true
+    protection:
+      develop: required
+      staging: required
+      prod: required
     callers:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
