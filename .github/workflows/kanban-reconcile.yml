@@ -456,8 +456,12 @@ jobs:
               esac
 
               # OPEN issue that drifted into a post-merge column -> back to Backlog.
+              # `Staging (agent review)` belongs here with its siblings: it is a
+              # post-merge column, so an OPEN issue in it has drifted just as it
+              # would have in `On dev`. Added in the READ hop (#1577) so reconcile
+              # already treats it correctly before anything writes it (#1578).
               case "$COL" in
-                "Ready for prod"|"Staging (human review)"|"FR on staging"|"On dev")
+                "Ready for prod"|"Staging (agent review)"|"Staging (human review)"|"FR on staging"|"On dev")
                   printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$BACKLOG_OPT" "$REPO#$NUM open issue in $COL -> Backlog" "misplaced-issue" >> moves.tsv
                   continue ;;
               esac
