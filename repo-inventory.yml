@@ -213,8 +213,12 @@ shared_reasons:
     self-defeating. Measured false on claude-skills, release-train and rfcs, 2026-08-10.
   no_develop_branch_single_branch_repo: &no_develop_branch_single_branch_repo >-
     single-branch repo: `main` is the only integration branch, so there is no `develop` to protect.
-    Structural, not a gap. Joining the train would create one, and this entry would become a
-    finding at that point - which is the intended behaviour.
+    Structural, not a gap. Precise staleness rule, because an earlier draft of this note overstated
+    it (Bugbot, .github#196): the guard flags an exemption when the role's branch appears AND
+    carries protection. A `develop` created and left UNPROTECTED is not flagged - the checker
+    cannot distinguish that from `develop_unprotected_non_train` below, which is an exemption
+    written precisely about an existing unprotected branch. The case this reason is about is still
+    covered: enrolling in the train means a protected `develop`, which does trip the check.
   no_staging_branch_not_on_train: &no_staging_branch_not_on_train >-
     not on the release train, so there is no develop -> staging -> prod lane and no `staging`
     branch to hold to a policy. Distinct from `no_staging_branch_no_hop_to_gate`, which is about

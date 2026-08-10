@@ -955,6 +955,8 @@ def main() -> int:
 
     findings: "list[str]" = []
     unreadable: "list[str]" = []
+    # Kept separate until `evaluated` is computed - see the note at the call site.
+    protection_unreadable: "list[str]" = []
 
     untracked = sorted(set(active) - set(inventory["repos"]))
     for name in untracked:
@@ -1077,17 +1079,31 @@ def main() -> int:
 
         # Protection is read from the branch LIST already gathered by read_repo,
         # so it costs no extra enumeration and inherits its pagination.
+        #
+        # Into its OWN list, not the shared one. `evaluated` below drives a die()
+        # that discards the entire report, and `unreadable` means "this repo's
+        # caller/copy state could not be read at all". A fleet-wide protection
+        # outage (rate limit, auth, GitHub incident) is a different thing: the
+        # caller audit for those repos SUCCEEDED, and folding protection failures
+        # into the same counter would make every repo look unreadable, abort, and
+        # throw away real caller findings before anything was written.
+        # Fail-closed means the run still goes RED - it must not mean the results
+        # are destroyed. (Bugbot, .github#196.)
         evaluate_protection(
             name, entry, inventory["protection_policy"], read.branches,
-            org, findings, unreadable,
+            org, findings, protection_unreadable,
         )
 
+    # Computed from repo-read failures ONLY, before the two lists are merged.
     evaluated = len(audited) - len({line.split(":", 1)[0] for line in unreadable})
     if evaluated <= 0:
         die(
             f"all {len(audited)} inventoried repos were unreadable: "
             + "; ".join(unreadable)
         )
+    # Merged only now, so protection failures are REPORTED and still fail the run
+    # without ever being able to trigger the abort above.
+    unreadable.extend(protection_unreadable)
 
     report = [
         "### Repo conformance drift",

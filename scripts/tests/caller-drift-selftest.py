@@ -701,6 +701,30 @@ record(got.block_deletions and got.min_reviews == 1 and got.error is None,
        "elements streamed across pages are all reassembled, not just the first",
        f"del={got.block_deletions} reviews={got.min_reviews} rulesets={got.rulesets}")
 
+
+# --- protection unreadability must not be able to abort the whole audit -------
+# `evaluated <= 0` calls die(), which discards the report. A fleet-wide
+# protection outage would otherwise make every repo look unreadable and throw
+# away real, already-collected caller findings before anything was written.
+# Fail-closed must mean RED, not "results destroyed". (Bugbot, .github#196.)
+#
+# Asserted structurally: evaluate_protection writes ONLY into the list it is
+# handed, so main() can keep it out of the `evaluated` computation.
+stub(_all_500)
+caller_unreadable, prot_unreadable = [], []
+guard.evaluate_protection(
+    "repo", {"protection": {r: ("required", "", {}) for r in guard.PROTECTION_ROLES}},
+    POLICY, {"develop", "staging", "main"}, "acme", [], prot_unreadable,
+)
+record(len(prot_unreadable) == 3 and caller_unreadable == [],
+       "protection failures land in their OWN list, never the one driving die()",
+       f"protection={len(prot_unreadable)} caller={len(caller_unreadable)}")
+
+# And they must still be loud - isolating them must not make them silent.
+record(all("unreadable" in x for x in prot_unreadable),
+       "isolated protection failures are still recorded as UNREADABLE",
+       f"{prot_unreadable[:1]}")
+
 failed = [row for row in RESULTS if not row[0]]
 print(f"\npass={len(RESULTS) - len(failed)} fail={len(failed)}")
 if failed:
