@@ -1,0 +1,242 @@
+name: Version bump PR
+
+# Reusable workflow. Opens a PR bumping this repo's version file when develop
+# carries publishable changes that the declared version has already shipped.
+# Layer 2 of backend#1563.
+#
+# THE PROBLEM IT REMOVES
+#   The release train reads `version_file` as the DECLARED NEXT RELEASE. It cuts
+#   vX.Y.Z from whatever the file says and it never writes the file back. So the
+#   instant a release succeeds, version_file equals the version that just
+#   shipped -- and the NEXT prod hop hits version_preflight's "v$ver already
+#   exists and the delta touches published files" refusal. Every successful
+#   release arms the next one to fail, and nothing prevented it. That is
+#   backend#1440's mechanism; it stalled the tracebloc-py-package prod leg on
+#   2026-08-05 (backend#1561), costing a release leg plus a hand diagnosis
+#   before anyone realised the train was right and the file was stale.
+#
+#   Layer 1 (the version-bump gate, .github#172) catches the omission at PR time
+#   when an author changes published files. It cannot catch this case, because
+#   nobody authored anything -- the staleness is created BY the release itself.
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+#   It never tags and never publishes. The release train is the single
+#   publisher -- it owns the prod tag and the release-managers token in the tag
+#   ruleset -- and backend#1563 names "two competing publishers" as the failure
+#   to avoid. This opens a PR; a human merges it. That is why release-please was
+#   not adopted: we want its "open the bump PR" half and specifically not its
+#   "tag and publish" half.
+#
+# WHY A PR AND NOT A PUSH
+#   develop is protected on every train repo (1 approving review). A push would
+#   need admin bypass, making this a second thing that writes to develop
+#   unreviewed. The bump is a one-line diff; a PR costs a click.
+#
+# WHEN IT DOES NOTHING, which is most of the time
+#   - the declared version is already ahead of every released tag  (normal state)
+#   - nothing under publish_paths changed since that tag           (docs/CI only)
+#   - a bump PR is already open                                    (idempotent)
+#
+# REFUSES RATHER THAN GUESSES
+#   Every failed read, and every version it cannot parse, exits non-zero with a
+#   named reason instead of opening a PR. A wrong bump is worse than no bump: it
+#   would ship a version nobody chose, under the train's own tag.
+
+on:
+  workflow_call:
+    inputs:
+      version-file:
+        description: "Path to the file holding the declared next version. Must match repos.yml."
+        required: true
+        type: string
+      publish-paths:
+        description: "Space-separated globs of what this repo publishes. Must match repos.yml."
+        required: true
+        type: string
+      base-branch:
+        description: "Branch the bump PR targets (where the next cycle starts)."
+        type: string
+        default: develop
+
+permissions:
+  contents: write        # create the bump branch
+  pull-requests: write   # open the bump PR
+
+concurrency:
+  # One bump PR at a time. Two pushes landing together must not race into two
+  # branches proposing different versions.
+  group: version-bump-pr-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.base-branch }}
+
+      - name: Open a version bump PR if the declared version has already shipped
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION_FILE: ${{ inputs.version-file }}
+          PUBLISH_PATHS: ${{ inputs.publish-paths }}
+          BASE: ${{ inputs.base-branch }}
+          BUMP_BRANCH: chore/version-bump
+        run: |
+          set -euo pipefail
+          # No pathname expansion: publish_paths are matched with `case`, and a
+          # glob must stay a pattern rather than expand against the checkout.
+          set -f
+
+          # read_version's case table from release-train's promote-repo.sh, rule
+          # for rule. A parser that disagreed with the train's would propose a
+          # bump the train then rejects. Each branch ends in `head -1` because
+          # `grep -oE` prints one line per MATCH: a version line with a trailing
+          # comment otherwise yields a two-line value (release-train#41).
+          semver='[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?'
+          read_version() {
+            local raw
+            raw=$(cat "$1" 2>/dev/null) || return 1
+            case "$1" in
+              *.json)       printf '%s' "$raw" | jq -r '.version // empty' 2>/dev/null | grep -oE "^$semver" | head -1 || true ;;
+              *.yaml|*.yml) printf '%s' "$raw" | grep -E '^version:' | head -1 | grep -oE "$semver" | head -1 || true ;;
+              *.toml)       printf '%s' "$raw" | grep -E '^version *= *"' | head -1 | grep -oE "$semver" | head -1 || true ;;
+              *.py)         printf '%s' "$raw" | grep -E '^__version__ *= *["'"'"']' | head -1 | grep -oE "$semver" | head -1 || true ;;
+              *)            printf '%s' "$raw" | grep -oE "^$semver" | head -1 || true ;;
+            esac
+          }
+
+          if [ ! -f "$VERSION_FILE" ]; then
+            echo "::error::$VERSION_FILE does not exist on $BASE - refusing to guess where the version lives"
+            exit 1
+          fi
+          DECLARED=$(read_version "$VERSION_FILE")
+          if [ -z "$DECLARED" ]; then
+            echo "::error::could not parse a version out of $VERSION_FILE - refusing to propose a bump from an unread file"
+            exit 1
+          fi
+          echo "declared version on $BASE: $DECLARED"
+
+          # The highest already-released FINAL version. Plain vX.Y.Z only: an rc
+          # tag is not a release, and treating one as the ceiling would bump past
+          # a version that never shipped.
+          if ! REFS=$(gh api "repos/$REPO/git/matching-refs/tags/v" --paginate --jq '.[].ref'); then
+            echo "::error::could not list v* tags - refusing to decide 'already shipped' without them"
+            exit 1
+          fi
+          LATEST=$(printf '%s\n' "$REFS" | sed 's|refs/tags/v||' \
+                   | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+          if [ -z "$LATEST" ]; then
+            echo "No final release exists yet, so no version can have shipped. Nothing to do."
+            exit 0
+          fi
+          echo "highest released final version: $LATEST"
+
+          if [ "$DECLARED" != "$LATEST" ] \
+             && [ "$(printf '%s\n%s\n' "$DECLARED" "$LATEST" | sort -V | tail -1)" = "$DECLARED" ]; then
+            echo "Declared $DECLARED is ahead of released $LATEST - the next hop can tag. Nothing to do."
+            exit 0
+          fi
+
+          # Did anything PUBLISHABLE change since that release? If only docs or
+          # CI moved, the train promotes the content untagged and no bump is
+          # owed -- the same publishable_delta question the train asks, so this
+          # proposes a bump exactly when the train would otherwise refuse. Both
+          # filename and previous_filename, because a file renamed OUT of a
+          # published tree is still a publish-path change.
+          if ! FILES=$(gh api --paginate "repos/$REPO/compare/v$LATEST...$BASE" \
+                        --jq '.files[]? | .filename, (.previous_filename // empty)'); then
+            echo "::error::could not compare v$LATEST...$BASE - refusing to call the delta unpublishable from a failed read"
+            exit 1
+          fi
+          MATCHED=""
+          for f in $FILES; do
+            for pat in $PUBLISH_PATHS; do
+              # shellcheck disable=SC2254  # $pat is a glob on purpose
+              case "$f" in
+                $pat) MATCHED="$f"; break 2 ;;
+              esac
+            done
+          done
+          if [ -z "$MATCHED" ]; then
+            echo "Nothing under [$PUBLISH_PATHS] changed since v$LATEST - the train promotes untagged. Nothing to do."
+            exit 0
+          fi
+          echo "publishable change since v$LATEST: $MATCHED"
+
+          OPEN=$(gh pr list --repo "$REPO" --head "$BUMP_BRANCH" --state open --json number --jq '.[0].number // ""')
+          if [ -n "$OPEN" ]; then
+            echo "Bump PR #$OPEN is already open. Leaving it alone."
+            exit 0
+          fi
+
+          # PATCH, deliberately. This is a FLOOR that unblocks the next hop, not
+          # a judgement about what the release deserves: a human who wants a
+          # minor or major edits the PR before merging. Computing it from commit
+          # types needs Conventional Commits, which backend#1563 sequences as a
+          # separate step and which no repo has adopted yet.
+          MAJOR=${LATEST%%.*}; REST=${LATEST#*.}; MINOR=${REST%%.*}; PATCH=${REST#*.}
+          case "$MAJOR$MINOR$PATCH" in
+            *[!0-9]*) echo "::error::released version v$LATEST is not X.Y.Z - refusing to compute a bump from it"; exit 1 ;;
+          esac
+          NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
+          echo "proposing $DECLARED -> $NEXT"
+
+          case "$VERSION_FILE" in
+            *.json) tmp=$(mktemp); jq --arg v "$NEXT" '.version = $v' "$VERSION_FILE" > "$tmp" && mv "$tmp" "$VERSION_FILE" ;;
+            *.yaml|*.yml) sed -i -E "0,/^version:.*/s//version: $NEXT/" "$VERSION_FILE" ;;
+            *.toml) sed -i -E "0,/^version *= *\".*\"/s//version = \"$NEXT\"/" "$VERSION_FILE" ;;
+            *.py)   sed -i -E "0,/^__version__ *= *[\"'].*[\"']/s//__version__ = \"$NEXT\"/" "$VERSION_FILE" ;;
+            *)      printf '%s\n' "$NEXT" > "$VERSION_FILE" ;;
+          esac
+
+          # Read it back with the SAME parser the train uses. A sed that silently
+          # matched nothing would otherwise open a PR containing no change.
+          WROTE=$(read_version "$VERSION_FILE")
+          if [ "$WROTE" != "$NEXT" ]; then
+            echo "::error::wrote $NEXT to $VERSION_FILE but it reads back as '${WROTE:-<unparseable>}' - refusing to open a PR whose diff does not say what it claims"
+            exit 1
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BUMP_BRANCH"
+          git add "$VERSION_FILE"
+          COMMIT_BODY="v$DECLARED is already released, and $MATCHED changed since it shipped, so
+          the next prod hop would refuse to tag: the train reads $VERSION_FILE as the
+          declared NEXT release and never writes it back (backend#1440, backend#1561).
+
+          Patch is a floor that unblocks the hop, not a judgement - edit this PR if the
+          release deserves a minor or major.
+
+          Opened by version-bump-pr.yml (backend#1563 Layer 2). This workflow never tags
+          and never publishes; the release train stays the single publisher."
+          git commit -m "chore(release): bump $VERSION_FILE $DECLARED -> $NEXT" -m "$COMMIT_BODY"
+          git push -u origin "$BUMP_BRANCH" --force-with-lease
+
+          PR_BODY="\`v$DECLARED\` is **already released**, and \`$MATCHED\` has changed since it shipped — so the next prod hop would refuse to tag with *\"v$DECLARED already exists and the delta touches published files\"*.
+
+          That is not a mistake anyone made. The train reads \`$VERSION_FILE\` as the **declared next release** and never writes it back, so every successful release leaves the file naming the version that just went out, arming the next hop to refuse (backend#1440). It stalled a real release leg on 2026-08-05 (backend#1561).
+
+          | | |
+          |---|---|
+          | declared on \`$BASE\` | \`$DECLARED\` |
+          | highest released | \`v$LATEST\` |
+          | proposed | **\`$NEXT\`** |
+          | publishable change since the release | \`$MATCHED\` |
+
+          **Patch is a floor, not a judgement.** It unblocks the hop; edit this PR if the release deserves a minor or major. Computing that automatically needs Conventional Commits, which backend#1563 sequences separately.
+
+          This workflow **never tags and never publishes** — the release train remains the single publisher (backend#1563's stated constraint). Merging this PR is the bump; the train does the rest."
+          gh pr create --repo "$REPO" --base "$BASE" --head "$BUMP_BRANCH" \
+            --title "chore(release): bump $VERSION_FILE to $NEXT" --body "$PR_BODY"
+
+          {
+            echo "### Version bump PR opened"
+            echo
+            echo "\`$DECLARED\` is released and \`$MATCHED\` changed since — proposed \`$NEXT\`."
+          } >> "$GITHUB_STEP_SUMMARY"
