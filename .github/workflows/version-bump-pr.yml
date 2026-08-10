@@ -69,9 +69,17 @@ on:
           and uses RELEASE_TRAIN_PR_TOKEN for the same reason.
         required: true
 
+# READ ONLY, and that is load-bearing rather than tidy. Every write here goes
+# through `pr-token`: the branch push uses the credential checkout persisted from
+# it, and `gh pr create` names it explicitly. Nothing uses the ambient token to
+# write, so granting it write would only remove the 403 that catches a future
+# edit which forgets -- and that mistake produces a PR authored by GITHUB_TOKEN,
+# which starts no workflow runs, so its required checks never report and it can
+# never merge. This is exactly the failure the pr-token guard exists to prevent,
+# so the permissions block should fail fast on it rather than let it succeed.
 permissions:
-  contents: write        # create the bump branch
-  pull-requests: write   # open the bump PR
+  contents: read         # list tags, read the compare
+  pull-requests: read    # the idempotency check for an existing bump PR
 
 concurrency:
   # One bump PR at a time. Two pushes landing together must not race into two
