@@ -10,7 +10,9 @@ Exit 0 when every path behaves the way it is supposed to.
 
 from __future__ import annotations
 
+import base64
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -156,6 +158,74 @@ with tempfile.TemporaryDirectory() as tmp:
     )
     record(proc.returncode == 2, "crash: gh unavailable exits 2, not 1",
            f"exited {proc.returncode} (want 2 — a crash must never read as drift)")
+
+# ---------------------------------------------------- fresh-branch read race
+# Run 31373298821 (design rule 5): a file read on a just-created branch
+# transiently 404'd, the 404 was believed, and the sha-less write was
+# rejected as 'Invalid request'. These stubs assert the retry / fail-closed
+# contract with no network: sync.gh is replaced by a scripted fake and the
+# backoff sleep by a no-op.
+class GhScript:
+    def __init__(self, steps):
+        self.steps = list(steps)
+        self.calls = []
+
+    def __call__(self, *args):
+        self.calls.append(args)
+        if not self.steps:
+            raise AssertionError("gh called more often than scripted")
+        return self.steps.pop(0)
+
+
+OK_PAYLOAD = json.dumps({"sha": "abc123", "content": base64.b64encode(b"hello").decode()})
+NOT_FOUND = (1, "", "gh: Not Found (HTTP 404)")
+_real_gh, _real_sleep = sync.gh, sync.time.sleep
+sync.time.sleep = lambda _s: None
+try:
+    stub = GhScript([NOT_FOUND, (0, OK_PAYLOAD, "")])
+    sync.gh = stub
+    sha, content, err = sync._read_head_file("o/r", "docs/x", expect_file=True)
+    record(err is None and sha == "abc123" and content == "hello" and len(stub.calls) == 2,
+           "race: transient 404 is retried to success",
+           f"attempts={len(stub.calls)} sha={sha} err={err}")
+
+    stub = GhScript([NOT_FOUND] * 5)
+    sync.gh = stub
+    sha, content, err = sync._read_head_file("o/r", "docs/x", expect_file=True)
+    record(err is not None and len(stub.calls) == 5,
+           "race: persistent 404 fails closed after all retries",
+           f"attempts={len(stub.calls)} err={(err or '')[:70]}")
+
+    stub = GhScript([NOT_FOUND] * 2)
+    sync.gh = stub
+    sha, content, err = sync._read_head_file("o/r", "docs/x", expect_file=False)
+    record(err is None and sha is None and len(stub.calls) == 2,
+           "race: genuine absence is confirmed by a re-read, not trusted once",
+           f"attempts={len(stub.calls)}")
+
+    stub = GhScript([
+        (1, "", "gh: Invalid request (HTTP 422)"),  # sha-less PUT rejected
+        (0, OK_PAYLOAD, ""),                        # sha refresh read
+        (0, "{}", ""),                              # retried PUT succeeds
+    ])
+    sync.gh = stub
+    err = sync._write_head_file("o/r", "docs/x", "new content", None, 1602)
+    record(err is None and any(a == "sha=abc123" for a in stub.calls[-1]),
+           "race: rejected write refreshes the sha and retries exactly once",
+           f"err={err}, retried PUT carries the refreshed sha")
+
+    stub = GhScript([
+        (1, "", "gh: Invalid request (HTTP 422)"),
+        (0, OK_PAYLOAD, ""),
+        (1, "", "gh: Conflict (HTTP 409)"),
+    ])
+    sync.gh = stub
+    err = sync._write_head_file("o/r", "docs/x", "new content", None, 1602)
+    record(err is not None and len(stub.calls) == 3,
+           "race: a second rejection fails closed",
+           f"err={(err or '')[:70]}")
+finally:
+    sync.gh, sync.time.sleep = _real_gh, _real_sleep
 
 # ---------------------------------------------------------------------- tally
 failed = [name for ok, name, _ in RESULTS if not ok]
