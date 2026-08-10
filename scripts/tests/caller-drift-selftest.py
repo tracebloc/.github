@@ -41,18 +41,42 @@ def record(ok: bool, name: str, detail: str) -> None:
 
 # ------------------------------------------------------------- schema failures
 
+def _policy(**over):
+    base = {
+        "classic_protection": True,
+        "min_reviews": 1,
+        "enforce_admins": None,
+        "block_force_pushes": True,
+        "block_deletions": True,
+        "require_conversation_resolution": True,
+        "strict": False,
+    }
+    base.update(over)
+    return base
+
+
 MINIMAL = {
-    "schema_version": 1,
+    "schema_version": 2,
     "org": "acme",
     "pinned_ref": "main",
     "audit_branch": "develop-first",
     "source_repo": "hub",
     "reusables": ["a.yml"],
     "copies": ["c.yml"],
+    "protection_policy": {
+        "develop": _policy(),
+        "staging": _policy(),
+        "prod": _policy(enforce_admins=True),
+    },
     "repos": {
         "hub": {
             "visibility": "public",
             "release_train": False,
+            "protection": {
+                "develop": "required",
+                "staging": "required",
+                "prod": "required",
+            },
             "callers": {"a.yml": "required"},
             "copies": {"c.yml": "required"},
         },
@@ -132,6 +156,80 @@ expect_schema_failure("two states in one cell rejected",
 expect_schema_failure("copies-only 'divergent' rejected on a caller",
                       lambda d: d["repos"]["hub"]["callers"].update(
                           {"a.yml": {"divergent": "not valid here"}}))
+
+# ------------------------------------------------- protection schema (#1608 inc 2)
+expect_schema_failure("missing protection_policy rejected", _drop("protection_policy"))
+expect_schema_failure("protection_policy missing a role rejected",
+                      lambda d: d["protection_policy"].pop("staging"))
+expect_schema_failure("protection_policy with an unknown role rejected",
+                      lambda d: d["protection_policy"].update({"qa": _policy()}))
+expect_schema_failure("policy missing a key is a failure, not a default",
+                      lambda d: d["protection_policy"]["develop"].pop("min_reviews"))
+expect_schema_failure("policy with an unknown key rejected",
+                      lambda d: d["protection_policy"]["develop"].update({"nope": True}))
+expect_schema_failure("negative min_reviews rejected",
+                      lambda d: d["protection_policy"]["develop"].update({"min_reviews": -1}))
+expect_schema_failure("non-int min_reviews rejected",
+                      lambda d: d["protection_policy"]["develop"].update({"min_reviews": "1"}))
+# classic_protection/block_* may NOT be un-asserted: null there would silently
+# switch off the assertions that matter most.
+expect_schema_failure("null classic_protection rejected",
+                      lambda d: d["protection_policy"]["develop"].update({"classic_protection": None}))
+expect_schema_failure("null block_deletions rejected",
+                      lambda d: d["protection_policy"]["develop"].update({"block_deletions": None}))
+
+expect_schema_failure("repo missing the protection block rejected",
+                      lambda d: d["repos"]["hub"].pop("protection"))
+expect_schema_failure("MISSING protection role is a failure, not a default",
+                      lambda d: d["repos"]["hub"]["protection"].pop("prod"))
+expect_schema_failure("unknown protection role rejected",
+                      lambda d: d["repos"]["hub"]["protection"].update({"qa": "required"}))
+expect_schema_failure("protection exempt with no reason rejected",
+                      lambda d: d["repos"]["hub"]["protection"].update({"prod": {"exempt": "  "}}))
+expect_schema_failure("bare 'exempt' scalar rejected on protection",
+                      lambda d: d["repos"]["hub"]["protection"].update({"prod": "exempt"}))
+# `divergent` must NAME the deviating key. A blanket divergence would switch off
+# every assertion at once - the failure this shape exists to prevent.
+expect_schema_failure("protection divergent as a bare string rejected",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": "just a reason"}}))
+expect_schema_failure("protection divergent naming no key rejected",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "because"}}}))
+expect_schema_failure("protection divergent with no reason rejected",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"min_reviews": 0}}}))
+expect_schema_failure("protection divergent cannot override classic_protection",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "classic_protection": False}}}))
+expect_schema_failure("protection divergent cannot override block_deletions",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "block_deletions": False}}}))
+
+# Override VALUES are validated too, not just the key names. Without this a cell
+# that looks like a narrow documented divergence can neutralise the assertion it
+# claims merely to adjust. (Bugbot, .github#196.)
+expect_schema_failure("divergent min_reviews cannot be negative",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "min_reviews": -1}}}))
+expect_schema_failure("divergent min_reviews cannot be a bool (bool is an int in Python)",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "min_reviews": True}}}))
+expect_schema_failure("divergent min_reviews cannot be a string",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "min_reviews": "0"}}}))
+expect_schema_failure("divergent enforce_admins cannot be null (that un-asserts it)",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "enforce_admins": None}}}))
+expect_schema_failure("divergent strict cannot be null",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "strict": None}}}))
+expect_schema_failure("divergent strict cannot be a string",
+                      lambda d: d["repos"]["hub"]["protection"].update(
+                          {"prod": {"divergent": {"reason": "x", "strict": "false"}}}))
+# The same bool-is-int trap at policy level.
+expect_schema_failure("policy min_reviews cannot be a bool",
+                      lambda d: d["protection_policy"]["develop"].update({"min_reviews": True}))
 
 # A well-formed inventory must still load, or the tests above prove nothing.
 with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as _h:
@@ -357,6 +455,275 @@ record(read.ok and read.copies.get("add-to-kanban.yml") == "deadbeef",
 record(guard.blob_sha(b"hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a",
        "blob_sha matches git's own object id",
        guard.blob_sha(b"hello\n"))
+
+
+# ------------------------------------------------ protection reads (#1608 inc 2)
+#
+# The lesson these encode: on 2026-08-10 an audit that read ONLY the classic
+# endpoint reported docs/staging as unprotected. It was covered by a ruleset the
+# whole time. A guard that cannot tell those apart is worse than none.
+
+def _prot(args) -> bool:
+    # Scan ALL args, not args[1]: the rules read now carries --paginate/--jq
+    # flags ahead of the path, so positional indexing would silently stop
+    # matching and every stub would fall through to the default.
+    return any(a.endswith("/protection") for a in args)
+
+
+def _rules(args) -> bool:
+    return any("/rules/branches/" in a for a in args)
+
+
+def ndjson(*objs) -> str:
+    """What `gh api --paginate --jq '.[]'` emits: one compact object per line."""
+    return "".join(json.dumps(o) + "\n" for o in objs)
+
+
+CLASSIC = json.dumps({
+    "required_pull_request_reviews": {"required_approving_review_count": 1},
+    "enforce_admins": {"enabled": True},
+    "allow_force_pushes": {"enabled": False},
+    "allow_deletions": {"enabled": False},
+    "required_conversation_resolution": {"enabled": True},
+    "required_status_checks": {"strict": False, "checks": []},
+})
+
+# --- ruleset-only branch: classic 404s, rules carry the protection -------------
+def _ruleset_only(args):
+    if _prot(args):
+        raise guard.GhError(404, "Branch not protected (HTTP 404)")
+    if _rules(args):
+        return ndjson(
+            {"type": "pull_request", "ruleset_source": "promotion-branches",
+             "parameters": {"required_approving_review_count": 2,
+                            "required_review_thread_resolution": True}},
+            {"type": "deletion", "ruleset_source": "promotion-branches",
+             "parameters": {}},
+        )
+    return "{}"
+
+
+stub(_ruleset_only)
+got = guard.read_protection("acme", "repo", "staging")
+record(got.error is None and not got.classic_present,
+       "ruleset-only branch: classic 404 is a FACT, not a read failure",
+       f"error={got.error} classic={got.classic_present}")
+record(got.min_reviews == 2 and got.block_force_pushes and got.block_deletions
+       and got.conversation_resolution,
+       "ruleset-only branch: protection is read from the RULESET, not reported absent",
+       f"reviews={got.min_reviews} force={got.block_force_pushes} "
+       f"del={got.block_deletions} conv={got.conversation_resolution}")
+
+# --- a pull_request rule alone does NOT block deletion -------------------------
+def _pr_rule_only(args):
+    if _prot(args):
+        raise guard.GhError(404, "Branch not protected (HTTP 404)")
+    if _rules(args):
+        return ndjson({"type": "pull_request", "ruleset_source": "x",
+                       "parameters": {}})
+    return "{}"
+
+
+stub(_pr_rule_only)
+got = guard.read_protection("acme", "repo", "staging")
+record(got.block_force_pushes and not got.block_deletions,
+       "a pull_request rule blocks force pushes but NOT deletion",
+       f"force={got.block_force_pushes} del={got.block_deletions}")
+
+# --- fail closed: an unreadable classic read is never 'unprotected' -----------
+def _prot_500(args):
+    if _prot(args):
+        raise guard.GhError(500, "server error (HTTP 500)")
+    if _rules(args):
+        return ""
+    return "{}"
+
+
+stub(_prot_500)
+got = guard.read_protection("acme", "repo", "main")
+record(got.error is not None,
+       "non-404 protection error is UNREADABLE, never 'no protection'",
+       f"error={got.error}")
+
+# --- fail closed: an unreadable RULESET read is not 'classic is enough' -------
+def _rules_500(args):
+    if _prot(args):
+        return CLASSIC
+    if _rules(args):
+        raise guard.GhError(500, "server error (HTTP 500)")
+    return "{}"
+
+
+stub(_rules_500)
+got = guard.read_protection("acme", "repo", "main")
+record(got.error is not None,
+       "unreadable ruleset read fails closed even when classic succeeded",
+       f"error={got.error}")
+
+# --- strict: absent required_status_checks is None ('nothing to assert') ------
+def _no_checks_object(args):
+    if _prot(args):
+        payload = json.loads(CLASSIC)
+        payload.pop("required_status_checks")
+        return json.dumps(payload)
+    if _rules(args):
+        return ""
+    return "{}"
+
+
+stub(_no_checks_object)
+got = guard.read_protection("acme", "repo", "main")
+record(got.strict is None,
+       "absent required_status_checks means strict=None, not strict=False",
+       f"strict={got.strict!r}")
+
+# --- prod role resolves from the BRANCH LIST, never by probing ----------------
+# GET branches/master follows rename redirects and returns 200 for a branch that
+# does not exist; on 2026-08-10 that made all 16 train repos report a `master`.
+record(guard.resolve_role_branch("prod", {"develop", "main"}) == "main",
+       "prod resolves to main when main is in the branch list", "main")
+record(guard.resolve_role_branch("prod", {"develop", "master"}) == "master",
+       "prod resolves to master for a genuine master-prod repo", "master")
+record(guard.resolve_role_branch("prod", {"develop", "main", "master"}) == "main",
+       "main wins when a repo carries both (mid-rename)", "main")
+record(guard.resolve_role_branch("prod", {"develop"}) is None,
+       "no prod branch resolves to None, so the policy cell reports it", "None")
+record(guard.resolve_role_branch("staging", {"develop"}) is None,
+       "absent staging resolves to None rather than falling back", "None")
+
+
+# --- the `exempt` staleness probe must not let a failed read decide -----------
+# Bugbot, .github#196. Gating the staleness check on `error is None` first meant
+# an unreadable probe silently read as "not stale" - a failed read deciding a
+# negative, in the change that documents that exact defect class.
+
+POLICY = {role: _policy() for role in guard.PROTECTION_ROLES}
+POLICY["prod"]["enforce_admins"] = True
+
+
+def _exempt_entry():
+    return {"protection": {
+        "develop": ("exempt", "documented reason", {}),
+        "staging": ("exempt", "documented reason", {}),
+        "prod": ("exempt", "documented reason", {}),
+    }}
+
+
+# both reads fail -> UNREADABLE, never "the exemption holds"
+def _all_500(args):
+    if _prot(args) or _rules(args):
+        raise guard.GhError(500, "server error (HTTP 500)")
+    return "{}"
+
+
+stub(_all_500)
+f, u = [], []
+guard.evaluate_protection("repo", _exempt_entry(), POLICY, {"develop", "main"}, "acme", f, u)
+record(len(u) >= 1 and not f,
+       "exempt + unreadable probe records UNREADABLE, not a silent pass",
+       f"findings={len(f)} unreadable={u[:1]}")
+
+# classic read SUCCEEDS, ruleset read fails -> we already know enough to call the
+# exemption stale, and suppressing that on the ruleset error is the worse half.
+def _classic_ok_rules_500(args):
+    if _prot(args):
+        return CLASSIC
+    if _rules(args):
+        raise guard.GhError(500, "server error (HTTP 500)")
+    return "{}"
+
+
+stub(_classic_ok_rules_500)
+f, u = [], []
+guard.evaluate_protection("repo", _exempt_entry(), POLICY, {"develop", "main"}, "acme", f, u)
+record(any("exemption is stale" in x for x in f),
+       "exempt + classic-present-but-ruleset-unreadable STILL reports the stale exemption",
+       f"findings={f[:1]}")
+
+# a genuinely unprotected branch leaves the exemption intact and says nothing
+def _unprotected(args):
+    if _prot(args):
+        raise guard.GhError(404, "Branch not protected (HTTP 404)")
+    if _rules(args):
+        return ""
+    return "{}"
+
+
+stub(_unprotected)
+f, u = [], []
+guard.evaluate_protection("repo", _exempt_entry(), POLICY, {"develop", "main"}, "acme", f, u)
+record(not f and not u,
+       "a genuinely unprotected branch leaves its exemption intact",
+       f"findings={f} unreadable={u}")
+
+
+# --- the ruleset read must be PAGINATED --------------------------------------
+# `rules/branches/{b}` defaults to 30 per page. A rule dropped off page 2 is a
+# partial view of a branch's protection that this guard would then report as a
+# verdict - the exact failure mode read_protection()'s header describes.
+# Asserted on the CALL, because pagination itself is gh's job and is stubbed out
+# here. (Bugbot, .github#196.)
+SEEN_ARGS = []
+
+
+def _capture(args):
+    SEEN_ARGS.append(list(args))
+    if _prot(args):
+        raise guard.GhError(404, "Branch not protected (HTTP 404)")
+    if _rules(args):
+        return ""
+    return "{}"
+
+
+stub(_capture)
+guard.read_protection("acme", "repo", "main")
+rules_calls = [a for a in SEEN_ARGS if _rules(a)]
+record(len(rules_calls) == 1 and "--paginate" in rules_calls[0],
+       "the ruleset read passes --paginate, so page 2 is never silently dropped",
+       f"call={rules_calls[0] if rules_calls else None}")
+
+# And the NDJSON reassembly must actually reassemble multiple elements.
+def _two_pages(args):
+    if _prot(args):
+        raise guard.GhError(404, "Branch not protected (HTTP 404)")
+    if _rules(args):
+        # what gh emits for a 2-page result with --jq '.[]': one object per line
+        return ndjson({"type": "pull_request", "ruleset_source": "p1",
+                       "parameters": {"required_approving_review_count": 1}},
+                      {"type": "deletion", "ruleset_source": "p2",
+                       "parameters": {}})
+    return "{}"
+
+
+stub(_two_pages)
+got = guard.read_protection("acme", "repo", "main")
+record(got.block_deletions and got.min_reviews == 1 and got.error is None,
+       "elements streamed across pages are all reassembled, not just the first",
+       f"del={got.block_deletions} reviews={got.min_reviews} rulesets={got.rulesets}")
+
+
+# --- protection unreadability must not be able to abort the whole audit -------
+# `evaluated <= 0` calls die(), which discards the report. A fleet-wide
+# protection outage would otherwise make every repo look unreadable and throw
+# away real, already-collected caller findings before anything was written.
+# Fail-closed must mean RED, not "results destroyed". (Bugbot, .github#196.)
+#
+# Asserted structurally: evaluate_protection writes ONLY into the list it is
+# handed, so main() can keep it out of the `evaluated` computation.
+stub(_all_500)
+caller_unreadable, prot_unreadable = [], []
+guard.evaluate_protection(
+    "repo", {"protection": {r: ("required", "", {}) for r in guard.PROTECTION_ROLES}},
+    POLICY, {"develop", "staging", "main"}, "acme", [], prot_unreadable,
+)
+record(len(prot_unreadable) == 3 and caller_unreadable == [],
+       "protection failures land in their OWN list, never the one driving die()",
+       f"protection={len(prot_unreadable)} caller={len(caller_unreadable)}")
+
+# And they must still be loud - isolating them must not make them silent.
+record(all("unreadable" in x for x in prot_unreadable),
+       "isolated protection failures are still recorded as UNREADABLE",
+       f"{prot_unreadable[:1]}")
 
 failed = [row for row in RESULTS if not row[0]]
 print(f"\npass={len(RESULTS) - len(failed)} fail={len(failed)}")
