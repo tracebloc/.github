@@ -236,20 +236,35 @@ try:
     # honest and permanent. Treating file_on_base alone as expect_file made the
     # read retry five times and fail closed, so the sha-less create could never
     # run and that repo was stuck forever (Bugbot .github#197).
+    #
+    # ASSERTS THE READ COUNT, not the end state. A first version of this check
+    # asserted only "the file got created", and passed with the bug still in
+    # place: the retrying read swallowed the scripted PUT response, read its `{}`
+    # body as the file, and the run limped to the same end state by a completely
+    # different path. It proved nothing in either direction. The count is the
+    # thing that actually differs -- 2 reads when the 404 is believed, 5 when it
+    # is not.
     stub = GhScript([
         (0, "sha_of_base", ""),                       # resolve base head
         (1, "", "gh: Reference already exists (HTTP 422)"),   # branch REUSED, not fresh
-        NOT_FOUND, NOT_FOUND,                          # CLAUDE.md genuinely absent on it
+        NOT_FOUND, NOT_FOUND,                          # absence, confirmed by one re-read
         (0, "{}", ""),                                 # sha-less PUT creates it
         (0, "[]", ""),                                 # pr list
         (0, "https://x/pull/1", ""),                   # pr create
     ])
     sync.gh = stub
-    err = sync.remediate("o", "r", "develop", "content", 1602, file_on_base=True)
-    puts = [c for c in stub.calls if any("PUT" == a for a in c)]
-    record(err is None and puts and not any("sha=" in a for a in puts[0]),
-           "reused branch: a genuine 404 creates the file instead of failing closed",
-           f"err={err} put_carried_sha={any('sha=' in a for a in (puts[0] if puts else []))}")
+    try:
+        err = sync.remediate("o", "r", "develop", "content", 1602, file_on_base=True)
+        reads = [c for c in stub.calls if any("contents/CLAUDE.md?ref=" in str(a) for a in c)]
+        record(err is None and len(reads) == 2,
+               "reused branch: a genuine 404 is absence after ONE re-read, not a retry storm",
+               f"err={err} reads={len(reads)} (5 would mean it wrongly expected the file)")
+    except AssertionError as exc:
+        # The stub ran out, which here means the read kept retrying past the
+        # absence confirmation -- the bug itself.
+        record(False,
+               "reused branch: a genuine 404 is absence after ONE re-read, not a retry storm",
+               f"read retried past the absence confirmation ({exc})")
 finally:
     sync.gh, sync.time.sleep = _real_gh, _real_sleep
 
