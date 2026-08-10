@@ -196,6 +196,26 @@ jobs:
             exit 0
           fi
 
+          # COMPARE FROM THE DECLARED VERSION'S TAG, NOT THE LATEST ONE.
+          # version_preflight refuses on "v$DECLARED already exists AND the delta
+          # touches published files" -- it keys on the DECLARED version, so that
+          # is the tag whose delta decides whether the train stalls. The two are
+          # the same tag in the common case (declared == latest), and differ
+          # exactly when the file has fallen BEHIND a release: reverted, or a
+          # stale branch. Measuring from v$LATEST there asks a question the train
+          # never asks, and can answer "nothing publishable changed" about a
+          # window the train is not looking at.
+          CMP_BASE="v$DECLARED"
+          if ! gh api "repos/$REPO/git/ref/tags/v$DECLARED" >/dev/null 2>&1; then
+            # The declared version is not itself tagged. It is <= LATEST and not
+            # released, so the newest thing that IS released is the honest
+            # baseline for "what has changed since we last shipped".
+            CMP_BASE="v$LATEST"
+            echo "v$DECLARED is not tagged; comparing from v$LATEST instead"
+          fi
+          echo "measuring the publishable delta from $CMP_BASE"
+
+
           # Did anything PUBLISHABLE change since that release? If only docs or
           # CI moved, the train promotes the content untagged and no bump is
           # owed -- the same publishable_delta question the train asks, so this
@@ -205,14 +225,14 @@ jobs:
           # Fetched ONCE and kept, because three different questions are answered
           # from the same response and re-fetching could see three different
           # states.
-          if ! CMP=$(gh api "repos/$REPO/compare/v$LATEST...$BASE"); then
-            echo "::error::could not compare v$LATEST...$BASE - refusing to call the delta unpublishable from a failed read"
+          if ! CMP=$(gh api "repos/$REPO/compare/$CMP_BASE...$BASE"); then
+            echo "::error::could not compare $CMP_BASE...$BASE - refusing to call the delta unpublishable from a failed read"
             exit 1
           fi
           AHEAD=$(printf '%s' "$CMP" | jq -r '.ahead_by // empty')
           CMP_STATUS=$(printf '%s' "$CMP" | jq -r '.status // empty')
           if [ -z "$AHEAD" ] || [ -z "$CMP_STATUS" ]; then
-            echo "::error::the compare v$LATEST...$BASE carried no status/ahead_by - refusing to reason about a response this shape"
+            echo "::error::the compare $CMP_BASE...$BASE carried no status/ahead_by - refusing to reason about a response this shape"
             exit 1
           fi
 
@@ -228,11 +248,11 @@ jobs:
           # bump that is owed. `ahead_by` separates them, and `files` being NULL
           # (absent) rather than [] confirms it.
           if [ "$AHEAD" = "0" ]; then
-            echo "$BASE is '$CMP_STATUS' relative to v$LATEST (ahead_by=0) - nothing has landed since the release. Nothing to do."
+            echo "$BASE is '$CMP_STATUS' relative to $CMP_BASE (ahead_by=0) - nothing has landed since the release. Nothing to do."
             exit 0
           fi
           if [ "$(printf '%s' "$CMP" | jq -r 'if has("files") and (.files != null) then "present" else "absent" end')" = "absent" ]; then
-            echo "::error::the compare v$LATEST...$BASE is $AHEAD commits ahead but carries NO files array. GitHub omits it on very large compares, so nothing was scanned and no conclusion about published paths is available."
+            echo "::error::the compare $CMP_BASE...$BASE is $AHEAD commits ahead but carries NO files array. GitHub omits it on very large compares, so nothing was scanned and no conclusion about published paths is available."
             exit 1
           fi
           # One LINE per file, tab-separated, NOT one line per path: the 300-cap
@@ -244,7 +264,7 @@ jobs:
           # commits that change nothing (empty or merge-only). Nothing published
           # can have changed, so this is a clean "nothing to do".
           if [ -z "$FILES" ]; then
-            echo "$BASE is $AHEAD commits ahead of v$LATEST but those commits change no files. Nothing to do."
+            echo "$BASE is $AHEAD commits ahead of $CMP_BASE but those commits change no files. Nothing to do."
             exit 0
           fi
           FILE_COUNT=0
@@ -278,13 +298,13 @@ jobs:
             # MATCH is sound on a truncated list, so a large compare that does
             # match still gets a precise answer instead of a refusal.
             if [ "$FILE_COUNT" -ge 300 ]; then
-              echo "::error::the compare v$LATEST...$BASE returned $FILE_COUNT files, the API's page cap, with no publish-path match. The file array is capped at 300 and does not paginate, so 'nothing published changed' cannot be asserted from it - refusing rather than skipping the bump."
+              echo "::error::the compare $CMP_BASE...$BASE returned $FILE_COUNT files, the API's page cap, with no publish-path match. The file array is capped at 300 and does not paginate, so 'nothing published changed' cannot be asserted from it - refusing rather than skipping the bump."
               exit 1
             fi
-            echo "Nothing under [$PUBLISH_PATHS] changed since v$LATEST ($FILE_COUNT files compared) - the train promotes untagged. Nothing to do."
+            echo "Nothing under [$PUBLISH_PATHS] changed since $CMP_BASE ($FILE_COUNT files compared) - the train promotes untagged. Nothing to do."
             exit 0
           fi
-          echo "publishable change since v$LATEST: $MATCHED ($FILE_COUNT files compared)"
+          echo "publishable change since $CMP_BASE: $MATCHED ($FILE_COUNT files compared)"
 
           # `if ! var=$(...)` like the sibling reads above, not a bare assignment.
           # Under set -e a bare one still fails the step -- so this is about the
