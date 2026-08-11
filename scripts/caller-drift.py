@@ -95,6 +95,14 @@ POLICY_KEYS = {
     "block_deletions",                 # bool
     "require_conversation_resolution",  # bool
     "strict",                          # bool | null: required_status_checks.strict
+    # list[str]: contexts that must be REQUIRED on this role, merged across both
+    # protection systems. A caller being present only means the check RUNS; this
+    # is what makes it BLOCK. Until backend#1681 the whole
+    # required_status_checks object was opened and everything but `strict` thrown
+    # away, so `.github/staging` required exactly one context while the inventory
+    # reported it conformant -- and two promotion PRs merged with the contract
+    # audit red (.github#203, #205).
+    "required_checks",
 }
 # Which policy keys a per-repo `divergent` entry may override. Deliberately NOT
 # every key: a repo may document a weaker review count or admin posture, but it
@@ -102,6 +110,10 @@ POLICY_KEYS = {
 # word and shows up differently in the report.
 OVERRIDABLE = {
     "min_reviews", "enforce_admins", "require_conversation_resolution", "strict",
+    # A repo may require FEWER contexts than the fleet baseline, but only with a
+    # written reason naming the narrower set -- so the gap is a sentence in this
+    # file rather than something a reader has to diff two API calls to discover.
+    "required_checks",
 }
 
 WORKFLOW_PATH = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
@@ -259,6 +271,29 @@ def _policy_value(key: str, value, where: str, allow_null: bool) -> None:
             )
         if not isinstance(value, bool):
             die(f"{where}.{key}: must be true, false, or null (not asserted).")
+        return
+    if key == "required_checks":
+        # A LIST, not a bool, so it needs its own shape rules. `[]` is legal and
+        # deliberately so: `docs` requires no checks on staging/prod by a written
+        # 2026-06-04 exemption, and saying that out loud in a `divergent` cell is
+        # the point of this file. What is NOT legal is a non-list, a non-string
+        # entry, or a blank/duplicate context -- each of those would silently
+        # assert less than it appears to.
+        if not isinstance(value, list):
+            die(
+                f"{where}.required_checks: must be a list of status-check "
+                "contexts (use [] to assert none, with a written reason)."
+            )
+        seen = set()
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                die(
+                    f"{where}.required_checks: every entry must be a non-empty "
+                    f"context string; got {item!r}."
+                )
+            if item in seen:
+                die(f"{where}.required_checks: duplicate context {item!r}.")
+            seen.add(item)
         return
     die(f"{where}.{key}: unknown policy key.")
 
@@ -502,6 +537,65 @@ def load_source_copies(source_dir: str, copies: "list[str]") -> "dict[str, str]"
     return shas
 
 
+def check_source_reusables(source_dir: str, listed: "list[str]") -> None:
+    """Every `workflow_call` workflow in the source repo must be in the inventory.
+
+    THE GUARD ENUMERATED THE INVENTORY, NEVER THE SOURCE. `reusables` is a
+    hand-written list and the audit iterates it, so a reusable added to
+    tracebloc/.github but not added to that list is compared against no repo and
+    reported by nothing -- the one direction of drift this file could not see.
+
+    `version-bump-pr.yml` is how that surfaced (backend#1681): shipped, never
+    listed, zero callers org-wide, and requiring a `pr-token` secret no repo
+    supplies. It is Layer 2 of backend#1563, meant to stop the version staleness
+    that stalled tracebloc-py-package's prod leg -- and nothing said it was never
+    wired up.
+
+    Deliberately a die(), not a finding: the inventory is the contract, and a
+    contract that does not mention half the artifacts it governs cannot be
+    audited against. Adding the row is the fix; `exempt` with a written reason is
+    how a parked reusable stays parked (see wip-limit-check).
+    """
+    workflows = os.path.join(source_dir, ".github", "workflows")
+    if not os.path.isdir(workflows):
+        die(
+            f"source workflow directory {workflows} is missing. Refusing to "
+            "report that every reusable is tracked without having looked."
+        )
+    found = []
+    for name in sorted(os.listdir(workflows)):
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        path = os.path.join(workflows, name)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                doc = yaml.safe_load(handle)
+        except (OSError, yaml.YAMLError) as exc:
+            die(f"{path} is not readable/parseable ({exc}); cannot tell if it is a reusable.")
+        # `on:` parses as the boolean True in YAML 1.1, which is why this reads
+        # both keys rather than the obvious one.
+        triggers = doc.get("on") if isinstance(doc, dict) else None
+        if triggers is None and isinstance(doc, dict):
+            triggers = doc.get(True)
+        if isinstance(triggers, dict) and "workflow_call" in triggers:
+            found.append(name)
+    untracked = sorted(set(found) - set(listed))
+    if untracked:
+        die(
+            f"reusable workflow(s) {untracked} exist in {workflows} but are absent "
+            "from the inventory's `reusables` list, so they are checked against no "
+            "repo and reported by nothing. Add a row for every repo - `exempt` with "
+            "a written reason is how a parked reusable stays parked."
+        )
+    phantom = sorted(set(listed) - set(found))
+    if phantom:
+        die(
+            f"inventory lists reusable(s) {phantom} that are not `workflow_call` "
+            f"workflows in {workflows}. A renamed or deleted reusable leaves every "
+            "repo's row asserting something that cannot exist."
+        )
+
+
 # ------------------------------------------------------------------- discovery
 
 
@@ -731,6 +825,10 @@ class BranchProtection:
         self.block_deletions = False
         self.conversation_resolution = False
         self.strict: "bool | None" = None
+        # Contexts that BLOCK a merge on this branch, unioned across both
+        # systems. A set, because the same context can be required by classic
+        # protection and by a ruleset and it blocks exactly once either way.
+        self.required_checks: "set[str]" = set()
         self.rulesets: "list[str]" = []
         self.error: "str | None" = None
 
@@ -770,6 +868,19 @@ def read_protection(org: str, name: str, branch: str) -> BranchProtection:
         # `strict` is only meaningful when a required-status-checks object exists.
         # Absent object -> None ("nothing to assert"), NOT False.
         out.strict = checks.get("strict") if isinstance(checks, dict) else None
+        if isinstance(checks, dict):
+            # Two spellings of the same list. `checks` is the current shape
+            # ({context, app_id}); `contexts` is the legacy flat list still
+            # returned for older configurations. Read both -- taking only the
+            # modern one would report a branch's required set as EMPTY, which is
+            # the fail-open shape this guard exists to prevent.
+            for item in checks.get("checks") or []:
+                ctx = item.get("context") if isinstance(item, dict) else None
+                if isinstance(ctx, str) and ctx:
+                    out.required_checks.add(ctx)
+            for ctx in checks.get("contexts") or []:
+                if isinstance(ctx, str) and ctx:
+                    out.required_checks.add(ctx)
 
     # --- rulesets -----------------------------------------------------------
     # `rules/branches/{b}` resolves every ruleset that targets this branch,
@@ -805,6 +916,14 @@ def read_protection(org: str, name: str, branch: str) -> BranchProtection:
         elif rtype == "required_status_checks":
             if params.get("strict_required_status_checks_policy"):
                 out.strict = True
+            # A ruleset can require checks too, and those block just as hard as
+            # the classic ones. No repo uses this today (measured 2026-08-11:
+            # all 28 active rules are `pull_request`), but reading only classic
+            # would silently under-report the moment one does.
+            for item in params.get("required_status_checks") or []:
+                ctx = item.get("context") if isinstance(item, dict) else None
+                if isinstance(ctx, str) and ctx:
+                    out.required_checks.add(ctx)
 
     return out
 
@@ -926,6 +1045,17 @@ def evaluate_protection(
                     f"required_status_checks.strict={got.strict}, policy wants "
                     f"{want['strict']} (backend#1276 decision 2)."
                 )
+        # SUBSET, not equality: repos legitimately require their own tests on top
+        # of the fleet baseline (backend's Django suite, cli's golangci-lint), and
+        # demanding an exact match would turn every one of those into drift. The
+        # baseline is a floor.
+        missing = [c for c in want["required_checks"] if c not in got.required_checks]
+        if missing:
+            fail(
+                f"does not REQUIRE {', '.join(missing)} - the check may run and go "
+                f"red, but nothing stops the merge. Required here: "
+                f"{', '.join(sorted(got.required_checks)) or '(none)'}."
+            )
 
 
 # ------------------------------------------------------------------ evaluation
@@ -948,6 +1078,7 @@ def main() -> int:
     source_repo = inventory["source_repo"]
     reusables = list(inventory["reusables"])
     copies = list(inventory["copies"])
+    check_source_reusables(args.source_dir, reusables)
     source_shas = load_source_copies(args.source_dir, copies)
 
     active = list_active_repos(org)

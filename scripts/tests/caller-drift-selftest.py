@@ -50,6 +50,7 @@ def _policy(**over):
         "block_deletions": True,
         "require_conversation_resolution": True,
         "strict": False,
+        "required_checks": ["ci / build"],
     }
     base.update(over)
     return base
@@ -724,6 +725,180 @@ record(len(prot_unreadable) == 3 and caller_unreadable == [],
 record(all("unreadable" in x for x in prot_unreadable),
        "isolated protection failures are still recorded as UNREADABLE",
        f"{prot_unreadable[:1]}")
+
+
+# --- required_checks (backend#1681) -------------------------------------------
+#
+# The property exists because a caller being PRESENT only means the check runs.
+# These assert the thing that was previously unassertable: that it BLOCKS.
+
+def _classic_with(contexts, legacy=False):
+    """Classic protection whose required-status-checks carry `contexts`."""
+    rsc = {"strict": False}
+    if legacy:
+        rsc["contexts"] = list(contexts)          # older flat spelling
+    else:
+        rsc["checks"] = [{"context": c, "app_id": None} for c in contexts]
+    return json.dumps({
+        "required_pull_request_reviews": {"required_approving_review_count": 1},
+        "enforce_admins": {"enabled": True},
+        "allow_force_pushes": {"enabled": False},
+        "allow_deletions": {"enabled": False},
+        "required_conversation_resolution": {"enabled": True},
+        "required_status_checks": rsc,
+    })
+
+
+def _required_entry():
+    return {"protection": {r: ("required", "", {}) for r in guard.PROTECTION_ROLES}}
+
+
+ALL_BRANCHES = {"develop", "staging", "main"}
+
+
+def _stub_classic(contexts, legacy=False, rule_contexts=None):
+    body = _classic_with(contexts, legacy)
+
+    def handler(args):
+        if _prot(args):
+            return body
+        if _rules(args):
+            if rule_contexts is None:
+                return ""
+            return ndjson({
+                "type": "required_status_checks",
+                "ruleset_source": "some-ruleset",
+                "parameters": {"required_status_checks":
+                               [{"context": c} for c in rule_contexts]},
+            })
+        return "{}"
+
+    stub(handler)
+
+
+# POSITIVE CONTROL: the baseline is met -> silence.
+_stub_classic(["ci / build"])
+f, u = [], []
+guard.evaluate_protection("repo", _required_entry(), POLICY, ALL_BRANCHES, "acme", f, u)
+record(not f and not u, "required_checks: baseline met reports nothing", f"findings={f}")
+
+# THE POINT: the context is absent -> a finding on every role, naming it.
+_stub_classic([])
+f, u = [], []
+guard.evaluate_protection("repo", _required_entry(), POLICY, ALL_BRANCHES, "acme", f, u)
+record(len(f) == 3 and all("does not REQUIRE ci / build" in x for x in f),
+       "required_checks: a check that runs but cannot block IS a finding",
+       f"findings={len(f)} :: {f[:1]}")
+
+# SUBSET, not equality: repo-specific suites on top of the floor are not drift.
+_stub_classic(["ci / build", "Django tests", "golangci-lint"])
+f, u = [], []
+guard.evaluate_protection("repo", _required_entry(), POLICY, ALL_BRANCHES, "acme", f, u)
+record(not f, "required_checks: extra contexts beyond the baseline are not drift",
+       f"findings={f}")
+
+# The legacy `contexts` spelling is read too -- reading only `checks` would
+# report an EMPTY required set for those repos, i.e. fail open.
+_stub_classic(["ci / build"], legacy=True)
+f, u = [], []
+guard.evaluate_protection("repo", _required_entry(), POLICY, ALL_BRANCHES, "acme", f, u)
+record(not f, "required_checks: the legacy `contexts` spelling still counts", f"findings={f}")
+
+# Union across BOTH systems: classic carries none, a ruleset carries it.
+_stub_classic([], rule_contexts=["ci / build"])
+f, u = [], []
+guard.evaluate_protection("repo", _required_entry(), POLICY, ALL_BRANCHES, "acme", f, u)
+record(not f, "required_checks: a ruleset-supplied context satisfies the policy",
+       f"findings={f}")
+
+# A documented divergence may narrow the set -- and is then held to the narrower
+# set, not excused entirely.
+_stub_classic(["gate / gate"])
+narrowed = {"protection": {r: ("divergent", "public repo, tracked in backend#1681",
+                              {"required_checks": ["gate / gate"]})
+                           for r in guard.PROTECTION_ROLES}}
+f, u = [], []
+guard.evaluate_protection("repo", narrowed, POLICY, ALL_BRANCHES, "acme", f, u)
+record(not f, "required_checks: a divergent cell is judged against ITS list", f"findings={f}")
+
+_stub_classic([])
+f, u = [], []
+guard.evaluate_protection("repo", narrowed, POLICY, ALL_BRANCHES, "acme", f, u)
+record(len(f) == 3 and all("gate / gate" in x for x in f),
+       "required_checks: a divergent cell still fails when its own list is unmet",
+       f"findings={len(f)} :: {f[:1]}")
+
+# Schema: the shapes that would silently assert less than they appear to.
+expect_schema_failure("required_checks as a bare string rejected",
+                      lambda d: d["protection_policy"]["develop"].update({"required_checks": "ci / build"}))
+expect_schema_failure("required_checks with a non-string entry rejected",
+                      lambda d: d["protection_policy"]["develop"].update({"required_checks": [1]}))
+expect_schema_failure("required_checks with a blank context rejected",
+                      lambda d: d["protection_policy"]["develop"].update({"required_checks": ["  "]}))
+expect_schema_failure("required_checks with a duplicate context rejected",
+                      lambda d: d["protection_policy"]["develop"].update(
+                          {"required_checks": ["ci / build", "ci / build"]}))
+
+
+# --- source-reusable enumeration (backend#1681) -------------------------------
+#
+# The guard iterated the inventory's `reusables` list and never the source
+# directory, so a reusable that shipped without being listed was compared against
+# no repo and reported by nothing. version-bump-pr.yml lived in that blind spot.
+
+def _src_tree(names_and_bodies):
+    """A throwaway source dir with .github/workflows/<name> files."""
+    root = tempfile.mkdtemp()
+    wf = os.path.join(root, ".github", "workflows")
+    os.makedirs(wf)
+    for name, body in names_and_bodies.items():
+        with open(os.path.join(wf, name), "w", encoding="utf-8") as fh:
+            fh.write(body)
+    return root
+
+
+REUSABLE = "on:\n  workflow_call:\n    inputs: {}\njobs: {}\n"
+NOT_REUSABLE = "on:\n  push:\n    branches: [main]\njobs: {}\n"
+
+
+def _expect_exit(name, fn, detail_ok="SystemExit(2)"):
+    try:
+        fn()
+    except SystemExit as exc:
+        record(exc.code == 2, name, f"SystemExit({exc.code})")
+    else:
+        record(False, name, "ACCEPTED what should have been refused")
+
+
+root = _src_tree({"a.yml": REUSABLE, "b.yml": NOT_REUSABLE})
+try:
+    guard.check_source_reusables(root, ["a.yml"])
+    record(True, "source reusables: a fully-tracked source dir passes", "no exit")
+except SystemExit as exc:
+    record(False, "source reusables: a fully-tracked source dir passes", f"SystemExit({exc.code})")
+
+# THE POINT: shipped but unlisted.
+root = _src_tree({"a.yml": REUSABLE, "sneaky.yml": REUSABLE})
+_expect_exit("source reusables: an UNLISTED reusable is refused",
+             lambda: guard.check_source_reusables(root, ["a.yml"]))
+
+# The inverse: listed but gone (a rename/delete leaves every repo asserting a ghost).
+root = _src_tree({"a.yml": REUSABLE})
+_expect_exit("source reusables: a listed-but-absent reusable is refused",
+             lambda: guard.check_source_reusables(root, ["a.yml", "ghost.yml"]))
+
+# A non-reusable workflow must NOT be demanded in the list.
+root = _src_tree({"a.yml": REUSABLE, "b.yml": NOT_REUSABLE})
+try:
+    guard.check_source_reusables(root, ["a.yml"])
+    record(True, "source reusables: a push-triggered workflow is not a reusable", "no exit")
+except SystemExit as exc:
+    record(False, "source reusables: a push-triggered workflow is not a reusable",
+           f"SystemExit({exc.code})")
+
+# Missing directory is a malfunction, never "nothing to check".
+_expect_exit("source reusables: a missing workflows dir is refused, not passed",
+             lambda: guard.check_source_reusables(tempfile.mkdtemp(), ["a.yml"]))
 
 failed = [row for row in RESULTS if not row[0]]
 print(f"\npass={len(RESULTS) - len(failed)} fail={len(failed)}")
