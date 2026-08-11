@@ -60,11 +60,27 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           # Changing any of these changes what the org's repos are contractually
           # required to have, so the audit must have passed on this exact head.
+          #
+          # THIS FILE IS IN ITS OWN LIST, and that is not decoration. Without it,
+          # a PR touching ONLY conformance-gate.yml took the "does not touch the
+          # repo contract" branch below, printed that line and exited 0 -- so the
+          # gate could be defanged (drop repo-inventory.yml from GUARDED, or
+          # replace the poll with `exit 0`) on a green check, and a FOLLOW-UP PR
+          # then edited the contract against a gate that no longer guarded it.
+          # Two PRs, both green, no audit. (backend#1681.)
+          #
+          # What this does NOT fix, stated so nobody reads more into it than is
+          # there: `pull_request` workflows run from the PR's merge ref, so the
+          # gate evaluating a PR is that PR's version of the gate, and
+          # caller-drift.py is likewise supplied by the head. The integrity of
+          # this family still rests on the required human review. This closes the
+          # silent path; it does not make the gate self-hosting.
           GUARDED: |
             repo-inventory.yml
             scripts/caller-drift.py
             scripts/tests/caller-drift-selftest.py
             .github/workflows/caller-drift.yml
+            .github/workflows/conformance-gate.yml
           AUDIT_WORKFLOW: caller-drift.yml
           # The budget MUST exceed the worst case of what it waits for, or
           # fail-closed degrades into fail-annoying and people learn to bypass

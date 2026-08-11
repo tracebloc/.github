@@ -632,6 +632,65 @@ def load_source_copies(source_dir: str, copies: "list[str]") -> "dict[str, str]"
     return shas
 
 
+def check_source_reusables(source_dir: str, listed: "list[str]") -> None:
+    """Every `workflow_call` workflow in the source repo must be in the inventory.
+
+    THE GUARD ENUMERATED THE INVENTORY, NEVER THE SOURCE. `reusables` is a
+    hand-written list and the audit iterates it, so a reusable added to
+    tracebloc/.github but not added to that list is compared against no repo and
+    reported by nothing -- the one direction of drift this file could not see.
+
+    `version-bump-pr.yml` is how that surfaced (backend#1681): shipped, never
+    listed, zero callers org-wide, and requiring a `pr-token` secret no repo
+    supplies. It is Layer 2 of backend#1563, meant to stop the version staleness
+    that stalled tracebloc-py-package's prod leg -- and nothing said it was never
+    wired up.
+
+    Deliberately a die(), not a finding: the inventory is the contract, and a
+    contract that does not mention half the artifacts it governs cannot be
+    audited against. Adding the row is the fix; `exempt` with a written reason is
+    how a parked reusable stays parked (see wip-limit-check).
+    """
+    workflows = os.path.join(source_dir, ".github", "workflows")
+    if not os.path.isdir(workflows):
+        die(
+            f"source workflow directory {workflows} is missing. Refusing to "
+            "report that every reusable is tracked without having looked."
+        )
+    found = []
+    for name in sorted(os.listdir(workflows)):
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        path = os.path.join(workflows, name)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                doc = yaml.safe_load(handle)
+        except (OSError, yaml.YAMLError) as exc:
+            die(f"{path} is not readable/parseable ({exc}); cannot tell if it is a reusable.")
+        # `on:` parses as the boolean True in YAML 1.1, which is why this reads
+        # both keys rather than the obvious one.
+        triggers = doc.get("on") if isinstance(doc, dict) else None
+        if triggers is None and isinstance(doc, dict):
+            triggers = doc.get(True)
+        if isinstance(triggers, dict) and "workflow_call" in triggers:
+            found.append(name)
+    untracked = sorted(set(found) - set(listed))
+    if untracked:
+        die(
+            f"reusable workflow(s) {untracked} exist in {workflows} but are absent "
+            "from the inventory's `reusables` list, so they are checked against no "
+            "repo and reported by nothing. Add a row for every repo - `exempt` with "
+            "a written reason is how a parked reusable stays parked."
+        )
+    phantom = sorted(set(listed) - set(found))
+    if phantom:
+        die(
+            f"inventory lists reusable(s) {phantom} that are not `workflow_call` "
+            f"workflows in {workflows}. A renamed or deleted reusable leaves every "
+            "repo's row asserting something that cannot exist."
+        )
+
+
 # ------------------------------------------------------------------- discovery
 
 
@@ -1291,6 +1350,7 @@ def main() -> int:
     source_repo = inventory["source_repo"]
     reusables = list(inventory["reusables"])
     copies = list(inventory["copies"])
+    check_source_reusables(args.source_dir, reusables)
     source_shas = load_source_copies(args.source_dir, copies)
 
     active = list_active_repos(org)
