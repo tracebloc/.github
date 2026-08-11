@@ -69,6 +69,21 @@ MINIMAL = {
         "staging": _policy(),
         "prod": _policy(enforce_admins=True),
     },
+    "ruleset_policy": {
+        "promotion_merge_commit_only": {
+            "target": "branch",
+            "require_rule_types": ["pull_request"],
+            "allowed_merge_methods": ["merge"],
+            "must_cover_roles": ["staging", "prod"],
+            "bypass_actors": [],
+        },
+        "tag_trust_root": {
+            "target": "tag",
+            "require_rule_types": ["creation", "update", "deletion"],
+            "include_refs": ["refs/tags/v*"],
+            "bypass_actors": ["OrganizationAdmin"],
+        },
+    },
     "repos": {
         "hub": {
             "visibility": "public",
@@ -80,6 +95,10 @@ MINIMAL = {
             },
             "callers": {"a.yml": "required"},
             "copies": {"c.yml": "required"},
+            "rulesets": {
+                "promotion_merge_commit_only": "required",
+                "tag_trust_root": {"exempt": "publishes no v* tags"},
+            },
         },
     },
 }
@@ -838,6 +857,153 @@ expect_schema_failure("required_checks with a blank context rejected",
 expect_schema_failure("required_checks with a duplicate context rejected",
                       lambda d: d["protection_policy"]["develop"].update(
                           {"required_checks": ["ci / build", "ci / build"]}))
+
+
+# --- rulesets (backend#1681) ---------------------------------------------------
+#
+# The layer nothing audited. These assert that a MISSING ruleset, a WEAKENED one,
+# and an UNEXPECTED bypass actor are each findings -- the three shapes that were
+# live on the fleet when this was written.
+
+RPOLICY = {
+    "promotion_merge_commit_only": {
+        "target": "branch", "require_rule_types": ["pull_request"],
+        "allowed_merge_methods": ["merge"],
+        "must_cover_roles": ["staging", "prod"], "bypass_actors": [],
+    },
+    "tag_trust_root": {
+        "target": "tag",
+        "require_rule_types": ["creation", "update", "deletion"],
+        "include_refs": ["refs/tags/v*"],
+        "bypass_actors": ["OrganizationAdmin", "Team:18304481"],
+    },
+}
+
+
+def _rs_entry(promotion="required", tag=("exempt", "no v* tags")):
+    return {"rulesets": {
+        "promotion_merge_commit_only": (promotion, "") if isinstance(promotion, str)
+        else promotion,
+        "tag_trust_root": tag if isinstance(tag, tuple) else (tag, ""),
+    }}
+
+
+PROMO_OK = {"id": 1, "name": "promotion-branches-merge-commit-only", "target": "branch",
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["refs/heads/main", "refs/heads/staging"]}},
+            "rules": [{"type": "pull_request",
+                       "parameters": {"allowed_merge_methods": ["merge"]}}],
+            "bypass_actors": []}
+
+
+def _stub_rulesets(*full):
+    """Stub the two-call read: a listing, then each ruleset by id."""
+    def handler(args):
+        # Match the listing call, query string and all: read_rulesets now
+        # requests `/rulesets?includes_parents=false`, so strip the query before
+        # the suffix check (must still not match `/rulesets/{id}`).
+        if any(a.split("?", 1)[0].endswith("/rulesets") for a in args):
+            return ndjson(*[{"id": r["id"]} for r in full])
+        for r in full:
+            if any(a.endswith(f"/rulesets/{r['id']}") for a in args):
+                return json.dumps(r)
+        if _prot(args):
+            raise guard.GhError(404, "Branch not protected (HTTP 404)")
+        if _rules(args):
+            return ""
+        return "{}"
+    stub(handler)
+
+
+BR = {"develop", "staging", "main"}
+
+# POSITIVE CONTROL
+_stub_rulesets(PROMO_OK)
+f, u = [], []
+guard.evaluate_rulesets("repo", _rs_entry(), RPOLICY, BR, "acme", f, u)
+record(not f and not u, "rulesets: a conforming promotion ruleset reports nothing", f"findings={f}")
+
+# MISSING ENTIRELY -- start-training's live state before backend#1681.
+_stub_rulesets()
+f, u = [], []
+guard.evaluate_rulesets("repo", _rs_entry(), RPOLICY, BR, "acme", f, u)
+record(len(f) == 1 and "has NO promotion_merge_commit_only ruleset" in f[0],
+       "rulesets: a repo with NO promotion ruleset IS a finding", f"findings={f}")
+
+# WEAKENED: squash allowed alongside merge.
+weak = json.loads(json.dumps(PROMO_OK))
+weak["rules"][0]["parameters"]["allowed_merge_methods"] = ["merge", "squash"]
+_stub_rulesets(weak)
+f, u = [], []
+guard.evaluate_rulesets("repo", _rs_entry(), RPOLICY, BR, "acme", f, u)
+record(any("allows merge methods" in x for x in f),
+       "rulesets: permitting squash on a promotion branch IS a finding", f"findings={f[:1]}")
+
+# EVALUATE-ONLY: looks protective, enforces nothing.
+inert = json.loads(json.dumps(PROMO_OK))
+inert["enforcement"] = "evaluate"
+_stub_rulesets(inert)
+f, u = [], []
+guard.evaluate_rulesets("repo", _rs_entry(), RPOLICY, BR, "acme", f, u)
+record(any("not `active`" in x for x in f),
+       "rulesets: enforcement=evaluate IS a finding", f"findings={f[:1]}")
+
+# UNEXPECTED BYPASS ACTOR -- the release-python shape.
+tag_ok = {"id": 2, "name": "R8 trust root - protect v* release tags", "target": "tag",
+          "enforcement": "active",
+          "conditions": {"ref_name": {"include": ["refs/tags/v*"]}},
+          "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}],
+          "bypass_actors": [{"actor_type": "OrganizationAdmin", "actor_id": None},
+                            {"actor_type": "Team", "actor_id": 18304481}]}
+_stub_rulesets(PROMO_OK, tag_ok)
+f, u = [], []
+guard.evaluate_rulesets("repo", _rs_entry(tag="required"), RPOLICY, BR, "acme", f, u)
+record(not f, "rulesets: a differently-NAMED tag ruleset still matches (target+rules)",
+       f"findings={f}")
+
+extra = json.loads(json.dumps(tag_ok))
+extra["bypass_actors"].append({"actor_type": "Team", "actor_id": 18689454})
+_stub_rulesets(PROMO_OK, extra)
+f, u = [], []
+guard.evaluate_rulesets("repo", _rs_entry(tag="required"), RPOLICY, BR, "acme", f, u)
+record(any("unexpected ['Team:18689454']" in x for x in f),
+       "rulesets: an EXTRA bypass actor IS a finding (the release-python shape)",
+       f"findings={f[:1]}")
+
+# A stale exemption must say so.
+_stub_rulesets(PROMO_OK)
+f, u = [], []
+guard.evaluate_rulesets("repo", _rs_entry(promotion=("exempt", "documented")), RPOLICY, BR, "acme", f, u)
+record(any("is `exempt` but a matching ruleset exists" in x for x in f),
+       "rulesets: an exemption contradicted by reality IS a finding", f"findings={f[:1]}")
+
+# FAIL-CLOSED: an unreadable ruleset must never read as "absent".
+def _rulesets_500(args):
+    if any(a.split("?", 1)[0].endswith("/rulesets") for a in args):
+        raise guard.GhError(500, "server error (HTTP 500)")
+    return "{}"
+
+
+stub(_rulesets_500)
+f, u = [], []
+guard.evaluate_rulesets("repo", _rs_entry(), RPOLICY, BR, "acme", f, u)
+record(not f and len(u) == 1,
+       "rulesets: an unreadable read is UNREADABLE, never a silent pass", f"unreadable={u}")
+
+# Schema
+expect_schema_failure("ruleset_policy missing a kind rejected",
+                      lambda d: d["ruleset_policy"].pop("tag_trust_root"))
+expect_schema_failure("ruleset_policy with an unknown kind rejected",
+                      lambda d: d["ruleset_policy"].update({"nope": {}}))
+expect_schema_failure("ruleset kind missing bypass_actors rejected",
+                      lambda d: d["ruleset_policy"]["tag_trust_root"].pop("bypass_actors"))
+expect_schema_failure("ruleset kind with a bad target rejected",
+                      lambda d: d["ruleset_policy"]["tag_trust_root"].update({"target": "repo"}))
+expect_schema_failure("MISSING rulesets cell is a failure, not a default",
+                      lambda d: d["repos"]["hub"]["rulesets"].clear())
+expect_schema_failure("rulesets exemption with no reason rejected",
+                      lambda d: d["repos"]["hub"]["rulesets"].update(
+                          {"tag_trust_root": {"exempt": "  "}}))
 
 
 # --- source-reusable enumeration (backend#1681) -------------------------------
