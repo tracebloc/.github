@@ -22,6 +22,7 @@
 <!-- Env vars, migrations, rollout order, feature flags. Remove if N/A. -->
 
 ## Checklist
+- [ ] **Sibling check** — what class is this bug in, and how did you cover it? *(paste the grep, or "N/A — one-off")*
 - [ ] Tests added / updated and passing locally
 - [ ] Docs updated if behavior or config changed
 - [ ] No secrets / credentials in the diff
