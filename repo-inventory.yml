@@ -180,6 +180,40 @@ protection_policy:
       - quality / gitleaks
       - quality / house-rules
 
+# The ruleset contract (backend#1681). GitHub's second protection system, which
+# nothing audited until now - so the merge-method restriction on every promotion
+# branch and the v* tag trust root were both enforced by artifacts no check read.
+#
+# Matched on TARGET + RULES, never on name: client's tag ruleset is named
+# "R8 trust root - protect v* release tags" while its five peers use
+# "Protect v* release tags (supply-chain trust root)", so a name-keyed check
+# reports client as missing its trust root.
+ruleset_policy:
+  promotion_merge_commit_only:
+    target: branch
+    require_rule_types: [pull_request]
+    # NOT expressible in classic protection at all. This is the whole reason the
+    # ruleset layer matters: it is what stops a promotion PR being squash-merged,
+    # which would collapse the merge-commit ancestry promote-repo.sh's squash
+    # guard reads and jam the NEXT prepare.
+    allowed_merge_methods: [merge]
+    must_cover_roles: [staging, prod]
+    # EXACT allowlist, not a floor. Empty is the measured fleet state
+    # (2026-08-11, all 16); any actor appearing here later is the finding.
+    bypass_actors: []
+  tag_trust_root:
+    target: tag
+    require_rule_types: [creation, update, deletion]
+    include_refs: ['refs/tags/v*']
+    # backend#1681 removed `release-python` (Team:18689454) from three of these:
+    # four engineers held `always` bypass on backend, data-ingestors and
+    # tracebloc-py-package, two of which publish ON the tag (PyPI, GHCR) - an
+    # undocumented publish path that contradicted PUBLISH-PATHS.md and the
+    # operator instruction in token-check.yml. Team:18304481 is release-managers.
+    bypass_actors:
+      - OrganizationAdmin
+      - Team:18304481
+
 # Reasons cited by more than one repo, as YAML anchors: one edit updates every
 # citation. An alias is still a written reason - the guard resolves it and
 # rejects an empty one exactly as it would an inline string. This block holds
@@ -274,6 +308,10 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -314,6 +352,10 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -337,6 +379,9 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root: required
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -369,6 +414,11 @@ repos:
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
           required_checks: []
+    rulesets:
+      promotion_merge_commit_only:
+        exempt: "Not on the release train: no staging branch and no promotion PRs, so there are no promotion branches for a merge-method rule to protect."
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -395,6 +445,9 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
       advance-deploy-env.yml: required   # advance-deploy-env.yml
@@ -426,6 +479,9 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
       advance-deploy-env.yml: required   # advance-deploy-env.yml
@@ -448,6 +504,10 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -471,6 +531,9 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
       advance-deploy-env.yml: required   # advance-deploy-env.yml
@@ -493,6 +556,9 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
       advance-deploy-env.yml: required   # advance-deploy-env.yml
@@ -518,6 +584,11 @@ repos:
         exempt: *devex_bootstrap_undisposed
       prod:
         exempt: *devex_bootstrap_undisposed
+    rulesets:
+      promotion_merge_commit_only:
+        exempt: "Not on the release train: no staging branch and no promotion PRs, so there are no promotion branches for a merge-method rule to protect."
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -597,6 +668,10 @@ repos:
           reason: *docs_no_required_review
           min_reviews: 0
           required_checks: []          # as staging, above
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -648,6 +723,10 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -671,6 +750,10 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -708,6 +791,10 @@ repos:
             As staging, above.
           required_checks:
             - gate / gate
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -745,6 +832,11 @@ repos:
             - actionlint
             - mutation
             - shell
+    rulesets:
+      promotion_merge_commit_only:
+        exempt: "Not on the release train: no staging branch and no promotion PRs, so there are no promotion branches for a merge-method rule to protect."
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -792,6 +884,11 @@ repos:
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
           required_checks: []
+    rulesets:
+      promotion_merge_commit_only:
+        exempt: "Not on the release train: no staging branch and no promotion PRs, so there are no promotion branches for a merge-method rule to protect."
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -850,6 +947,10 @@ repos:
             As staging, above.
           required_checks:
             - gate / gate
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -873,6 +974,10 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -896,6 +1001,9 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
       advance-deploy-env.yml: required   # advance-deploy-env.yml
@@ -923,6 +1031,10 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
