@@ -391,12 +391,14 @@ jobs:
         if: steps.files.outputs.mode == 'all' || steps.files.outputs.count != '0'
         env:
           MODE: ${{ steps.files.outputs.mode }}
-          # The format-specific override alone decides this job's posture, for the
-          # same reason as action-pins below: an override that cannot override is
-          # not one. No caller passes `format-soft-fail` today and its default is
-          # true, so this is behaviour-neutral right now -- it removes the trap
-          # rather than springing it (backend#1681).
-          SOFT_FAIL: ${{ inputs.format-soft-fail && 'true' || 'false' }}
+          # Additive soft-fail, per this input's contract ("exit 0 even when
+          # soft-fail is false"): format is advisory when EITHER the global
+          # soft-fail OR the format-specific override is set. Unlike action-pins
+          # below, format-soft-fail defaults to false and no caller arms it, and
+          # there's no need to force format HARD during a soft migration -- so it
+          # stays an OR, not an authoritative override. Dropping the OR flipped
+          # every `soft-fail: true` caller to a hard format gate (Bugbot, #1681).
+          SOFT_FAIL: ${{ (inputs.soft-fail || inputs.format-soft-fail) && 'true' || 'false' }}
         run: |
           set -uo pipefail
           # No --isolated: black must read the repo's own [tool.black]
