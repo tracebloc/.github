@@ -284,9 +284,18 @@ repos:
       # reverted actions/checkout from a pinned SHA to the mutable @v4 tag with
       # nothing in CI to object. Armed soft-fail:false against a measured-clean
       # tree; ruff, gitleaks, shellcheck and house-rules were all green on the
-      # first run. action-pins itself stays unarmed until #159 reaches main - a
-      # caller may only pass inputs the @main callee declares, or the whole call
-      # dies with startup_failure.
+      # first run.
+      #
+      # action-pins was armed here on 2026-08-06 (backend#1603 step 2) once #159
+      # reached main: this repo's own caller passes `action-pins: true` +
+      # `action-pins-soft-fail: false`, and `quality / action-pins` is a REQUIRED
+      # check on develop. The line that used to sit here said it "stays unarmed
+      # until #159 reaches main" and was never updated when that happened, so the
+      # contract denied a control it actually has (backend#1668).
+      #
+      # The original caveat still holds and is worth keeping: a caller may only
+      # pass inputs the @main callee declares, or the whole call dies with
+      # startup_failure. That is why arming had to wait for the callee to land.
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml:
         exempt: *customer_priority_bump_caller_missing
