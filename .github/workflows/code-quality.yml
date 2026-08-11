@@ -391,8 +391,13 @@ jobs:
         if: steps.files.outputs.mode == 'all' || steps.files.outputs.count != '0'
         env:
           MODE: ${{ steps.files.outputs.mode }}
-          # Either global soft-fail or the format-specific override makes this
-          # job advisory; neither means it blocks.
+          # Additive soft-fail, per this input's contract ("exit 0 even when
+          # soft-fail is false"): format is advisory when EITHER the global
+          # soft-fail OR the format-specific override is set. Unlike action-pins
+          # below, format-soft-fail defaults to false and no caller arms it, and
+          # there's no need to force format HARD during a soft migration -- so it
+          # stays an OR, not an authoritative override. Dropping the OR flipped
+          # every `soft-fail: true` caller to a hard format gate (Bugbot, #1681).
           SOFT_FAIL: ${{ (inputs.soft-fail || inputs.format-soft-fail) && 'true' || 'false' }}
         run: |
           set -uo pipefail
@@ -767,9 +772,18 @@ jobs:
 
       - name: Scan every workflow for unpinned action refs
         env:
-          # Either global soft-fail or the pin-specific override keeps this
-          # advisory; both must be false for findings to fail the job.
-          SOFT_FAIL: ${{ (inputs.soft-fail || inputs.action-pins-soft-fail) && 'true' || 'false' }}
+          # The pin-specific override alone decides this job's posture, so a repo
+          # can arm the supply-chain check while the rest of its suite is still
+          # advisory during a migration. That is the whole reason this input is
+          # separate from `soft-fail`.
+          #
+          # It used to read `(inputs.soft-fail || inputs.action-pins-soft-fail)`.
+          # Because `soft-fail` defaults to true, that OR made the override
+          # incapable of EVER arming the job -- it could only ever weaken it --
+          # while 16 of 16 callers pass `action-pins-soft-fail: false` expecting
+          # the opposite, and four of them carry a comment claiming the check is
+          # "Armed ... independent of soft-fail above". It was not (backend#1681).
+          SOFT_FAIL: ${{ inputs.action-pins-soft-fail && 'true' || 'false' }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
