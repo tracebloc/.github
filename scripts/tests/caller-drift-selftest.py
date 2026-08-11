@@ -899,10 +899,11 @@ PROMO_OK = {"id": 1, "name": "promotion-branches-merge-commit-only", "target": "
 def _stub_rulesets(*full):
     """Stub the two-call read: a listing, then each ruleset by id."""
     def handler(args):
-        joined = " ".join(args)
-        if joined.endswith("/rulesets") or "/rulesets " in joined + " ":
-            if any(a.endswith("/rulesets") for a in args):
-                return ndjson(*[{"id": r["id"]} for r in full])
+        # Match the listing call, query string and all: read_rulesets now
+        # requests `/rulesets?includes_parents=false`, so strip the query before
+        # the suffix check (must still not match `/rulesets/{id}`).
+        if any(a.split("?", 1)[0].endswith("/rulesets") for a in args):
+            return ndjson(*[{"id": r["id"]} for r in full])
         for r in full:
             if any(a.endswith(f"/rulesets/{r['id']}") for a in args):
                 return json.dumps(r)
@@ -978,7 +979,7 @@ record(any("is `exempt` but a matching ruleset exists" in x for x in f),
 
 # FAIL-CLOSED: an unreadable ruleset must never read as "absent".
 def _rulesets_500(args):
-    if any(a.endswith("/rulesets") for a in args):
+    if any(a.split("?", 1)[0].endswith("/rulesets") for a in args):
         raise guard.GhError(500, "server error (HTTP 500)")
     return "{}"
 
