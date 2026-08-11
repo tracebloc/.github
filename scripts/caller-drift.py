@@ -1147,7 +1147,12 @@ def read_rulesets(org: str, name: str) -> "tuple[list[RepoRuleset], str | None]"
     missing its ruleset".
     """
     try:
-        listing = gh_json_array(f"repos/{org}/{name}/rulesets")
+        # includes_parents=false: the default listing folds in org/enterprise
+        # rulesets whose ids then 404 on the per-ruleset get-by-id below, failing
+        # the whole audit. We assert only THIS repo's rulesets (Bugbot, .github#212).
+        listing = gh_json_array(
+            f"repos/{org}/{name}/rulesets?includes_parents=false"
+        )
     except GhError as exc:
         return ([], f"rulesets unreadable ({exc.detail})")
     out = []
@@ -1297,10 +1302,11 @@ def main() -> int:
     # Holds BOTH protection and ruleset read failures (backend#1681). Kept as one
     # bucket deliberately: both are "this repo's caller/copy audit SUCCEEDED, a
     # different control plane did not", which is the distinction this list exists
-    # to preserve. The wording below says protection/ruleset rather than naming
-    # only protection, because a rulesets-only outage would otherwise be reported
-    # as branch protection failing (Bugbot, .github#212).
+    # to preserve. Protection and ruleset read-failures go in SEPARATE buckets so
+    # each names exactly which layer failed: a rulesets-only outage must not read
+    # as branch protection failing, and vice versa (Bugbot, .github#212).
     protection_unreadable: "list[str]" = []
+    ruleset_unreadable: "list[str]" = []
 
     untracked = sorted(set(active) - set(inventory["repos"]))
     for name in untracked:
@@ -1437,12 +1443,12 @@ def main() -> int:
             name, entry, inventory["protection_policy"], read.branches,
             org, findings, protection_unreadable,
         )
-        # Rulesets share protection's unreadable bucket for the same reason: a
-        # rulesets API failure is not "this repo's callers could not be read",
+        # Rulesets get their OWN unreadable bucket (not protection's): a rulesets
+        # API failure is neither "callers unreadable" nor "protection unreadable",
         # and must not abort the run or discard real caller findings.
         evaluate_rulesets(
             name, entry, inventory["ruleset_policy"], read.branches,
-            org, findings, protection_unreadable,
+            org, findings, ruleset_unreadable,
         )
 
     # Computed from repo-read failures ONLY, before the two lists are merged.
@@ -1455,6 +1461,7 @@ def main() -> int:
     # Merged only now, so protection failures are REPORTED and still fail the run
     # without ever being able to trigger the abort above.
     unreadable.extend(protection_unreadable)
+    unreadable.extend(ruleset_unreadable)
 
     report = [
         "### Repo conformance drift",
@@ -1480,15 +1487,23 @@ def main() -> int:
         # that says "caller state is unknown" after a protection-only outage
         # misstates what happened and quietly undoes the separation above
         # (Bugbot, .github#196).
-        caller_failed = len(unreadable) - len(protection_unreadable)
+        caller_failed = (
+            len(unreadable) - len(protection_unreadable) - len(ruleset_unreadable)
+        )
         bits = []
         if caller_failed:
             bits.append(f"**{caller_failed} repo read(s) FAILED** (caller/copy state UNKNOWN)")
         if protection_unreadable:
             bits.append(
-                f"**{len(protection_unreadable)} protection/ruleset read(s) FAILED** "
-                "(that layer's state UNKNOWN for the repos named below; caller/copy "
+                f"**{len(protection_unreadable)} branch-protection read(s) FAILED** "
+                "(protection state UNKNOWN for the repos named below; caller/copy "
                 "state for those repos WAS read)"
+            )
+        if ruleset_unreadable:
+            bits.append(
+                f"**{len(ruleset_unreadable)} ruleset read(s) FAILED** "
+                "(ruleset state UNKNOWN for the repos named below; caller/copy and "
+                "branch-protection state for those repos WAS read)"
             )
         report.append(
             " and ".join(bits)
@@ -1534,14 +1549,21 @@ def main() -> int:
             die(f"could not write step outputs: {exc}")
 
     if unreadable:
-        caller_failed = len(unreadable) - len(protection_unreadable)
+        caller_failed = (
+            len(unreadable) - len(protection_unreadable) - len(ruleset_unreadable)
+        )
         parts = []
         if caller_failed:
             parts.append(f"{caller_failed} repo read(s) failed - caller/copy state UNKNOWN")
         if protection_unreadable:
             parts.append(
-                f"{len(protection_unreadable)} protection/ruleset read(s) failed - "
-                "that layer's state UNKNOWN"
+                f"{len(protection_unreadable)} branch-protection read(s) failed - "
+                "protection state UNKNOWN"
+            )
+        if ruleset_unreadable:
+            parts.append(
+                f"{len(ruleset_unreadable)} ruleset read(s) failed - "
+                "ruleset state UNKNOWN"
             )
         sys.stderr.write("::error::" + "; ".join(parts) + ".\n")
         return 2
