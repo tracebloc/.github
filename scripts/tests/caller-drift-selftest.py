@@ -939,7 +939,8 @@ record(any("allows merge methods" in x for x in f),
        "rulesets: permitting squash on a promotion branch IS a finding", f"findings={f[:1]}")
 
 # EVALUATE-ONLY: looks protective, enforces nothing.
-inert = json.loads(json.dumps(PROMO_OK)); inert["enforcement"] = "evaluate"
+inert = json.loads(json.dumps(PROMO_OK))
+inert["enforcement"] = "evaluate"
 _stub_rulesets(inert)
 f, u = [], []
 guard.evaluate_rulesets("repo", _rs_entry(), RPOLICY, BR, "acme", f, u)

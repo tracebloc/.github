@@ -1294,6 +1294,12 @@ def main() -> int:
     findings: "list[str]" = []
     unreadable: "list[str]" = []
     # Kept separate until `evaluated` is computed - see the note at the call site.
+    # Holds BOTH protection and ruleset read failures (backend#1681). Kept as one
+    # bucket deliberately: both are "this repo's caller/copy audit SUCCEEDED, a
+    # different control plane did not", which is the distinction this list exists
+    # to preserve. The wording below says protection/ruleset rather than naming
+    # only protection, because a rulesets-only outage would otherwise be reported
+    # as branch protection failing (Bugbot, .github#212).
     protection_unreadable: "list[str]" = []
 
     untracked = sorted(set(active) - set(inventory["repos"]))
@@ -1480,8 +1486,9 @@ def main() -> int:
             bits.append(f"**{caller_failed} repo read(s) FAILED** (caller/copy state UNKNOWN)")
         if protection_unreadable:
             bits.append(
-                f"**{len(protection_unreadable)} branch-protection read(s) FAILED** "
-                "(protection state UNKNOWN; caller/copy state for those repos WAS read)"
+                f"**{len(protection_unreadable)} protection/ruleset read(s) FAILED** "
+                "(that layer's state UNKNOWN for the repos named below; caller/copy "
+                "state for those repos WAS read)"
             )
         report.append(
             " and ".join(bits)
@@ -1533,8 +1540,8 @@ def main() -> int:
             parts.append(f"{caller_failed} repo read(s) failed - caller/copy state UNKNOWN")
         if protection_unreadable:
             parts.append(
-                f"{len(protection_unreadable)} branch-protection read(s) failed - "
-                "protection state UNKNOWN"
+                f"{len(protection_unreadable)} protection/ruleset read(s) failed - "
+                "that layer's state UNKNOWN"
             )
         sys.stderr.write("::error::" + "; ".join(parts) + ".\n")
         return 2
