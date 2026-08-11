@@ -108,10 +108,6 @@ POLICY_KEYS = {
 # every key: a repo may document a weaker review count or admin posture, but it
 # may not opt out of `classic_protection` -- that is `exempt`, which is a louder
 # word and shows up differently in the report.
-# Which policy keys a per-repo `divergent` entry may override. Deliberately NOT
-# every key: a repo may document a weaker review count or admin posture, but it
-# may not opt out of `classic_protection` -- that is `exempt`, which is a louder
-# word and shows up differently in the report.
 OVERRIDABLE = {
     "min_reviews", "enforce_admins", "require_conversation_resolution", "strict",
     # A repo may require FEWER contexts than the fleet baseline, but only with a
