@@ -1343,6 +1343,53 @@ def evaluate_rulesets(
                     )
 
 
+def render_matrix(matrix: dict, inventory: dict) -> "list[str]":
+    """The one screen (backend#1608 increment 3).
+
+    The audit has always known each repo's state per family and only ever
+    printed the failures, so a green run said "no drift" and nothing about what
+    was actually covered -- you could not tell a fleet that conforms from a fleet
+    that was barely checked. This renders every repo x family cell, so coverage
+    and drift are visible in the same glance.
+
+    Cells:
+      OK   the family was evaluated and matched
+      N    that many findings in that family
+      ?    that family could not be READ (never conflated with OK -- an
+           unreadable family is the state this guard exists to refuse)
+    """
+    families = ("callers", "copies", "protection", "rulesets")
+    out = [
+        "<details><summary><b>Conformance matrix</b> - every repo x every family, "
+        "including what passed</summary>",
+        "",
+        "| repo | train | " + " | ".join(families) + " |",
+        "|---|---|" + "---|" * len(families),
+    ]
+    for name in sorted(matrix):
+        cells = matrix[name]
+        entry = inventory["repos"].get(name, {})
+        train = "yes" if entry.get("release_train") else "-"
+        if cells.get("unread"):
+            out.append(f"| `{name}` | {train} | " + " | ".join(["?"] * len(families)) + " |")
+            continue
+        rendered = []
+        for fam in families:
+            # Only protection and rulesets can be partially unread: callers and
+            # copies come from the repo read, which fails the whole row first.
+            unread = cells.get(f"{fam}_unread", 0) if fam in ("protection", "rulesets") else 0
+            n = cells.get(fam, 0)
+            if unread:
+                rendered.append("?")
+            elif n:
+                rendered.append(f"**{n}**")
+            else:
+                rendered.append("OK")
+        out.append(f"| `{name}` | {train} | " + " | ".join(rendered) + " |")
+    out += ["", "</details>", ""]
+    return out
+
+
 # ------------------------------------------------------------------ evaluation
 
 
@@ -1401,6 +1448,16 @@ def main() -> int:
             "evaluated, so this cannot be reported as no drift."
         )
 
+    # ONE SCREEN (backend#1608 increment 3). The audit already knows every
+    # repo's state per family; until now it only ever emitted the failures, so a
+    # reader could see what was wrong but never what was covered. `matrix` records
+    # a per-repo, per-family count so the report can show the whole fleet at once.
+    #
+    # Counted by DELTA around each family's block rather than by parsing the
+    # finding strings: the strings are prose written for humans, and keying a
+    # table off them would break the first time one is reworded.
+    matrix: "dict[str, dict]" = {}
+
     for name in audited:
         entry = inventory["repos"][name]
         meta = active[name]
@@ -1409,6 +1466,7 @@ def main() -> int:
             for problem in read.errors:
                 unreadable.append(f"{name}: {problem}")
             print(f"  ?? {name} - NOT EVALUATED: {'; '.join(read.errors)}")
+            matrix[name] = {"unread": True}
             continue
 
         print(f"  -- {name} @ {read.branch}")
@@ -1426,6 +1484,9 @@ def main() -> int:
                 f"inventory says {entry['release_train']}. A repo joining the train "
                 "without an fr-gate caller is an ungated staging -> prod hop."
             )
+
+        _m: "dict[str, int|bool]" = {}
+        _mark = len(findings)
 
         for reusable in reusables:
             state, _reason = entry["callers"][reusable]
@@ -1460,6 +1521,9 @@ def main() -> int:
                     "and the inventory has not caught up, or the call is a typo "
                     "that has never run."
                 )
+
+        _m["callers"] = len(findings) - _mark
+        _mark = len(findings)
 
         for copy_name in copies:
             state, _reason = entry["copies"][copy_name]
@@ -1512,6 +1576,10 @@ def main() -> int:
         # throw away real caller findings before anything was written.
         # Fail-closed means the run still goes RED - it must not mean the results
         # are destroyed. (Bugbot, .github#196.)
+        _m["copies"] = len(findings) - _mark
+        _mark = len(findings)
+        _pmark = len(protection_unreadable)
+
         evaluate_protection(
             name, entry, inventory["protection_policy"], read.branches,
             org, findings, protection_unreadable,
@@ -1519,10 +1587,18 @@ def main() -> int:
         # Rulesets get their OWN unreadable bucket (not protection's): a rulesets
         # API failure is neither "callers unreadable" nor "protection unreadable",
         # and must not abort the run or discard real caller findings.
+        _m["protection"] = len(findings) - _mark
+        _m["protection_unread"] = len(protection_unreadable) - _pmark
+        _mark = len(findings)
+        _rmark = len(ruleset_unreadable)
+
         evaluate_rulesets(
             name, entry, inventory["ruleset_policy"], read.branches,
             org, findings, ruleset_unreadable,
         )
+        _m["rulesets"] = len(findings) - _mark
+        _m["rulesets_unread"] = len(ruleset_unreadable) - _rmark
+        matrix[name] = _m
 
     # Computed from repo-read failures ONLY, before the two lists are merged.
     evaluated = len(audited) - len({line.split(":", 1)[0] for line in unreadable})
@@ -1550,6 +1626,7 @@ def main() -> int:
         "otherwise read as unprotected.",
         "",
     ]
+    report.extend(render_matrix(matrix, inventory))
     if findings:
         report.append(f"**{len(findings)} drift finding(s):**")
         report.append("")

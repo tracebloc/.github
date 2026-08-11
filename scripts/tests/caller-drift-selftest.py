@@ -1078,6 +1078,51 @@ except SystemExit as exc:
 _expect_exit("source reusables: a missing workflows dir is refused, not passed",
              lambda: guard.check_source_reusables(tempfile.mkdtemp(), ["a.yml"]))
 
+
+# --- the conformance matrix (backend#1608 increment 3) ------------------------
+#
+# A screen that can only ever render OK is the same vacuous pass this guard
+# exists to refuse, so each cell state is asserted, including the two that cannot
+# be produced against a healthy fleet.
+
+INV_M = {"repos": {
+    "alpha": {"release_train": True},
+    "beta": {"release_train": False},
+}}
+
+rows = guard.render_matrix({"alpha": {"callers": 0, "copies": 0, "protection": 0,
+                                      "rulesets": 0}}, INV_M)
+record(any("| `alpha` | yes | OK | OK | OK | OK |" in r for r in rows),
+       "matrix: a clean repo renders OK in every family", rows[-3])
+
+rows = guard.render_matrix({"alpha": {"callers": 2, "copies": 0, "protection": 0,
+                                      "rulesets": 0}}, INV_M)
+record(any("**2**" in r for r in rows) and not any("| OK | OK | OK | OK |" in r for r in rows),
+       "matrix: findings render as a COUNT, not as OK", rows[-3])
+
+rows = guard.render_matrix({"alpha": {"unread": True}}, INV_M)
+record(any("| ? | ? | ? | ? |" in r for r in rows),
+       "matrix: an unreadable repo renders ? in every family, never OK", rows[-3])
+
+rows = guard.render_matrix({"alpha": {"callers": 0, "copies": 0, "protection": 0,
+                                      "protection_unread": 1, "rulesets": 0}}, INV_M)
+record(any("| OK | OK | ? | OK |" in r for r in rows),
+       "matrix: an unreadable FAMILY renders ? in that column only", rows[-3])
+
+# The distinction that matters most: zero findings because it was checked, versus
+# zero findings because it was never read. Those must not render the same.
+clean = guard.render_matrix({"alpha": {"callers": 0, "copies": 0, "protection": 0,
+                                       "rulesets": 0}}, INV_M)
+unread = guard.render_matrix({"alpha": {"unread": True}}, INV_M)
+record(clean != unread,
+       "matrix: 'checked and clean' and 'never read' do NOT render identically",
+       "clean != unread")
+
+rows = guard.render_matrix({"beta": {"callers": 0, "copies": 0, "protection": 0,
+                                     "rulesets": 0}}, INV_M)
+record(any("| `beta` | - |" in r for r in rows),
+       "matrix: a non-train repo is marked as such", rows[-3])
+
 failed = [row for row in RESULTS if not row[0]]
 print(f"\npass={len(RESULTS) - len(failed)} fail={len(failed)}")
 if failed:
