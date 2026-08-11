@@ -137,6 +137,14 @@ protection_policy:
     block_deletions: true
     require_conversation_resolution: true
     strict: false                   # backend#1276 D2 - the train solves stale bases better
+    # The floor, not the whole set: repos add their own suites on top and that is
+    # not drift. Measured 2026-08-11 - these three are required on develop in all
+    # 16 train repos, so this states the status quo and catches a regression.
+    # ruff/shellcheck are deliberately absent: they are language-scoped (9/16).
+    required_checks:
+      - quality / gitleaks
+      - quality / house-rules
+      - quality / action-pins
   staging:
     classic_protection: true
     min_reviews: 1
@@ -145,6 +153,15 @@ protection_policy:
     block_deletions: true
     require_conversation_resolution: true
     strict: false
+    # fr-gate is the promotion gate; gitleaks/house-rules are the content gates.
+    # `quality / action-pins` is NOT here: it is required on all 16 develops and
+    # none of the 32 staging/prod branches (measured 2026-08-11). That asymmetry
+    # is unexplained rather than decided, so this file does not bless it -
+    # backend#1681 carries the question.
+    required_checks:
+      - gate / gate
+      - quality / gitleaks
+      - quality / house-rules
   prod:
     classic_protection: true
     min_reviews: 1
@@ -153,6 +170,15 @@ protection_policy:
     block_deletions: true
     require_conversation_resolution: true
     strict: false
+    # fr-gate is the promotion gate; gitleaks/house-rules are the content gates.
+    # `quality / action-pins` is NOT here: it is required on all 16 develops and
+    # none of the 32 staging/prod branches (measured 2026-08-11). That asymmetry
+    # is unexplained rather than decided, so this file does not bless it -
+    # backend#1681 carries the question.
+    required_checks:
+      - gate / gate
+      - quality / gitleaks
+      - quality / house-rules
 
 # Reasons cited by more than one repo, as YAML anchors: one edit updates every
 # citation. An alias is still a written reason - the guard resolves it and
@@ -339,6 +365,10 @@ repos:
         divergent:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
+          # The fleet baseline names `gate / gate` -- the fr-gate, which only
+          # exists on a promotion pipeline. This repo has none, so the baseline
+          # cannot apply; the narrower set is stated rather than left implicit.
+          required_checks: []
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -558,10 +588,15 @@ repos:
         divergent:
           reason: *docs_no_required_review
           min_reviews: 0
+          # docs requires NO status check on staging or prod - the 2026-06-04
+          # exemption is broader than review alone. Stated as [] so the gap is a
+          # sentence here rather than a silence.
+          required_checks: []
       prod:
         divergent:
           reason: *docs_no_required_review
           min_reviews: 0
+          required_checks: []          # as staging, above
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -657,8 +692,22 @@ repos:
     release_train: true
     protection:
       develop: required
-      staging: required
-      prod: required
+      staging:
+        divergent:
+          reason: >-
+            Carries the fr-gate on both promotion branches but not the content
+            gates: `quality / gitleaks` and `quality / house-rules` are required
+            on develop and on neither staging nor prod (measured 2026-08-11).
+            This is a public repo, so the credential scan is the gate that matters most. Recorded as the narrower set rather than left silent -
+            backend#1681 tracks closing it.
+          required_checks:
+            - gate / gate
+      prod:
+        divergent:
+          reason: >-
+            As staging, above.
+          required_checks:
+            - gate / gate
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -687,6 +736,15 @@ repos:
         divergent:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
+          # The fleet baseline names `gate / gate` -- the fr-gate, which only
+          # exists on a promotion pipeline. This repo has none, so the baseline
+          # cannot apply; the narrower set is stated rather than left implicit.
+          # Stated as its REAL set rather than [] - this repo is the tool that
+          # performs every promotion, so its own gates are worth guarding.
+          required_checks:
+            - actionlint
+            - mutation
+            - shell
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -730,6 +788,10 @@ repos:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
           require_conversation_resolution: false
+          # The fleet baseline names `gate / gate` -- the fr-gate, which only
+          # exists on a promotion pipeline. This repo has none, so the baseline
+          # cannot apply; the narrower set is stated rather than left implicit.
+          required_checks: []
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
@@ -772,8 +834,22 @@ repos:
     release_train: true
     protection:
       develop: required
-      staging: required
-      prod: required
+      staging:
+        divergent:
+          reason: >-
+            Carries the fr-gate on both promotion branches but not the content
+            gates: `quality / gitleaks` and `quality / house-rules` are required
+            on develop and on neither staging nor prod (measured 2026-08-11).
+            This is a public repo whose notebooks carry executed output cells - exactly where a token gets committed unnoticed - so the credential scan is the gate that matters most. Recorded as the narrower set rather than left silent -
+            backend#1681 tracks closing it.
+          required_checks:
+            - gate / gate
+      prod:
+        divergent:
+          reason: >-
+            As staging, above.
+          required_checks:
+            - gate / gate
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
