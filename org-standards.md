@@ -22,6 +22,7 @@
 - Before every push: run the linter and the tests that cover your change. Never push a branch you believe is red — CI is the backstop, not the first run.
 - Read the full diff before opening the PR. You own every line you ship, whoever — or whatever — wrote it.
 - AI sessions end with evidence, not assertion: run the relevant check (tests, build, lint) and show the output. A change that could not be verified does not ship.
+- Fix the class, not the instance. The bug you just fixed is a member of a class; check the rest of the class before you push. Two shapes, and aiming at only the first catches half of them: **other call sites** — grep the symbol or pattern you changed — and **other inputs to the same guard** — what else reaches this branch? If the class can't be cheaply enumerated, say so in the PR rather than leaving it implied that you covered it.
 - After opening or pushing to a PR, stay on it: poll CI and Bugbot on the current head and triage every finding the same day — fix it, or reply on the thread saying why not. No silent dismissals. Unresolved threads block the merge and stall the release train's settle stage; cheap now beats expensive later.
 - A finding that recurs across PRs becomes a rule: add it to `.cursor/BUGBOT.md`, and if it is grep-expressible, to code-quality's house-rules — then stop re-arguing it in comments.
 - Style and naming rules live in tooling (black/ruff, eslint/prettier, house-rules), never in prose. If a rule matters, encode it; do not restate linter rules in CLAUDE.md files.
