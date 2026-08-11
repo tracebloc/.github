@@ -43,6 +43,7 @@ on:
       - scripts/caller-drift.py
       - scripts/tests/caller-drift-selftest.py
       - .github/workflows/caller-drift.yml
+      - .github/workflows/conformance-gate.yml
   push:
     branches: [main, develop]
     paths:
@@ -50,6 +51,7 @@ on:
       - scripts/caller-drift.py
       - scripts/tests/caller-drift-selftest.py
       - .github/workflows/caller-drift.yml
+      - .github/workflows/conformance-gate.yml
 
 permissions:
   contents: read
