@@ -97,6 +97,7 @@ reusables:
   - set-pr-status.yml
   - wip-limit-check.yml
   - version-bump-gate.yml
+  - version-bump-pr.yml
 
 # Copies, not callers: these are duplicated into each repo, so the guard compares
 # content (git blob sha against the checked-out source) instead of looking for a
@@ -137,6 +138,14 @@ protection_policy:
     block_deletions: true
     require_conversation_resolution: true
     strict: false                   # backend#1276 D2 - the train solves stale bases better
+    # The floor, not the whole set: repos add their own suites on top and that is
+    # not drift. Measured 2026-08-11 - these three are required on develop in all
+    # 16 train repos, so this states the status quo and catches a regression.
+    # ruff/shellcheck are deliberately absent: they are language-scoped (9/16).
+    required_checks:
+      - quality / gitleaks
+      - quality / house-rules
+      - quality / action-pins
   staging:
     classic_protection: true
     min_reviews: 1
@@ -145,6 +154,15 @@ protection_policy:
     block_deletions: true
     require_conversation_resolution: true
     strict: false
+    # fr-gate is the promotion gate; gitleaks/house-rules are the content gates.
+    # `quality / action-pins` is NOT here: it is required on all 16 develops and
+    # none of the 32 staging/prod branches (measured 2026-08-11). That asymmetry
+    # is unexplained rather than decided, so this file does not bless it -
+    # backend#1681 carries the question.
+    required_checks:
+      - gate / gate
+      - quality / gitleaks
+      - quality / house-rules
   prod:
     classic_protection: true
     min_reviews: 1
@@ -153,6 +171,49 @@ protection_policy:
     block_deletions: true
     require_conversation_resolution: true
     strict: false
+    # fr-gate is the promotion gate; gitleaks/house-rules are the content gates.
+    # `quality / action-pins` is NOT here: it is required on all 16 develops and
+    # none of the 32 staging/prod branches (measured 2026-08-11). That asymmetry
+    # is unexplained rather than decided, so this file does not bless it -
+    # backend#1681 carries the question.
+    required_checks:
+      - gate / gate
+      - quality / gitleaks
+      - quality / house-rules
+
+# The ruleset contract (backend#1681). GitHub's second protection system, which
+# nothing audited until now - so the merge-method restriction on every promotion
+# branch and the v* tag trust root were both enforced by artifacts no check read.
+#
+# Matched on TARGET + RULES, never on name: client's tag ruleset is named
+# "R8 trust root - protect v* release tags" while its five peers use
+# "Protect v* release tags (supply-chain trust root)", so a name-keyed check
+# reports client as missing its trust root.
+ruleset_policy:
+  promotion_merge_commit_only:
+    target: branch
+    require_rule_types: [pull_request]
+    # NOT expressible in classic protection at all. This is the whole reason the
+    # ruleset layer matters: it is what stops a promotion PR being squash-merged,
+    # which would collapse the merge-commit ancestry promote-repo.sh's squash
+    # guard reads and jam the NEXT prepare.
+    allowed_merge_methods: [merge]
+    must_cover_roles: [staging, prod]
+    # EXACT allowlist, not a floor. Empty is the measured fleet state
+    # (2026-08-11, all 16); any actor appearing here later is the finding.
+    bypass_actors: []
+  tag_trust_root:
+    target: tag
+    require_rule_types: [creation, update, deletion]
+    include_refs: ['refs/tags/v*']
+    # backend#1681 removed `release-python` (Team:18689454) from three of these:
+    # four engineers held `always` bypass on backend, data-ingestors and
+    # tracebloc-py-package, two of which publish ON the tag (PyPI, GHCR) - an
+    # undocumented publish path that contradicted PUBLISH-PATHS.md and the
+    # operator instruction in token-check.yml. Team:18304481 is release-managers.
+    bypass_actors:
+      - OrganizationAdmin
+      - Team:18304481
 
 # Reasons cited by more than one repo, as YAML anchors: one edit updates every
 # citation. An alias is still a written reason - the guard resolves it and
@@ -170,6 +231,16 @@ shared_reasons:
     it. Requiring it in any repo would land this guard red on day one; the decision to wire it
     up or delete it is backend#1415 follow-up work. Exempt everywhere, deliberately and in
     writing.
+  version_bump_pr_never_wired: &version_bump_pr_never_wired >-
+    version-bump-pr has ZERO callers anywhere in the org and cannot be called as
+    written: it requires a `pr-token` secret no repo supplies. It is Layer 2 of
+    backend#1563 - the automated post-release bump-PR opener, meant to prevent the
+    version staleness that stalled tracebloc-py-package's prod leg (backend#1561).
+    It shipped and was never wired up, and nothing said so, because the guard
+    enumerated this list rather than the source directory (backend#1681 added that
+    check, which is what surfaced it). Exempt everywhere in writing until it is
+    wired or deleted - the same posture as wip-limit-check.
+
   no_staging_branch_no_hop_to_gate: &no_staging_branch_no_hop_to_gate >-
     fr-gate gates the staging -> prod hop. This repo has no `staging` branch, so there is no hop
     for it to gate. Structural, not a gap.
@@ -248,9 +319,15 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
       # Remediated 2026-08-06 (.github#171, backend#1603). The repo that HOSTS
       # code-quality.yml was the only repo not running it, so the action-pins job
@@ -258,9 +335,18 @@ repos:
       # reverted actions/checkout from a pinned SHA to the mutable @v4 tag with
       # nothing in CI to object. Armed soft-fail:false against a measured-clean
       # tree; ruff, gitleaks, shellcheck and house-rules were all green on the
-      # first run. action-pins itself stays unarmed until #159 reaches main - a
-      # caller may only pass inputs the @main callee declares, or the whole call
-      # dies with startup_failure.
+      # first run.
+      #
+      # action-pins was armed here on 2026-08-06 (backend#1603 step 2) once #159
+      # reached main: this repo's own caller passes `action-pins: true` +
+      # `action-pins-soft-fail: false`, and `quality / action-pins` is a REQUIRED
+      # check on develop. The line that used to sit here said it "stays unarmed
+      # until #159 reaches main" and was never updated when that happened, so the
+      # contract denied a control it actually has (backend#1668).
+      #
+      # The original caveat still holds and is worth keeping: a caller may only
+      # pass inputs the @main callee declares, or the whole call dies with
+      # startup_failure. That is why arming had to wait for the callee to land.
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml:
         exempt: *customer_priority_bump_caller_missing
@@ -288,9 +374,15 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -311,9 +403,14 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root: required
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -339,9 +436,20 @@ repos:
         divergent:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
+          # The fleet baseline names `gate / gate` -- the fr-gate, which only
+          # exists on a promotion pipeline. This repo has none, so the baseline
+          # cannot apply; the narrower set is stated rather than left implicit.
+          required_checks: []
+    rulesets:
+      promotion_merge_commit_only:
+        exempt: "Not on the release train: no staging branch and no promotion PRs, so there are no promotion branches for a merge-method rule to protect."
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml:
         exempt: *advance_deploy_env_caller_missing
       code-quality.yml:
@@ -365,8 +473,13 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -396,8 +509,13 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -418,9 +536,15 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -441,8 +565,13 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -463,8 +592,13 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -488,9 +622,16 @@ repos:
         exempt: *devex_bootstrap_undisposed
       prod:
         exempt: *devex_bootstrap_undisposed
+    rulesets:
+      promotion_merge_commit_only:
+        exempt: "Not on the release train: no staging branch and no promotion PRs, so there are no promotion branches for a merge-method rule to protect."
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml:
         exempt: >-
           devex-bootstrap has no .github directory at all, no branch protection and no
@@ -558,13 +699,24 @@ repos:
         divergent:
           reason: *docs_no_required_review
           min_reviews: 0
+          # docs requires NO status check on staging or prod - the 2026-06-04
+          # exemption is broader than review alone. Stated as [] so the gap is a
+          # sentence here rather than a silence.
+          required_checks: []
       prod:
         divergent:
           reason: *docs_no_required_review
           min_reviews: 0
+          required_checks: []          # as staging, above
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       # Flipped exempt -> required 2026-08-04: the caller was added on MAIN only
       # (docs#70, a docs-exception direct merge) where the develop-first audit
       # could not see it. docs#80's backmerge brought it onto develop.
@@ -613,9 +765,15 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -636,9 +794,15 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -657,11 +821,31 @@ repos:
     release_train: true
     protection:
       develop: required
-      staging: required
-      prod: required
+      staging:
+        divergent:
+          reason: >-
+            Carries the fr-gate on both promotion branches but not the content
+            gates: `quality / gitleaks` and `quality / house-rules` are required
+            on develop and on neither staging nor prod (measured 2026-08-11).
+            This is a public repo, so the credential scan is the gate that matters most. Recorded as the narrower set rather than left silent -
+            backend#1681 tracks closing it.
+          required_checks:
+            - gate / gate
+      prod:
+        divergent:
+          reason: >-
+            As staging, above.
+          required_checks:
+            - gate / gate
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -687,9 +871,25 @@ repos:
         divergent:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
+          # The fleet baseline names `gate / gate` -- the fr-gate, which only
+          # exists on a promotion pipeline. This repo has none, so the baseline
+          # cannot apply; the narrower set is stated rather than left implicit.
+          # Stated as its REAL set rather than [] - this repo is the tool that
+          # performs every promotion, so its own gates are worth guarding.
+          required_checks:
+            - actionlint
+            - mutation
+            - shell
+    rulesets:
+      promotion_merge_commit_only:
+        exempt: "Not on the release train: no staging branch and no promotion PRs, so there are no promotion branches for a merge-method rule to protect."
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml:
         exempt: *code_quality_caller_missing
@@ -730,9 +930,20 @@ repos:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
           require_conversation_resolution: false
+          # The fleet baseline names `gate / gate` -- the fr-gate, which only
+          # exists on a promotion pipeline. This repo has none, so the baseline
+          # cannot apply; the narrower set is stated rather than left implicit.
+          required_checks: []
+    rulesets:
+      promotion_merge_commit_only:
+        exempt: "Not on the release train: no staging branch and no promotion PRs, so there are no promotion branches for a merge-method rule to protect."
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       # Per-caller reasons, not one blanket text (Bugbot, .github#138). The first
       # version of this block asserted "no hop to gate" for all nine, which is only
       # true for some of them and silently overwrote reasons that were already
@@ -772,11 +983,31 @@ repos:
     release_train: true
     protection:
       develop: required
-      staging: required
-      prod: required
+      staging:
+        divergent:
+          reason: >-
+            Carries the fr-gate on both promotion branches but not the content
+            gates: `quality / gitleaks` and `quality / house-rules` are required
+            on develop and on neither staging nor prod (measured 2026-08-11).
+            This is a public repo whose notebooks carry executed output cells - exactly where a token gets committed unnoticed - so the credential scan is the gate that matters most. Recorded as the narrower set rather than left silent -
+            backend#1681 tracks closing it.
+          required_checks:
+            - gate / gate
+      prod:
+        divergent:
+          reason: >-
+            As staging, above.
+          required_checks:
+            - gate / gate
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -797,9 +1028,15 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -820,8 +1057,13 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -847,9 +1089,15 @@ repos:
       develop: required
       staging: required
       prod: required
+    rulesets:
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
+      version-bump-pr.yml:
+        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml

@@ -68,9 +68,38 @@ except ImportError:  # pragma: no cover - the workflow installs it explicitly
 TOP_LEVEL_KEYS = {
     "schema_version", "org", "pinned_ref", "audit_branch", "source_repo",
     "reusables", "copies", "shared_reasons", "repos", "protection_policy",
+    "ruleset_policy",
 }
 REQUIRED_TOP_LEVEL = TOP_LEVEL_KEYS - {"shared_reasons"}
-REPO_KEYS = {"visibility", "release_train", "callers", "copies", "protection"}
+REPO_KEYS = {
+    "visibility", "release_train", "callers", "copies", "protection", "rulesets",
+}
+
+# ---------------------------------------------------------------------- rulesets
+#
+# GitHub's SECOND protection system, and until backend#1681 nothing in the org
+# audited it. `read_protection()` reads rulesets, but only to satisfy the seven
+# classic-expressible properties -- so it can tell that a branch is protected,
+# never that a ruleset EXISTS, what it permits, or who may bypass it.
+#
+# Two things rest entirely on that unaudited layer:
+#   * `allowed_merge_methods: ["merge"]` on every promotion branch. This is not
+#     expressible in classic protection at all, and it is what stops a promotion
+#     PR being squash-merged -- which would collapse the merge-commit ancestry
+#     the release train's squash guard reads.
+#   * the `v*` tag trust root on the repos that publish from a tag.
+#
+# Measured 2026-08-11, both were drifting unnoticed: start-training carried NO
+# ruleset at all (its classic protection was fully compliant, so the guard was
+# structurally blind to it), and `release-python` -- four engineers -- held
+# `always` tag bypass on backend, data-ingestors and tracebloc-py-package, two
+# of which publish on the tag. Neither is detectable by any existing check.
+#
+# MATCH ON TARGET + RULES, NEVER ON NAME. `client`'s tag ruleset is called
+# "R8 trust root - protect v* release tags" while its five peers use
+# "Protect v* release tags (supply-chain trust root)". A name-keyed check
+# silently reports client as missing its trust root.
+RULESET_KINDS = ("promotion_merge_commit_only", "tag_trust_root")
 SUPPORTED_SCHEMA = 2
 SUPPORTED_AUDIT_BRANCH = "develop-first"
 
@@ -95,6 +124,14 @@ POLICY_KEYS = {
     "block_deletions",                 # bool
     "require_conversation_resolution",  # bool
     "strict",                          # bool | null: required_status_checks.strict
+    # list[str]: contexts that must be REQUIRED on this role, merged across both
+    # protection systems. A caller being present only means the check RUNS; this
+    # is what makes it BLOCK. Until backend#1681 the whole
+    # required_status_checks object was opened and everything but `strict` thrown
+    # away, so `.github/staging` required exactly one context while the inventory
+    # reported it conformant -- and two promotion PRs merged with the contract
+    # audit red (.github#203, #205).
+    "required_checks",
 }
 # Which policy keys a per-repo `divergent` entry may override. Deliberately NOT
 # every key: a repo may document a weaker review count or admin posture, but it
@@ -102,6 +139,10 @@ POLICY_KEYS = {
 # word and shows up differently in the report.
 OVERRIDABLE = {
     "min_reviews", "enforce_admins", "require_conversation_resolution", "strict",
+    # A repo may require FEWER contexts than the fleet baseline, but only with a
+    # written reason naming the narrower set -- so the gap is a sentence in this
+    # file rather than something a reader has to diff two API calls to discover.
+    "required_checks",
 }
 
 WORKFLOW_PATH = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
@@ -260,6 +301,29 @@ def _policy_value(key: str, value, where: str, allow_null: bool) -> None:
         if not isinstance(value, bool):
             die(f"{where}.{key}: must be true, false, or null (not asserted).")
         return
+    if key == "required_checks":
+        # A LIST, not a bool, so it needs its own shape rules. `[]` is legal and
+        # deliberately so: `docs` requires no checks on staging/prod by a written
+        # 2026-06-04 exemption, and saying that out loud in a `divergent` cell is
+        # the point of this file. What is NOT legal is a non-list, a non-string
+        # entry, or a blank/duplicate context -- each of those would silently
+        # assert less than it appears to.
+        if not isinstance(value, list):
+            die(
+                f"{where}.required_checks: must be a list of status-check "
+                "contexts (use [] to assert none, with a written reason)."
+            )
+        seen = set()
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                die(
+                    f"{where}.required_checks: every entry must be a non-empty "
+                    f"context string; got {item!r}."
+                )
+            if item in seen:
+                die(f"{where}.required_checks: duplicate context {item!r}.")
+            seen.add(item)
+        return
     die(f"{where}.{key}: unknown policy key.")
 
 
@@ -279,6 +343,54 @@ def _policy_block(value, where: str) -> dict:
     for key in POLICY_KEYS:
         _policy_value(key, value[key], where, allow_null=True)
     return dict(value)
+
+
+def _ruleset_policy_block(value, where: str) -> dict:
+    """Validate one ruleset-kind policy.
+
+    Every key is stated explicitly, for the same reason the protection policy
+    does it: a silently-absent `bypass_actors` would assert nothing while looking
+    like an allowlist.
+    """
+    required = {"target", "require_rule_types", "bypass_actors"}
+    optional = {"allowed_merge_methods", "include_refs", "must_cover_roles"}
+    if not isinstance(value, dict):
+        die(f"{where}: must be a mapping.")
+    unknown = set(value) - required - optional
+    if unknown:
+        die(f"{where}: unknown key(s) {sorted(unknown)}.")
+    absent = required - set(value)
+    if absent:
+        die(
+            f"{where}: missing key(s) {sorted(absent)}. Absence is never implicit - "
+            "an unstated bypass allowlist would assert nothing."
+        )
+    if value["target"] not in ("branch", "tag"):
+        die(f"{where}.target: must be `branch` or `tag`.")
+    for key in ("require_rule_types", "bypass_actors"):
+        _str_list(value[key], f"{where}.{key}", allow_empty=(key == "bypass_actors"))
+    for key in optional & set(value):
+        if key == "must_cover_roles":
+            bad = [r for r in value[key] if r not in PROTECTION_ROLES]
+            if bad:
+                die(f"{where}.must_cover_roles: unknown role(s) {bad}.")
+        _str_list(value[key], f"{where}.{key}", allow_empty=False)
+    return dict(value)
+
+
+def _str_list(value, where: str, allow_empty: bool) -> None:
+    """A list of non-empty, unique strings -- or a stated-empty allowlist."""
+    if not isinstance(value, list):
+        die(f"{where}: must be a list of strings.")
+    if not value and not allow_empty:
+        die(f"{where}: must not be empty.")
+    seen = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            die(f"{where}: every entry must be a non-empty string; got {item!r}.")
+        if item in seen:
+            die(f"{where}: duplicate entry {item!r}.")
+        seen.add(item)
 
 
 def _protection_entry(value, where: str) -> "tuple[str, str, dict]":
@@ -413,6 +525,18 @@ def load_inventory(path: str) -> dict:
     for role in PROTECTION_ROLES:
         policy[role] = _policy_block(policy[role], f"{path}: protection_policy.{role}")
 
+    rpolicy = data["ruleset_policy"]
+    if not isinstance(rpolicy, dict):
+        die(f"{path}: ruleset_policy must be a mapping of ruleset kinds.")
+    unknown = set(rpolicy) - set(RULESET_KINDS)
+    if unknown:
+        die(f"{path}: ruleset_policy has unknown kind(s) {sorted(unknown)}.")
+    missing = set(RULESET_KINDS) - set(rpolicy)
+    if missing:
+        die(f"{path}: ruleset_policy is missing kind(s) {sorted(missing)}.")
+    for kind in RULESET_KINDS:
+        rpolicy[kind] = _ruleset_policy_block(rpolicy[kind], f"{path}: ruleset_policy.{kind}")
+
     repos = data["repos"]
     if not isinstance(repos, dict) or not repos:
         die(f"{path}: `repos` must be a non-empty mapping.")
@@ -437,6 +561,12 @@ def load_inventory(path: str) -> dict:
         for section, expected, allowed in (
             ("callers", reusables, {"exempt"}),
             ("copies", copies, {"exempt", "divergent"}),
+            # Same schema as the caller family, deliberately: `required`, or an
+            # exemption carrying a written reason. There is no `divergent` here --
+            # a ruleset that exists but permits something else is drift, not a
+            # documented variant, because the thing it permits (a squash promotion,
+            # an extra bypass actor) is exactly what the property exists to catch.
+            ("rulesets", RULESET_KINDS, {"exempt"}),
         ):
             cells = entry[section]
             if not isinstance(cells, dict):
@@ -500,6 +630,65 @@ def load_source_copies(source_dir: str, copies: "list[str]") -> "dict[str, str]"
                 "everything."
             )
     return shas
+
+
+def check_source_reusables(source_dir: str, listed: "list[str]") -> None:
+    """Every `workflow_call` workflow in the source repo must be in the inventory.
+
+    THE GUARD ENUMERATED THE INVENTORY, NEVER THE SOURCE. `reusables` is a
+    hand-written list and the audit iterates it, so a reusable added to
+    tracebloc/.github but not added to that list is compared against no repo and
+    reported by nothing -- the one direction of drift this file could not see.
+
+    `version-bump-pr.yml` is how that surfaced (backend#1681): shipped, never
+    listed, zero callers org-wide, and requiring a `pr-token` secret no repo
+    supplies. It is Layer 2 of backend#1563, meant to stop the version staleness
+    that stalled tracebloc-py-package's prod leg -- and nothing said it was never
+    wired up.
+
+    Deliberately a die(), not a finding: the inventory is the contract, and a
+    contract that does not mention half the artifacts it governs cannot be
+    audited against. Adding the row is the fix; `exempt` with a written reason is
+    how a parked reusable stays parked (see wip-limit-check).
+    """
+    workflows = os.path.join(source_dir, ".github", "workflows")
+    if not os.path.isdir(workflows):
+        die(
+            f"source workflow directory {workflows} is missing. Refusing to "
+            "report that every reusable is tracked without having looked."
+        )
+    found = []
+    for name in sorted(os.listdir(workflows)):
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        path = os.path.join(workflows, name)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                doc = yaml.safe_load(handle)
+        except (OSError, yaml.YAMLError) as exc:
+            die(f"{path} is not readable/parseable ({exc}); cannot tell if it is a reusable.")
+        # `on:` parses as the boolean True in YAML 1.1, which is why this reads
+        # both keys rather than the obvious one.
+        triggers = doc.get("on") if isinstance(doc, dict) else None
+        if triggers is None and isinstance(doc, dict):
+            triggers = doc.get(True)
+        if isinstance(triggers, dict) and "workflow_call" in triggers:
+            found.append(name)
+    untracked = sorted(set(found) - set(listed))
+    if untracked:
+        die(
+            f"reusable workflow(s) {untracked} exist in {workflows} but are absent "
+            "from the inventory's `reusables` list, so they are checked against no "
+            "repo and reported by nothing. Add a row for every repo - `exempt` with "
+            "a written reason is how a parked reusable stays parked."
+        )
+    phantom = sorted(set(listed) - set(found))
+    if phantom:
+        die(
+            f"inventory lists reusable(s) {phantom} that are not `workflow_call` "
+            f"workflows in {workflows}. A renamed or deleted reusable leaves every "
+            "repo's row asserting something that cannot exist."
+        )
 
 
 # ------------------------------------------------------------------- discovery
@@ -731,6 +920,10 @@ class BranchProtection:
         self.block_deletions = False
         self.conversation_resolution = False
         self.strict: "bool | None" = None
+        # Contexts that BLOCK a merge on this branch, unioned across both
+        # systems. A set, because the same context can be required by classic
+        # protection and by a ruleset and it blocks exactly once either way.
+        self.required_checks: "set[str]" = set()
         self.rulesets: "list[str]" = []
         self.error: "str | None" = None
 
@@ -770,6 +963,19 @@ def read_protection(org: str, name: str, branch: str) -> BranchProtection:
         # `strict` is only meaningful when a required-status-checks object exists.
         # Absent object -> None ("nothing to assert"), NOT False.
         out.strict = checks.get("strict") if isinstance(checks, dict) else None
+        if isinstance(checks, dict):
+            # Two spellings of the same list. `checks` is the current shape
+            # ({context, app_id}); `contexts` is the legacy flat list still
+            # returned for older configurations. Read both -- taking only the
+            # modern one would report a branch's required set as EMPTY, which is
+            # the fail-open shape this guard exists to prevent.
+            for item in checks.get("checks") or []:
+                ctx = item.get("context") if isinstance(item, dict) else None
+                if isinstance(ctx, str) and ctx:
+                    out.required_checks.add(ctx)
+            for ctx in checks.get("contexts") or []:
+                if isinstance(ctx, str) and ctx:
+                    out.required_checks.add(ctx)
 
     # --- rulesets -----------------------------------------------------------
     # `rules/branches/{b}` resolves every ruleset that targets this branch,
@@ -805,6 +1011,14 @@ def read_protection(org: str, name: str, branch: str) -> BranchProtection:
         elif rtype == "required_status_checks":
             if params.get("strict_required_status_checks_policy"):
                 out.strict = True
+            # A ruleset can require checks too, and those block just as hard as
+            # the classic ones. No repo uses this today (measured 2026-08-11:
+            # all 28 active rules are `pull_request`), but reading only classic
+            # would silently under-report the moment one does.
+            for item in params.get("required_status_checks") or []:
+                ctx = item.get("context") if isinstance(item, dict) else None
+                if isinstance(ctx, str) and ctx:
+                    out.required_checks.add(ctx)
 
     return out
 
@@ -926,6 +1140,194 @@ def evaluate_protection(
                     f"required_status_checks.strict={got.strict}, policy wants "
                     f"{want['strict']} (backend#1276 decision 2)."
                 )
+        # SUBSET, not equality: repos legitimately require their own tests on top
+        # of the fleet baseline (backend's Django suite, cli's golangci-lint), and
+        # demanding an exact match would turn every one of those into drift. The
+        # baseline is a floor.
+        missing = [c for c in want["required_checks"] if c not in got.required_checks]
+        if missing:
+            fail(
+                f"does not REQUIRE {', '.join(missing)} - the check may run and go "
+                f"red, but nothing stops the merge. Required here: "
+                f"{', '.join(sorted(got.required_checks)) or '(none)'}."
+            )
+
+
+def _actor(entry: dict) -> str:
+    """Render one bypass actor as a stable, comparable string.
+
+    `OrganizationAdmin` carries no actor_id; teams and apps do. Rendering both
+    into one vocabulary keeps the inventory readable and the comparison exact --
+    a set difference, not a fuzzy match.
+    """
+    kind = entry.get("actor_type") or "Unknown"
+    ident = entry.get("actor_id")
+    return kind if ident is None else f"{kind}:{ident}"
+
+
+class RepoRuleset:
+    """One ruleset, reduced to the properties the inventory asserts."""
+
+    def __init__(self, raw: dict):
+        self.id = raw.get("id")
+        self.name = raw.get("name") or ""
+        self.target = raw.get("target") or ""
+        self.enforcement = raw.get("enforcement") or ""
+        cond = (raw.get("conditions") or {}).get("ref_name") or {}
+        self.includes = [r for r in (cond.get("include") or []) if isinstance(r, str)]
+        self.rule_types = {
+            r.get("type") for r in (raw.get("rules") or []) if isinstance(r, dict)
+        }
+        self.merge_methods: "list[str] | None" = None
+        for rule in raw.get("rules") or []:
+            if isinstance(rule, dict) and rule.get("type") == "pull_request":
+                params = rule.get("parameters") or {}
+                methods = params.get("allowed_merge_methods")
+                if isinstance(methods, list):
+                    self.merge_methods = sorted(m for m in methods if isinstance(m, str))
+        self.bypass = sorted(
+            _actor(a) for a in (raw.get("bypass_actors") or []) if isinstance(a, dict)
+        )
+
+
+def read_rulesets(org: str, name: str) -> "tuple[list[RepoRuleset], str | None]":
+    """Every ruleset on a repo, fully expanded.
+
+    TWO CALLS PER RULESET, NOT ONE, AND THE SECOND IS THE POINT. The listing at
+    `/rulesets` carries no rules and no bypass actors, and
+    `/rules/branches/{b}` -- which read_protection() already uses -- omits
+    `bypass_actors` ENTIRELY (verified against the live payload 2026-08-11: its
+    rule objects carry only type/parameters/ruleset_source*/ruleset_id). Only
+    `/rulesets/{id}` returns them. Asserting a bypass allowlist from either of
+    the cheaper endpoints would assert nothing and report a pass.
+
+    Fail-closed: any unreadable ruleset returns an error rather than a short
+    list, because "fewer rulesets than exist" reads exactly like "this repo is
+    missing its ruleset".
+    """
+    try:
+        # includes_parents=false: the default listing folds in org/enterprise
+        # rulesets whose ids then 404 on the per-ruleset get-by-id below, failing
+        # the whole audit. We assert only THIS repo's rulesets (Bugbot, .github#212).
+        listing = gh_json_array(
+            f"repos/{org}/{name}/rulesets?includes_parents=false"
+        )
+    except GhError as exc:
+        return ([], f"rulesets unreadable ({exc.detail})")
+    out = []
+    for row in listing:
+        if not isinstance(row, dict) or row.get("id") is None:
+            return ([], "rulesets listing carried an entry with no id")
+        try:
+            full = gh_json(["api", f"repos/{org}/{name}/rulesets/{row['id']}"])
+        except GhError as exc:
+            return ([], f"ruleset {row['id']} unreadable ({exc.detail})")
+        if not isinstance(full, dict):
+            return ([], f"ruleset {row['id']} did not return an object")
+        out.append(RepoRuleset(full))
+    return (out, None)
+
+
+def classify(rs: RepoRuleset) -> "str | None":
+    """Which policy kind a ruleset is, from its SHAPE.
+
+    Deliberately not its name: `client`'s tag ruleset is named differently from
+    its five peers, and a name-keyed check reports it as missing.
+    """
+    if rs.target == "tag":
+        return "tag_trust_root"
+    if rs.target == "branch" and "pull_request" in rs.rule_types:
+        return "promotion_merge_commit_only"
+    return None
+
+
+def evaluate_rulesets(
+    name: str, entry: dict, policy: dict, branches: "set[str]",
+    org: str, findings: "list[str]", unreadable: "list[str]",
+) -> None:
+    """Assert one repo's rulesets against the policy."""
+    cells = entry["rulesets"]
+    # NO early return for a fully-exempt repo, even though it would save an API
+    # call. An exemption still has to be checked for STALENESS -- "this repo has
+    # no rulesets" is a claim about reality, and skipping the read would make it
+    # unfalsifiable. A repo that exempts everything is exactly the one where an
+    # unnoticed ruleset would sit forever. (Caught by this file's own selftest.)
+    found, error = read_rulesets(org, name)
+    if error:
+        unreadable.append(f"{name}: rulesets - {error}")
+        return
+
+    by_kind: "dict[str, list[RepoRuleset]]" = {k: [] for k in RULESET_KINDS}
+    for rs in found:
+        kind = classify(rs)
+        if kind in by_kind:
+            by_kind[kind].append(rs)
+
+    for kind in RULESET_KINDS:
+        state, reason = cells[kind]
+        matches = by_kind[kind]
+        want = policy[kind]
+
+        if state == "exempt":
+            # Same staleness rule the caller and protection families apply: an
+            # exemption that is no longer true must say so out loud.
+            if matches:
+                findings.append(
+                    f"{name}: rulesets.{kind} is `exempt` but a matching ruleset "
+                    f"exists ({matches[0].name!r}). The exemption is stale - "
+                    f"promote it to `required`. (reason on file: {reason[:70]})"
+                )
+            continue
+
+        if not matches:
+            findings.append(
+                f"{name}: has NO {kind} ruleset. Nothing enforces "
+                f"{'merge-commit-only on its promotion branches' if kind == 'promotion_merge_commit_only' else 'the v* tag trust root'}."
+            )
+            continue
+
+        for rs in matches:
+            label = f"{name}: ruleset {rs.name!r} ({kind})"
+            if rs.enforcement != "active":
+                findings.append(
+                    f"{label} is enforcement={rs.enforcement!r}, not `active` - it "
+                    "looks protective and enforces nothing."
+                )
+            missing_rules = sorted(set(want["require_rule_types"]) - rs.rule_types)
+            if missing_rules:
+                findings.append(f"{label} is missing rule type(s) {missing_rules}.")
+            if want.get("allowed_merge_methods") is not None:
+                if rs.merge_methods != sorted(want["allowed_merge_methods"]):
+                    findings.append(
+                        f"{label} allows merge methods {rs.merge_methods}, policy "
+                        f"wants {sorted(want['allowed_merge_methods'])} - a squash "
+                        "promotion rewrites the merge-commit ancestry the train reads."
+                    )
+            # Bypass is an EXACT allowlist, not a subset: an unexpected actor is
+            # precisely the finding this exists for (backend#1681 removed a team
+            # with `always` tag bypass on two repos that publish on the tag).
+            allowed = sorted(want["bypass_actors"])
+            if rs.bypass != allowed:
+                extra = sorted(set(rs.bypass) - set(allowed))
+                gone = sorted(set(allowed) - set(rs.bypass))
+                detail = []
+                if extra:
+                    detail.append(f"unexpected {extra}")
+                if gone:
+                    detail.append(f"missing {gone}")
+                findings.append(f"{label} bypass actors: {'; '.join(detail)}.")
+            for ref in want.get("include_refs") or []:
+                if ref not in rs.includes:
+                    findings.append(f"{label} does not cover {ref} (covers {rs.includes}).")
+            for role in want.get("must_cover_roles") or []:
+                branch = resolve_role_branch(role, branches)
+                if branch is None:
+                    continue
+                if f"refs/heads/{branch}" not in rs.includes:
+                    findings.append(
+                        f"{label} does not cover {role} (refs/heads/{branch}); "
+                        f"covers {rs.includes}."
+                    )
 
 
 # ------------------------------------------------------------------ evaluation
@@ -948,6 +1350,7 @@ def main() -> int:
     source_repo = inventory["source_repo"]
     reusables = list(inventory["reusables"])
     copies = list(inventory["copies"])
+    check_source_reusables(args.source_dir, reusables)
     source_shas = load_source_copies(args.source_dir, copies)
 
     active = list_active_repos(org)
@@ -956,7 +1359,14 @@ def main() -> int:
     findings: "list[str]" = []
     unreadable: "list[str]" = []
     # Kept separate until `evaluated` is computed - see the note at the call site.
+    # Holds BOTH protection and ruleset read failures (backend#1681). Kept as one
+    # bucket deliberately: both are "this repo's caller/copy audit SUCCEEDED, a
+    # different control plane did not", which is the distinction this list exists
+    # to preserve. Protection and ruleset read-failures go in SEPARATE buckets so
+    # each names exactly which layer failed: a rulesets-only outage must not read
+    # as branch protection failing, and vice versa (Bugbot, .github#212).
     protection_unreadable: "list[str]" = []
+    ruleset_unreadable: "list[str]" = []
 
     untracked = sorted(set(active) - set(inventory["repos"]))
     for name in untracked:
@@ -1093,6 +1503,13 @@ def main() -> int:
             name, entry, inventory["protection_policy"], read.branches,
             org, findings, protection_unreadable,
         )
+        # Rulesets get their OWN unreadable bucket (not protection's): a rulesets
+        # API failure is neither "callers unreadable" nor "protection unreadable",
+        # and must not abort the run or discard real caller findings.
+        evaluate_rulesets(
+            name, entry, inventory["ruleset_policy"], read.branches,
+            org, findings, ruleset_unreadable,
+        )
 
     # Computed from repo-read failures ONLY, before the two lists are merged.
     evaluated = len(audited) - len({line.split(":", 1)[0] for line in unreadable})
@@ -1104,13 +1521,15 @@ def main() -> int:
     # Merged only now, so protection failures are REPORTED and still fail the run
     # without ever being able to trigger the abort above.
     unreadable.extend(protection_unreadable)
+    unreadable.extend(ruleset_unreadable)
 
     report = [
         "### Repo conformance drift",
         "",
         f"Inventory: **{len(inventory['repos'])}** repos x **{len(reusables)}** "
         f"reusables + **{len(copies)}** copies + **{len(PROTECTION_ROLES)}** "
-        f"branch-protection roles. Audited **{evaluated}** of **{len(audited)}** "
+        f"branch-protection roles + **{len(RULESET_KINDS)}** ruleset kinds. "
+        f"Audited **{evaluated}** of **{len(audited)}** "
         "on the develop-first branch.",
         "",
         "Protection is read from **both** GitHub protection systems (classic + "
@@ -1128,14 +1547,23 @@ def main() -> int:
         # that says "caller state is unknown" after a protection-only outage
         # misstates what happened and quietly undoes the separation above
         # (Bugbot, .github#196).
-        caller_failed = len(unreadable) - len(protection_unreadable)
+        caller_failed = (
+            len(unreadable) - len(protection_unreadable) - len(ruleset_unreadable)
+        )
         bits = []
         if caller_failed:
             bits.append(f"**{caller_failed} repo read(s) FAILED** (caller/copy state UNKNOWN)")
         if protection_unreadable:
             bits.append(
                 f"**{len(protection_unreadable)} branch-protection read(s) FAILED** "
-                "(protection state UNKNOWN; caller/copy state for those repos WAS read)"
+                "(protection state UNKNOWN for the repos named below; caller/copy "
+                "state for those repos WAS read)"
+            )
+        if ruleset_unreadable:
+            bits.append(
+                f"**{len(ruleset_unreadable)} ruleset read(s) FAILED** "
+                "(ruleset state UNKNOWN for the repos named below; caller/copy and "
+                "branch-protection state for those repos WAS read)"
             )
         report.append(
             " and ".join(bits)
@@ -1181,7 +1609,9 @@ def main() -> int:
             die(f"could not write step outputs: {exc}")
 
     if unreadable:
-        caller_failed = len(unreadable) - len(protection_unreadable)
+        caller_failed = (
+            len(unreadable) - len(protection_unreadable) - len(ruleset_unreadable)
+        )
         parts = []
         if caller_failed:
             parts.append(f"{caller_failed} repo read(s) failed - caller/copy state UNKNOWN")
@@ -1189,6 +1619,11 @@ def main() -> int:
             parts.append(
                 f"{len(protection_unreadable)} branch-protection read(s) failed - "
                 "protection state UNKNOWN"
+            )
+        if ruleset_unreadable:
+            parts.append(
+                f"{len(ruleset_unreadable)} ruleset read(s) failed - "
+                "ruleset state UNKNOWN"
             )
         sys.stderr.write("::error::" + "; ".join(parts) + ".\n")
         return 2
