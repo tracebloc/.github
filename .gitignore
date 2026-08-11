@@ -1,0 +1,12 @@
+# Python bytecode. A `.pyc` was committed here by a `git add -A` and rode a
+# promotion to staging before anyone noticed: it is a build artifact, it is
+# version- and platform-specific (this one was cpython-314), and a stale one
+# shadows the source it was built from. Ignore the whole class rather than the
+# one file that got caught.
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local editor / OS noise, same reasoning.
+.DS_Store
+.pytest_cache/

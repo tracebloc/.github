@@ -96,6 +96,7 @@ reusables:
   - kanban-closure-router.yml
   - set-pr-status.yml
   - wip-limit-check.yml
+  - version-bump-gate.yml
 
 # Copies, not callers: these are duplicated into each repo, so the guard compares
 # content (git blob sha against the checked-out source) instead of looking for a
@@ -158,6 +159,11 @@ protection_policy:
 # rejects an empty one exactly as it would an inline string. This block holds
 # no policy; deleting an entry that is still aliased is a YAML error.
 shared_reasons:
+  version_gate_not_applicable: &version_gate_not_applicable >-
+    This repo has no version_file in release-train/repos.yml, so it publishes
+    no tag-versioned artifact through the train and the version-bump gate does
+    not apply. The five version-published repos declare it required.
+
   wip_limit_check_has_no_callers: &wip_limit_check_has_no_callers >-
     wip-limit-check has ZERO callers anywhere in the org (measured 2026-08-03, all 20 active
     repos, develop-first). Its own header says to delete the reusable once nothing references
@@ -243,6 +249,8 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
       # Remediated 2026-08-06 (.github#171, backend#1603). The repo that HOSTS
       # code-quality.yml was the only repo not running it, so the action-pins job
@@ -281,6 +289,8 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -302,6 +312,8 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -328,6 +340,8 @@ repos:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       advance-deploy-env.yml:
         exempt: *advance_deploy_env_caller_missing
       code-quality.yml:
@@ -352,6 +366,7 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml: required   # version-bump-gate-caller.yml
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -382,6 +397,7 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml: required   # version-bump-gate-caller.yml
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -403,6 +419,8 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -424,6 +442,7 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml: required   # version-bump-gate-caller.yml
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -445,6 +464,7 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml: required   # version-bump-gate-caller.yml
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -469,6 +489,8 @@ repos:
       prod:
         exempt: *devex_bootstrap_undisposed
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       advance-deploy-env.yml:
         exempt: >-
           devex-bootstrap has no .github directory at all, no branch protection and no
@@ -541,6 +563,8 @@ repos:
           reason: *docs_no_required_review
           min_reviews: 0
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       # Flipped exempt -> required 2026-08-04: the caller was added on MAIN only
       # (docs#70, a docs-exception direct merge) where the develop-first audit
       # could not see it. docs#80's backmerge brought it onto develop.
@@ -590,6 +614,8 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -611,6 +637,8 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -632,6 +660,8 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -658,6 +688,8 @@ repos:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml:
         exempt: *code_quality_caller_missing
@@ -699,6 +731,8 @@ repos:
           enforce_admins: false
           require_conversation_resolution: false
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       # Per-caller reasons, not one blanket text (Bugbot, .github#138). The first
       # version of this block asserted "no hop to gate" for all nine, which is only
       # true for some of them and silently overwrote reasons that were already
@@ -741,6 +775,8 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -762,6 +798,8 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -783,6 +821,7 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml: required   # version-bump-gate-caller.yml
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -809,6 +848,8 @@ repos:
       staging: required
       prod: required
     callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml

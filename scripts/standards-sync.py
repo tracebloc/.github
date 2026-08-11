@@ -36,6 +36,15 @@ DESIGN RULES, inherited from caller-drift.py:
     is never auto-edited — a bad splice could destroy hand-written repo
     content. It is reported and exits 2 until a human repairs the markers.
 
+5.  FRESH REFS ARE EVENTUALLY CONSISTENT. A file read on a just-created
+    branch can transiently 404 even though the base it was cut from has the
+    file (seen live: run 31373298821, frontend-app leg — the 404 was
+    believed, the write went out sha-less against an existing path, and
+    GitHub rejected it). Reads the base proves must succeed are retried
+    with backoff; a write rejected over a missing/stale sha refreshes the
+    sha and retries exactly once. After the retries: fail closed, never
+    silently.
+
 The canon is read from the CHECKOUT (it lives next to this script); target
 state is read over the API. A PR that edits org-standards.md therefore sees
 the whole fleet as DRIFTED — which is true: the fleet IS behind the proposed
@@ -58,6 +67,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 BEGIN = "<!-- org-standards:begin -->"
 END = "<!-- org-standards:end -->"
@@ -208,7 +218,92 @@ def fetch_claude_md(org: str, repo: str, branch: str) -> "str | None":
     raise Unreadable(f"CLAUDE.md read failed: {err.strip() or 'empty response'}")
 
 
-def remediate(org: str, repo: str, base: str, desired: str, issue: int) -> "str | None":
+def _read_head_file(full: str, head: str, expect_file: bool) -> "tuple[str | None, str | None, str | None]":
+    """Read CLAUDE.md on the sync branch. Returns (sha, content, error).
+
+    A ref created an instant ago is eventually consistent: reading a file on
+    it can transiently 404 even though the base it was cut from has the file
+    (design rule 5; run 31373298821). When the caller KNOWS the base has the
+    file (expect_file), a 404 here cannot be true yet — retry with backoff
+    and fail CLOSED if it never appears, because believing it produces a
+    sha-less write against an existing path. When the base has no file, one
+    confirming re-read still guards against trusting a single blip.
+    """
+    attempts = 5 if expect_file else 2
+    delay = 1.0
+    last = ""
+    for attempt in range(1, attempts + 1):
+        code, out, err = gh("api", f"repos/{full}/contents/CLAUDE.md?ref={head}")
+        if code == 0:
+            try:
+                payload = json.loads(out)
+                content = base64.b64decode(payload.get("content", "")).decode("utf-8")
+            except (ValueError, UnicodeDecodeError) as exc:
+                return None, None, f"CLAUDE.md on {head} did not decode: {exc!r}"
+            return payload.get("sha"), content, None
+        if http_status(err) == 404:
+            if not expect_file and attempt >= 2:
+                return None, None, None  # absence confirmed by a re-read
+            last = f"404 (attempt {attempt}/{attempts})"
+        else:
+            last = err.strip() or "empty error"
+        if attempt < attempts:
+            time.sleep(delay)
+            delay = min(delay * 2, 8.0)
+    if expect_file:
+        return None, None, (
+            f"cannot read CLAUDE.md on {head}: the base branch has the file but this "
+            f"ref kept answering {last} after {attempts} attempts — refusing a sha-less write"
+        )
+    return None, None, f"cannot read CLAUDE.md on {head} after {attempts} attempts: {last}"
+
+
+def _write_head_file(full: str, head: str, desired: str, head_sha: "str | None", issue: int) -> "str | None":
+    """PUT CLAUDE.md on the sync branch; refresh the sha and retry once on rejection.
+
+    A 409/422 means the file exists under a different (or unsupplied) sha —
+    the write-side face of the consistency window _read_head_file() guards.
+    Exactly one refreshed retry: a second rejection is a real conflict and
+    fails closed (design rule 5).
+    """
+    message = (
+        f"docs(claude): sync org-standards block (backend#{issue})\n\n"
+        "Managed sync from tracebloc/.github/org-standards.md.\n\n"
+        "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+    )
+    encoded = base64.b64encode(desired.encode("utf-8")).decode("ascii")
+    for attempt in (1, 2):
+        put_args = ["api", "-X", "PUT", f"repos/{full}/contents/CLAUDE.md",
+                    "-f", f"message={message}", "-f", f"content={encoded}", "-f", f"branch={head}"]
+        if head_sha:
+            put_args += ["-f", f"sha={head_sha}"]
+        code, _, err = gh(*put_args)
+        if code == 0:
+            return None
+        if attempt == 1 and http_status(err) in (409, 422):
+            # The file provably exists on the ref now — expect_file=True.
+            head_sha, _, rerr = _read_head_file(full, head, expect_file=True)
+            if rerr:
+                return f"write rejected (HTTP {http_status(err)}) and the sha refresh then failed: {rerr}"
+            continue
+        if attempt == 2 and http_status(err) in (409, 422):
+            # A REAL conflict, not the consistency window: we refreshed the sha
+            # and were rejected anyway, so something else is writing this branch.
+            # This used to fall through to the generic message below, leaving the
+            # specific one after the loop UNREACHABLE (Bugbot, #197) -- so the one
+            # failure worth distinguishing was the one nobody could see.
+            return (f"cannot write CLAUDE.md on {head}: rejected twice "
+                    f"(HTTP {http_status(err)}) with a freshly-read sha — "
+                    "another writer is racing this branch")
+        return f"cannot write CLAUDE.md on {head}: {err.strip()}"
+    # Unreachable by construction: every path in the loop returns or continues,
+    # and `continue` on attempt 2 is impossible. Kept as a fail-closed backstop
+    # rather than falling off the end and returning None, which would read as
+    # SUCCESS.
+    return f"cannot write CLAUDE.md on {head}: exhausted retries"
+
+
+def remediate(org: str, repo: str, base: str, desired: str, issue: int, file_on_base: bool) -> "str | None":
     """Push the sync branch and open/refresh the PR. Returns an error string or None."""
     head = f"docs/{issue}-org-standards-sync"
     full = f"{org}/{repo}"
@@ -220,33 +315,31 @@ def remediate(org: str, repo: str, base: str, desired: str, issue: int) -> "str 
 
     code, _, err = gh("api", "-X", "POST", f"repos/{full}/git/refs",
                       "-f", f"ref=refs/heads/{head}", "-f", f"sha={base_sha}")
+    branch_is_fresh = code == 0
     if code != 0 and http_status(err) != 422:  # 422: branch already exists — reuse it
         return f"cannot create branch {head}: {err.strip()}"
 
-    head_sha = None
-    code, out, err = gh("api", f"repos/{full}/contents/CLAUDE.md?ref={head}")
-    if code == 0:
-        payload = json.loads(out)
-        head_sha = payload.get("sha")
-        current = base64.b64decode(payload.get("content", "")).decode("utf-8")
-        if current == desired:
-            return _ensure_pr(full, head, base, issue)  # content already pushed; just ensure the PR
-    elif http_status(err) != 404:
-        return f"cannot read CLAUDE.md on {head}: {err.strip()}"
-
-    message = (
-        f"docs(claude): sync org-standards block (backend#{issue})\n\n"
-        "Managed sync from tracebloc/.github/org-standards.md.\n\n"
-        "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+    # expect_file means "a 404 here CANNOT be true", and that holds only when the
+    # ref was cut from a base that has the file MOMENTS ago -- the eventual
+    # consistency window the retry exists for.
+    #
+    # A REUSED branch is a different situation. It may have been cut before
+    # CLAUDE.md existed on the base, in which case a 404 is honest and permanent.
+    # Passing file_on_base alone made _read_head_file retry five times and then
+    # fail CLOSED, so the sha-less create could never happen and that repo was
+    # stuck forever (Bugbot, #197). The previous code read the 404 as absence and
+    # created the file, which was right for this case.
+    head_sha, current, rerr = _read_head_file(
+        full, head, expect_file=file_on_base and branch_is_fresh
     )
-    encoded = base64.b64encode(desired.encode("utf-8")).decode("ascii")
-    put_args = ["api", "-X", "PUT", f"repos/{full}/contents/CLAUDE.md",
-                "-f", f"message={message}", "-f", f"content={encoded}", "-f", f"branch={head}"]
-    if head_sha:
-        put_args += ["-f", f"sha={head_sha}"]
-    code, _, err = gh(*put_args)
-    if code != 0:
-        return f"cannot write CLAUDE.md on {head}: {err.strip()}"
+    if rerr:
+        return rerr
+    if current is not None and current == desired:
+        return _ensure_pr(full, head, base, issue)  # content already pushed; just ensure the PR
+
+    werr = _write_head_file(full, head, desired, head_sha, issue)
+    if werr:
+        return werr
 
     return _ensure_pr(full, head, base, issue)
 
@@ -321,7 +414,8 @@ def main() -> int:
         elif state != IN_SYNC:
             drifted += 1
             if args.create_prs:
-                error = remediate(org, repo, branch, build_desired(text, canon, state), args.issue)
+                error = remediate(org, repo, branch, build_desired(text, canon, state),
+                                  args.issue, file_on_base=(state != NO_FILE))
                 if error:
                     write_errors += 1
                     action = f"REMEDIATION FAILED: {error}"
