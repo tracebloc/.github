@@ -676,6 +676,18 @@ record(not f and not u,
        "a genuinely unprotected branch leaves its exemption intact",
        f"findings={f} unreadable={u}")
 
+# THE FAIL-OPEN backend#1681 CLOSED. Classic 404s, a RULESET carries the branch.
+# The exempt probe used to read `probe.classic_present` alone, so this state --
+# a real, protected branch -- read as unprotected and the exemption stayed
+# silently valid. `_ruleset_only` already existed for the `required` path; it was
+# never pointed at the `exempt` path, which is why the hole survived.
+stub(_ruleset_only)
+f, u = [], []
+guard.evaluate_protection("repo", _exempt_entry(), POLICY, {"develop", "main"}, "acme", f, u)
+record(any("exemption is stale" in x for x in f) and any("ruleset" in x for x in f),
+       "exempt + RULESET-ONLY protection reports the stale exemption (backend#1681)",
+       f"findings={f[:1]}")
+
 
 # --- the ruleset read must be PAGINATED --------------------------------------
 # `rules/branches/{b}` defaults to 30 per page. A rule dropped off page 2 is a

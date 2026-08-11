@@ -1067,12 +1067,25 @@ def evaluate_protection(
             # unreadable when nothing was established. (Bugbot, .github#196 --
             # the same defect class this file's header documents, found in the
             # change that documents it.)
+            # BOTH SYSTEMS, not just the classic one. This condition read
+            # `probe.classic_present` alone until backend#1681, which made a
+            # branch protected SOLELY by a ruleset read as unprotected here --
+            # so its exemption stayed silently valid. That is precisely the
+            # two-systems defect the 20-line header of read_protection()
+            # exists to prevent, sitting in the one place that decides whether
+            # an exemption is still true. `probe.rulesets` is populated by the
+            # very same call; it was simply never consulted.
             if branch is not None:
                 probe = read_protection(org, name, branch)
-                if probe.classic_present:
+                if probe.classic_present or probe.rulesets:
+                    cover = (
+                        "classic protection"
+                        if probe.classic_present
+                        else f"a ruleset ({', '.join(probe.rulesets)})"
+                    )
                     findings.append(
                         f"{name}: protection.{role} is `exempt` but {branch} exists "
-                        f"and carries classic protection. The exemption is stale - "
+                        f"and is protected by {cover}. The exemption is stale - "
                         f"promote it to `required`. (reason on file: {reason[:80]})"
                     )
                 elif probe.error:
