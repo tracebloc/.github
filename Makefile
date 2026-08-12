@@ -231,9 +231,14 @@ selftests: selftest-caller-drift selftest-blocked-marker selftest-standards-sync
 selftest-caller-drift: guard-pyyaml
 	$(PYTHON) scripts/tests/caller-drift-selftest.py
 
+# Two steps, mirroring blocked-gate-selftest.yml exactly: the marker table, then
+# the check that the gate does NOT fire on its own filenames. That self-reference
+# step is the only coverage for a "blocked"-in-a-path false positive, so make
+# check must run it too or it reports green on a matcher change CI would fail.
 .PHONY: selftest-blocked-marker
 selftest-blocked-marker:
 	$(PYTHON) scripts/tests/blocked-marker-selftest.py
+	$(PYTHON) scripts/blocked-marker.py --title "ci(gate): add blocked-gate.yml and blocked-marker.py"
 
 .PHONY: selftest-standards-sync
 selftest-standards-sync: guard-pyyaml
