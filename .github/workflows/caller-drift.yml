@@ -16,9 +16,16 @@
 # develop-first branch: twelve of twenty repos default to main/master while work
 # lands on develop, so a default-branch audit under-reports anything in flight.
 #
-# REPORT-ONLY, like merge-settings-drift.yml. It never opens a PR and never edits a
-# repo; the sync job that opens caller PRs is deliberately deferred (backend#1415).
-# The token therefore only needs org-wide read.
+# REPORT-ONLY on schedule, PR and push. The `create-prs` dispatch input is the only
+# path that writes, and it writes ONE family: copies marked `required` in the
+# inventory that are missing or drifted (backend#1608 item 4). Callers are not
+# generated — their content is repo-specific, measured 2026-08-12 as eight different
+# code-quality-caller.yml files across eight repos — and protection/rulesets are API
+# settings no commit can change. Entries marked `divergent` or `exempt` carry a
+# written reason and are never rewritten.
+#
+# TOKEN: report-only needs org-wide read. create-prs additionally needs Contents: RW
+# and Pull requests: RW, the same scopes standards-sync.yml already exercises.
 #
 # FAIL-CLOSED: every read either yields a value or is recorded as unreadable, and
 # one unreadable repo fails the run. There is no path from a 403, a rate limit, an
@@ -35,6 +42,12 @@ on:
   schedule:
     - cron: '30 6 * * 1' # Mondays 06:30 UTC, right after merge-settings-drift
   workflow_dispatch:
+    inputs:
+      create-prs:
+        description: 'Open remediation PRs for drifted/missing REQUIRED copies'
+        type: boolean
+        default: false
+        required: false
   # Edits to the inventory or the guard are validated against reality on the PR
   # that makes them, so a wrong inventory cannot reach develop unchallenged.
   pull_request:
@@ -116,15 +129,28 @@ jobs:
         id: audit
         env:
           GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          # The event is asserted explicitly rather than inferred from `inputs`
+          # being unset — same expression standards-sync.yml uses. Writing to
+          # twenty repos is not something a cron may decide to do, and a
+          # PR-triggered audit that wrote to the fleet would be a supply-chain
+          # hole rather than a convenience.
+          CREATE_PRS: ${{ github.event_name == 'workflow_dispatch' && inputs.create-prs == true }}
         run: |
           set -uo pipefail
+          remediate=""
+          if [ "${CREATE_PRS:-false}" = "true" ]; then
+            remediate="--create-prs"
+            echo "Remediation ENABLED: required copies that are missing or drifted"
+            echo "will get a PR. divergent/exempt entries are never rewritten."
+          fi
           # The exit code is recorded rather than raised so that the reporting step
           # below still runs on a failure. The step itself therefore always exits 0
           # — the run is failed by the final step, from this recorded value.
           set +e
           python scripts/caller-drift.py \
             --inventory repo-inventory.yml \
-            --source-dir .
+            --source-dir . \
+            ${remediate}
           code=$?
           set -e
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"

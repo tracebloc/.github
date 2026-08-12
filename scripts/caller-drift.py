@@ -632,6 +632,144 @@ def load_source_copies(source_dir: str, copies: "list[str]") -> "dict[str, str]"
     return shas
 
 
+def read_source_copy(source_dir: str, name: str) -> bytes:
+    """The canonical bytes of a copy. load_source_copies() already proved it reads."""
+    path = os.path.join(source_dir, ".github", "workflows", name)
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+# ------------------------------------------------------------------ remediation
+#
+# WHAT --create-prs WILL AND WILL NOT FIX, and why the boundary is here.
+#
+# The ask (backend#1608 item 4) is "open the missing-piece PR per repo", because
+# detection alone still leaves the manual work; it only makes it visible. But a
+# pull request is the right instrument for exactly one of the five families, and
+# pretending otherwise would be worse than not automating at all:
+#
+#   copies             REMEDIABLE. Byte-identical by definition, and the guard
+#                      already holds the canonical bytes it compares against, so
+#                      the fix is exact rather than generated.
+#
+#   callers            NOT remediable. Caller content is repo-specific: measured
+#                      2026-08-12, all EIGHT sampled repos have a different
+#                      code-quality-caller.yml, because each passes its own
+#                      toolchain inputs. A generated caller would be a plausible
+#                      file that is wrong for that repo -- worse than an absent
+#                      one, which at least reports as a finding.
+#
+#   protection,        NOT remediable BY PR. These are API settings, not files in
+#   required_checks,   the tree. No commit can change them, so a PR that claimed
+#   rulesets           to fix them would be theatre. They stay report-only, and
+#                      arming them by hand stays deliberate (backend#1276).
+#
+# And within `copies`, only entries whose inventory state is `required` are
+# touched. `divergent` means a human wrote down WHY this repo differs -- cli pins
+# actions/stale@v11 where canon pins v9, and the newer pin may well be the better
+# one. A script that silently overwrote a recorded decision with the canonical
+# bytes would destroy the very judgement the inventory exists to preserve. Same
+# for `exempt`. Those are reported, never rewritten.
+
+
+def _ensure_copy_pr(full: str, head: str, base: str, issue: int, names: "list[str]") -> "str | None":
+    try:
+        existing = gh(["pr", "list", "-R", full, "--head", head, "--base", base,
+                       "--state", "open", "--json", "number", "--jq", ".[0].number // empty"])
+    except GhError as exc:
+        return f"cannot list PRs: {exc}"
+    if existing.strip():
+        return None  # an open PR already tracks the branch; the write above refreshed it
+
+    listed = ", ".join(f"`{n}`" for n in names)
+    body = (
+        f"Realigns {listed} with the canonical copy in `tracebloc/.github`.\n\n"
+        "These files are **copies, not callers** — nothing resolves them at run time, so a\n"
+        "drifted or missing copy produces no failing run anywhere. Only the conformance\n"
+        "audit notices, which is why this PR exists.\n\n"
+        "Opened by the conformance harness (`caller-drift.py --create-prs`). It rewrites\n"
+        "only copies marked `required` in `repo-inventory.yml`; entries marked `divergent`\n"
+        "or `exempt` carry a written reason and are never touched.\n\n"
+        f"Part of tracebloc/backend#{issue}.\n\n"
+        "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"
+    )
+    try:
+        out = gh(["pr", "create", "-R", full, "--base", base, "--head", head,
+                  "--title", f"chore(ci): realign canonical workflow copies (backend#{issue})",
+                  "--body", body])
+    except GhError as exc:
+        return f"cannot open PR: {exc}"
+
+    # Assignee = whoever dispatched the run (D31). Non-fatal: a missing assignee is
+    # visible on the PR and cheap to add by hand, and failing here would strand a
+    # branch that was already pushed correctly.
+    actor = os.environ.get("GITHUB_ACTOR", "").strip()
+    if actor:
+        try:
+            gh(["pr", "edit", out.strip() or head, "-R", full, "--add-assignee", actor])
+        except GhError as exc:
+            sys.stderr.write(f"::warning::{full}: could not assign @{actor}: {exc}\n")
+    return None
+
+
+def remediate_copies(
+    org: str, repo: str, base: str, names: "list[str]", source_dir: str, issue: int
+) -> "str | None":
+    """Push canonical copies onto a branch and open/refresh the PR.
+
+    Returns an error string, or None on success. Never raises: one repo that
+    cannot be written must not abort remediation for the rest, and must not be
+    reported as done.
+    """
+    head = f"chore/{issue}-conformance-copies"
+    full = f"{org}/{repo}"
+
+    try:
+        base_sha = gh(["api", f"repos/{full}/git/ref/heads/{base}", "--jq", ".object.sha"]).strip()
+    except GhError as exc:
+        return f"cannot resolve {base} head: {exc}"
+    if not base_sha:
+        return f"cannot resolve {base} head: empty sha"
+
+    try:
+        gh(["api", "-X", "POST", f"repos/{full}/git/refs",
+            "-f", f"ref=refs/heads/{head}", "-f", f"sha={base_sha}"])
+    except GhError as exc:
+        # 422 means the branch already exists: reuse it, which is what makes a
+        # re-dispatch idempotent instead of a second PR. Anything else is fatal —
+        # a branch we could not create is not a branch we may write to.
+        if exc.status != 422:
+            return f"cannot create branch {head}: {exc}"
+
+    for name in names:
+        payload = read_source_copy(source_dir, name)
+        encoded = base64.b64encode(payload).decode("ascii")
+        path = f".github/workflows/{name}"
+        args = ["api", "-X", "PUT", f"repos/{full}/contents/{path}",
+                "-f", f"message=chore(ci): realign {name} with tracebloc/.github (backend#{issue})",
+                "-f", f"content={encoded}", "-f", f"branch={head}"]
+        # The blob sha of the file AS IT IS ON THE BRANCH, required by the API to
+        # replace an existing file. Absent means the file does not exist there yet,
+        # which is the create case -- and is exactly the MISSING-copy remediation.
+        try:
+            current = gh(["api", f"repos/{full}/contents/{path}?ref={head}", "--jq", ".sha"]).strip()
+        except GhError as exc:
+            if exc.status != 404:
+                return f"cannot read {path} on {head}: {exc}"
+            current = ""
+        if current:
+            args += ["-f", f"sha={current}"]
+        try:
+            gh(args)
+        except GhError as exc:
+            # 409/422 here means someone else wrote the branch between the read and
+            # the write. Refusing is right: retrying blind would clobber whatever
+            # they pushed.
+            return f"cannot write {path} on {head}: {exc}"
+
+    return _ensure_copy_pr(full, head, base, issue, names)
+
+
 def check_source_reusables(source_dir: str, listed: "list[str]") -> None:
     """Every `workflow_call` workflow in the source repo must be in the inventory.
 
@@ -1400,6 +1538,13 @@ def main() -> int:
         "--source-dir", default=".",
         help="checkout of tracebloc/.github, holding the canonical copies",
     )
+    parser.add_argument(
+        "--create-prs",
+        action="store_true",
+        help="remediate drifted/missing REQUIRED copies by opening a PR per repo. "
+             "Only the `copies` family is remediable - see the remediation block "
+             "above for why callers and protection are not.",
+    )
     parser.add_argument("--summary", default=os.environ.get("GITHUB_STEP_SUMMARY"))
     parser.add_argument("--output", default=os.environ.get("GITHUB_OUTPUT"))
     args = parser.parse_args()
@@ -1408,6 +1553,11 @@ def main() -> int:
     org = inventory["org"]
     pinned_ref = inventory["pinned_ref"]
     source_repo = inventory["source_repo"]
+    # {(repo, branch): [copy_name, ...]} - REQUIRED copies that are missing or
+    # drifted. Populated during the audit so remediation never re-derives what
+    # counts as broken from a second, drifting copy of the rules.
+    remediable: "dict[tuple[str, str], list[str]]" = {}
+    remediation_failures: "list[str]" = []
     reusables = list(inventory["reusables"])
     copies = list(inventory["copies"])
     check_source_reusables(args.source_dir, reusables)
@@ -1533,6 +1683,7 @@ def main() -> int:
                     findings.append(
                         f"{name}: MISSING required copy {copy_name} on {read.branch}."
                     )
+                    remediable.setdefault((name, read.branch), []).append(copy_name)
                 elif name == source_repo:
                     # This repo holds the canonical file. Comparing the audit branch
                     # against the checkout would flag any PR that edits a copy, so
@@ -1546,6 +1697,7 @@ def main() -> int:
                         f"{source_shas[copy_name][:12]}). It is a copy, not a "
                         "caller, so nothing else would ever notice."
                     )
+                    remediable.setdefault((name, read.branch), []).append(copy_name)
             elif state == "divergent":
                 if actual is None:
                     findings.append(
@@ -1672,6 +1824,56 @@ def main() -> int:
         report.append("No drift. Every repo read, every entry matched.")
         report.append("")
 
+    # ---------------------------------------------------------- remediation
+    # After the report is built, so the findings a run reports and the ones it
+    # fixes can never come from two different evaluations.
+    #
+    # Deliberately NOT gated on `unreadable`: a repo we could not read is not a
+    # repo we may write to, but it says nothing about the repos we did read.
+    # Refusing to remediate anything because one repo 403'd would make the
+    # feature useless in exactly the conditions it is for.
+    if args.create_prs:
+        if not remediable:
+            report.append("### Remediation")
+            report.append("")
+            report.append(
+                "Nothing to remediate: no `required` copy is missing or drifted. "
+                "Entries marked `divergent` or `exempt` are never rewritten - they "
+                "record a decision, and the harness does not overrule one."
+            )
+            report.append("")
+        else:
+            issue = 1608
+            rows = ["| repo | branch | copies | result |", "|---|---|---|---|"]
+            for (repo_name, branch), names in sorted(remediable.items()):
+                error = remediate_copies(org, repo_name, branch, names, args.source_dir, issue)
+                if error:
+                    # Its OWN list, not `unreadable`. The exit path derives
+                    # "caller/copy state UNKNOWN" by subtracting the protection and
+                    # ruleset lists from `unreadable`, so a failed WRITE pushed in
+                    # there would be reported as a failed READ -- the wrong diagnosis
+                    # on the one line an operator acts from.
+                    remediation_failures.append(f"{repo_name}: {error}")
+                listed = ", ".join(f"`{n}`" for n in names)
+                rows.append(
+                    f"| `{repo_name}` | `{branch}` | {listed} | "
+                    f"{'PR opened/refreshed' if not error else 'FAILED: ' + error} |"
+                )
+            report.append("### Remediation")
+            report.append("")
+            report.extend(rows)
+            report.append("")
+            if remediation_failures:
+                # "I tried to fix it and could not" must not report as the same green
+                # as "there was nothing to fix". Failing the run is handled at the
+                # exit path below, on its own branch with its own message.
+                report.append(
+                    f"**{len(remediation_failures)} repo(s) could not be remediated:**"
+                )
+                report.append("")
+                report.extend(f"- {line}" for line in remediation_failures)
+                report.append("")
+
     text = "\n".join(report)
     print(text)
     if args.summary:
@@ -1721,6 +1923,16 @@ def main() -> int:
                 "ruleset state UNKNOWN"
             )
         sys.stderr.write("::error::" + "; ".join(parts) + ".\n")
+        return 2
+    if remediation_failures:
+        # Exit 2, not 1: with --create-prs the drift findings were expected (they are
+        # what it was asked to fix). What is NOT expected is being unable to fix them,
+        # and that leaves the fleet in an unknown state rather than a merely drifted
+        # one -- the same class as an unreadable repo.
+        sys.stderr.write(
+            f"::error::{len(remediation_failures)} repo(s) could not be remediated; "
+            "the drift they carry is still present.\n"
+        )
         return 2
     if findings:
         sys.stderr.write(
