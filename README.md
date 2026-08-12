@@ -29,7 +29,8 @@ on later events, and two of them cause confusing failures if they are missing.
       `code-quality-caller.yml`, `wip-limit-check.yml`, `customer-priority-bump.yml`,
       `add-to-kanban.yml`, `stale-backlog.yml`. Copy them from a comparable existing
       repo rather than writing them fresh, and pin any third-party action to a full
-      semver tag (`actions/add-to-project@v1.0.2` — `@v1` does not exist).
+      semver tag (`actions/add-to-project@v2.0.0` — `@v1` does not exist, and a bare
+      `@v2` moves; v2.0.0 is the fleet pin since backend#1816).
 
 - [ ] **Create `develop`** from the default branch. All PRs target `develop`; only the
       release train promotes onward to `staging` and then to the prod branch.

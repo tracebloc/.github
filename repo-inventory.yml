@@ -517,12 +517,7 @@ repos:
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
     copies:
-      add-to-kanban.yml:
-        divergent: >-
-          cli's copy has drifted: it pins actions/add-to-project@v2.0.0 where every other repo
-          pins v1.0.2. Recorded as divergent rather than required so the guard reports the drift
-          it already found instead of hiding it behind a green run. Realigning it is
-          backend#1415 follow-up work.
+      add-to-kanban.yml: required
       stale-backlog.yml:
         divergent: >-
           cli's copy has drifted: it pins actions/stale@v11 where every other repo pins v9
@@ -961,8 +956,9 @@ repos:
       add-to-kanban.yml:
         divergent: >-
           release-train's copy adds a header explaining why the repo is exempt from riding the
-          train, and pins actions/add-to-project@v2.0.0 rather than v1.0.2. The comment is
-          wanted; the version pin is drift. Divergent until the pin is realigned.
+          train. The comment is wanted, and it is now the ONLY difference: the action pin was
+          the other half of this entry until backend#1816 made v2.0.0 - which release-train and
+          cli already ran - the fleet norm. Divergent for the header alone.
       stale-backlog.yml:
         exempt: >-
           release-train has add-to-kanban.yml but no stale-backlog.yml. Auto-closing backlog
