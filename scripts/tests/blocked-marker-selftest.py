@@ -169,6 +169,15 @@ with open(_edited, "w", encoding="utf-8") as fh:
                "pull_request": {"title": "feat: thing", "labels": []}}, fh)
 check("event: `edited` reads the new title, not changes.from",
       bm.main(["--event-path", _edited]), 0)
+# A payload with NO pull_request object (a non-PR event, or a malformed one)
+# carries nothing to check. The gate must FAIL CLOSED (exit 2), like the
+# no-GITHUB_EVENT_PATH branch — a silent exit 0 here would pass an unchecked
+# PR. (Bugbot #229.)
+_nopr = os.path.join(_tmp, "no_pr.json")
+with open(_nopr, "w", encoding="utf-8") as fh:
+    json.dump({"action": "opened"}, fh)
+check("event: missing pull_request fails closed (exit 2)",
+      bm.main(["--event-path", _nopr]), 2)
 shutil.rmtree(_tmp, ignore_errors=True)
 
 if FAILURES:

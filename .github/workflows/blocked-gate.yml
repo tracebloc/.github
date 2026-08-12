@@ -25,9 +25,13 @@ name: Blocked gate
 # it can take a release cycle. Here the fix is editing your own title, so an
 # escape hatch would only ever be used to skip the thinking.
 #
-# `edited` is in the caller's trigger list on purpose: a title changed to add or
-# remove a marker must re-evaluate, or the gate is decided by whatever the title
-# said when the PR was opened.
+# The caller's `pull_request` trigger list must include `edited`, `labeled`, and
+# `unlabeled`. `edited` so a title changed to add/remove a marker re-evaluates
+# (or the gate is decided by whatever the title said when the PR opened);
+# `labeled`/`unlabeled` so the `blocked` label added or removed after open also
+# re-runs the gate — without them the label half stays green until the next
+# synchronize. (Bugbot #229; version-bump-gate.yml documents the same for its
+# own label path.)
 #
 # INJECTION: the PR title is attacker-controlled text. It is never interpolated
 # into a shell command — no `${{ github.event.pull_request.title }}` appears
@@ -38,8 +42,11 @@ on:
   workflow_call:
 
 permissions:
+  # contents: read only — the script reads GITHUB_EVENT_PATH, never the API, so a
+  # wider grant would exceed a minimal (contents:read) caller and fail the
+  # reusable at startup with no jobs, like the other secretless reusables
+  # (code-quality.yml, version-bump-gate.yml). (Bugbot #229.)
   contents: read
-  pull-requests: read
 
 jobs:
   gate:

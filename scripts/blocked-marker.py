@@ -112,7 +112,12 @@ def evaluate(title: str, labels: List[str]) -> Tuple[bool, List[str]]:
 def _from_event(path: str) -> Tuple[str, List[str]]:
     with open(path, encoding="utf-8") as fh:
         event = json.load(fh)
-    pr = event.get("pull_request") or {}
+    pr = event.get("pull_request")
+    if not isinstance(pr, dict):
+        # No pull_request payload: this event carries nothing to check. A gate
+        # that silently passes an event it could not read is fail-OPEN -- refuse,
+        # exactly like the missing-GITHUB_EVENT_PATH branch below (Bugbot #229).
+        raise ValueError("event payload has no pull_request object")
     labels = [lbl.get("name", "") for lbl in (pr.get("labels") or [])
               if isinstance(lbl, dict)]
     return str(pr.get("title") or ""), labels
@@ -130,7 +135,13 @@ def main(argv: List[str]) -> int:
             print("::error::no --title and no GITHUB_EVENT_PATH — nothing to check",
                   file=sys.stderr)
             return 2
-        title, labels = _from_event(args.event_path)
+        try:
+            title, labels = _from_event(args.event_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"::error::could not read a PR to check from the event ({exc}) — "
+                  "failing closed rather than passing an unchecked PR.",
+                  file=sys.stderr)
+            return 2
     else:
         title, labels = args.title, args.labels
 
