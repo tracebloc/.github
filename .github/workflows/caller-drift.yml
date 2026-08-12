@@ -202,9 +202,21 @@ jobs:
           case "$code" in
             0) verdict='✅ **Conformant** — every repo read, every entry matched.' ;;
             1) verdict='🔴 **Drift** — see the latest comment for the findings.' ;;
-            2) verdict='⚠️ **Could not evaluate** — repos that could not be read are NOT known to comply.' ;;
+            2) verdict='⚠️ **Could not evaluate** — the audit did not complete cleanly. Fleet conformance is UNKNOWN; anything not read is NOT known to comply.' ;;
             *) verdict="⚠️ **No result** — the audit exited \`${code:-<empty>}\`, which it should never do. Treat fleet conformance as UNKNOWN." ;;
           esac
+
+          # Exit 2 is not only "an unreadable repo": die() also exits 2 for a bad
+          # inventory or a failed org enumeration, where UNREADABLE is 0. Name the
+          # actual cause from the count instead of always blaming unread repos
+          # (Bugbot #227).
+          if [ "$code" = "2" ]; then
+            if [ "${UNREADABLE:-0}" != "0" ]; then
+              verdict="⚠️ **Could not evaluate** — ${UNREADABLE} repo(s) could not be read and are NOT known to comply. Fleet conformance is UNKNOWN."
+            else
+              verdict='⚠️ **Could not evaluate** — the audit could not run to completion (a bad inventory or a failed org enumeration; see the log). Fleet conformance is UNKNOWN.'
+            fi
+          fi
 
           # Exit 2 has two causes and they need different words. Without this, a
           # dispatch whose remediation PRs failed to open is headlined "repos that
