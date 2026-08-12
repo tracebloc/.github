@@ -69,12 +69,44 @@ except ImportError:  # pragma: no cover - the workflow installs it explicitly
 TOP_LEVEL_KEYS = {
     "schema_version", "org", "pinned_ref", "audit_branch", "source_repo",
     "reusables", "copies", "shared_reasons", "repos", "protection_policy",
-    "ruleset_policy",
+    "ruleset_policy", "quality_files",
 }
 REQUIRED_TOP_LEVEL = TOP_LEVEL_KEYS - {"shared_reasons"}
 REPO_KEYS = {
     "visibility", "release_train", "callers", "copies", "protection", "rulesets",
+    "quality_files",
 }
+
+# ----------------------------------------------------------------- quality files
+#
+# Files every repo must CARRY, asserted by presence at a fixed path (backend#1608
+# increment 5). Distinct from `copies`, which are workflow files compared byte for
+# byte against the canonical original: these are per-repo BY DESIGN -- backend's
+# BUGBOT.md is about Django and Celery, cli's is about Go -- so content cannot be
+# compared and presence is the whole assertion.
+#
+# WHY PRESENCE IS WORTH ASSERTING AT ALL. Both files are read by a tool, not by a
+# reviewer who would notice them missing: CLAUDE.md is what an AI session is told
+# to follow, and `.cursor/BUGBOT.md` is what Bugbot reads before reviewing a diff.
+# A repo without them does not fail; it gets silently worse review than its peers,
+# which is not a state anything else in the org reports. Adding a repo to the org
+# forces a row here, which is the same forcing function the caller family provides.
+#
+# NOT the org-standards block inside CLAUDE.md -- scripts/standards-sync.py owns
+# that, and asserting it here would be a second mechanism for one property.
+#
+# `.gitleaks.toml` is deliberately NOT modelled. It is 7/20 and that is correct:
+# it is a per-repo allowlist you add when you hit a false positive, not a control.
+# The control is `quality / gitleaks` being a REQUIRED status check, which
+# protection_policy.required_checks already asserts on all 16 train repos. Adding
+# the file here would generate nine exemption rows for zero security value and
+# make a tuning file read as a security gap -- inert verification, which is the
+# pattern backend#1729 exists to catch.
+#
+# Modes, not just presence. A tree entry can be a directory, a submodule or a
+# SYMLINK (mode 120000) at the asserted path, and a symlink to nowhere satisfies
+# "the path exists" while being no guide at all.
+REGULAR_FILE_MODES = ("100644", "100755")
 
 # ---------------------------------------------------------------------- rulesets
 #
@@ -495,7 +527,7 @@ def load_inventory(path: str) -> dict:
             "default branch - that is exactly the under-reporting this corrects."
         )
 
-    for key in ("reusables", "copies"):
+    for key in ("reusables", "copies", "quality_files"):
         value = data[key]
         if not isinstance(value, list):
             die(f"{path}: `{key}` must be a list.")
@@ -505,14 +537,36 @@ def load_inventory(path: str) -> dict:
             die(f"{path}: `{key}` contains duplicates.")
     reusables = list(data["reusables"])
     copies = list(data["copies"])
+    quality_files = list(data["quality_files"])
     if not reusables:
         die(
             f"{path}: `reusables` is empty. An empty inventory would pass "
             "vacuously, which is worse than no guard at all."
         )
+    if not quality_files:
+        die(
+            f"{path}: `quality_files` is empty. Like `reusables`, an empty list "
+            "passes vacuously for all 20 repos, which is worse than no family."
+        )
     overlap = set(reusables) & set(copies)
     if overlap:
         die(f"{path}: {sorted(overlap)} listed as both a reusable and a copy.")
+    # Repo-relative paths, matched against git tree paths exactly. An absolute or
+    # `..`-bearing path can never equal a tree path, so it would assert nothing
+    # while looking like an assertion -- the whole defect class this guard is for.
+    for item in quality_files:
+        if item != item.strip():
+            die(f"{path}: quality_files entry {item!r} has surrounding whitespace.")
+        if item.startswith("/") or item.endswith("/") or "//" in item:
+            die(
+                f"{path}: quality_files entry {item!r} must be a repo-relative "
+                "path with no leading or trailing slash."
+            )
+        if ".." in item.split("/"):
+            die(
+                f"{path}: quality_files entry {item!r} contains `..`, which can "
+                "never match a git tree path."
+            )
 
     policy = data["protection_policy"]
     if not isinstance(policy, dict):
@@ -568,6 +622,10 @@ def load_inventory(path: str) -> dict:
             # documented variant, because the thing it permits (a squash promotion,
             # an extra bypass actor) is exactly what the property exists to catch.
             ("rulesets", RULESET_KINDS, {"exempt"}),
+            # Presence is binary, so there is no `divergent` here either: the
+            # files are per-repo by design and their CONTENT is never compared,
+            # which leaves nothing for a documented content variance to describe.
+            ("quality_files", quality_files, {"exempt"}),
         ):
             cells = entry[section]
             if not isinstance(cells, dict):
@@ -969,6 +1027,11 @@ class RepoRead:
         self.branches: "set[str]" = set()
         self.callers: "dict[str, list[tuple[str, str]]]" = {}
         self.copies: "dict[str, str]" = {}
+        # path -> {"type":, "mode":, "size":} for each asserted quality file that
+        # the tree carries. A path ABSENT from this dict means the tree was read
+        # successfully and did not contain it -- never that the read failed, which
+        # returns early with an error and no verdict at all.
+        self.quality_files: "dict[str, dict]" = {}
         self.has_workflow_dir = False
         self.errors: "list[str]" = []
 
@@ -977,7 +1040,10 @@ class RepoRead:
         return not self.errors
 
 
-def read_repo(org: str, name: str, meta: dict, copies: "list[str]") -> RepoRead:
+def read_repo(
+    org: str, name: str, meta: dict, copies: "list[str]",
+    quality_files: "list[str]",
+) -> RepoRead:
     out = RepoRead(name)
 
     try:
@@ -1034,6 +1100,34 @@ def read_repo(org: str, name: str, meta: dict, copies: "list[str]") -> RepoRead:
         if item.get("type") == "blob" and WORKFLOW_PATH.match(item.get("path") or "")
     ]
     out.has_workflow_dir = bool(workflows)
+
+    # Quality files come out of the SAME tree, so they cost no extra call and
+    # inherit its fail-closed properties: a 403, an unparseable payload or a
+    # truncated tree already returned above, and only a fully-read tree can reach
+    # this loop. That is what makes "not in out.quality_files" mean absent.
+    #
+    # `size` is recorded rather than assumed, because a zero-byte file at the right
+    # path satisfies presence while carrying no guidance. A blob whose size the API
+    # did not report is UNREADABLE, not empty -- guessing either way here would be
+    # the guard deciding a fact it does not have.
+    wanted_files = set(quality_files)
+    for item in entries:
+        item_path = item.get("path")
+        if item_path not in wanted_files:
+            continue
+        item_type = item.get("type")
+        size = item.get("size")
+        if item_type == "blob" and not isinstance(size, int):
+            out.errors.append(
+                f"{item_path}: tree entry has no size, so it cannot be told from "
+                "an empty file"
+            )
+            continue
+        out.quality_files[item_path] = {
+            "type": item_type,
+            "mode": item.get("mode"),
+            "size": size,
+        }
 
     for item in workflows:
         path = item["path"]
@@ -1529,6 +1623,64 @@ def evaluate_rulesets(
                     )
 
 
+def evaluate_quality_files(
+    name: str, entry: dict, quality_files: "list[str]", found: "dict[str, dict]",
+    findings: "list[str]",
+) -> None:
+    """Assert one repo's quality files (backend#1608 increment 5).
+
+    Takes the already-read tree facts rather than doing its own read, so there is
+    no second code path that could conclude "absent" from a failure. `found` is
+    only ever populated from a fully-read, untruncated tree; a repo whose read
+    failed never reaches this function, and its whole row is recorded unreadable.
+
+    Both directions are asserted, as everywhere else in this file:
+      required  the file must be present, a regular file, and non-empty
+      exempt    the file must be ABSENT; if it turns up, the exemption is stale
+    """
+    for file_path in quality_files:
+        state, reason = entry["quality_files"][file_path]
+        got = found.get(file_path)
+
+        if state == "required":
+            if got is None:
+                findings.append(
+                    f"{name}: MISSING required {file_path}. Nothing else in the org "
+                    "reports its absence - the tools that read it simply get less "
+                    "context here than in every peer repo."
+                )
+                continue
+            if got["type"] != "blob":
+                findings.append(
+                    f"{name}: {file_path} exists but is a {got['type']!r}, not a "
+                    "file."
+                )
+                continue
+            if got["mode"] not in REGULAR_FILE_MODES:
+                findings.append(
+                    f"{name}: {file_path} is mode {got['mode']} (a symlink or "
+                    "submodule), not a regular file. The path resolving is not the "
+                    "same as the guidance being there."
+                )
+                continue
+            if got["size"] == 0:
+                findings.append(
+                    f"{name}: {file_path} is present but EMPTY (0 bytes), which "
+                    "satisfies a presence check and carries no guidance."
+                )
+            continue
+
+        # exempt: the claim is that the file is legitimately absent. If it exists,
+        # say so -- the same staleness rule the caller, copy, protection and
+        # ruleset families each apply to their own exemptions.
+        if got is not None:
+            findings.append(
+                f"{name}: {file_path} is marked `exempt` but the file exists. The "
+                f"exemption is stale - promote it to `required`. (reason on file: "
+                f"{reason[:80]})"
+            )
+
+
 def render_matrix(matrix: dict, inventory: dict) -> "list[str]":
     """The one screen (backend#1608 increment 3).
 
@@ -1544,7 +1696,7 @@ def render_matrix(matrix: dict, inventory: dict) -> "list[str]":
       ?    that family could not be READ (never conflated with OK -- an
            unreadable family is the state this guard exists to refuse)
     """
-    families = ("callers", "copies", "protection", "rulesets")
+    families = ("callers", "copies", "quality_files", "protection", "rulesets")
     out = [
         "<details><summary><b>Conformance matrix</b> - every repo x every family, "
         "including what passed</summary>",
@@ -1561,8 +1713,9 @@ def render_matrix(matrix: dict, inventory: dict) -> "list[str]":
             continue
         rendered = []
         for fam in families:
-            # Only protection and rulesets can be partially unread: callers and
-            # copies come from the repo read, which fails the whole row first.
+            # Only protection and rulesets can be partially unread: callers,
+            # copies and quality_files all come from the one repo read, which
+            # fails the whole row first.
             unread = cells.get(f"{fam}_unread", 0) if fam in ("protection", "rulesets") else 0
             n = cells.get(fam, 0)
             if unread:
@@ -1608,6 +1761,7 @@ def main() -> int:
     remediation_failures: "list[str]" = []
     reusables = list(inventory["reusables"])
     copies = list(inventory["copies"])
+    quality_files = list(inventory["quality_files"])
     check_source_reusables(args.source_dir, reusables)
     source_shas = load_source_copies(args.source_dir, copies)
 
@@ -1659,7 +1813,7 @@ def main() -> int:
     for name in audited:
         entry = inventory["repos"][name]
         meta = active[name]
-        read = read_repo(org, name, meta, copies)
+        read = read_repo(org, name, meta, copies, quality_files)
         if not read.ok:
             for problem in read.errors:
                 unreadable.append(f"{name}: {problem}")
@@ -1766,6 +1920,19 @@ def main() -> int:
                     "The exemption is stale."
                 )
 
+        _m["copies"] = len(findings) - _mark
+        _mark = len(findings)
+
+        # Quality files (backend#1608 increment 5). Evaluated from the tree
+        # read_repo already fetched, so this family has no read of its own and no
+        # separate unreadable bucket: if the tree could not be read, the row above
+        # was recorded unreadable and this line was never reached.
+        evaluate_quality_files(
+            name, entry, quality_files, read.quality_files, findings,
+        )
+        _m["quality_files"] = len(findings) - _mark
+        _mark = len(findings)
+
         # Protection is read from the branch LIST already gathered by read_repo,
         # so it costs no extra enumeration and inherits its pagination.
         #
@@ -1778,8 +1945,6 @@ def main() -> int:
         # throw away real caller findings before anything was written.
         # Fail-closed means the run still goes RED - it must not mean the results
         # are destroyed. (Bugbot, .github#196.)
-        _m["copies"] = len(findings) - _mark
-        _mark = len(findings)
         _pmark = len(protection_unreadable)
 
         evaluate_protection(
@@ -1823,8 +1988,9 @@ def main() -> int:
         "### Repo conformance",
         "",
         f"Inventory: **{len(inventory['repos'])}** repos x **{len(reusables)}** "
-        f"reusables + **{len(copies)}** copies + **{len(PROTECTION_ROLES)}** "
-        f"branch-protection roles + **{len(RULESET_KINDS)}** ruleset kinds. "
+        f"reusables + **{len(copies)}** copies + **{len(quality_files)}** quality "
+        f"files + **{len(PROTECTION_ROLES)}** branch-protection roles + "
+        f"**{len(RULESET_KINDS)}** ruleset kinds. "
         f"Audited **{evaluated}** of **{len(audited)}** "
         "on the develop-first branch.",
         "",

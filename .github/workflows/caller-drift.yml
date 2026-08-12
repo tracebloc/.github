@@ -24,6 +24,14 @@
 # settings no commit can change. Entries marked `divergent` or `exempt` carry a
 # written reason and are never rewritten.
 #
+# `quality_files` (CLAUDE.md, .cursor/BUGBOT.md — backend#1608 increment 5) is also
+# NOT remediable, and unlike the others that is a deliberate refusal rather than a
+# technical limit: a commit could trivially create the file. But the family asserts
+# that per-repo GUIDANCE exists, and auto-generating a placeholder would turn every
+# finding green while adding nothing a tool can use — a check that can no longer
+# fail, which is the one outcome this repo's guards exist to prevent. These findings
+# are closed by a human writing the file.
+#
 # TOKEN: report-only needs org-wide read. create-prs additionally needs Contents: RW
 # and Pull requests: RW — AND, because the callers it writes live under
 # `.github/workflows/`, the `workflow` scope (classic PAT) or fine-grained
