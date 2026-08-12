@@ -78,6 +78,17 @@ check("holder", blocked("refactor: rename the token holder"), False)
 check("household", blocked("docs: household naming conventions"), False)
 check("wipe", blocked("fix: wipe the staging dir between runs"), False)
 check("swipe", blocked("feat(ui): swipe to dismiss"), False)
+# FOUND BY MEASUREMENT, NOT BY IMAGINATION. Running the matcher over 588 merged
+# PR titles from ten tracebloc repos produced exactly one false positive, and
+# this was it. "WIP limit" is a domain term HERE -- wip-limit-check.yml is one of
+# our own reusables -- so the phrase recurs, and the (?<![a-z]) guard does not
+# help because the next character is a hyphen. That is why `wip` is anchored to
+# the start of the title and the other markers are not.
+check("WIP-limit mid-title (real: .github#...)",
+      blocked("chore(ci): retire the WIP-limit nudge"), False)
+check("WIP as a noun mid-title",
+      blocked("docs: explain how the WIP limit is enforced"), False)
+check("wip inside a word at the start", blocked("wipe the staging dir"), False)
 check("plain title", blocked("fix(ingest): emit the layout the CLI opens"), False)
 check("empty title", blocked(""), False)
 

@@ -59,17 +59,30 @@ BLOCKED_LABEL = "blocked"
 #   [blocked]             the bracketed form #468 used
 #   do not merge          -
 #   hold until/for        NOT "threshold", NOT "holder", NOT "household"
-#   wip                   NOT "wipe", NOT "swipe"
+#   wip                   NOT "wipe", NOT "swipe", NOT "the WIP-limit nudge"
 #
 # `(?<![a-z])` before each keyword is what kills the un- prefixes: `unblocked`
 # has `n` immediately before `blocked`, so the lookbehind refuses it. Written
 # as an explicit table so a new marker arrives with its own test.
+#
+# WHY `wip` IS ANCHORED TO THE START AND THE OTHERS ARE NOT
+# It was not, at first. Measured against 588 merged PR titles across ten
+# tracebloc repos, an unanchored `wip` produced exactly one false positive —
+# `chore(ci): retire the WIP-limit nudge` — and it is a bad one, because "WIP
+# limit" is a domain term in THIS org: `wip-limit-check.yml` is one of our own
+# reusables, so the phrase recurs. The `(?<![a-z])`/`(?![a-z])` guards do not
+# help, since the character after "WIP" there is a hyphen.
+#
+# WIP-as-a-marker is a PREFIX convention (`WIP: ...`, `[WIP] ...`); WIP in the
+# middle of a sentence is almost always the noun. Anchoring to the start keeps
+# every real marker and drops the false positive. After the change the same 588
+# titles yield one hit: data-ingestors#468, the PR this gate exists for.
 _TITLE_MARKERS: List[Tuple[str, str]] = [
     ("blocked-on", r"(?<![a-z])blocked\s+(?:on|by|until)(?![a-z])"),
     ("blocked-bracket", r"\[\s*blocked\b[^\]]*\]"),
     ("do-not-merge", r"(?<![a-z])do\s+not\s+merge(?![a-z])"),
     ("hold-until", r"(?<![a-z])hold\s+(?:until|for|pending)(?![a-z])"),
-    ("wip", r"(?<![a-z])wip(?![a-z])"),
+    ("wip", r"^\s*[\[(]?\s*wip(?![a-z])"),
 ]
 
 _COMPILED = [(name, re.compile(pat, re.IGNORECASE)) for name, pat in _TITLE_MARKERS]
