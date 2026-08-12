@@ -268,11 +268,19 @@ credential-scan: guard-gitleaks
 # inventory against the live fleet, so its answer can change with no local
 # commit. Run it deliberately when you touch repo-inventory.yml; the selftest in
 # `check` covers the parser's own logic.
+#
+# --inventory and --source-dir are passed EXPLICITLY, exactly as caller-drift.yml
+# passes them, even though both happen to match the script's own defaults today.
+# This file's whole claim is that its commands are copied from the workflow
+# rather than merely equivalent to it — and a default is the kind of thing that
+# changes under you, which is how the two would quietly stop agreeing.
 .PHONY: audit
 audit: guard-pyyaml
 	@command -v gh >/dev/null 2>&1 || { echo "audit needs the gh CLI on PATH"; exit 1; }
 	@echo "note: reads ~20 repos through the API; needs a token with org read access."
-	$(PYTHON) scripts/caller-drift.py
+	$(PYTHON) scripts/caller-drift.py \
+	  --inventory repo-inventory.yml \
+	  --source-dir .
 
 # ---- setup / hooks -----------------------------------------------
 #
