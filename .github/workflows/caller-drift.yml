@@ -187,6 +187,7 @@ jobs:
           EVALUATED: ${{ steps.audit.outputs.evaluated }}
           UNREADABLE: ${{ steps.audit.outputs.unreadable }}
           FINDINGS: ${{ steps.audit.outputs.findings }}
+          REMEDIATION_FAILURES: ${{ steps.audit.outputs.remediation_failures }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -199,6 +200,15 @@ jobs:
             2) verdict='⚠️ **Could not evaluate** — repos that could not be read are NOT known to comply.' ;;
             *) verdict="⚠️ **No result** — the audit exited \`${code:-<empty>}\`, which it should never do. Treat fleet conformance as UNKNOWN." ;;
           esac
+
+          # Exit 2 has two causes and they need different words. Without this, a
+          # dispatch whose remediation PRs failed to open is headlined "repos that
+          # could not be read are NOT known to comply" - a true sentence about a
+          # thing that did not happen, sending the reader to the wrong problem.
+          # (Bugbot, #227.)
+          if [ "${REMEDIATION_FAILURES:-0}" != "0" ]; then
+            verdict="⚠️ **Remediation failed** — the fleet was read successfully, but ${REMEDIATION_FAILURES} repo(s) could not be remediated and still carry their drift."
+          fi
 
           # The verdict must not be able to contradict the counts printed beside it.
           # A clean exit code alongside a non-zero unreadable/findings count is not a

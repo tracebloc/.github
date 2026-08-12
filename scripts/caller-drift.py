@@ -54,6 +54,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 try:
     import yaml
@@ -672,6 +673,43 @@ def read_source_copy(source_dir: str, name: str) -> bytes:
 # for `exempt`. Those are reported, never rewritten.
 
 
+def _read_copy_on_head(
+    full: str, path: str, head: str, expect_file: bool
+) -> "tuple[str, str | None]":
+    """The blob sha of `path` on `head`, or ("", None) when it genuinely is absent.
+
+    Ported from standards-sync.py's _read_head_file and for the same reason: a ref
+    created an instant ago is eventually consistent, so reading a file on it can
+    transiently 404 even though the base it was cut from has that file. When the
+    caller KNOWS the base has it, a 404 cannot be true yet -- retry with backoff and
+    fail CLOSED if it never appears, because believing it means a sha-less write
+    against an existing path. When the base has no file, one confirming re-read
+    still guards against trusting a single blip.
+    """
+    attempts = 5 if expect_file else 2
+    delay = 1.0
+    last = ""
+    for attempt in range(1, attempts + 1):
+        try:
+            return gh(["api", f"repos/{full}/contents/{path}?ref={head}", "--jq", ".sha"]).strip(), None
+        except GhError as exc:
+            if exc.status == 404:
+                if not expect_file and attempt >= 2:
+                    return "", None  # absence confirmed by a re-read
+                last = f"404 (attempt {attempt}/{attempts})"
+            else:
+                last = str(exc)
+        if attempt < attempts:
+            time.sleep(delay)
+            delay = min(delay * 2, 8.0)
+    if expect_file:
+        return "", (
+            f"cannot read {path} on {head}: the base has the file but this ref kept "
+            f"answering {last} after {attempts} attempts - refusing a sha-less write"
+        )
+    return "", f"cannot read {path} on {head} after {attempts} attempts: {last}"
+
+
 def _ensure_copy_pr(full: str, head: str, base: str, issue: int, names: "list[str]") -> "str | None":
     try:
         existing = gh(["pr", "list", "-R", full, "--head", head, "--base", base,
@@ -713,7 +751,8 @@ def _ensure_copy_pr(full: str, head: str, base: str, issue: int, names: "list[st
 
 
 def remediate_copies(
-    org: str, repo: str, base: str, names: "list[str]", source_dir: str, issue: int
+    org: str, repo: str, base: str, entries: "list[tuple[str, bool]]",
+    source_dir: str, issue: int
 ) -> "str | None":
     """Push canonical copies onto a branch and open/refresh the PR.
 
@@ -731,6 +770,7 @@ def remediate_copies(
     if not base_sha:
         return f"cannot resolve {base} head: empty sha"
 
+    branch_is_fresh = True
     try:
         gh(["api", "-X", "POST", f"repos/{full}/git/refs",
             "-f", f"ref=refs/heads/{head}", "-f", f"sha={base_sha}"])
@@ -740,23 +780,31 @@ def remediate_copies(
         # a branch we could not create is not a branch we may write to.
         if exc.status != 422:
             return f"cannot create branch {head}: {exc}"
+        # A REUSED branch is a different situation, and conflating the two is how
+        # standards-sync got stuck (its #197): that ref may have been cut BEFORE the
+        # file existed on the base, so a 404 on it is honest and permanent. Retrying
+        # five times and then failing closed would strand the repo forever. Only a
+        # branch created moments ago may be presumed to be lying.
+        branch_is_fresh = False
 
-    for name in names:
+    for name, on_base in entries:
         payload = read_source_copy(source_dir, name)
         encoded = base64.b64encode(payload).decode("ascii")
         path = f".github/workflows/{name}"
+        # A DRIFTED copy exists on the base, so on a branch cut from that base a 404
+        # cannot be true -- it is the eventual-consistency window standards-sync.py
+        # already pays for (design rule 5). Believing it produces a sha-less PUT
+        # against an existing path, which the API rejects with 422, and remediation
+        # then fails on the most common dispatch of all: fresh branch, drifted file.
+        # Only a MISSING copy may legitimately 404. (Bugbot, #227.)
+        current, rerr = _read_copy_on_head(
+            full, path, head, expect_file=on_base and branch_is_fresh
+        )
+        if rerr:
+            return rerr
         args = ["api", "-X", "PUT", f"repos/{full}/contents/{path}",
                 "-f", f"message=chore(ci): realign {name} with tracebloc/.github (backend#{issue})",
                 "-f", f"content={encoded}", "-f", f"branch={head}"]
-        # The blob sha of the file AS IT IS ON THE BRANCH, required by the API to
-        # replace an existing file. Absent means the file does not exist there yet,
-        # which is the create case -- and is exactly the MISSING-copy remediation.
-        try:
-            current = gh(["api", f"repos/{full}/contents/{path}?ref={head}", "--jq", ".sha"]).strip()
-        except GhError as exc:
-            if exc.status != 404:
-                return f"cannot read {path} on {head}: {exc}"
-            current = ""
         if current:
             args += ["-f", f"sha={current}"]
         try:
@@ -767,7 +815,7 @@ def remediate_copies(
             # they pushed.
             return f"cannot write {path} on {head}: {exc}"
 
-    return _ensure_copy_pr(full, head, base, issue, names)
+    return _ensure_copy_pr(full, head, base, issue, [n for n, _ in entries])
 
 
 def check_source_reusables(source_dir: str, listed: "list[str]") -> None:
@@ -1683,7 +1731,7 @@ def main() -> int:
                     findings.append(
                         f"{name}: MISSING required copy {copy_name} on {read.branch}."
                     )
-                    remediable.setdefault((name, read.branch), []).append(copy_name)
+                    remediable.setdefault((name, read.branch), []).append((copy_name, False))
                 elif name == source_repo:
                     # This repo holds the canonical file. Comparing the audit branch
                     # against the checkout would flag any PR that edits a copy, so
@@ -1697,7 +1745,9 @@ def main() -> int:
                         f"{source_shas[copy_name][:12]}). It is a copy, not a "
                         "caller, so nothing else would ever notice."
                     )
-                    remediable.setdefault((name, read.branch), []).append(copy_name)
+                    # True: the file EXISTS on the base (that is what drifted). A
+                    # 404 for it on a fresh branch is therefore provably a lie.
+                    remediable.setdefault((name, read.branch), []).append((copy_name, True))
             elif state == "divergent":
                 if actual is None:
                     findings.append(
@@ -1845,8 +1895,8 @@ def main() -> int:
         else:
             issue = 1608
             rows = ["| repo | branch | copies | result |", "|---|---|---|---|"]
-            for (repo_name, branch), names in sorted(remediable.items()):
-                error = remediate_copies(org, repo_name, branch, names, args.source_dir, issue)
+            for (repo_name, branch), entries in sorted(remediable.items()):
+                error = remediate_copies(org, repo_name, branch, entries, args.source_dir, issue)
                 if error:
                     # Its OWN list, not `unreadable`. The exit path derives
                     # "caller/copy state UNKNOWN" by subtracting the protection and
@@ -1854,7 +1904,7 @@ def main() -> int:
                     # there would be reported as a failed READ -- the wrong diagnosis
                     # on the one line an operator acts from.
                     remediation_failures.append(f"{repo_name}: {error}")
-                listed = ", ".join(f"`{n}`" for n in names)
+                listed = ", ".join(f"`{n}`" for n, _ in entries)
                 rows.append(
                     f"| `{repo_name}` | `{branch}` | {listed} | "
                     f"{'PR opened/refreshed' if not error else 'FAILED: ' + error} |"
@@ -1896,6 +1946,11 @@ def main() -> int:
             with open(args.output, "a", encoding="utf-8") as handle:
                 handle.write(f"findings={len(findings)}\n")
                 handle.write(f"unreadable={len(unreadable)}\n")
+                # Its own output, because exit 2 now has two very different
+                # causes. Every exit-2 message describes UNREAD repos; a failed
+                # --create-prs would otherwise be headlined on the conformance
+                # issue as a read failure. (Bugbot, #227.)
+                handle.write(f"remediation_failures={len(remediation_failures)}\n")
                 handle.write(f"evaluated={evaluated}\n")
                 handle.write(f"report<<{delimiter}\n")
                 handle.write(body + "\n")
