@@ -12,13 +12,16 @@ Exit 0 when every path fails the way it is supposed to.
 
 from __future__ import annotations
 
+import ast
 import base64
 import copy
 import importlib.util
+import inspect
 import json
 import os
 import sys
 import tempfile
+import textwrap
 
 import yaml
 
@@ -1122,6 +1125,244 @@ rows = guard.render_matrix({"beta": {"callers": 0, "copies": 0, "protection": 0,
                                      "rulesets": 0}}, INV_M)
 record(any("| `beta` | - |" in r for r in rows),
        "matrix: a non-train repo is marked as such", rows[-3])
+
+# ---------------------------------------------------------------- remediation
+# --create-prs WRITES to every repo in the org, so its restraint matters more than
+# its reach. The safety property is not "does it fix drift" but "does it ever touch
+# something a human deliberately decided about".
+
+
+# THE ONE THAT MATTERS. `divergent` records a written reason why a repo differs --
+# cli pins actions/stale@v11 where canon pins v9, and the newer pin may well be the
+# better one. `exempt` records that the file should not be there at all. A harness
+# that overwrote either would destroy the judgement the inventory exists to hold.
+#
+# Asserted structurally rather than by grep: parse main(), find the `state ==
+# "required"` branch, and require every `remediable` mutation to live inside it.
+# A grep for "divergent" near "remediable" would pass whatever the code did.
+_src = textwrap.dedent(inspect.getsource(guard.main))
+_tree = ast.parse(_src)
+
+
+def _remediable_lines(node) -> "set[int]":
+    out = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and sub.id == "remediable":
+            out.add(sub.lineno)
+    return out
+
+
+_all_rem = _remediable_lines(_tree)
+_required_rem = set()
+for _n in ast.walk(_tree):
+    # the `if state == "required":` test inside the copies loop
+    if isinstance(_n, ast.If) and isinstance(_n.test, ast.Compare):
+        left, comps = _n.test.left, _n.test.comparators
+        if (isinstance(left, ast.Name) and left.id == "state"
+                and comps and isinstance(comps[0], ast.Constant)
+                and comps[0].value == "required"):
+            for _stmt in _n.body:
+                _required_rem |= _remediable_lines(_stmt)
+
+# the declaration line is not a mutation site
+_mutations = {ln for ln in _all_rem if ln not in _required_rem}
+_decl = min(_all_rem) if _all_rem else 0
+_mutations.discard(_decl)
+# lines inside the `if args.create_prs:` reporting block read it, not write it
+_reads = set()
+for _n in ast.walk(_tree):
+    if isinstance(_n, ast.If) and isinstance(_n.test, ast.Attribute) \
+            and _n.test.attr == "create_prs":
+        _reads |= _remediable_lines(_n)
+_mutations -= _reads
+record(not _mutations,
+       "remediation: only the `required` branch can enqueue a copy - "
+       "`divergent`/`exempt` are never rewritten",
+       f"unexpected remediable use at lines {sorted(_mutations)}")
+
+record(bool(_required_rem),
+       "remediation: the `required` branch DOES enqueue (the check above is not vacuous)",
+       f"required-branch lines {sorted(_required_rem)}")
+
+# --- the write path -----------------------------------------------------------
+CALLS = []
+
+
+def _rem_stub(missing_on_branch=True, fail=None, has_pr=False, ref_status=None):
+    def handler(args):
+        CALLS.append(list(args))
+        joined = " ".join(args)
+        if "git/ref/heads/" in joined and "-X" not in joined:
+            return "basesha123\n"
+        if "git/refs" in joined and "-X" in args:
+            if ref_status is not None:
+                raise guard.GhError(ref_status, f"HTTP {ref_status}")
+            return "{}"
+        if "contents/" in joined and "-X" not in args:
+            if missing_on_branch:
+                raise guard.GhError(404, "Not Found (HTTP 404)")
+            return "existingsha\n"
+        if "-X" in args and "PUT" in args:
+            if fail:
+                raise guard.GhError(fail, f"HTTP {fail}")
+            return "{}"
+        if args[0] == "pr" and args[1] == "list":
+            return "7\n" if has_pr else "\n"
+        if args[0] == "pr" and args[1] == "create":
+            return "https://github.com/acme/repo/pull/9\n"
+        return "{}"
+    return handler
+
+
+os.makedirs("/tmp/rem-src/.github/workflows", exist_ok=True)
+with open("/tmp/rem-src/.github/workflows/copy-a.yml", "wb") as _h:
+    _h.write(b"canonical bytes\n")
+
+CALLS.clear()
+stub(_rem_stub())
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)], "/tmp/rem-src", 1608)
+_puts = [c for c in CALLS if "PUT" in c]
+record(_err is None and len(_puts) == 1
+       and any("contents/.github/workflows/copy-a.yml" in a for a in _puts[0])
+       and any(a.startswith("branch=chore/1608") for a in _puts[0]),
+       "remediation: writes the named copy to the remediation branch",
+       f"err={_err} puts={len(_puts)}")
+
+# A file already present on the branch must be sent WITH its sha, or the API
+# rejects the update; absent means create. Getting this backwards fails every
+# second dispatch, which is the shape that looks intermittent.
+CALLS.clear()
+stub(_rem_stub(missing_on_branch=False))
+guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", True)], "/tmp/rem-src", 1608)
+_puts = [c for c in CALLS if "PUT" in c]
+record(any(a.startswith("sha=existingsha") for a in _puts[0]),
+       "remediation: an existing file on the branch is updated with its sha",
+       str(_puts[0]))
+
+CALLS.clear()
+stub(_rem_stub(missing_on_branch=True))
+guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)], "/tmp/rem-src", 1608)
+_puts = [c for c in CALLS if "PUT" in c]
+record(not any(a.startswith("sha=") for a in _puts[0]),
+       "remediation: a missing file is CREATED, with no sha argument",
+       str(_puts[0]))
+
+# 422 on the ref create means the branch exists: reuse it. That is what makes a
+# re-dispatch idempotent rather than a second PR.
+CALLS.clear()
+stub(_rem_stub(ref_status=422))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)], "/tmp/rem-src", 1608)
+record(_err is None and any("PUT" in c for c in CALLS),
+       "remediation: an existing branch (422) is reused, not treated as fatal",
+       f"err={_err}")
+
+# Any OTHER branch-create failure is fatal: a branch we could not create is not a
+# branch we may write to.
+CALLS.clear()
+stub(_rem_stub(ref_status=403))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)], "/tmp/rem-src", 1608)
+record(_err is not None and not any("PUT" in c for c in CALLS),
+       "remediation: a non-422 branch failure aborts before writing anything",
+       f"err={_err}")
+
+# A failed write must return an error. Returning None would report the drift as
+# fixed while it is still there -- the fail-open this whole guard refuses.
+CALLS.clear()
+stub(_rem_stub(fail=409))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)], "/tmp/rem-src", 1608)
+record(_err is not None and "cannot write" in _err,
+       "remediation: a rejected write returns an error, never a silent success",
+       f"err={_err}")
+
+# An open PR already tracking the branch must not produce a second one.
+CALLS.clear()
+stub(_rem_stub(has_pr=True))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)], "/tmp/rem-src", 1608)
+record(_err is None and not any(c[:2] == ["pr", "create"] for c in CALLS),
+       "remediation: an existing open PR is refreshed, not duplicated",
+       f"err={_err}")
+
+
+# --- the eventual-consistency race (Bugbot, #227) -----------------------------
+# A ref created an instant ago can 404 for a file the base demonstrably has. For a
+# DRIFTED copy that 404 is provably a lie, and believing it means a sha-less PUT
+# against an existing path -> 422 -> remediation fails on the commonest dispatch
+# there is: fresh branch, drifted file.
+guard.time.sleep = lambda _s: None  # no real backoff in tests
+
+
+def _flaky(n_404s, on_fresh_branch=True):
+    state = {"reads": 0}
+
+    def handler(args):
+        CALLS.append(list(args))
+        joined = " ".join(args)
+        if "git/ref/heads/" in joined and "-X" not in joined:
+            return "basesha123\n"
+        if "git/refs" in joined and "-X" in args:
+            if on_fresh_branch:
+                return "{}"
+            raise guard.GhError(422, "Reference already exists (HTTP 422)")
+        if "contents/" in joined and "-X" not in args:
+            state["reads"] += 1
+            if state["reads"] <= n_404s:
+                raise guard.GhError(404, "Not Found (HTTP 404)")
+            return "realsha\n"
+        if "-X" in args and "PUT" in args:
+            return "{}"
+        if args[0] == "pr" and args[1] == "list":
+            return "\n"
+        if args[0] == "pr" and args[1] == "create":
+            return "https://github.com/acme/repo/pull/9\n"
+        return "{}"
+    return handler
+
+
+CALLS.clear()
+stub(_flaky(2))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", True)],
+                              "/tmp/rem-src", 1608)
+_puts = [c for c in CALLS if "PUT" in c]
+record(_err is None and _puts and any(a.startswith("sha=realsha") for a in _puts[0]),
+       "remediation: a transient 404 on a fresh branch is retried, not read as absence",
+       f"err={_err} put={_puts[0] if _puts else None}")
+
+# ...and if it NEVER appears, refuse. A sha-less write against a path the base has
+# is the thing being prevented; failing closed is the correct outcome.
+CALLS.clear()
+stub(_flaky(99))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", True)],
+                              "/tmp/rem-src", 1608)
+record(_err is not None and "refusing a sha-less write" in _err
+       and not any("PUT" in c for c in CALLS),
+       "remediation: a 404 that never resolves fails CLOSED, with no sha-less write",
+       f"err={_err}")
+
+# A MISSING copy is allowed to 404 - that is the create case - but only after a
+# confirming re-read, so a single blip is not trusted.
+CALLS.clear()
+stub(_flaky(99))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)],
+                              "/tmp/rem-src", 1608)
+_reads = [c for c in CALLS if "contents/" in " ".join(c) and "-X" not in c]
+record(_err is None and len(_reads) == 2,
+       "remediation: a missing copy confirms absence with a re-read before creating",
+       f"err={_err} reads={len(_reads)}")
+
+
+# A REUSED branch may legitimately 404: it can have been cut before the file
+# existed on the base, so that 404 is honest and permanent. Retrying then failing
+# closed strands the repo forever -- the shape that stuck standards-sync (#197).
+CALLS.clear()
+stub(_flaky(99, on_fresh_branch=False))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", True)],
+                              "/tmp/rem-src", 1608)
+_puts = [c for c in CALLS if "PUT" in c]
+record(_err is None and len(_puts) == 1
+       and not any(a.startswith("sha=") for a in _puts[0]),
+       "remediation: a REUSED branch's 404 is honest - create, do not fail closed",
+       f"err={_err} puts={len(_puts)}")
+
 
 failed = [row for row in RESULTS if not row[0]]
 print(f"\npass={len(RESULTS) - len(failed)} fail={len(failed)}")
