@@ -1,0 +1,67 @@
+name: Blocked gate selftest
+
+# blocked-gate.yml is a `workflow_call` reusable, so it cannot host a test job of
+# its own — this workflow runs the marker table instead. Same split as
+# version-bump-gate-selftest.yml, for the same reason.
+#
+# WHY IT EXISTS: the matching IS the gate. Everything else here is four lines of
+# YAML; the entire risk lives in whether `blocked on X` fires and `unblocked`,
+# `blocker`, `threshold`, `holder` and `wipe` do not. A false negative costs what
+# we have today. A FALSE POSITIVE costs the gate itself — it fires on somebody's
+# "unbreak dev + staging ingestion" title, gets called noise, and is switched off
+# inside a week, at which point it catches nothing forever. house-rules.sh names
+# that failure mode in its own design notes: a checker that cries wolf gets
+# switched off. So the selftest is weighted towards false friends, and every
+# blocked title in it is copied verbatim from a real tracebloc PR.
+#
+# The gate is consumed at @main by every repo that wires it up, so a regression
+# in the matching reaches all of them on its first successful run.
+#
+# Every title below is a LITERAL written by us. No `${{ }}` appears in any
+# `run:` here, and the gate itself never interpolates a PR title either — it
+# reads the event payload from GITHUB_EVENT_PATH.
+
+on:
+  pull_request:
+    paths:
+      - scripts/blocked-marker.py
+      - scripts/tests/blocked-marker-selftest.py
+      - .github/workflows/blocked-gate.yml
+      - .github/workflows/blocked-gate-selftest.yml
+  push:
+    branches: [main, develop, staging]
+    paths:
+      - scripts/blocked-marker.py
+      - scripts/tests/blocked-marker-selftest.py
+      - .github/workflows/blocked-gate.yml
+      - .github/workflows/blocked-gate-selftest.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blocked-gate-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      # No dependencies on purpose: re, json and argparse only. A gate that can
+      # be broken by a pip resolution is a gate that blocks merges on a bad day
+      # at PyPI.
+      - run: python scripts/tests/blocked-marker-selftest.py
+
+      # The gate must not fire on the PR that ships it. A self-reference bug —
+      # matching the WORD "blocked" in a path or filename rather than in prose —
+      # would show up here and nowhere else in the table.
+      - name: The gate does not fire on this workflow's own filenames
+        run: |
+          set -euo pipefail
+          python scripts/blocked-marker.py \
+            --title "ci(gate): add blocked-gate.yml and blocked-marker.py"
