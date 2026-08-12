@@ -96,6 +96,7 @@ reusables:
   - kanban-closure-router.yml
   - set-pr-status.yml
   - wip-limit-check.yml
+  - blocked-gate.yml
   - version-bump-gate.yml
   - version-bump-pr.yml
 
@@ -240,6 +241,22 @@ shared_reasons:
     enumerated this list rather than the source directory (backend#1681 added that
     check, which is what surfaced it). Exempt everywhere in writing until it is
     wired or deleted - the same posture as wip-limit-check.
+  blocked_gate_rollout_pending: &blocked_gate_rollout_pending >-
+    blocked-gate has ZERO callers so far, deliberately and for exactly one PR. The
+    reusable and its selftest land first so the MATCHING can be reviewed on its own -
+    that is the whole risk surface; the rest of the gate is four lines of YAML. The
+    callers follow in the rollout PR (backend#1729).
+    The two-step is forced by this file's own header: .github's caller state is read
+    from its audit branch over the API, so adding a caller and flipping its entry to
+    `required` in one PR fails on a caller that is not on the audit branch yet.
+    STAGED, NOT PARKED. If this anchor is still here once the rollout PR has merged,
+    it has become the same finding as wip_limit_check_has_no_callers and
+    version_bump_pr_never_wired: a reusable that shipped, was never wired up, and had
+    a written excuse for it. Treat it as a defect then, not a justification.
+    Arming is a briefing decision rather than a silent flip because two live PRs go red
+    the moment it is on - client#490 ("HOLD until v0.8.0 image") and client-runtime#192
+    ("DO NOT MERGE") - which is the gate working as intended (backend#1752,
+    data-ingestors#468).
 
   no_staging_branch_no_hop_to_gate: &no_staging_branch_no_hop_to_gate >-
     fr-gate gates the staging -> prod hop. This repo has no `staging` branch, so there is no hop
@@ -363,6 +380,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status-caller.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -392,6 +411,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -420,6 +441,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -462,6 +485,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -489,6 +514,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml:
         divergent: >-
@@ -525,6 +552,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -554,6 +583,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -581,6 +612,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -608,6 +641,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -680,6 +715,13 @@ repos:
           CODEOWNERS, and nothing in the org references it (backend#1408). Onboarding it is a
           separate decision from this guard; recorded so its absence is a written exemption
           rather than an oversight.
+      blocked-gate.yml:
+        exempt: >-
+          devex-bootstrap has no .github directory at all, no branch protection and no
+          CODEOWNERS, and nothing in the org references it (backend#1408). Onboarding it is a
+          separate decision from this guard; recorded so its absence is a written exemption
+          rather than an oversight. Unlike the other 19, this one does NOT clear when the
+          blocked-gate rollout PR lands - there is nowhere to put a caller.
     copies:
       add-to-kanban.yml:
         exempt: *no_workflows_directory_at_all
@@ -740,6 +782,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -783,6 +827,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -812,6 +858,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -855,6 +903,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -905,6 +955,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml:
         divergent: >-
@@ -971,6 +1023,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml:
@@ -1017,6 +1071,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -1046,6 +1102,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -1073,6 +1131,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
@@ -1107,6 +1167,8 @@ repos:
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required

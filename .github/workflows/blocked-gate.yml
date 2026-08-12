@@ -1,0 +1,66 @@
+name: Blocked gate
+
+# Reusable workflow. Called from each active repo on pull_request events.
+# Fails when a PR declares itself blocked — via the org-wide `blocked` label,
+# or via a marker the author wrote into the title.
+#
+# WHY (backend#1729, backend#1752)
+# data-ingestors#468 was titled "... (D10) [blocked on S2]". It collected THREE
+# approvals and was merged by its author 105 seconds after S2 merged. The author
+# did wait for the blocker they had written down — but "S2 merged" was never the
+# real precondition, and nothing could tell the difference. dev and staging
+# ingestion broke within hours and stayed broken for a day.
+#
+# The dependency was recorded as PROSE, in a place nothing reads. This makes the
+# same sentence a merge gate. Two other PRs carry the shape right now:
+# client#490 ("HOLD until v0.8.0 image") and client-runtime#192 ("DO NOT MERGE").
+#
+# WHAT IT DOES NOT DO
+# It cannot tell whether the blocker is genuinely resolved — #468's author
+# satisfied the sentence they wrote and the real condition was still unmet. All
+# this guarantees is that removing the marker is a deliberate act by someone who
+# has looked. That is the whole claim; it is not "PRs are never merged early".
+#
+# NO OVERRIDE LABEL, deliberately. fr-gate has `skip-fr-gate` because satisfying
+# it can take a release cycle. Here the fix is editing your own title, so an
+# escape hatch would only ever be used to skip the thinking.
+#
+# `edited` is in the caller's trigger list on purpose: a title changed to add or
+# remove a marker must re-evaluate, or the gate is decided by whatever the title
+# said when the PR was opened.
+#
+# INJECTION: the PR title is attacker-controlled text. It is never interpolated
+# into a shell command — no `${{ github.event.pull_request.title }}` appears
+# anywhere here. The script reads the event payload from GITHUB_EVENT_PATH
+# itself, so the title never transits the shell at all.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  gate:
+    name: blocked
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # Same shape as code-quality.yml's shared-checker step: the script lives
+      # here, not in the calling repo, so the reusable fetches it. `.github` is
+      # public, so this needs no token.
+      - name: Check out the shared marker checker
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: tracebloc/.github
+          # Same repo this workflow lives in, so `main` is the version that
+          # matches a `@main` caller.
+          ref: main
+          path: .blocked-gate-tools
+          persist-credentials: false
+
+      # No API call and nothing to rate-limit: the event payload already carries
+      # the title and labels, and a reusable sees the caller's payload.
+      - name: Check for a blocked marker
+        run: python3 .blocked-gate-tools/scripts/blocked-marker.py
