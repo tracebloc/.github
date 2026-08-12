@@ -25,7 +25,12 @@
 # written reason and are never rewritten.
 #
 # TOKEN: report-only needs org-wide read. create-prs additionally needs Contents: RW
-# and Pull requests: RW, the same scopes standards-sync.yml already exercises.
+# and Pull requests: RW — AND, because the callers it writes live under
+# `.github/workflows/`, the `workflow` scope (classic PAT) or fine-grained
+# "Workflows: write". Contents: RW alone is REFUSED for that path, so every
+# remediation PUT would fail closed and no PR would open. standards-sync.yml writes
+# CLAUDE.md, not workflow files, so it needs no `workflow` scope — the one scope
+# that differs from what it exercises. (Bugbot #227.)
 #
 # FAIL-CLOSED: every read either yields a value or is recorded as unreadable, and
 # one unreadable repo fails the run. There is no path from a 403, a rate limit, an
