@@ -645,6 +645,30 @@ jobs:
             COUNT=$(jq 'length' /tmp/gitleaks.json 2>/dev/null || echo 0)
           fi
 
+          # Captured whole HERE, then sliced with a here-string below -- NOT
+          # `jq ... | head -50`. `head` closes the pipe after row 50; with a big
+          # enough finding set jq is still buffering, so it takes SIGPIPE, and
+          # under pipefail the PIPELINE returns 141. Errexit then aborts the step
+          # mid-summary -- and -e IS on here: Actions runs `run:` as `bash -e {0}`,
+          # so the `set -uo pipefail` above leaves it ON while reading as though it
+          # were off. The damage is not just a short table: the ::error::/::warning::
+          # annotations below never emit, and the soft-fail `exit 0` is skipped, so
+          # a repo configured `soft-fail: true` HARD-fails instead of reporting.
+          # Latent, not live -- it needs ~700+ findings to fill a 64K pipe buffer
+          # (measured: tips at ~250 findings / ~24K, nondeterministically at the
+          # boundary, because it is a race). A here-string is one command, so jq
+          # always runs to completion and the status is its own.
+          # (backend#1778 -- same class as .github#173 and the PII gate's #1409.)
+          #
+          # `|| true` keeps a parse failure non-fatal, which is what the existing
+          # `2>/dev/null` already intended; it is near-unreachable anyway, since
+          # COUNT != 0 means jq already parsed this file once.
+          ROWS=""
+          if [ "$COUNT" != "0" ]; then
+            ROWS=$(jq -r '.[] | "| \(.RuleID) | `\(.File)` | \(.StartLine) | \(.Commit[0:8]) |"' \
+              /tmp/gitleaks.json 2>/dev/null || true)
+          fi
+
           {
             echo "### gitleaks"
             echo ""
@@ -655,8 +679,11 @@ jobs:
               echo ""
               echo "| Rule | File | Line | Commit |"
               echo "|---|---|---:|---|"
-              jq -r '.[] | "| \(.RuleID) | `\(.File)` | \(.StartLine) | \(.Commit[0:8]) |"' \
-                /tmp/gitleaks.json 2>/dev/null | head -50
+              # Guarded: `head <<<""` would emit one blank line and break the
+              # table, where the old pipeline printed nothing.
+              if [ -n "$ROWS" ]; then
+                head -50 <<<"$ROWS"
+              fi
               echo ""
               echo "Treat anything detected here as compromised: **rotate it first**, then"
               echo "remove it from the code. Rewriting history is not remediation — the"
