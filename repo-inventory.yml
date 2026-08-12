@@ -2,12 +2,15 @@
 # single source of truth; `.github/workflows/caller-drift.yml` fails when reality
 # diverges from it.
 #
-# Two property families so far (backend#1608 - one checker, one contract, one
-# report, deliberately NOT a third audit to keep in step):
+# The property families (backend#1608 - one checker, one contract, one report,
+# deliberately NOT a separate audit per family to keep in step):
 #   callers / copies   which tracebloc/.github reusable workflows a repo must call,
 #                      and which duplicated files must match the canonical copy
 #   protection         branch protection per branch ROLE (develop/staging/prod),
 #                      holding the backend#1276 decisions of record
+#   rulesets           GitHub's SECOND protection system (backend#1681)
+#   quality_files      files every repo must CARRY at a fixed path, asserted by
+#                      presence because their content is per-repo by design
 #
 # Adding a property means adding a row for ALL 20 repos. That is the point: it is
 # the forcing function that stops a new repo arriving with a gap nobody notices.
@@ -29,8 +32,8 @@
 # file exists.
 #
 # THE SCHEMA DECISION: ABSENCE IS NEVER IMPLICIT.
-# Every repo carries an entry for EVERY reusable and EVERY copy. Each entry is
-# exactly one of:
+# Every repo carries an entry for EVERY reusable, EVERY copy and EVERY quality
+# file. Each entry is exactly one of:
 #
 #   required            the caller must be present (copies: content must match)
 #   exempt: "<reason>"  the caller must be absent, and WHY is written down
@@ -106,6 +109,37 @@ reusables:
 copies:
   - add-to-kanban.yml
   - stale-backlog.yml
+
+# QUALITY FILES (backend#1608 increment 5): files every repo must CARRY, asserted
+# by presence at a fixed repo-relative path.
+#
+# NOT copies. A copy is compared byte for byte against the canonical original; both
+# files below are per-repo BY DESIGN - backend's BUGBOT.md is about Django and
+# Celery, cli's about Go - so there is nothing to compare and presence is the whole
+# assertion. Presence, a regular file, and non-empty: a zero-byte CLAUDE.md would
+# satisfy a bare existence check while carrying nothing, and so would a symlink.
+#
+# WHY THESE TWO ARE WORTH A FAMILY. Both are read by a TOOL rather than by a
+# reviewer who would notice them missing. CLAUDE.md is what an AI session is
+# instructed to follow; .cursor/BUGBOT.md is what Bugbot reads before reviewing a
+# diff. A repo lacking either does not go red - it quietly gets worse review than
+# its peers, and nothing in the org reports that today. Measured 2026-08-12,
+# develop-first: CLAUDE.md 19/20, .cursor/BUGBOT.md 17/20.
+#
+# The org-standards block INSIDE CLAUDE.md is not asserted here: standards-sync.py
+# owns it, and a second mechanism for one property is how the two drift apart.
+#
+# `.gitleaks.toml` is DELIBERATELY NOT MODELLED. It is 7/20 and that is correct -
+# it is a per-repo allowlist you add when you hit a false positive, not a control.
+# The control is `quality / gitleaks` being a REQUIRED status check, and
+# protection_policy.required_checks below already asserts exactly that on all 16
+# train repos (verified live 2026-08-12: 16/16 armed, 16/16 asserted). Modelling
+# the file would add nine exemption rows for zero security value and make a tuning
+# file read as a security gap - inert verification, the pattern backend#1729
+# exists to catch.
+quality_files:
+  - CLAUDE.md
+  - .cursor/BUGBOT.md
 
 # BRANCH PROTECTION, BY BRANCH ROLE (backend#1608 increment 2).
 #
@@ -292,6 +326,17 @@ shared_reasons:
     no .github/workflows directory, so neither copied workflow is present. Its issues and PRs
     therefore never reach the board. UNREMEDIATED.
 
+  # --- quality-file reasons (backend#1608 increment 5) ------------------------
+  bugbot_guide_missing: &bugbot_guide_missing >-
+    no .cursor/BUGBOT.md, so Bugbot reviews PRs here with no repo context: no statement of what
+    this repo is, which defect classes actually occur in it, or which findings are known
+    non-issues. Measured absent 2026-08-12 in claude-skills and rfcs; present in all 16 train
+    repos and in release-train. UNREMEDIATED - this exemption is the finding, not a
+    justification. Cheap to close (one file), and deliberately NOT closed in the same PR that
+    adds this family: the point of the family is that the gap is on the record and countable
+    rather than invisible. Distinct from devex_bootstrap_undisposed, where the repo's existence
+    is itself the open question.
+
   # --- branch-protection reasons (backend#1608 increment 2, backend#1276) -----
   docs_no_required_review: &docs_no_required_review >-
     docs is exempt from required review on `staging` and `main` (Lukas, 2026-06-04): docs are
@@ -323,10 +368,16 @@ shared_reasons:
     quietly dropped, per this file's schema decision. Protecting it is cheap; the reason it has not
     happened is that nothing depends on it.
   devex_bootstrap_undisposed: &devex_bootstrap_undisposed >-
-    devex-bootstrap has no protection on any branch and its disposition is still open
-    (backend#1597). Exempt on all three roles until that ticket decides whether the repo joins the
-    train, stays a scratch repo, or is archived. UNREMEDIATED, deliberately: arming protection on a
+    devex-bootstrap is an empty shell whose disposition is still open (backend#1597): no protection
+    on any branch, no .github directory, and none of the quality files - 5 blobs on develop in
+    total (measured 2026-08-12). Exempt on all three protection roles AND on every quality file
+    until that ticket decides whether the repo joins the train, stays a scratch repo, or is
+    archived. UNREMEDIATED, deliberately: arming protection on, or writing a review guide for, a
     repo we may archive is work we would throw away.
+    This anchor was widened from protection-only when the quality_files family arrived
+    (backend#1608 increment 5). One repo, one open question, one reason - rather than a second
+    text saying the same thing about a different file, which is how two reasons for one decision
+    start disagreeing.
 
 repos:
   .github:
@@ -385,6 +436,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   averaging-service:
     visibility: private
@@ -416,6 +470,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   backend:
     visibility: private
@@ -446,6 +503,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   claude-skills:
     visibility: private
@@ -490,6 +550,10 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md":
+        exempt: *bugbot_guide_missing
 
   cli:
     visibility: public
@@ -523,6 +587,9 @@ repos:
           cli's copy has drifted: it pins actions/stale@v11 where every other repo pins v9
           (backend#1415 says v10 - the measured value is v11). Recorded as divergent so the
           guard reports it. Realignment is follow-up work.
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   client:
     visibility: public
@@ -552,6 +619,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   client-runtime:
     visibility: private
@@ -583,6 +653,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   data-ingestors:
     visibility: public
@@ -612,6 +685,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   design-system:
     visibility: private
@@ -641,6 +717,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   devex-bootstrap:
     visibility: private
@@ -722,6 +801,11 @@ repos:
         exempt: *no_workflows_directory_at_all
       stale-backlog.yml:
         exempt: *no_workflows_directory_at_all
+    quality_files:
+      CLAUDE.md:
+        exempt: *devex_bootstrap_undisposed
+      ".cursor/BUGBOT.md":
+        exempt: *devex_bootstrap_undisposed
 
   docs:
     visibility: public
@@ -782,6 +866,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   # Remediated 2026-08-05 by e2e-test-agent#13, which added the .github/workflows
   # directory this repo had lacked since it was created on 2026-06-03. The nine
@@ -827,6 +914,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   frontend-app:
     visibility: private
@@ -858,6 +948,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   model-zoo:
     visibility: public
@@ -903,6 +996,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   release-train:
     visibility: private
@@ -964,6 +1060,9 @@ repos:
           release-train has add-to-kanban.yml but no stale-backlog.yml. Auto-closing backlog
           items in the repo that drives promotions is a deliberate omission - stale-backlog.yml
           is column-blind and would close live pipeline work (backend#1408 P3).
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   rfcs:
     visibility: private
@@ -1028,6 +1127,10 @@ repos:
           no stale-backlog copy: this repo holds decision documents, not a backlog. An RFC
           that has sat untouched is not stale in the sense the sweep measures -- it is a
           decision nobody has taken, which is what the board card is now for (.github#138).
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md":
+        exempt: *bugbot_guide_missing
   start-training:
     visibility: public
     release_train: true
@@ -1072,6 +1175,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   tracebloc-engine:
     visibility: private
@@ -1103,6 +1209,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   tracebloc-py-package:
     visibility: private
@@ -1132,6 +1241,9 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   tracebloc-website:
     visibility: private
@@ -1168,3 +1280,6 @@ repos:
     copies:
       add-to-kanban.yml: required
       stale-backlog.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required

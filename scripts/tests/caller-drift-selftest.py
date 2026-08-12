@@ -67,6 +67,7 @@ MINIMAL = {
     "source_repo": "hub",
     "reusables": ["a.yml"],
     "copies": ["c.yml"],
+    "quality_files": ["GUIDE.md"],
     "protection_policy": {
         "develop": _policy(),
         "staging": _policy(),
@@ -98,6 +99,7 @@ MINIMAL = {
             },
             "callers": {"a.yml": "required"},
             "copies": {"c.yml": "required"},
+            "quality_files": {"GUIDE.md": "required"},
             "rulesets": {
                 "promotion_merge_commit_only": "required",
                 "tag_trust_root": {"exempt": "publishes no v* tags"},
@@ -287,6 +289,7 @@ else:
 # ------------------------------------------------- unreadable-repo failure paths
 
 COPIES = ["add-to-kanban.yml", "stale-backlog.yml"]
+QFILES = ["CLAUDE.md", ".cursor/BUGBOT.md"]
 META = {"visibility": "private", "default_branch": "main"}
 TREE_ONE = json.dumps({
     "truncated": False,
@@ -309,7 +312,7 @@ def blob(body: bytes) -> str:
 def expect_unreadable(name: str, handler, needle: str) -> None:
     """A failed read must produce an UNREADABLE record, never 'no caller found'."""
     stub(handler)
-    read = guard.read_repo("acme", "repo", META, COPIES)
+    read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
     ok = (not read.ok) and any(needle in err for err in read.errors)
     record(ok, name, str(read.errors))
 
@@ -413,7 +416,7 @@ def _good(args):
 
 
 stub(_good)
-read = guard.read_repo("acme", "repo", META, COPIES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
 record(
     read.ok
     and read.branch == "develop"
@@ -437,7 +440,7 @@ def _decoys(args):
 
 
 stub(_decoys)
-read = guard.read_repo("acme", "repo", META, COPIES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
 record(read.ok and read.callers == {},
        "a commented-out `uses:` and one inside a run script are NOT callers",
        f"callers={read.callers}")
@@ -454,7 +457,7 @@ def _unpinned(args):
 
 
 stub(_unpinned)
-read = guard.read_repo("acme", "repo", META, COPIES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
 record(read.ok and read.callers.get("fr-gate.yml") == [("fr-gate-caller.yml", "v1.2.3")],
        "a caller on an unexpected ref is captured with its ref, for the pin check",
        f"callers={read.callers}")
@@ -470,7 +473,7 @@ def _copy_sha(args):
 
 
 stub(_copy_sha)
-read = guard.read_repo("acme", "repo", META, COPIES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
 record(read.ok and read.copies.get("add-to-kanban.yml") == "deadbeef",
        "a copy is recorded by blob sha so content can be compared",
        f"copies={read.copies}")
@@ -478,6 +481,172 @@ record(read.ok and read.copies.get("add-to-kanban.yml") == "deadbeef",
 record(guard.blob_sha(b"hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a",
        "blob_sha matches git's own object id",
        guard.blob_sha(b"hello\n"))
+
+
+# --------------------------------------------- quality files (#1608 increment 5)
+#
+# A presence family is the easiest thing in this file to write as inert
+# verification: "the path is in the tree" passes for a zero-byte file, for a
+# symlink to nowhere, and -- worst -- for a repo whose tree was never read.
+# The cases below pin all three, plus both directions of the exemption.
+
+def _qf_entry(path, size=120, mode="100644", type_="blob", with_size=True):
+    entry = {"type": type_, "path": path, "mode": mode}
+    if with_size:
+        entry["size"] = size
+    return entry
+
+
+def _qf_tree(*items, truncated=False):
+    return json.dumps({"truncated": truncated, "tree": list(items)})
+
+
+def _stub_qf_tree(payload):
+    """Branch list plus one tree read; no workflow blobs are involved."""
+    stub(lambda args: "main\n" if _branches(args) else payload)
+
+
+_stub_qf_tree(_qf_tree(_qf_entry("CLAUDE.md", size=5901),
+                       _qf_entry(".cursor/BUGBOT.md", size=4193)))
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+record(read.ok
+       and read.quality_files.get("CLAUDE.md", {}).get("size") == 5901
+       and read.quality_files.get(".cursor/BUGBOT.md", {}).get("mode") == "100644",
+       "quality files: a present file is recorded with its size and mode",
+       f"quality_files={read.quality_files}")
+
+# Absence from a SUCCESSFUL read is the only legitimate way to conclude "absent".
+_stub_qf_tree(_qf_tree(_qf_entry("README.md")))
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+record(read.ok and read.quality_files == {},
+       "quality files: absent from a fully-read tree is recorded as absent",
+       f"quality_files={read.quality_files}")
+
+# THE FAIL-CLOSED CASE. A truncated tree omits paths, so "not in the tree" is not
+# knowledge. read_repo must fail the whole row rather than let the family conclude
+# the file is missing -- exit 2, never a finding and never an all-clear.
+_stub_qf_tree(_qf_tree(_qf_entry("README.md"), truncated=True))
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+record(not read.ok and any("truncated" in e for e in read.errors),
+       "quality files: a TRUNCATED tree is unreadable, never 'the file is absent'",
+       f"ok={read.ok} errors={read.errors}")
+
+# A blob whose size the API did not report cannot be told from an empty file.
+# Guessing either way is the guard deciding a fact it does not have.
+_stub_qf_tree(_qf_tree(_qf_entry("CLAUDE.md", with_size=False)))
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+record(not read.ok and any("no size" in e for e in read.errors),
+       "quality files: a blob with no reported size is unreadable, not 'empty'",
+       f"ok={read.ok} errors={read.errors}")
+
+
+def _qf_cells(cells):
+    """An inventory entry holding only the quality_files section."""
+    return {"quality_files": {p: v for p, v in cells.items()}}
+
+
+REQ_BOTH = _qf_cells({"CLAUDE.md": ("required", ""),
+                      ".cursor/BUGBOT.md": ("required", "")})
+
+# POSITIVE CONTROL: both present, regular, non-empty -> silence.
+f = []
+guard.evaluate_quality_files(
+    "repo", REQ_BOTH, QFILES,
+    {"CLAUDE.md": {"type": "blob", "mode": "100644", "size": 5901},
+     ".cursor/BUGBOT.md": {"type": "blob", "mode": "100644", "size": 4193}}, f)
+record(not f, "quality files: both present and non-empty reports nothing", f"findings={f}")
+
+# THE POINT: a required file that is not there.
+f = []
+guard.evaluate_quality_files(
+    "repo", REQ_BOTH, QFILES,
+    {"CLAUDE.md": {"type": "blob", "mode": "100644", "size": 5901}}, f)
+record(len(f) == 1 and "MISSING required .cursor/BUGBOT.md" in f[0],
+       "quality files: a MISSING required file is a finding, naming it",
+       f"findings={f}")
+
+# Present but empty: passes a bare existence check, carries nothing.
+f = []
+guard.evaluate_quality_files(
+    "repo", REQ_BOTH, QFILES,
+    {"CLAUDE.md": {"type": "blob", "mode": "100644", "size": 0},
+     ".cursor/BUGBOT.md": {"type": "blob", "mode": "100644", "size": 4193}}, f)
+record(len(f) == 1 and "EMPTY" in f[0] and "CLAUDE.md" in f[0],
+       "quality files: a 0-byte file is a finding, not a pass",
+       f"findings={f}")
+
+# A symlink resolves for `cat` and is not the guidance being present in the repo.
+f = []
+guard.evaluate_quality_files(
+    "repo", REQ_BOTH, QFILES,
+    {"CLAUDE.md": {"type": "blob", "mode": "120000", "size": 12},
+     ".cursor/BUGBOT.md": {"type": "blob", "mode": "100644", "size": 4193}}, f)
+record(len(f) == 1 and "120000" in f[0],
+       "quality files: a SYMLINK at the asserted path is a finding",
+       f"findings={f}")
+
+# A directory (or submodule) at the path is not a file either.
+f = []
+guard.evaluate_quality_files(
+    "repo", REQ_BOTH, QFILES,
+    {"CLAUDE.md": {"type": "tree", "mode": "040000", "size": None},
+     ".cursor/BUGBOT.md": {"type": "blob", "mode": "100644", "size": 4193}}, f)
+record(len(f) == 1 and "'tree'" in f[0] and "not a file" in f[0],
+       "quality files: a directory at the asserted path is a finding",
+       f"findings={f}")
+
+# Both directions of the exemption, which is what stops the family becoming a
+# list of permanent excuses: an exemption whose file appears must say so.
+EXEMPT_ONE = _qf_cells({"CLAUDE.md": ("required", ""),
+                        ".cursor/BUGBOT.md": ("exempt", "no guide yet, backend#1608")})
+f = []
+guard.evaluate_quality_files(
+    "repo", EXEMPT_ONE, QFILES,
+    {"CLAUDE.md": {"type": "blob", "mode": "100644", "size": 5901}}, f)
+record(not f, "quality files: an exempt file that is absent reports nothing", f"findings={f}")
+
+f = []
+guard.evaluate_quality_files(
+    "repo", EXEMPT_ONE, QFILES,
+    {"CLAUDE.md": {"type": "blob", "mode": "100644", "size": 5901},
+     ".cursor/BUGBOT.md": {"type": "blob", "mode": "100644", "size": 4193}}, f)
+record(len(f) == 1 and "exemption is stale" in f[0] and "backend#1608" in f[0],
+       "quality files: an exempt file that EXISTS is a stale exemption, and says why "
+       "it was exempt",
+       f"findings={f}")
+
+# Schema: the same two headline rules as every other family.
+expect_schema_failure("missing quality_files top-level rejected",
+                      _drop("quality_files"))
+expect_schema_failure("EMPTY quality_files list rejected (it would pass vacuously)",
+                      lambda d: d.update({"quality_files": []}))
+expect_schema_failure("repo missing the quality_files section rejected",
+                      lambda d: d["repos"]["hub"].pop("quality_files"))
+expect_schema_failure("MISSING quality-file key is a failure, not a default",
+                      lambda d: d["repos"]["hub"]["quality_files"].clear())
+expect_schema_failure("quality-file key not in the top-level list rejected",
+                      lambda d: d["repos"]["hub"]["quality_files"].update(
+                          {"OTHER.md": "required"}))
+expect_schema_failure("quality-file exempt with no reason rejected",
+                      lambda d: d["repos"]["hub"]["quality_files"].update(
+                          {"GUIDE.md": {"exempt": "   "}}))
+expect_schema_failure("`divergent` rejected on a quality file (presence is binary)",
+                      lambda d: d["repos"]["hub"]["quality_files"].update(
+                          {"GUIDE.md": {"divergent": "content differs"}}))
+expect_schema_failure("duplicate quality_files entry rejected",
+                      lambda d: d.update({"quality_files": ["GUIDE.md", "GUIDE.md"]}))
+
+# Path shapes that can NEVER match a git tree path, so they would assert nothing
+# while reading like an assertion.
+for _bad, _label in (("/GUIDE.md", "absolute"),
+                     ("../GUIDE.md", "parent-relative"),
+                     ("docs/", "trailing-slash"),
+                     (" GUIDE.md", "whitespace-padded")):
+    expect_schema_failure(
+        f"quality_files path that is {_label} rejected",
+        (lambda b: lambda d: (d.update({"quality_files": [b]}),
+                              d["repos"]["hub"].update(
+                                  {"quality_files": {b: "required"}})))(_bad))
 
 
 # ------------------------------------------------ protection reads (#1608 inc 2)
@@ -1093,36 +1262,42 @@ INV_M = {"repos": {
     "beta": {"release_train": False},
 }}
 
-rows = guard.render_matrix({"alpha": {"callers": 0, "copies": 0, "protection": 0,
-                                      "rulesets": 0}}, INV_M)
-record(any("| `alpha` | yes | OK | OK | OK | OK |" in r for r in rows),
+CLEAN_CELLS = {"callers": 0, "copies": 0, "quality_files": 0, "protection": 0,
+               "rulesets": 0}
+
+rows = guard.render_matrix({"alpha": dict(CLEAN_CELLS)}, INV_M)
+record(any("| `alpha` | yes | OK | OK | OK | OK | OK |" in r for r in rows),
        "matrix: a clean repo renders OK in every family", rows[-3])
 
-rows = guard.render_matrix({"alpha": {"callers": 2, "copies": 0, "protection": 0,
-                                      "rulesets": 0}}, INV_M)
-record(any("**2**" in r for r in rows) and not any("| OK | OK | OK | OK |" in r for r in rows),
+rows = guard.render_matrix({"alpha": dict(CLEAN_CELLS, callers=2)}, INV_M)
+record(any("**2**" in r for r in rows)
+       and not any("| OK | OK | OK | OK | OK |" in r for r in rows),
        "matrix: findings render as a COUNT, not as OK", rows[-3])
 
 rows = guard.render_matrix({"alpha": {"unread": True}}, INV_M)
-record(any("| ? | ? | ? | ? |" in r for r in rows),
+record(any("| ? | ? | ? | ? | ? |" in r for r in rows),
        "matrix: an unreadable repo renders ? in every family, never OK", rows[-3])
 
-rows = guard.render_matrix({"alpha": {"callers": 0, "copies": 0, "protection": 0,
-                                      "protection_unread": 1, "rulesets": 0}}, INV_M)
-record(any("| OK | OK | ? | OK |" in r for r in rows),
+rows = guard.render_matrix({"alpha": dict(CLEAN_CELLS, protection_unread=1)}, INV_M)
+record(any("| OK | OK | OK | ? | OK |" in r for r in rows),
        "matrix: an unreadable FAMILY renders ? in that column only", rows[-3])
+
+# The new family gets its own column, and a finding in it must not smear into a
+# neighbour's cell -- the table is the artefact people read instead of the log.
+rows = guard.render_matrix({"alpha": dict(CLEAN_CELLS, quality_files=3)}, INV_M)
+record(any("| OK | OK | **3** | OK | OK |" in r for r in rows)
+       and any("quality_files" in r for r in rows),
+       "matrix: quality_files is its own column, counted in its own cell", rows[-3])
 
 # The distinction that matters most: zero findings because it was checked, versus
 # zero findings because it was never read. Those must not render the same.
-clean = guard.render_matrix({"alpha": {"callers": 0, "copies": 0, "protection": 0,
-                                       "rulesets": 0}}, INV_M)
+clean = guard.render_matrix({"alpha": dict(CLEAN_CELLS)}, INV_M)
 unread = guard.render_matrix({"alpha": {"unread": True}}, INV_M)
 record(clean != unread,
        "matrix: 'checked and clean' and 'never read' do NOT render identically",
        "clean != unread")
 
-rows = guard.render_matrix({"beta": {"callers": 0, "copies": 0, "protection": 0,
-                                     "rulesets": 0}}, INV_M)
+rows = guard.render_matrix({"beta": dict(CLEAN_CELLS)}, INV_M)
 record(any("| `beta` | - |" in r for r in rows),
        "matrix: a non-train repo is marked as such", rows[-3])
 
