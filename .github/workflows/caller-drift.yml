@@ -207,7 +207,11 @@ jobs:
           # thing that did not happen, sending the reader to the wrong problem.
           # (Bugbot, #227.)
           if [ "${REMEDIATION_FAILURES:-0}" != "0" ]; then
-            verdict="⚠️ **Remediation failed** — the fleet was read successfully, but ${REMEDIATION_FAILURES} repo(s) could not be remediated and still carry their drift."
+            if [ "${UNREADABLE:-0}" != "0" ]; then
+              verdict="⚠️ **Remediation failed** — ${REMEDIATION_FAILURES} repo(s) still carry their drift, and ${UNREADABLE} repo(s) could not be read and are NOT known to comply."
+            else
+              verdict="⚠️ **Remediation failed** — the fleet was read successfully, but ${REMEDIATION_FAILURES} repo(s) could not be remediated and still carry their drift."
+            fi
           fi
 
           # The verdict must not be able to contradict the counts printed beside it.
@@ -291,11 +295,13 @@ jobs:
                 printf 'caller, or the inventory is out of date — the report below says which.\n\n'
                 ;;
               2)
-                printf '## Caller inventory could NOT be evaluated\n\n'
+                printf '## Caller inventory could NOT be evaluated (or remediation failed)\n\n'
                 printf 'This is not a clean result. Either `repo-inventory.yml` failed schema\n'
-                printf 'validation, or one or more repos could not be read. Repos that could not\n'
-                printf 'be read are **not** known to comply — fix the token or the inventory and\n'
-                printf 're-run before drawing any conclusion.\n\n'
+                printf 'validation, one or more repos could not be read, or remediation PRs\n'
+                printf 'could not be opened/refreshed. Repos that could not be read are **not**\n'
+                printf 'known to comply, and drift that could not be remediated still stands —\n'
+                printf 'fix the token, the inventory, or the remediation dispatch and re-run\n'
+                printf 'before drawing any conclusion.\n\n'
                 ;;
               *)
                 printf '## Caller inventory guard did not report a result\n\n'
@@ -336,8 +342,9 @@ jobs:
               exit 1
               ;;
             2)
-              echo "::error::The caller inventory could not be evaluated — bad inventory," \
-                   "failed org enumeration, or an unreadable repo. This is NOT an all-clear." >&2
+              echo "::error::The caller inventory could not be evaluated or remediated — bad" \
+                   "inventory, failed org enumeration, an unreadable repo, or remediation PRs" \
+                   "that could not be opened. This is NOT an all-clear." >&2
               exit 1
               ;;
             *)
