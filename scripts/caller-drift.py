@@ -1613,7 +1613,12 @@ def main() -> int:
     unreadable.extend(ruleset_unreadable)
 
     report = [
-        "### Repo conformance drift",
+        # Not "…drift": this block is now also the body of the standing conformance
+        # issue (backend#1608 item 3), where it is rendered under a verdict line
+        # that may well be "Conformant" — a heading asserting drift above a green
+        # matrix reads as a contradiction on the one screen people are meant to
+        # trust. The report states what it surveyed; the verdict states the outcome.
+        "### Repo conformance",
         "",
         f"Inventory: **{len(inventory['repos'])}** repos x **{len(reusables)}** "
         f"reusables + **{len(copies)}** copies + **{len(PROTECTION_ROLES)}** "

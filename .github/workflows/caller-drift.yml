@@ -82,6 +82,11 @@ jobs:
     needs: selftest
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Job-level so BOTH reporting steps below resolve it. Defined in one step's
+      # env: it was undefined in the other, and under `set -u` that step dies —
+      # loud rather than silent, but the drift comment would never post.
+      WATCHDOG_ISSUE: '1781'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -124,6 +129,102 @@ jobs:
           set -e
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           echo "The audit exited $code (0 clean, 1 drift, 2 could not evaluate)."
+
+      - name: Rewrite the conformance matrix on the watchdog issue
+        # THE ONE SCREEN (backend#1608 item 3).
+        #
+        # The comment step below fires only on drift, deliberately — an all-clear
+        # per run trains people to ignore the issue (backend#1344). The cost of
+        # that, until now, was that a CONFORMANT fleet published nothing at all:
+        # the matrix existed only in a step summary on a run nobody opens, so
+        # "where does the fleet stand?" was still answered by running the script by
+        # hand. Comments are the history; this body is the current state.
+        #
+        # Rewritten on EVERY scheduled/manual run regardless of outcome, which is
+        # what makes staleness meaningful: the body carries the run timestamp and
+        # the audit is weekly, so a timestamp older than ~8 days means the audit
+        # itself stopped and the fleet is UNKNOWN. That is the backend#1530
+        # cron-watchdog contract, and it only holds if a red run rewrites the body
+        # too — otherwise a fleet that broke in January still shows January's
+        # green and looks merely stale-ish.
+        #
+        # `always()`, and NOT gated on exit_code: a run that could not evaluate
+        # must overwrite the previous green with UNKNOWN. Leaving the last good
+        # matrix in place is the fail-open this whole guard exists to refuse.
+        if: >-
+          always()
+          && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          CODE: ${{ steps.audit.outputs.exit_code }}
+          REPORT: ${{ steps.audit.outputs.report }}
+          EVALUATED: ${{ steps.audit.outputs.evaluated }}
+          UNREADABLE: ${{ steps.audit.outputs.unreadable }}
+          FINDINGS: ${{ steps.audit.outputs.findings }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          code="${CODE:-}"
+          now="$(date -u '+%Y-%m-%d %H:%M UTC')"
+
+          case "$code" in
+            0) verdict='✅ **Conformant** — every repo read, every entry matched.' ;;
+            1) verdict='🔴 **Drift** — see the latest comment for the findings.' ;;
+            2) verdict='⚠️ **Could not evaluate** — repos that could not be read are NOT known to comply.' ;;
+            *) verdict="⚠️ **No result** — the audit exited \`${code:-<empty>}\`, which it should never do. Treat fleet conformance as UNKNOWN." ;;
+          esac
+
+          # The verdict must not be able to contradict the counts printed beside it.
+          # A clean exit code alongside a non-zero unreadable/findings count is not a
+          # green fleet, it is a broken audit — and "✅ every repo read" printed above
+          # "3 unreadable" is the most confidently wrong thing this issue could say.
+          # The script does not currently produce that pair, which is exactly why it
+          # is worth pinning: the headline is DERIVED from the numbers, so it stays
+          # true if the exit-code contract ever changes.
+          if [ "$code" = "0" ] && { [ "${UNREADABLE:-0}" != "0" ] || [ "${FINDINGS:-0}" != "0" ]; }; then
+            verdict="⚠️ **Inconsistent result** — the audit exited clean while reporting ${UNREADABLE:-?} unreadable and ${FINDINGS:-?} finding(s). Treat fleet conformance as UNKNOWN and fix the audit."
+          fi
+
+          # shellcheck disable=SC2016  # backticks are markdown code spans in the
+          # issue body, not command substitution — hence the single quotes.
+          {
+            printf 'This issue is the org'"'"'s repo-conformance surface (backend#1608). The weekly\n'
+            printf 'audit in `tracebloc/.github` (`caller-drift.yml`) rewrites this body on every\n'
+            printf 'run; drift arrives separately as a **comment**. The body is the current\n'
+            printf 'state, the comments are the history.\n\n'
+            printf '**Fail-closed contract:** the audit runs **Mondays 06:30 UTC**. If the\n'
+            printf 'timestamp below is stale by more than ~8 days, the audit itself has died —\n'
+            printf 'that staleness is the alarm, and fleet conformance is UNKNOWN rather than\n'
+            printf 'fine. Do not close this issue.\n\n'
+            printf -- '---\n\n'
+            printf '### Last audit: %s\n\n' "$now"
+            printf -- '- Repos evaluated: **%s** (%s unreadable)\n' "${EVALUATED:-?}" "${UNREADABLE:-?}"
+            printf -- '- Findings: **%s**\n' "${FINDINGS:-?}"
+            printf -- '- Verdict: %s\n\n' "$verdict"
+            if [ -n "${REPORT:-}" ]; then
+              printf '%s\n\n' "$REPORT"
+            else
+              # No report body on a run that was supposed to produce one is itself a
+              # finding: say so here rather than leaving the previous matrix visible.
+              printf 'The audit produced **no report body**, so no matrix could be rendered.\n'
+              printf 'Fleet conformance is UNKNOWN for this run — see the run log.\n\n'
+            fi
+            printf '[Run log](%s)\n' "$RUN_URL"
+          } > wd-body.md
+
+          # GitHub rejects a body over 65536 characters. A rejected edit would leave
+          # the previous body in place — a stale green presented as current, the one
+          # outcome this step exists to prevent — so truncate and say that we did.
+          if [ "$(wc -c < wd-body.md)" -gt 60000 ]; then
+            head -c 59000 wd-body.md > wd-body.trunc
+            {
+              printf '\n\n---\n\n**TRUNCATED** — the full report exceeded GitHub'"'"'s issue-body\n'
+              printf 'limit. See the [run log](%s) for the complete matrix.\n' "$RUN_URL"
+            } >> wd-body.trunc
+            mv wd-body.trunc wd-body.md
+          fi
+
+          gh issue edit "$WATCHDOG_ISSUE" --repo tracebloc/backend --body-file wd-body.md
 
       - name: Report on the tracking issue
         # Only on scheduled and manual runs: a PR that edits the inventory gets its
@@ -173,7 +274,11 @@ jobs:
             fi
             printf '[Run log](%s)\n' "$RUN_URL"
           } > body.md
-          gh issue comment 1415 --repo tracebloc/backend --body-file body.md
+          # backend#1781, not #1415: #1415 is CLOSED. Comments on a closed issue
+          # still post, so this looked like it worked — but a closed issue cannot
+          # be pinned, drops out of every default issue view, and notifies nobody
+          # who is not already subscribed. Drift has been reporting into a drawer.
+          gh issue comment "$WATCHDOG_ISSUE" --repo tracebloc/backend --body-file body.md
 
       - name: Fail the run unless the audit came back clean
         # A green run must mean "the inventory matches reality", never merely "the
