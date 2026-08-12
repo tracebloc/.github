@@ -139,7 +139,9 @@ ruff: guard-ruff
 shellcheck: guard-shellcheck
 	@set -e; \
 	 files=$$(mktemp); \
-	 git ls-files | while IFS= read -r f; do \
+	 all=$$(mktemp); \
+	 git ls-files > "$$all"; \
+	 while IFS= read -r f; do \
 	   [ -f "$$f" ] || continue; \
 	   case "$$f" in \
 	     *.sh|*.bash|*.ksh) printf '%s\n' "$$f" >> "$$files" ;; \
@@ -148,7 +150,8 @@ shellcheck: guard-shellcheck
 	          | grep -Eq '^#![[:space:]]*[^[:space:]]*(/|[[:space:]])(ba|da|k)?sh([[:space:]]|$$)' \
 	          && printf '%s\n' "$$f" >> "$$files" || true ;; \
 	   esac; \
-	 done; \
+	 done < "$$all"; \
+	 rm -f "$$all"; \
 	 n=$$(wc -l < "$$files" | tr -d ' '); \
 	 echo "Shell files to check: $$n"; \
 	 if [ "$$n" = "0" ]; then \
