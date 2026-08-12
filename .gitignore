@@ -10,3 +10,7 @@ __pycache__/
 # Local editor / OS noise, same reasoning.
 .DS_Store
 .pytest_cache/
+
+# Scratch written by caller-drift.yml's watchdog step at runtime; never committed.
+wd-body.md
+body.md
