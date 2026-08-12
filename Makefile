@@ -314,7 +314,7 @@ version-check:
 	@got=$$($(RUFF) --version 2>/dev/null | awk '{print $$2}'); \
 	 [ "$$got" = "$(RUFF_VERSION)" ] \
 	   || echo "warning: ruff $$got on PATH, CI pins $(RUFF_VERSION) — findings may differ."
-	@got=$$($(ACTIONLINT) -version 2>/dev/null | head -1); \
+	@got=$$($(ACTIONLINT) -version 2>/dev/null | head -1 | sed 's/^v//'); \
 	 [ "$$got" = "$(ACTIONLINT_VERSION)" ] \
 	   || echo "warning: actionlint $$got on PATH, CI pins $(ACTIONLINT_VERSION) — findings may differ."
 
