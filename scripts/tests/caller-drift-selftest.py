@@ -12,13 +12,16 @@ Exit 0 when every path fails the way it is supposed to.
 
 from __future__ import annotations
 
+import ast
 import base64
 import copy
 import importlib.util
+import inspect
 import json
 import os
 import sys
 import tempfile
+import textwrap
 
 import yaml
 
@@ -1128,9 +1131,6 @@ record(any("| `beta` | - |" in r for r in rows),
 # its reach. The safety property is not "does it fix drift" but "does it ever touch
 # something a human deliberately decided about".
 
-import ast as _ast
-import inspect as _inspect
-import textwrap as _textwrap
 
 # THE ONE THAT MATTERS. `divergent` records a written reason why a repo differs --
 # cli pins actions/stale@v11 where canon pins v9, and the newer pin may well be the
@@ -1140,26 +1140,26 @@ import textwrap as _textwrap
 # Asserted structurally rather than by grep: parse main(), find the `state ==
 # "required"` branch, and require every `remediable` mutation to live inside it.
 # A grep for "divergent" near "remediable" would pass whatever the code did.
-_src = _textwrap.dedent(_inspect.getsource(guard.main))
-_tree = _ast.parse(_src)
+_src = textwrap.dedent(inspect.getsource(guard.main))
+_tree = ast.parse(_src)
 
 
 def _remediable_lines(node) -> "set[int]":
     out = set()
-    for sub in _ast.walk(node):
-        if isinstance(sub, _ast.Name) and sub.id == "remediable":
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and sub.id == "remediable":
             out.add(sub.lineno)
     return out
 
 
 _all_rem = _remediable_lines(_tree)
 _required_rem = set()
-for _n in _ast.walk(_tree):
+for _n in ast.walk(_tree):
     # the `if state == "required":` test inside the copies loop
-    if isinstance(_n, _ast.If) and isinstance(_n.test, _ast.Compare):
+    if isinstance(_n, ast.If) and isinstance(_n.test, ast.Compare):
         left, comps = _n.test.left, _n.test.comparators
-        if (isinstance(left, _ast.Name) and left.id == "state"
-                and comps and isinstance(comps[0], _ast.Constant)
+        if (isinstance(left, ast.Name) and left.id == "state"
+                and comps and isinstance(comps[0], ast.Constant)
                 and comps[0].value == "required"):
             for _stmt in _n.body:
                 _required_rem |= _remediable_lines(_stmt)
@@ -1170,8 +1170,8 @@ _decl = min(_all_rem) if _all_rem else 0
 _mutations.discard(_decl)
 # lines inside the `if args.create_prs:` reporting block read it, not write it
 _reads = set()
-for _n in _ast.walk(_tree):
-    if isinstance(_n, _ast.If) and isinstance(_n.test, _ast.Attribute) \
+for _n in ast.walk(_tree):
+    if isinstance(_n, ast.If) and isinstance(_n.test, ast.Attribute) \
             and _n.test.attr == "create_prs":
         _reads |= _remediable_lines(_n)
 _mutations -= _reads
@@ -1214,8 +1214,7 @@ def _rem_stub(missing_on_branch=True, fail=None, has_pr=False, ref_status=None):
     return handler
 
 
-import os as _os
-_os.makedirs("/tmp/rem-src/.github/workflows", exist_ok=True)
+os.makedirs("/tmp/rem-src/.github/workflows", exist_ok=True)
 with open("/tmp/rem-src/.github/workflows/copy-a.yml", "wb") as _h:
     _h.write(b"canonical bytes\n")
 
