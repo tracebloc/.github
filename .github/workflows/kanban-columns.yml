@@ -47,6 +47,11 @@ jobs:
 
   check:
     name: Written Status names exist on the board
+    # Gate on selftest: a conformance PASS emitted by a checker whose own
+    # failure paths have regressed is a false green (the checker can't fail, so
+    # its success means nothing). Sibling guards caller-drift + standards-sync
+    # gate their audit on selftest for exactly this reason. (Bugbot, #247.)
+    needs: selftest
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
