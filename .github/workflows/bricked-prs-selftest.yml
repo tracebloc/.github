@@ -1,0 +1,46 @@
+name: Bricked PRs selftest
+
+# The watcher's product is a DISTINCTION, not a list: a context absent because
+# it will never report, versus absent because the run has not started, versus a
+# branch that could not be read. Get any of those wrong and the report is either
+# ignorable or misleading -- both were observed while building it (backend#1721),
+# so the paths are asserted rather than trusted.
+#
+# Same shape as blocked-gate-selftest.yml: offline, no token, path-filtered
+# because it only needs to run when the thing it tests changes.
+
+on:
+  pull_request:
+    paths:
+      - scripts/bricked-prs.py
+      - scripts/tests/bricked-prs-selftest.py
+      - .github/workflows/bricked-prs.yml
+      - .github/workflows/bricked-prs-selftest.yml
+  push:
+    branches: [main, develop, staging]
+    paths:
+      - scripts/bricked-prs.py
+      - scripts/tests/bricked-prs-selftest.py
+      - .github/workflows/bricked-prs.yml
+      - .github/workflows/bricked-prs-selftest.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bricked-prs-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      # bricked-prs.py imports caller-drift.py for the protection reader, and
+      # that module hard-fails without PyYAML by design.
+      - run: pip install --quiet pyyaml
+      - run: python scripts/tests/bricked-prs-selftest.py
