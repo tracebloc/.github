@@ -199,6 +199,9 @@ jobs:
           REPORT: ${{ steps.audit.outputs.report }}
           EVALUATED: ${{ steps.audit.outputs.evaluated }}
           UNREADABLE: ${{ steps.audit.outputs.unreadable }}
+          CALLER_UNREADABLE: ${{ steps.audit.outputs.caller_unreadable }}
+          PROTECTION_UNREADABLE: ${{ steps.audit.outputs.protection_unreadable }}
+          RULESET_UNREADABLE: ${{ steps.audit.outputs.ruleset_unreadable }}
           FINDINGS: ${{ steps.audit.outputs.findings }}
           REMEDIATION_FAILURES: ${{ steps.audit.outputs.remediation_failures }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -206,6 +209,26 @@ jobs:
           set -euo pipefail
           code="${CODE:-}"
           now="$(date -u '+%Y-%m-%d %H:%M UTC')"
+
+          # NAME WHICH READ FAILED, once, for every verdict below. UNREADABLE is the merged list, so wording
+          # it as "repo(s) could not be read" announced a failed protection or
+          # ruleset read as a repo nobody looked at -- true count, false name
+          # (Bugbot #238). The script emits the split; use it.
+          what=""
+          [ "${CALLER_UNREADABLE:-0}" != "0" ] && what="${CALLER_UNREADABLE} repo(s) could not be read (caller/copy state UNKNOWN)"
+          if [ "${PROTECTION_UNREADABLE:-0}" != "0" ]; then
+          [ -n "$what" ] && what="$what; "
+          what="${what}${PROTECTION_UNREADABLE} branch-protection read(s) failed (protection state UNKNOWN)"
+          fi
+          if [ "${RULESET_UNREADABLE:-0}" != "0" ]; then
+          [ -n "$what" ] && what="$what; "
+          what="${what}${RULESET_UNREADABLE} ruleset read(s) failed (ruleset state UNKNOWN)"
+          fi
+          # Fall back to the merged count rather than an empty sentence if a
+          # future read type is added and not surfaced here.
+          [ -z "$what" ] && what="${UNREADABLE:-0} read(s) failed"
+          # Built once: TWO verdicts quote it, and fixing only the first would
+          # leave the second still saying "repo(s) could not be read".
 
           case "$code" in
             0) verdict='✅ **Conformant** — every repo read, every entry matched.' ;;
@@ -220,7 +243,7 @@ jobs:
           # (Bugbot #227).
           if [ "$code" = "2" ]; then
             if [ "${UNREADABLE:-0}" != "0" ]; then
-              verdict="⚠️ **Could not evaluate** — ${UNREADABLE} repo(s) could not be read and are NOT known to comply. Fleet conformance is UNKNOWN."
+              verdict="⚠️ **Could not evaluate** — ${what}. Anything not read is NOT known to comply. Fleet conformance is UNKNOWN."
             else
               verdict='⚠️ **Could not evaluate** — the audit could not run to completion (a bad inventory or a failed org enumeration; see the log). Fleet conformance is UNKNOWN.'
             fi
@@ -233,7 +256,7 @@ jobs:
           # (Bugbot, #227.)
           if [ "${REMEDIATION_FAILURES:-0}" != "0" ]; then
             if [ "${UNREADABLE:-0}" != "0" ]; then
-              verdict="⚠️ **Remediation failed** — ${REMEDIATION_FAILURES} repo(s) still carry their drift, and ${UNREADABLE} repo(s) could not be read and are NOT known to comply."
+              verdict="⚠️ **Remediation failed** — ${REMEDIATION_FAILURES} repo(s) still carry their drift, and ${what} — NOT known to comply."
             else
               verdict="⚠️ **Remediation failed** — the fleet was read successfully, but ${REMEDIATION_FAILURES} repo(s) could not be remediated and still carry their drift."
             fi
