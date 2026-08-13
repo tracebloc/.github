@@ -59,7 +59,7 @@ import importlib.util
 import json
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 # A head whose checks have not been CREATED yet looks exactly like a head whose
@@ -73,6 +73,15 @@ from pathlib import Path
 # seconds of the push), and a watcher that cries wolf on every fresh push is one
 # nobody reads -- the failure mode of the always-red check one repo over.
 MIN_HEAD_AGE_MINUTES = 60
+
+# `gh pr list` truncates at --limit and says nothing about it, so a repo with
+# more open PRs than this would be audited PARTIALLY and reported clean -- the
+# fail-open shape this watcher exists to remove, in the watcher itself. The cap
+# is high enough that no tracebloc repo approaches it (the busiest has ~10 open
+# PRs against one base), and reaching it is treated as "could not audit" rather
+# than raised, because a number nobody can justify is worse than a stated limit
+# that refuses.
+PR_LIST_LIMIT = 200
 
 HERE = Path(__file__).resolve().parent
 
@@ -106,31 +115,68 @@ def open_prs(org: str, name: str, base: str) -> "list[dict]":
     """
     raw = CD.gh([
         "pr", "list", "--repo", f"{org}/{name}", "--state", "open",
-        "--base", base, "--limit", "100", "--json",
+        "--base", base, "--limit", str(PR_LIST_LIMIT), "--json",
         "number,isDraft,title,mergeStateStatus,reviewDecision,statusCheckRollup,url,headRefOid",
     ])
     try:
-        return json.loads(raw)
+        prs = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise CD.GhError(None, f"pr list returned unparseable JSON: {exc}") from exc
+    if len(prs) >= PR_LIST_LIMIT:
+        raise CD.GhError(
+            None,
+            f"open PR list hit the {PR_LIST_LIMIT} cap, so the view is partial and "
+            "a bricked PR could be outside it",
+        )
+    return prs
+
+
+def _parse(stamp) -> "datetime | None":
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def head_age_minutes(org: str, name: str, sha: str) -> "float | None":
-    """Age of the PR head in minutes; None if it cannot be read.
+    """How long CI has had this head, in minutes; None if it cannot be dated.
+
+    NOT the commit timestamp (Bugbot, .github#239). A commit's committer date is
+    when it was WRITTEN, and a force-push can put a long-dated commit on a branch
+    a second ago -- which would be judged immediately, producing exactly the
+    false "bricked" the grace window exists to prevent.
+
+    The honest clock is when CI first saw the head: the OLDEST check suite on the
+    sha. GitHub creates a suite per app as soon as it has work for that head, so
+    that timestamp is "CI has known about this for N minutes", which is the
+    question being asked. Fall back to the commit date only when no suite exists
+    at all -- for a conflicted PR there never will be one, and then the commit
+    date is the only clock there is.
 
     Called ONLY for a PR that already looks bricked, so the fleet-wide cost is
-    one API call per candidate rather than one per PR.
+    one or two API calls per candidate, not per PR.
     """
+    try:
+        suites = CD.gh_json(["api", f"repos/{org}/{name}/commits/{sha}/check-suites"])
+    except CD.GhError:
+        suites = None
+    stamps = []
+    if isinstance(suites, dict):
+        for suite in suites.get("check_suites") or []:
+            when = _parse((suite or {}).get("created_at"))
+            if when:
+                stamps.append(when)
+    if stamps:
+        return (datetime.now(timezone.utc) - min(stamps)).total_seconds() / 60.0
+
     try:
         commit = CD.gh_json(["api", f"repos/{org}/{name}/commits/{sha}"])
     except CD.GhError:
         return None
-    stamp = (((commit.get("commit") or {}).get("committer") or {}).get("date"))
-    if not isinstance(stamp, str) or not stamp:
-        return None
-    try:
-        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-    except ValueError:
+    when = _parse(((commit.get("commit") or {}).get("committer") or {}).get("date"))
+    if when is None:
         return None
     return (datetime.now(timezone.utc) - when).total_seconds() / 60.0
 

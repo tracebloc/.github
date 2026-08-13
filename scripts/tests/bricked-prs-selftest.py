@@ -20,8 +20,10 @@ Exit 0 when every path behaves as specified.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TARGET = os.path.join(HERE, os.pardir, "bricked-prs.py")
@@ -31,6 +33,13 @@ if _spec is None or _spec.loader is None:
     sys.exit(f"cannot import {TARGET}")
 bp = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bp)
+
+# Captured BEFORE any case swaps them out. `install()` replaces these module
+# attributes wholesale, so a later case that wants the real implementation must
+# put them back -- otherwise it silently tests the previous case's stub, which is
+# this file's own subject matter.
+REAL_OPEN_PRS = bp.open_prs
+REAL_HEAD_AGE = bp.head_age_minutes
 
 RESULTS: "list[tuple[bool, str, str]]" = []
 
@@ -136,6 +145,67 @@ bp.open_prs = _boom
 f, e = bp.audit_repo("o", "r", ROLES)
 record(not f and len(e) == 1 and "PR list unreadable" in e[0],
        "an unreadable PR list is reported, not silently empty", f"errors={e}")
+
+# 10. A CAPPED PR LIST IS NOT AN AUDITED ONE (Bugbot, .github#239). `gh pr list`
+#     truncates silently, so a partial view would report "clean" for the PRs it
+#     never saw -- the watcher committing the fail-open it exists to find.
+bp.open_prs = REAL_OPEN_PRS
+_real_gh = bp.CD.gh
+bp.CD.gh = lambda args: json.dumps([pr(number=i, contexts=["gate"])
+                                    for i in range(bp.PR_LIST_LIMIT)])
+try:
+    caught = ""
+    try:
+        bp.open_prs("o", "r", "develop")
+    except bp.CD.GhError as exc:
+        caught = exc.detail
+    record("cap" in caught,
+           "a PR list that hits the cap raises rather than returning a partial view",
+           f"detail={caught!r}")
+finally:
+    bp.CD.gh = _real_gh
+
+# 11. THE GRACE WINDOW'S CLOCK. A force-push can put a long-dated commit on a
+#     branch a second ago, so the commit timestamp is not "how long CI has had
+#     this head". The oldest check suite is.
+NOW = datetime.now(timezone.utc)
+
+def _fake_api(payload_by_path):
+    def gh_json(args):
+        path = args[-1]
+        for frag, payload in payload_by_path.items():
+            if frag in path:
+                return payload
+        raise bp.CD.GhError(None, f"unstubbed {path}")
+    return gh_json
+
+bp.head_age_minutes = REAL_HEAD_AGE
+_real_json = bp.CD.gh_json
+try:
+    # A suite created 5 minutes ago, on a commit dated last week: young.
+    bp.CD.gh_json = _fake_api({
+        "check-suites": {"check_suites": [
+            {"created_at": (NOW - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")}]},
+        "commits/": {"commit": {"committer": {
+            "date": (NOW - timedelta(days=7)).isoformat().replace("+00:00", "Z")}}},
+    })
+    age = bp.head_age_minutes("o", "r", "sha")
+    record(age is not None and age < 10,
+           "a force-pushed old commit is dated by CI's clock, not the commit's",
+           f"age={age!r} minutes (commit date was 7 days ago)")
+
+    # No suite at all -- the conflicted case. Only the commit date exists.
+    bp.CD.gh_json = _fake_api({
+        "check-suites": {"check_suites": []},
+        "commits/": {"commit": {"committer": {
+            "date": (NOW - timedelta(hours=3)).isoformat().replace("+00:00", "Z")}}},
+    })
+    age = bp.head_age_minutes("o", "r", "sha")
+    record(age is not None and age > 120,
+           "with no check suite at all it falls back to the commit date",
+           f"age={age!r} minutes — the conflicted case, where no suite will ever exist")
+finally:
+    bp.CD.gh_json = _real_json
 
 failed = [r for r in RESULTS if not r[0]]
 print(f"\n{len(RESULTS) - len(failed)} passed, {len(failed)} failed")
