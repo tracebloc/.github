@@ -15,9 +15,15 @@ name: Kanban column conformance
 
 on:
   pull_request:
+    # MUST LIST EVERY FILE IN `WRITERS`. It listed only the original two, so a PR
+    # touching just set-pr-status.yml or fr-pass-comment.yml never ran this check
+    # and a bad column write could merge until the next cron (Bugbot, #248). The
+    # selftest asserts this list against WRITERS, so they cannot drift apart.
     paths:
       - ".github/workflows/advance-deploy-env.yml"
       - ".github/workflows/kanban-closure-router.yml"
+      - ".github/workflows/set-pr-status.yml"
+      - ".github/workflows/fr-pass-comment.yml"
       - ".github/workflows/kanban-columns.yml"
       - "scripts/kanban-columns-check.py"
       - "scripts/tests/kanban-columns-selftest.py"

@@ -8,6 +8,7 @@ paths are exercised rather than assumed.
 from __future__ import annotations
 
 import importlib.util
+import re
 import io
 import contextlib
 import sys
@@ -103,6 +104,23 @@ try:
 finally:
     kcc_fresh.WRITERS = real_writers
     kcc_fresh.WORKFLOWS = HERE.parent.parent / ".github" / "workflows"
+
+# --- the PR trigger must cover every writer --------------------------------
+# Broadening WRITERS without broadening the workflow's `paths:` filter means a PR
+# touching only a new writer never runs this check at all, and a bad column write
+# merges until the next cron (Bugbot, #248). That is the same shape as the check
+# itself shipping with an incomplete WRITERS list: the guard is present, looks
+# green, and is not watching the thing it names.
+#
+# Derived from WRITERS rather than eyeballed, so the two cannot drift apart.
+_wf_text = (HERE.parent.parent / ".github" / "workflows" / "kanban-columns.yml").read_text()
+_paths_block = re.search(r"\n\s*paths:\s*\n((?:\s*-\s*'[^']*'|\s*-\s*\"[^\"]*\"\s*\n)+)", _wf_text)
+check(_paths_block is not None, "the workflow still has a paths: block")
+_listed = set(re.findall(r"-\s*[\"']([^\"']+)[\"']", _paths_block.group(1) if _paths_block else ""))
+_uncovered = [w for w in kcc_fresh.WRITERS if ".github/workflows/" + w not in _listed]
+check(_uncovered == [],
+      "every WRITERS entry is in the workflow's paths: filter",
+      "uncovered=" + repr(_uncovered))
 
 print(f"\npass={passed} fail={failed}")
 sys.exit(1 if failed else 0)
