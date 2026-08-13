@@ -82,7 +82,8 @@ kcc.cross_check = kcc_fresh.cross_check
 real_writers = kcc_fresh.WRITERS
 try:
     # A writer whose only Status name is written by an idiom the regex misses.
-    import tempfile, os
+    import os
+    import tempfile
     tmp = tempfile.mkdtemp()
     stale = os.path.join(tmp, "stale-writer.yml")
     with open(stale, "w", encoding="utf-8") as fh:
