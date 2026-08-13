@@ -32,9 +32,16 @@ def check(ok: bool, name: str, detail: str = "") -> None:
 
 
 def run(written, options):
-    """Drive main()'s comparison with both reads stubbed."""
+    """Drive main()'s comparison with both reads stubbed.
+
+    `cross_check` is stubbed out too: it reads the real workflow files, so
+    against a synthetic `written` dict it correctly reports staleness and would
+    mask the missing-name assertions these cases exist for. It has its own
+    tests at the bottom of this file.
+    """
     kcc.written_names = lambda: written
     kcc.board_options = lambda: options
+    kcc.cross_check = lambda found, options: []
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         code = kcc.main()
@@ -59,6 +66,43 @@ check(code == 1, "one stale name among good ones still fails", f"code={code}")
 # Case matters: the board lookup is exact, so a near-miss must not pass.
 code, _ = run({"fr on staging": {"x.yml"}}, BOARD)
 check(code == 1, "case-mismatched name does not silently pass", f"code={code}")
+
+# --- the cross-check: an extractor that under-collects must not report clean ---
+# This is the defect the check itself shipped with (.github#243): WRITERS named
+# two files and one idiom, three column names were invisible, and it passed.
+kcc.cross_check.__doc__  # touch, so a rename of the function fails loudly here
+
+# run() replaced cross_check with a stub; restore the real one for its own tests.
+importlib_spec = importlib.util.spec_from_file_location("kcc_fresh", HERE.parent / "kanban-columns-check.py")
+kcc_fresh = importlib.util.module_from_spec(importlib_spec)
+importlib_spec.loader.exec_module(kcc_fresh)
+kcc.cross_check = kcc_fresh.cross_check
+
+real_writers = kcc_fresh.WRITERS
+try:
+    # A writer whose only Status name is written by an idiom the regex misses.
+    import tempfile, os
+    tmp = tempfile.mkdtemp()
+    stale = os.path.join(tmp, "stale-writer.yml")
+    with open(stale, "w", encoding="utf-8") as fh:
+        fh.write('        run: |\n          UNMATCHED_VAR="Ready for prod"\n')
+    kcc_fresh.WORKFLOWS = __import__("pathlib").Path(tmp)
+    kcc_fresh.WRITERS = ("stale-writer.yml",)
+    stale_rows = kcc_fresh.cross_check({}, BOARD | {"Ready for prod"})
+    check(any("Ready for prod" in r for r in stale_rows),
+          "an assigned board name no idiom matched is reported as a stale idiom list",
+          f"rows={stale_rows}")
+
+    # A mention that is NOT an assignment must not be flagged.
+    prose = os.path.join(tmp, "prose-writer.yml")
+    with open(prose, "w", encoding="utf-8") as fh:
+        fh.write('          # advances the card to Ready for prod eventually\n')
+    kcc_fresh.WRITERS = ("prose-writer.yml",)
+    check(kcc_fresh.cross_check({}, BOARD | {"Ready for prod"}) == [],
+          "a comment mentioning a column is not mistaken for a write")
+finally:
+    kcc_fresh.WRITERS = real_writers
+    kcc_fresh.WORKFLOWS = HERE.parent.parent / ".github" / "workflows"
 
 print(f"\npass={passed} fail={failed}")
 sys.exit(1 if failed else 0)

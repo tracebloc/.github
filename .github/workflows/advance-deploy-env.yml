@@ -189,7 +189,8 @@ jobs:
           if [ -z "$STATUS_FIELD" ] || [ "$STATUS_FIELD" = "null" ] \
              || [ -z "$STATUS_OPT" ] || [ "$STATUS_OPT" = "null" ]; then
             echo "::error::Could not resolve Status option '$STATUS_NAME' in project #$PROJECT_NUMBER." \
-                 "The Deploy environment write may already have happened; the Status write did not." \
+                 "NOTHING WAS WRITTEN: this check runs before any field update, so no card" \
+                 "was touched and there is no half-applied state to repair." \
                  "Check the board's Status column names against this workflow's branch map." >&2
             exit 1
           fi
