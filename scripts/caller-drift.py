@@ -2133,6 +2133,19 @@ def main() -> int:
             with open(args.output, "a", encoding="utf-8") as handle:
                 handle.write(f"findings={len(findings)}\n")
                 handle.write(f"unreadable={len(unreadable)}\n")
+                # DECOMPOSED, because `unreadable` is the merged list and the
+                # watchdog headline reads it as "repos that could not be read".
+                # A clean caller/copy/quality audit with one failed protection or
+                # ruleset read was therefore announced as repos never read -- a
+                # true count under a false name, pointing at the wrong problem.
+                # Same reason `remediation_failures` got its own output above.
+                # (Bugbot, #238.)
+                handle.write(
+                    "caller_unreadable="
+                    f"{len(unreadable) - len(protection_unreadable) - len(ruleset_unreadable)}\n"
+                )
+                handle.write(f"protection_unreadable={len(protection_unreadable)}\n")
+                handle.write(f"ruleset_unreadable={len(ruleset_unreadable)}\n")
                 # Its own output, because exit 2 now has two very different
                 # causes. Every exit-2 message describes UNREAD repos; a failed
                 # --create-prs would otherwise be headlined on the conformance
