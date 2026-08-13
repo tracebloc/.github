@@ -68,7 +68,7 @@ jobs:
           # Default mapping
           case "$BRANCH" in
             develop)     DEPLOY_ENV="dev";     STATUS_NAME="On dev" ;;
-            staging)     DEPLOY_ENV="staging"; STATUS_NAME="Staging (human review)" ;;
+            staging)     DEPLOY_ENV="staging"; STATUS_NAME="FR on staging" ;;
             master|main) DEPLOY_ENV="prod";    STATUS_NAME="Prod" ;;
             *)           DEPLOY_ENV="";        STATUS_NAME="" ;;
           esac
@@ -167,23 +167,6 @@ jobs:
             | select(.name=="Status") | .id')
           STATUS_OPT=$(echo "$PROJ" | jq -r --arg s "$STATUS_NAME" '.data.organization.projectV2.fields.nodes[]
             | select(.name=="Status") | .options[] | select(.name==$s) | .id')
-          # Rename window (backend#1592). "FR on staging" becomes "Staging (human
-          # review)" via a UI rename, which is a single instant the board flips --
-          # there is no period where both options exist. So resolution asks for the
-          # NEW name and falls back to the OLD one, and this file works on either
-          # side of that instant. The fallback is removed in step 3 of #1592.
-          if [ -z "$STATUS_OPT" ] || [ "$STATUS_OPT" = "null" ]; then
-            case "$STATUS_NAME" in
-              "Staging (human review)") FALLBACK="FR on staging" ;;
-              *)                        FALLBACK="" ;;
-            esac
-            if [ -n "$FALLBACK" ]; then
-              STATUS_OPT=$(echo "$PROJ" | jq -r --arg s "$FALLBACK" '.data.organization.projectV2.fields.nodes[]
-                | select(.name=="Status") | .options[] | select(.name==$s) | .id')
-              [ -n "$STATUS_OPT" ] && [ "$STATUS_OPT" != "null" ] && STATUS_NAME="$FALLBACK"
-            fi
-          fi
-
           if [ -z "$DEPLOY_OPT" ] || [ "$DEPLOY_OPT" = "null" ]; then
             echo "Could not resolve Deploy environment option for '$DEPLOY_ENV' - aborting"
             exit 1
