@@ -39,11 +39,31 @@ WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 # The workflows that WRITE a Status value. Listed rather than globbed: `STATUS=`
 # is a common shell variable name and other workflows use it for unrelated
 # values ("ok", "absent", "unreadable"), which are not column names.
-WRITERS = ("advance-deploy-env.yml", "kanban-closure-router.yml")
+#
+# THIS LIST WAS WRONG ON ITS FIRST DAY and the check stayed green anyway, which
+# is the whole reason for the cross-check below. It named two files and one
+# idiom, and missed `set-pr-status.yml` (writes `status_name=In progress`
+# UNQUOTED) and `fr-pass-comment.yml` (writes `NEXT="Ready for prod"`) -- so
+# three column names were invisible to a guard built to make exactly that
+# impossible (Bugbot, .github#243).
+WRITERS = (
+    "advance-deploy-env.yml",
+    "kanban-closure-router.yml",
+    "set-pr-status.yml",
+    "fr-pass-comment.yml",
+)
 
-# `STATUS_NAME="On dev"` / `STATUS="Prod"`. Only literals: `STATUS_NAME="$OVERRIDE"`
-# is a per-repo .kanban.yml value that cannot be known here.
-LITERAL = re.compile(r'\bSTATUS(?:_NAME)?="([^"$]+)"')
+# The write idioms actually used. Quoted OR bare, because `echo "status_name=In
+# progress" >> "$GITHUB_OUTPUT"` has no inner quotes.
+#   STATUS="Prod"  STATUS_NAME="On dev"  status_name=In progress  NEXT="Ready for prod"
+# `$`-containing values are skipped: `STATUS_NAME="$OVERRIDE"` is a per-repo
+# .kanban.yml value that cannot be known here.
+LITERAL = re.compile(
+    r'\b(?:STATUS(?:_NAME)?|status_name|NEXT)='          # the write idioms
+    r'(?:"([^"$\n]+)"'                                    # quoted:  STATUS="Prod"
+    r'|([^"$\n;)&|]+?)(?=\s*(?:;|\)|&|\||"|$)))',        # bare:    status_name=In progress
+    re.MULTILINE,
+)
 
 PROJECT_ID = "PVT_kwDOCSsgos4BTDWN"  # engineer kanban (org project #2)
 
@@ -54,12 +74,47 @@ def written_names() -> "dict[str, set[str]]":
         path = WORKFLOWS / name
         if not path.is_file():
             sys.exit(f"error: {path} not found — WRITERS is stale")
-        for value in LITERAL.findall(path.read_text()):
-            found.setdefault(value, set()).add(name)
+        text = path.read_text()
+        for quoted, bare in LITERAL.findall(text):
+            value = (quoted or bare).strip()
+            if value:
+                found.setdefault(value, set()).add(name)
     if not found:
         sys.exit("error: no Status literals found at all — the pattern is stale, "
                  "which would make this check pass vacuously")
     return found
+
+
+def cross_check(found: "dict[str, set[str]]", options: "set[str]") -> "list[str]":
+    """Catch the extractor UNDER-COLLECTING, which is how this check failed first.
+
+    A precise extractor that silently misses an idiom reports a clean sweep of a
+    SUBSET -- indistinguishable from a clean sweep of everything. So the names are
+    derived a second, independent way and the two are compared.
+
+    The second pass looks at ASSIGNMENT SITES only: a non-comment line with an
+    `=`, from which quoted and bare right-hand values are pulled and matched
+    WHOLE against board names. Comments, the rank `case` arms and prose mentions
+    are therefore ignored -- they name columns without writing them. Whole-value
+    matching also stops `Ready` matching inside `Ready for prod`, which a
+    substring scan does.
+
+    One-directional on purpose: the precise pass may legitimately find MORE (a
+    name written but absent from the board is the primary finding), so only
+    crude-minus-precise indicates a stale idiom list.
+    """
+    rhs = re.compile(r'=\s*(?:"([^"\n]*)"|([^"\n;)&|]*))')
+    stale: "list[str]" = []
+    for name in WRITERS:
+        for line in (WORKFLOWS / name).read_text().splitlines():
+            bare_line = line.strip()
+            if not bare_line or bare_line.startswith("#") or "=" not in bare_line:
+                continue
+            for quoted, unquoted in rhs.findall(bare_line):
+                value = (quoted or unquoted).strip().strip('"')
+                if value in options and value not in found:
+                    stale.append(f"{value!r} is assigned in {name} but no idiom matched it")
+    return sorted(set(stale))
 
 
 def board_options() -> "set[str]":
@@ -87,6 +142,16 @@ def board_options() -> "set[str]":
 
 def main() -> int:
     written, options = written_names(), board_options()
+
+    stale = cross_check(written, options)
+    if stale:
+        print("ERROR: the idiom list is stale — a board column name appears in a "
+              "writer that no pattern matched, so this check would report a clean "
+              "sweep of a subset:")
+        for row in stale:
+            print(f"  - {row}")
+        return 1
+
     missing = {n: s for n, s in written.items() if n not in options}
 
     for name in sorted(written):
