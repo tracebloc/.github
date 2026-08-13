@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -733,8 +734,14 @@ def read_source_copy(source_dir: str, name: str) -> bytes:
 
 def _read_copy_on_head(
     full: str, path: str, head: str, expect_file: bool
-) -> "tuple[str, str | None]":
-    """The blob sha of `path` on `head`, or ("", None) when it genuinely is absent.
+) -> "tuple[str, bytes | None, str | None]":
+    """(blob sha, decoded bytes, error) for `path` on `head`.
+
+    THE CONTENT IS READ, NOT JUST THE SHA. Without it the caller cannot tell an
+    already-correct copy from a drifted one, so a re-dispatch PUTs bytes that are
+    already there and records a remediation failure on the 409 -- see the skip in
+    remediate_copies(). standards-sync.py's _read_head_file returns both for the
+    same reason. ("" , None) means the file genuinely is absent.
 
     Ported from standards-sync.py's _read_head_file and for the same reason: a ref
     created an instant ago is eventually consistent, so reading a file on it can
@@ -749,11 +756,17 @@ def _read_copy_on_head(
     last = ""
     for attempt in range(1, attempts + 1):
         try:
-            return gh(["api", f"repos/{full}/contents/{path}?ref={head}", "--jq", ".sha"]).strip(), None
+            raw = gh(["api", f"repos/{full}/contents/{path}?ref={head}"])
+            try:
+                blob = json.loads(raw)
+                body = base64.b64decode(blob.get("content", ""))
+            except (ValueError, binascii.Error) as exc:
+                return "", None, f"{path} on {head} did not decode: {exc!r}"
+            return str(blob.get("sha", "")).strip(), body, None
         except GhError as exc:
             if exc.status == 404:
                 if not expect_file and attempt >= 2:
-                    return "", None  # absence confirmed by a re-read
+                    return "", None, None  # absence confirmed by a re-read
                 last = f"404 (attempt {attempt}/{attempts})"
             else:
                 last = str(exc)
@@ -761,11 +774,11 @@ def _read_copy_on_head(
             time.sleep(delay)
             delay = min(delay * 2, 8.0)
     if expect_file:
-        return "", (
+        return "", None, (
             f"cannot read {path} on {head}: the base has the file but this ref kept "
             f"answering {last} after {attempts} attempts - refusing a sha-less write"
         )
-    return "", f"cannot read {path} on {head} after {attempts} attempts: {last}"
+    return "", None, f"cannot read {path} on {head} after {attempts} attempts: {last}"
 
 
 def _ensure_copy_pr(full: str, head: str, base: str, issue: int, names: "list[str]") -> "str | None":
@@ -855,11 +868,19 @@ def remediate_copies(
         # against an existing path, which the API rejects with 422, and remediation
         # then fails on the most common dispatch of all: fresh branch, drifted file.
         # Only a MISSING copy may legitimately 404. (Bugbot, #227.)
-        current, rerr = _read_copy_on_head(
+        current, body, rerr = _read_copy_on_head(
             full, path, head, expect_file=on_base and branch_is_fresh
         )
         if rerr:
             return rerr
+        # SKIP AN IDENTICAL WRITE. A re-dispatch normally finds the branch already
+        # carrying the canon from the first run; PUTting the same bytes answers
+        # 409 (or races the sha) and remediation records a failure, so the audit
+        # goes red as if the fleet could not be written. standards-sync.py skips
+        # the write for exactly this reason, which is what makes 422 branch reuse
+        # idempotent there. (Bugbot, PR #238.)
+        if body is not None and body == payload:
+            continue
         args = ["api", "-X", "PUT", f"repos/{full}/contents/{path}",
                 "-f", f"message=chore(ci): realign {name} with tracebloc/.github (backend#{issue})",
                 "-f", f"content={encoded}", "-f", f"branch={head}"]

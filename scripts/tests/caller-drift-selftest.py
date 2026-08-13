@@ -1363,7 +1363,15 @@ record(bool(_required_rem),
 CALLS = []
 
 
-def _rem_stub(missing_on_branch=True, fail=None, has_pr=False, ref_status=None):
+def _rem_stub(missing_on_branch=True, fail=None, has_pr=False, ref_status=None,
+              branch_body=b"drifted bytes\n"):
+    """`branch_body` is what the remediation branch already carries.
+
+    The contents read returns the REAL API shape (sha + base64 content), because
+    remediate_copies compares that content against the canon to skip an identical
+    re-write. Returning a bare sha here modelled the old --jq call and made the
+    skip untestable.
+    """
     def handler(args):
         CALLS.append(list(args))
         joined = " ".join(args)
@@ -1376,7 +1384,10 @@ def _rem_stub(missing_on_branch=True, fail=None, has_pr=False, ref_status=None):
         if "contents/" in joined and "-X" not in args:
             if missing_on_branch:
                 raise guard.GhError(404, "Not Found (HTTP 404)")
-            return "existingsha\n"
+            return json.dumps({
+                "sha": "existingsha",
+                "content": base64.b64encode(branch_body).decode("ascii"),
+            })
         if "-X" in args and "PUT" in args:
             if fail:
                 raise guard.GhError(fail, f"HTTP {fail}")
@@ -1413,6 +1424,25 @@ _puts = [c for c in CALLS if "PUT" in c]
 record(any(a.startswith("sha=existingsha") for a in _puts[0]),
        "remediation: an existing file on the branch is updated with its sha",
        str(_puts[0]))
+
+# A RE-DISPATCH MUST BE IDEMPOTENT. The second `--create-prs` run finds the branch
+# already carrying the canon from the first. PUTting identical bytes answers 409
+# (or races the sha) and remediation records a failure, so the audit goes red as if
+# the fleet could not be written -- while the open PR already has the canon.
+# standards-sync.py skips the write for the same reason. (Bugbot, PR #238.)
+CALLS.clear()
+stub(_rem_stub(missing_on_branch=False, branch_body=b"canonical bytes\n"))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", True)],
+                              "/tmp/rem-src", 1608)
+_puts = [c for c in CALLS if "PUT" in c]
+record(_err is None and not _puts,
+       "remediation: a copy already matching the canon is not re-written",
+       f"err={_err} puts={len(_puts)}")
+
+# ...and the PR is still ensured, or the first run's work would never be reviewable.
+record(any(c[0] == "pr" and c[1] in ("list", "create") for c in CALLS),
+       "remediation: the PR is still ensured when every write was skipped",
+       str([c[:2] for c in CALLS]))
 
 CALLS.clear()
 stub(_rem_stub(missing_on_branch=True))
@@ -1482,7 +1512,12 @@ def _flaky(n_404s, on_fresh_branch=True):
             state["reads"] += 1
             if state["reads"] <= n_404s:
                 raise guard.GhError(404, "Not Found (HTTP 404)")
-            return "realsha\n"
+            # Drifted content, so the write is not skipped and this case still
+            # exercises the sha-bearing PUT it was written for.
+            return json.dumps({
+                "sha": "realsha",
+                "content": base64.b64encode(b"drifted bytes\n").decode("ascii"),
+            })
         if "-X" in args and "PUT" in args:
             return "{}"
         if args[0] == "pr" and args[1] == "list":
