@@ -1,0 +1,44 @@
+name: Kanban deploy-state selftest
+
+# The classification that decides whether `Done` may overwrite a card's column
+# (backend#1846). It is asserted rather than trusted because its predecessor -- a
+# hand-maintained list of six column names -- rotted silently and cost a card its
+# deploy state (.github#237).
+#
+# The test reads `col_index()` OUT of kanban-closure-router.yml rather than
+# copying it, so it cannot go green against a stale duplicate. Offline, no token.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/kanban-closure-router.yml
+      - .github/workflows/kanban-deploy-state-selftest.yml
+      - scripts/tests/kanban-deploy-state-selftest.py
+  push:
+    branches: [main, develop, staging]
+    paths:
+      - .github/workflows/kanban-closure-router.yml
+      - .github/workflows/kanban-deploy-state-selftest.yml
+      - scripts/tests/kanban-deploy-state-selftest.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kanban-deploy-state-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      # PyYAML only: the test parses the workflow to extract the function under
+      # test. `pip install` without setup-python is what left the bricked-PR
+      # audit unable to start on Ubuntu 24.04's PEP 668 python (.github#244).
+      - run: pip install --quiet pyyaml
+      - run: python scripts/tests/kanban-deploy-state-selftest.py
