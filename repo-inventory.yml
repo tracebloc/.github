@@ -322,20 +322,14 @@ shared_reasons:
   set_pr_status_caller_missing: &set_pr_status_caller_missing >-
     no set-pr-status caller, so PRs here never post their gate status to the board.
     UNREMEDIATED.
-  no_workflows_directory_at_all: &no_workflows_directory_at_all >-
-    no .github/workflows directory, so neither copied workflow is present. Its issues and PRs
-    therefore never reach the board. UNREMEDIATED.
-
-  # --- quality-file reasons (backend#1608 increment 5) ------------------------
   bugbot_guide_missing: &bugbot_guide_missing >-
     no .cursor/BUGBOT.md, so Bugbot reviews PRs here with no repo context: no statement of what
     this repo is, which defect classes actually occur in it, or which findings are known
-    non-issues. Measured absent 2026-08-12 in claude-skills and rfcs; present in all 16 train
+    non-issues. Measured absent 2026-08-12 in rfcs; present in all 16 train
     repos and in release-train. UNREMEDIATED - this exemption is the finding, not a
     justification. Cheap to close (one file), and deliberately NOT closed in the same PR that
     adds this family: the point of the family is that the gap is on the record and countable
-    rather than invisible. Distinct from devex_bootstrap_undisposed, where the repo's existence
-    is itself the open question.
+    rather than invisible.
 
   # --- branch-protection reasons (backend#1608 increment 2, backend#1276) -----
   docs_no_required_review: &docs_no_required_review >-
@@ -367,18 +361,6 @@ shared_reasons:
     promotes out of it. UNREMEDIATED - recorded as an exemption with a name on it rather than
     quietly dropped, per this file's schema decision. Protecting it is cheap; the reason it has not
     happened is that nothing depends on it.
-  devex_bootstrap_undisposed: &devex_bootstrap_undisposed >-
-    devex-bootstrap is an empty shell whose disposition is still open (backend#1597): no protection
-    on any branch, no .github directory, and none of the quality files - 5 blobs on develop in
-    total (measured 2026-08-12). Exempt on all three protection roles AND on every quality file
-    until that ticket decides whether the repo joins the train, stays a scratch repo, or is
-    archived. UNREMEDIATED, deliberately: arming protection on, or writing a review guide for, a
-    repo we may archive is work we would throw away.
-    This anchor was widened from protection-only when the quality_files family arrived
-    (backend#1608 increment 5). One repo, one open question, one reason - rather than a second
-    text saying the same thing about a different file, which is how two reasons for one decision
-    start disagreeing.
-
 repos:
   .github:
     visibility: public

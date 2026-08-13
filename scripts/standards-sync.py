@@ -82,12 +82,13 @@ UNREADABLE = "UNREADABLE"
 
 # Every repo in repo-inventory.yml must be a target or appear here with a
 # written reason (design rule 3). An entry naming an unknown repo fails the run.
-EXEMPT: "dict[str, str]" = {
-    "devex-bootstrap": (
-        "archive-vs-harden undecided (backend#1597 item 3); stamping a managed "
-        "block into a repo that may be archived is deferred until Lukas's call."
-    ),
-}
+# Empty on purpose. devex-bootstrap was the only entry, and its
+# archive-vs-harden question (backend#1597 item 3) was answered by archiving the
+# repo -- so the exemption went with the inventory entry. Design rule 3 above
+# makes a stale exemption a hard failure: `load_targets` refuses an EXEMPT name
+# the inventory does not know, which would have taken the whole scheduled audit
+# down rather than skipping one repo.
+EXEMPT: "dict[str, str]" = {}
 
 # What a repo gets when it has no CLAUDE.md at all: a stub inviting repo-owned
 # content, then the managed block. Wave 2 of backend#1602 fills the stub.

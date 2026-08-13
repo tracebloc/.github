@@ -120,20 +120,30 @@ with tempfile.TemporaryDirectory() as tmp:
     expect_exit_2("inventory: missing repos key fails closed",
                   lambda: sync.load_targets(no_repos))
 
-    stale_exempt = os.path.join(tmp, "inv2.yml")
-    with open(stale_exempt, "w", encoding="utf-8") as handle:
-        handle.write("org: tracebloc\nrepos:\n  backend: {}\n")
-    # EXEMPT names devex-bootstrap; an inventory without it must fail, not skip.
-    expect_exit_2("inventory: exemption naming an unknown repo fails closed",
-                  lambda: sync.load_targets(stale_exempt))
+    # These two exercise the EXEMPT MECHANISM, so they inject their own entry
+    # rather than leaning on whatever real repo happens to be exempt. Naming a
+    # live one made them break the moment that repo was archived and its entry
+    # removed -- a test of the mechanism should not depend on today's fleet.
+    _real_exempt = sync.EXEMPT
+    try:
+        sync.EXEMPT = {"exempt-fixture": "written reason, for the selftest"}
 
-    good = os.path.join(tmp, "inv3.yml")
-    with open(good, "w", encoding="utf-8") as handle:
-        handle.write("org: tracebloc\nrepos:\n  backend: {}\n  devex-bootstrap: {}\n")
-    org, targets = sync.load_targets(good)
-    record(org == "tracebloc" and targets == ["backend"],
-           "inventory: exempt repo excluded from targets",
-           f"targets={targets} (devex-bootstrap exempt with written reason)")
+        stale_exempt = os.path.join(tmp, "inv2.yml")
+        with open(stale_exempt, "w", encoding="utf-8") as handle:
+            handle.write("org: tracebloc\nrepos:\n  backend: {}\n")
+        # EXEMPT names exempt-fixture; an inventory without it must fail, not skip.
+        expect_exit_2("inventory: exemption naming an unknown repo fails closed",
+                      lambda: sync.load_targets(stale_exempt))
+
+        good = os.path.join(tmp, "inv3.yml")
+        with open(good, "w", encoding="utf-8") as handle:
+            handle.write("org: tracebloc\nrepos:\n  backend: {}\n  exempt-fixture: {}\n")
+        org, targets = sync.load_targets(good)
+        record(org == "tracebloc" and targets == ["backend"],
+               "inventory: exempt repo excluded from targets",
+               f"targets={targets} (exempt-fixture exempt with written reason)")
+    finally:
+        sync.EXEMPT = _real_exempt
 
 # ----------------------------------------------------------- crash semantics
 # An operational crash must exit 2 ("could not evaluate"), never 1 — the
@@ -146,7 +156,7 @@ with tempfile.TemporaryDirectory() as tmp:
         handle.write(CANON)
     inv_path = os.path.join(tmp, "inv.yml")
     with open(inv_path, "w", encoding="utf-8") as handle:
-        handle.write("org: tracebloc\nrepos:\n  backend: {}\n  devex-bootstrap: {}\n")
+        handle.write("org: tracebloc\nrepos:\n  backend: {}\n")
     empty_bin = os.path.join(tmp, "bin")
     os.makedirs(empty_bin)
     env = dict(os.environ, PATH=empty_bin)  # no gh anywhere on PATH
