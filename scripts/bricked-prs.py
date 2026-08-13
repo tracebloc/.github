@@ -161,7 +161,12 @@ def head_age_minutes(org: str, name: str, sha: str) -> "float | None":
     try:
         suites = CD.gh_json(["api", f"repos/{org}/{name}/commits/{sha}/check-suites"])
     except CD.GhError:
-        suites = None
+        # An unreadable CI clock (502/403/rate-limit) is NOT "no suites" (Bugbot,
+        # .github#239). Falling through to the commit date here would let a
+        # force-pushed long-dated commit read as old and brick falsely -- the
+        # exact failure this function exists to avoid. We cannot date the head,
+        # so return None; the caller treats an undateable head as young and skips.
+        return None
     stamps = []
     if isinstance(suites, dict):
         for suite in suites.get("check_suites") or []:
@@ -171,6 +176,9 @@ def head_age_minutes(org: str, name: str, sha: str) -> "float | None":
     if stamps:
         return (datetime.now(timezone.utc) - min(stamps)).total_seconds() / 60.0
 
+    # No suite exists at all -- a SUCCESSFUL read that returned an empty list. A
+    # conflicted PR never gets a suite, so the commit date is the only clock there
+    # is. (A FAILED read was already handled above and never reaches here.)
     try:
         commit = CD.gh_json(["api", f"repos/{org}/{name}/commits/{sha}"])
     except CD.GhError:

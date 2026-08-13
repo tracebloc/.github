@@ -204,6 +204,20 @@ try:
     record(age is not None and age > 120,
            "with no check suite at all it falls back to the commit date",
            f"age={age!r} minutes — the conflicted case, where no suite will ever exist")
+
+    # An UNREADABLE check-suites read (502/403) is not "no suites": it must NOT
+    # fall through to an old commit date and brick falsely. The suites call
+    # raises; the commit call, if it were ever reached, is dated last week.
+    def _raise_on_suites(args):
+        if args[-1].endswith("check-suites"):
+            raise bp.CD.GhError(None, "502 reading check-suites")
+        return {"commit": {"committer": {
+            "date": (NOW - timedelta(days=7)).isoformat().replace("+00:00", "Z")}}}
+    bp.CD.gh_json = _raise_on_suites
+    age = bp.head_age_minutes("o", "r", "sha")
+    record(age is None,
+           "an unreadable check-suites read is undateable (None), not the commit date",
+           f"age={age!r} — a 502 here must read as young, never brick a 7-day-old commit")
 finally:
     bp.CD.gh_json = _real_json
 
