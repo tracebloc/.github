@@ -172,15 +172,31 @@ jobs:
             exit 1
           fi
 
-          # Status update degrades gracefully: if the Status field or its target
-          # option can't be resolved, log a warning and skip just the Status step
-          # rather than failing the whole workflow (Deploy env update still wins).
-          SKIP_STATUS=0
+          # Status resolution does NOT degrade gracefully -- see the abort below.
+          # It used to, and that was the bug: a graceful degrade here means the
+          # board stops advancing while every run reports success.
+          # FAIL CLOSED. This used to warn and set SKIP_STATUS=1, so an unresolvable
+          # Status option meant the run stayed GREEN while no card advanced -- the
+          # board silently stops tracking the pipeline and the only signal is a
+          # warning nobody reads (Bugbot, .github#243, High).
+          #
+          # It is also the ONE asymmetry in this file and its siblings: the Deploy
+          # environment lookup twelve lines above aborts, and
+          # kanban-closure-router.yml aborts on exactly this condition. A column
+          # rename, a project renumbering or a `.kanban.yml` naming a column that
+          # does not exist are all misconfigurations, and every one of them is
+          # cheaper to find as a red run than as three weeks of un-advanced cards.
           if [ -z "$STATUS_FIELD" ] || [ "$STATUS_FIELD" = "null" ] \
              || [ -z "$STATUS_OPT" ] || [ "$STATUS_OPT" = "null" ]; then
-            echo "::warning::Could not resolve Status option '$STATUS_NAME' in project #$PROJECT_NUMBER - skipping Status updates"
-            SKIP_STATUS=1
+            echo "::error::Could not resolve Status option '$STATUS_NAME' in project #$PROJECT_NUMBER." \
+                 "The Deploy environment write may already have happened; the Status write did not." \
+                 "Check the board's Status column names against this workflow's branch map." >&2
+            exit 1
           fi
+          # Now always 0 -- the branch that set it to 1 aborts instead. Kept so the
+          # two `[ "$SKIP_STATUS" != "1" ]` guards below stay valid without
+          # re-indenting their blocks; there is no live skip path.
+          SKIP_STATUS=0
 
           # Pipeline order (mirrors fr-gate's rank). Advancement is monotonic:
           # a push only ever moves a card FORWARD. Pushes routinely carry commits
