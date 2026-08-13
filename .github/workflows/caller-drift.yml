@@ -16,9 +16,29 @@
 # develop-first branch: twelve of twenty repos default to main/master while work
 # lands on develop, so a default-branch audit under-reports anything in flight.
 #
-# REPORT-ONLY, like merge-settings-drift.yml. It never opens a PR and never edits a
-# repo; the sync job that opens caller PRs is deliberately deferred (backend#1415).
-# The token therefore only needs org-wide read.
+# REPORT-ONLY on schedule, PR and push. The `create-prs` dispatch input is the only
+# path that writes, and it writes ONE family: copies marked `required` in the
+# inventory that are missing or drifted (backend#1608 item 4). Callers are not
+# generated — their content is repo-specific, measured 2026-08-12 as eight different
+# code-quality-caller.yml files across eight repos — and protection/rulesets are API
+# settings no commit can change. Entries marked `divergent` or `exempt` carry a
+# written reason and are never rewritten.
+#
+# `quality_files` (CLAUDE.md, .cursor/BUGBOT.md — backend#1608 increment 5) is also
+# NOT remediable, and unlike the others that is a deliberate refusal rather than a
+# technical limit: a commit could trivially create the file. But the family asserts
+# that per-repo GUIDANCE exists, and auto-generating a placeholder would turn every
+# finding green while adding nothing a tool can use — a check that can no longer
+# fail, which is the one outcome this repo's guards exist to prevent. These findings
+# are closed by a human writing the file.
+#
+# TOKEN: report-only needs org-wide read. create-prs additionally needs Contents: RW
+# and Pull requests: RW — AND, because the callers it writes live under
+# `.github/workflows/`, the `workflow` scope (classic PAT) or fine-grained
+# "Workflows: write". Contents: RW alone is REFUSED for that path, so every
+# remediation PUT would fail closed and no PR would open. standards-sync.yml writes
+# CLAUDE.md, not workflow files, so it needs no `workflow` scope — the one scope
+# that differs from what it exercises. (Bugbot #227.)
 #
 # FAIL-CLOSED: every read either yields a value or is recorded as unreadable, and
 # one unreadable repo fails the run. There is no path from a 403, a rate limit, an
@@ -35,6 +55,12 @@ on:
   schedule:
     - cron: '30 6 * * 1' # Mondays 06:30 UTC, right after merge-settings-drift
   workflow_dispatch:
+    inputs:
+      create-prs:
+        description: 'Open remediation PRs for drifted/missing REQUIRED copies'
+        type: boolean
+        default: false
+        required: false
   # Edits to the inventory or the guard are validated against reality on the PR
   # that makes them, so a wrong inventory cannot reach develop unchallenged.
   pull_request:
@@ -82,6 +108,11 @@ jobs:
     needs: selftest
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Job-level so BOTH reporting steps below resolve it. Defined in one step's
+      # env: it was undefined in the other, and under `set -u` that step dies —
+      # loud rather than silent, but the drift comment would never post.
+      WATCHDOG_ISSUE: '1781'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -111,19 +142,177 @@ jobs:
         id: audit
         env:
           GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          # The event is asserted explicitly rather than inferred from `inputs`
+          # being unset — same expression standards-sync.yml uses. Writing to
+          # twenty repos is not something a cron may decide to do, and a
+          # PR-triggered audit that wrote to the fleet would be a supply-chain
+          # hole rather than a convenience.
+          CREATE_PRS: ${{ github.event_name == 'workflow_dispatch' && inputs.create-prs == true }}
         run: |
           set -uo pipefail
+          remediate=""
+          if [ "${CREATE_PRS:-false}" = "true" ]; then
+            remediate="--create-prs"
+            echo "Remediation ENABLED: required copies that are missing or drifted"
+            echo "will get a PR. divergent/exempt entries are never rewritten."
+          fi
           # The exit code is recorded rather than raised so that the reporting step
           # below still runs on a failure. The step itself therefore always exits 0
           # — the run is failed by the final step, from this recorded value.
           set +e
           python scripts/caller-drift.py \
             --inventory repo-inventory.yml \
-            --source-dir .
+            --source-dir . \
+            ${remediate}
           code=$?
           set -e
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           echo "The audit exited $code (0 clean, 1 drift, 2 could not evaluate)."
+
+      - name: Rewrite the conformance matrix on the watchdog issue
+        # THE ONE SCREEN (backend#1608 item 3).
+        #
+        # The comment step below fires only on drift, deliberately — an all-clear
+        # per run trains people to ignore the issue (backend#1344). The cost of
+        # that, until now, was that a CONFORMANT fleet published nothing at all:
+        # the matrix existed only in a step summary on a run nobody opens, so
+        # "where does the fleet stand?" was still answered by running the script by
+        # hand. Comments are the history; this body is the current state.
+        #
+        # Rewritten on EVERY scheduled/manual run regardless of outcome, which is
+        # what makes staleness meaningful: the body carries the run timestamp and
+        # the audit is weekly, so a timestamp older than ~8 days means the audit
+        # itself stopped and the fleet is UNKNOWN. That is the backend#1530
+        # cron-watchdog contract, and it only holds if a red run rewrites the body
+        # too — otherwise a fleet that broke in January still shows January's
+        # green and looks merely stale-ish.
+        #
+        # `always()`, and NOT gated on exit_code: a run that could not evaluate
+        # must overwrite the previous green with UNKNOWN. Leaving the last good
+        # matrix in place is the fail-open this whole guard exists to refuse.
+        if: >-
+          always()
+          && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          CODE: ${{ steps.audit.outputs.exit_code }}
+          REPORT: ${{ steps.audit.outputs.report }}
+          EVALUATED: ${{ steps.audit.outputs.evaluated }}
+          UNREADABLE: ${{ steps.audit.outputs.unreadable }}
+          CALLER_UNREADABLE: ${{ steps.audit.outputs.caller_unreadable }}
+          PROTECTION_UNREADABLE: ${{ steps.audit.outputs.protection_unreadable }}
+          RULESET_UNREADABLE: ${{ steps.audit.outputs.ruleset_unreadable }}
+          FINDINGS: ${{ steps.audit.outputs.findings }}
+          REMEDIATION_FAILURES: ${{ steps.audit.outputs.remediation_failures }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          code="${CODE:-}"
+          now="$(date -u '+%Y-%m-%d %H:%M UTC')"
+
+          # NAME WHICH READ FAILED, once, for every verdict below. UNREADABLE is the merged list, so wording
+          # it as "repo(s) could not be read" announced a failed protection or
+          # ruleset read as a repo nobody looked at -- true count, false name
+          # (Bugbot #238). The script emits the split; use it.
+          what=""
+          [ "${CALLER_UNREADABLE:-0}" != "0" ] && what="${CALLER_UNREADABLE} repo(s) could not be read (caller/copy state UNKNOWN)"
+          if [ "${PROTECTION_UNREADABLE:-0}" != "0" ]; then
+          [ -n "$what" ] && what="$what; "
+          what="${what}${PROTECTION_UNREADABLE} branch-protection read(s) failed (protection state UNKNOWN)"
+          fi
+          if [ "${RULESET_UNREADABLE:-0}" != "0" ]; then
+          [ -n "$what" ] && what="$what; "
+          what="${what}${RULESET_UNREADABLE} ruleset read(s) failed (ruleset state UNKNOWN)"
+          fi
+          # Fall back to the merged count rather than an empty sentence if a
+          # future read type is added and not surfaced here.
+          [ -z "$what" ] && what="${UNREADABLE:-0} read(s) failed"
+          # Built once: TWO verdicts quote it, and fixing only the first would
+          # leave the second still saying "repo(s) could not be read".
+
+          case "$code" in
+            0) verdict='✅ **Conformant** — every repo read, every entry matched.' ;;
+            1) verdict='🔴 **Drift** — see the latest comment for the findings.' ;;
+            2) verdict='⚠️ **Could not evaluate** — the audit did not complete cleanly. Fleet conformance is UNKNOWN; anything not read is NOT known to comply.' ;;
+            *) verdict="⚠️ **No result** — the audit exited \`${code:-<empty>}\`, which it should never do. Treat fleet conformance as UNKNOWN." ;;
+          esac
+
+          # Exit 2 is not only "an unreadable repo": die() also exits 2 for a bad
+          # inventory or a failed org enumeration, where UNREADABLE is 0. Name the
+          # actual cause from the count instead of always blaming unread repos
+          # (Bugbot #227).
+          if [ "$code" = "2" ]; then
+            if [ "${UNREADABLE:-0}" != "0" ]; then
+              verdict="⚠️ **Could not evaluate** — ${what}. Anything not read is NOT known to comply. Fleet conformance is UNKNOWN."
+            else
+              verdict='⚠️ **Could not evaluate** — the audit could not run to completion (a bad inventory or a failed org enumeration; see the log). Fleet conformance is UNKNOWN.'
+            fi
+          fi
+
+          # Exit 2 has two causes and they need different words. Without this, a
+          # dispatch whose remediation PRs failed to open is headlined "repos that
+          # could not be read are NOT known to comply" - a true sentence about a
+          # thing that did not happen, sending the reader to the wrong problem.
+          # (Bugbot, #227.)
+          if [ "${REMEDIATION_FAILURES:-0}" != "0" ]; then
+            if [ "${UNREADABLE:-0}" != "0" ]; then
+              verdict="⚠️ **Remediation failed** — ${REMEDIATION_FAILURES} repo(s) still carry their drift, and ${what} — NOT known to comply."
+            else
+              verdict="⚠️ **Remediation failed** — the fleet was read successfully, but ${REMEDIATION_FAILURES} repo(s) could not be remediated and still carry their drift."
+            fi
+          fi
+
+          # The verdict must not be able to contradict the counts printed beside it.
+          # A clean exit code alongside a non-zero unreadable/findings count is not a
+          # green fleet, it is a broken audit — and "✅ every repo read" printed above
+          # "3 unreadable" is the most confidently wrong thing this issue could say.
+          # The script does not currently produce that pair, which is exactly why it
+          # is worth pinning: the headline is DERIVED from the numbers, so it stays
+          # true if the exit-code contract ever changes.
+          if [ "$code" = "0" ] && { [ "${UNREADABLE:-0}" != "0" ] || [ "${FINDINGS:-0}" != "0" ]; }; then
+            verdict="⚠️ **Inconsistent result** — the audit exited clean while reporting ${UNREADABLE:-?} unreadable and ${FINDINGS:-?} finding(s). Treat fleet conformance as UNKNOWN and fix the audit."
+          fi
+
+          # shellcheck disable=SC2016  # backticks are markdown code spans in the
+          # issue body, not command substitution — hence the single quotes.
+          {
+            printf 'This issue is the org'"'"'s repo-conformance surface (backend#1608). The weekly\n'
+            printf 'audit in `tracebloc/.github` (`caller-drift.yml`) rewrites this body on every\n'
+            printf 'run; drift arrives separately as a **comment**. The body is the current\n'
+            printf 'state, the comments are the history.\n\n'
+            printf '**Fail-closed contract:** the audit runs **Mondays 06:30 UTC**. If the\n'
+            printf 'timestamp below is stale by more than ~8 days, the audit itself has died —\n'
+            printf 'that staleness is the alarm, and fleet conformance is UNKNOWN rather than\n'
+            printf 'fine. Do not close this issue.\n\n'
+            printf -- '---\n\n'
+            printf '### Last audit: %s\n\n' "$now"
+            printf -- '- Repos evaluated: **%s** (%s unreadable)\n' "${EVALUATED:-?}" "${UNREADABLE:-?}"
+            printf -- '- Findings: **%s**\n' "${FINDINGS:-?}"
+            printf -- '- Verdict: %s\n\n' "$verdict"
+            if [ -n "${REPORT:-}" ]; then
+              printf '%s\n\n' "$REPORT"
+            else
+              # No report body on a run that was supposed to produce one is itself a
+              # finding: say so here rather than leaving the previous matrix visible.
+              printf 'The audit produced **no report body**, so no matrix could be rendered.\n'
+              printf 'Fleet conformance is UNKNOWN for this run — see the run log.\n\n'
+            fi
+            printf '[Run log](%s)\n' "$RUN_URL"
+          } > wd-body.md
+
+          # GitHub rejects a body over 65536 characters. A rejected edit would leave
+          # the previous body in place — a stale green presented as current, the one
+          # outcome this step exists to prevent — so truncate and say that we did.
+          if [ "$(wc -c < wd-body.md)" -gt 60000 ]; then
+            head -c 59000 wd-body.md > wd-body.trunc
+            {
+              printf '\n\n---\n\n**TRUNCATED** — the full report exceeded GitHub'"'"'s issue-body\n'
+              printf 'limit. See the [run log](%s) for the complete matrix.\n' "$RUN_URL"
+            } >> wd-body.trunc
+            mv wd-body.trunc wd-body.md
+          fi
+
+          gh issue edit "$WATCHDOG_ISSUE" --repo tracebloc/backend --body-file wd-body.md
 
       - name: Report on the tracking issue
         # Only on scheduled and manual runs: a PR that edits the inventory gets its
@@ -154,11 +343,13 @@ jobs:
                 printf 'caller, or the inventory is out of date — the report below says which.\n\n'
                 ;;
               2)
-                printf '## Caller inventory could NOT be evaluated\n\n'
+                printf '## Caller inventory could NOT be evaluated (or remediation failed)\n\n'
                 printf 'This is not a clean result. Either `repo-inventory.yml` failed schema\n'
-                printf 'validation, or one or more repos could not be read. Repos that could not\n'
-                printf 'be read are **not** known to comply — fix the token or the inventory and\n'
-                printf 're-run before drawing any conclusion.\n\n'
+                printf 'validation, one or more repos could not be read, or remediation PRs\n'
+                printf 'could not be opened/refreshed. Repos that could not be read are **not**\n'
+                printf 'known to comply, and drift that could not be remediated still stands —\n'
+                printf 'fix the token, the inventory, or the remediation dispatch and re-run\n'
+                printf 'before drawing any conclusion.\n\n'
                 ;;
               *)
                 printf '## Caller inventory guard did not report a result\n\n'
@@ -173,7 +364,11 @@ jobs:
             fi
             printf '[Run log](%s)\n' "$RUN_URL"
           } > body.md
-          gh issue comment 1415 --repo tracebloc/backend --body-file body.md
+          # backend#1781, not #1415: #1415 is CLOSED. Comments on a closed issue
+          # still post, so this looked like it worked — but a closed issue cannot
+          # be pinned, drops out of every default issue view, and notifies nobody
+          # who is not already subscribed. Drift has been reporting into a drawer.
+          gh issue comment "$WATCHDOG_ISSUE" --repo tracebloc/backend --body-file body.md
 
       - name: Fail the run unless the audit came back clean
         # A green run must mean "the inventory matches reality", never merely "the
@@ -195,8 +390,9 @@ jobs:
               exit 1
               ;;
             2)
-              echo "::error::The caller inventory could not be evaluated — bad inventory," \
-                   "failed org enumeration, or an unreadable repo. This is NOT an all-clear." >&2
+              echo "::error::The caller inventory could not be evaluated or remediated — bad" \
+                   "inventory, failed org enumeration, an unreadable repo, or remediation PRs" \
+                   "that could not be opened. This is NOT an all-clear." >&2
               exit 1
               ;;
             *)

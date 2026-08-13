@@ -12,13 +12,16 @@ Exit 0 when every path fails the way it is supposed to.
 
 from __future__ import annotations
 
+import ast
 import base64
 import copy
 import importlib.util
+import inspect
 import json
 import os
 import sys
 import tempfile
+import textwrap
 
 import yaml
 
@@ -64,6 +67,7 @@ MINIMAL = {
     "source_repo": "hub",
     "reusables": ["a.yml"],
     "copies": ["c.yml"],
+    "quality_files": ["GUIDE.md"],
     "protection_policy": {
         "develop": _policy(),
         "staging": _policy(),
@@ -95,6 +99,7 @@ MINIMAL = {
             },
             "callers": {"a.yml": "required"},
             "copies": {"c.yml": "required"},
+            "quality_files": {"GUIDE.md": "required"},
             "rulesets": {
                 "promotion_merge_commit_only": "required",
                 "tag_trust_root": {"exempt": "publishes no v* tags"},
@@ -284,6 +289,7 @@ else:
 # ------------------------------------------------- unreadable-repo failure paths
 
 COPIES = ["add-to-kanban.yml", "stale-backlog.yml"]
+QFILES = ["CLAUDE.md", ".cursor/BUGBOT.md"]
 META = {"visibility": "private", "default_branch": "main"}
 TREE_ONE = json.dumps({
     "truncated": False,
@@ -306,7 +312,7 @@ def blob(body: bytes) -> str:
 def expect_unreadable(name: str, handler, needle: str) -> None:
     """A failed read must produce an UNREADABLE record, never 'no caller found'."""
     stub(handler)
-    read = guard.read_repo("acme", "repo", META, COPIES)
+    read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
     ok = (not read.ok) and any(needle in err for err in read.errors)
     record(ok, name, str(read.errors))
 
@@ -410,7 +416,7 @@ def _good(args):
 
 
 stub(_good)
-read = guard.read_repo("acme", "repo", META, COPIES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
 record(
     read.ok
     and read.branch == "develop"
@@ -434,7 +440,7 @@ def _decoys(args):
 
 
 stub(_decoys)
-read = guard.read_repo("acme", "repo", META, COPIES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
 record(read.ok and read.callers == {},
        "a commented-out `uses:` and one inside a run script are NOT callers",
        f"callers={read.callers}")
@@ -451,7 +457,7 @@ def _unpinned(args):
 
 
 stub(_unpinned)
-read = guard.read_repo("acme", "repo", META, COPIES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
 record(read.ok and read.callers.get("fr-gate.yml") == [("fr-gate-caller.yml", "v1.2.3")],
        "a caller on an unexpected ref is captured with its ref, for the pin check",
        f"callers={read.callers}")
@@ -467,7 +473,7 @@ def _copy_sha(args):
 
 
 stub(_copy_sha)
-read = guard.read_repo("acme", "repo", META, COPIES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
 record(read.ok and read.copies.get("add-to-kanban.yml") == "deadbeef",
        "a copy is recorded by blob sha so content can be compared",
        f"copies={read.copies}")
@@ -475,6 +481,172 @@ record(read.ok and read.copies.get("add-to-kanban.yml") == "deadbeef",
 record(guard.blob_sha(b"hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a",
        "blob_sha matches git's own object id",
        guard.blob_sha(b"hello\n"))
+
+
+# --------------------------------------------- quality files (#1608 increment 5)
+#
+# A presence family is the easiest thing in this file to write as inert
+# verification: "the path is in the tree" passes for a zero-byte file, for a
+# symlink to nowhere, and -- worst -- for a repo whose tree was never read.
+# The cases below pin all three, plus both directions of the exemption.
+
+def _qf_entry(path, size=120, mode="100644", type_="blob", with_size=True):
+    entry = {"type": type_, "path": path, "mode": mode}
+    if with_size:
+        entry["size"] = size
+    return entry
+
+
+def _qf_tree(*items, truncated=False):
+    return json.dumps({"truncated": truncated, "tree": list(items)})
+
+
+def _stub_qf_tree(payload):
+    """Branch list plus one tree read; no workflow blobs are involved."""
+    stub(lambda args: "main\n" if _branches(args) else payload)
+
+
+_stub_qf_tree(_qf_tree(_qf_entry("CLAUDE.md", size=5901),
+                       _qf_entry(".cursor/BUGBOT.md", size=4193)))
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+record(read.ok
+       and read.quality_files.get("CLAUDE.md", {}).get("size") == 5901
+       and read.quality_files.get(".cursor/BUGBOT.md", {}).get("mode") == "100644",
+       "quality files: a present file is recorded with its size and mode",
+       f"quality_files={read.quality_files}")
+
+# Absence from a SUCCESSFUL read is the only legitimate way to conclude "absent".
+_stub_qf_tree(_qf_tree(_qf_entry("README.md")))
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+record(read.ok and read.quality_files == {},
+       "quality files: absent from a fully-read tree is recorded as absent",
+       f"quality_files={read.quality_files}")
+
+# THE FAIL-CLOSED CASE. A truncated tree omits paths, so "not in the tree" is not
+# knowledge. read_repo must fail the whole row rather than let the family conclude
+# the file is missing -- exit 2, never a finding and never an all-clear.
+_stub_qf_tree(_qf_tree(_qf_entry("README.md"), truncated=True))
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+record(not read.ok and any("truncated" in e for e in read.errors),
+       "quality files: a TRUNCATED tree is unreadable, never 'the file is absent'",
+       f"ok={read.ok} errors={read.errors}")
+
+# A blob whose size the API did not report cannot be told from an empty file.
+# Guessing either way is the guard deciding a fact it does not have.
+_stub_qf_tree(_qf_tree(_qf_entry("CLAUDE.md", with_size=False)))
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+record(not read.ok and any("no size" in e for e in read.errors),
+       "quality files: a blob with no reported size is unreadable, not 'empty'",
+       f"ok={read.ok} errors={read.errors}")
+
+
+def _qf_cells(cells):
+    """An inventory entry holding only the quality_files section."""
+    return {"quality_files": {p: v for p, v in cells.items()}}
+
+
+REQ_BOTH = _qf_cells({"CLAUDE.md": ("required", ""),
+                      ".cursor/BUGBOT.md": ("required", "")})
+
+# POSITIVE CONTROL: both present, regular, non-empty -> silence.
+f = []
+guard.evaluate_quality_files(
+    "repo", REQ_BOTH, QFILES,
+    {"CLAUDE.md": {"type": "blob", "mode": "100644", "size": 5901},
+     ".cursor/BUGBOT.md": {"type": "blob", "mode": "100644", "size": 4193}}, f)
+record(not f, "quality files: both present and non-empty reports nothing", f"findings={f}")
+
+# THE POINT: a required file that is not there.
+f = []
+guard.evaluate_quality_files(
+    "repo", REQ_BOTH, QFILES,
+    {"CLAUDE.md": {"type": "blob", "mode": "100644", "size": 5901}}, f)
+record(len(f) == 1 and "MISSING required .cursor/BUGBOT.md" in f[0],
+       "quality files: a MISSING required file is a finding, naming it",
+       f"findings={f}")
+
+# Present but empty: passes a bare existence check, carries nothing.
+f = []
+guard.evaluate_quality_files(
+    "repo", REQ_BOTH, QFILES,
+    {"CLAUDE.md": {"type": "blob", "mode": "100644", "size": 0},
+     ".cursor/BUGBOT.md": {"type": "blob", "mode": "100644", "size": 4193}}, f)
+record(len(f) == 1 and "EMPTY" in f[0] and "CLAUDE.md" in f[0],
+       "quality files: a 0-byte file is a finding, not a pass",
+       f"findings={f}")
+
+# A symlink resolves for `cat` and is not the guidance being present in the repo.
+f = []
+guard.evaluate_quality_files(
+    "repo", REQ_BOTH, QFILES,
+    {"CLAUDE.md": {"type": "blob", "mode": "120000", "size": 12},
+     ".cursor/BUGBOT.md": {"type": "blob", "mode": "100644", "size": 4193}}, f)
+record(len(f) == 1 and "120000" in f[0],
+       "quality files: a SYMLINK at the asserted path is a finding",
+       f"findings={f}")
+
+# A directory (or submodule) at the path is not a file either.
+f = []
+guard.evaluate_quality_files(
+    "repo", REQ_BOTH, QFILES,
+    {"CLAUDE.md": {"type": "tree", "mode": "040000", "size": None},
+     ".cursor/BUGBOT.md": {"type": "blob", "mode": "100644", "size": 4193}}, f)
+record(len(f) == 1 and "'tree'" in f[0] and "not a file" in f[0],
+       "quality files: a directory at the asserted path is a finding",
+       f"findings={f}")
+
+# Both directions of the exemption, which is what stops the family becoming a
+# list of permanent excuses: an exemption whose file appears must say so.
+EXEMPT_ONE = _qf_cells({"CLAUDE.md": ("required", ""),
+                        ".cursor/BUGBOT.md": ("exempt", "no guide yet, backend#1608")})
+f = []
+guard.evaluate_quality_files(
+    "repo", EXEMPT_ONE, QFILES,
+    {"CLAUDE.md": {"type": "blob", "mode": "100644", "size": 5901}}, f)
+record(not f, "quality files: an exempt file that is absent reports nothing", f"findings={f}")
+
+f = []
+guard.evaluate_quality_files(
+    "repo", EXEMPT_ONE, QFILES,
+    {"CLAUDE.md": {"type": "blob", "mode": "100644", "size": 5901},
+     ".cursor/BUGBOT.md": {"type": "blob", "mode": "100644", "size": 4193}}, f)
+record(len(f) == 1 and "exemption is stale" in f[0] and "backend#1608" in f[0],
+       "quality files: an exempt file that EXISTS is a stale exemption, and says why "
+       "it was exempt",
+       f"findings={f}")
+
+# Schema: the same two headline rules as every other family.
+expect_schema_failure("missing quality_files top-level rejected",
+                      _drop("quality_files"))
+expect_schema_failure("EMPTY quality_files list rejected (it would pass vacuously)",
+                      lambda d: d.update({"quality_files": []}))
+expect_schema_failure("repo missing the quality_files section rejected",
+                      lambda d: d["repos"]["hub"].pop("quality_files"))
+expect_schema_failure("MISSING quality-file key is a failure, not a default",
+                      lambda d: d["repos"]["hub"]["quality_files"].clear())
+expect_schema_failure("quality-file key not in the top-level list rejected",
+                      lambda d: d["repos"]["hub"]["quality_files"].update(
+                          {"OTHER.md": "required"}))
+expect_schema_failure("quality-file exempt with no reason rejected",
+                      lambda d: d["repos"]["hub"]["quality_files"].update(
+                          {"GUIDE.md": {"exempt": "   "}}))
+expect_schema_failure("`divergent` rejected on a quality file (presence is binary)",
+                      lambda d: d["repos"]["hub"]["quality_files"].update(
+                          {"GUIDE.md": {"divergent": "content differs"}}))
+expect_schema_failure("duplicate quality_files entry rejected",
+                      lambda d: d.update({"quality_files": ["GUIDE.md", "GUIDE.md"]}))
+
+# Path shapes that can NEVER match a git tree path, so they would assert nothing
+# while reading like an assertion.
+for _bad, _label in (("/GUIDE.md", "absolute"),
+                     ("../GUIDE.md", "parent-relative"),
+                     ("docs/", "trailing-slash"),
+                     (" GUIDE.md", "whitespace-padded")):
+    expect_schema_failure(
+        f"quality_files path that is {_label} rejected",
+        (lambda b: lambda d: (d.update({"quality_files": [b]}),
+                              d["repos"]["hub"].update(
+                                  {"quality_files": {b: "required"}})))(_bad))
 
 
 # ------------------------------------------------ protection reads (#1608 inc 2)
@@ -1090,38 +1262,317 @@ INV_M = {"repos": {
     "beta": {"release_train": False},
 }}
 
-rows = guard.render_matrix({"alpha": {"callers": 0, "copies": 0, "protection": 0,
-                                      "rulesets": 0}}, INV_M)
-record(any("| `alpha` | yes | OK | OK | OK | OK |" in r for r in rows),
+CLEAN_CELLS = {"callers": 0, "copies": 0, "quality_files": 0, "protection": 0,
+               "rulesets": 0}
+
+rows = guard.render_matrix({"alpha": dict(CLEAN_CELLS)}, INV_M)
+record(any("| `alpha` | yes | OK | OK | OK | OK | OK |" in r for r in rows),
        "matrix: a clean repo renders OK in every family", rows[-3])
 
-rows = guard.render_matrix({"alpha": {"callers": 2, "copies": 0, "protection": 0,
-                                      "rulesets": 0}}, INV_M)
-record(any("**2**" in r for r in rows) and not any("| OK | OK | OK | OK |" in r for r in rows),
+rows = guard.render_matrix({"alpha": dict(CLEAN_CELLS, callers=2)}, INV_M)
+record(any("**2**" in r for r in rows)
+       and not any("| OK | OK | OK | OK | OK |" in r for r in rows),
        "matrix: findings render as a COUNT, not as OK", rows[-3])
 
 rows = guard.render_matrix({"alpha": {"unread": True}}, INV_M)
-record(any("| ? | ? | ? | ? |" in r for r in rows),
+record(any("| ? | ? | ? | ? | ? |" in r for r in rows),
        "matrix: an unreadable repo renders ? in every family, never OK", rows[-3])
 
-rows = guard.render_matrix({"alpha": {"callers": 0, "copies": 0, "protection": 0,
-                                      "protection_unread": 1, "rulesets": 0}}, INV_M)
-record(any("| OK | OK | ? | OK |" in r for r in rows),
+rows = guard.render_matrix({"alpha": dict(CLEAN_CELLS, protection_unread=1)}, INV_M)
+record(any("| OK | OK | OK | ? | OK |" in r for r in rows),
        "matrix: an unreadable FAMILY renders ? in that column only", rows[-3])
+
+# The new family gets its own column, and a finding in it must not smear into a
+# neighbour's cell -- the table is the artefact people read instead of the log.
+rows = guard.render_matrix({"alpha": dict(CLEAN_CELLS, quality_files=3)}, INV_M)
+record(any("| OK | OK | **3** | OK | OK |" in r for r in rows)
+       and any("quality_files" in r for r in rows),
+       "matrix: quality_files is its own column, counted in its own cell", rows[-3])
 
 # The distinction that matters most: zero findings because it was checked, versus
 # zero findings because it was never read. Those must not render the same.
-clean = guard.render_matrix({"alpha": {"callers": 0, "copies": 0, "protection": 0,
-                                       "rulesets": 0}}, INV_M)
+clean = guard.render_matrix({"alpha": dict(CLEAN_CELLS)}, INV_M)
 unread = guard.render_matrix({"alpha": {"unread": True}}, INV_M)
 record(clean != unread,
        "matrix: 'checked and clean' and 'never read' do NOT render identically",
        "clean != unread")
 
-rows = guard.render_matrix({"beta": {"callers": 0, "copies": 0, "protection": 0,
-                                     "rulesets": 0}}, INV_M)
+rows = guard.render_matrix({"beta": dict(CLEAN_CELLS)}, INV_M)
 record(any("| `beta` | - |" in r for r in rows),
        "matrix: a non-train repo is marked as such", rows[-3])
+
+# ---------------------------------------------------------------- remediation
+# --create-prs WRITES to every repo in the org, so its restraint matters more than
+# its reach. The safety property is not "does it fix drift" but "does it ever touch
+# something a human deliberately decided about".
+
+
+# THE ONE THAT MATTERS. `divergent` records a written reason why a repo differs --
+# cli pins actions/stale@v11 where canon pins v9, and the newer pin may well be the
+# better one. `exempt` records that the file should not be there at all. A harness
+# that overwrote either would destroy the judgement the inventory exists to hold.
+#
+# Asserted structurally rather than by grep: parse main(), find the `state ==
+# "required"` branch, and require every `remediable` mutation to live inside it.
+# A grep for "divergent" near "remediable" would pass whatever the code did.
+_src = textwrap.dedent(inspect.getsource(guard.main))
+_tree = ast.parse(_src)
+
+
+def _remediable_lines(node) -> "set[int]":
+    out = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and sub.id == "remediable":
+            out.add(sub.lineno)
+    return out
+
+
+_all_rem = _remediable_lines(_tree)
+_required_rem = set()
+for _n in ast.walk(_tree):
+    # the `if state == "required":` test inside the copies loop
+    if isinstance(_n, ast.If) and isinstance(_n.test, ast.Compare):
+        left, comps = _n.test.left, _n.test.comparators
+        if (isinstance(left, ast.Name) and left.id == "state"
+                and comps and isinstance(comps[0], ast.Constant)
+                and comps[0].value == "required"):
+            for _stmt in _n.body:
+                _required_rem |= _remediable_lines(_stmt)
+
+# the declaration line is not a mutation site
+_mutations = {ln for ln in _all_rem if ln not in _required_rem}
+_decl = min(_all_rem) if _all_rem else 0
+_mutations.discard(_decl)
+# lines inside the `if args.create_prs:` reporting block read it, not write it
+_reads = set()
+for _n in ast.walk(_tree):
+    if isinstance(_n, ast.If) and isinstance(_n.test, ast.Attribute) \
+            and _n.test.attr == "create_prs":
+        _reads |= _remediable_lines(_n)
+_mutations -= _reads
+record(not _mutations,
+       "remediation: only the `required` branch can enqueue a copy - "
+       "`divergent`/`exempt` are never rewritten",
+       f"unexpected remediable use at lines {sorted(_mutations)}")
+
+record(bool(_required_rem),
+       "remediation: the `required` branch DOES enqueue (the check above is not vacuous)",
+       f"required-branch lines {sorted(_required_rem)}")
+
+# --- the write path -----------------------------------------------------------
+CALLS = []
+
+
+def _rem_stub(missing_on_branch=True, fail=None, has_pr=False, ref_status=None,
+              branch_body=b"drifted bytes\n"):
+    """`branch_body` is what the remediation branch already carries.
+
+    The contents read returns the REAL API shape (sha + base64 content), because
+    remediate_copies compares that content against the canon to skip an identical
+    re-write. Returning a bare sha here modelled the old --jq call and made the
+    skip untestable.
+    """
+    def handler(args):
+        CALLS.append(list(args))
+        joined = " ".join(args)
+        if "git/ref/heads/" in joined and "-X" not in joined:
+            return "basesha123\n"
+        if "git/refs" in joined and "-X" in args:
+            if ref_status is not None:
+                raise guard.GhError(ref_status, f"HTTP {ref_status}")
+            return "{}"
+        if "contents/" in joined and "-X" not in args:
+            if missing_on_branch:
+                raise guard.GhError(404, "Not Found (HTTP 404)")
+            return json.dumps({
+                "sha": "existingsha",
+                "content": base64.b64encode(branch_body).decode("ascii"),
+            })
+        if "-X" in args and "PUT" in args:
+            if fail:
+                raise guard.GhError(fail, f"HTTP {fail}")
+            return "{}"
+        if args[0] == "pr" and args[1] == "list":
+            return "7\n" if has_pr else "\n"
+        if args[0] == "pr" and args[1] == "create":
+            return "https://github.com/acme/repo/pull/9\n"
+        return "{}"
+    return handler
+
+
+os.makedirs("/tmp/rem-src/.github/workflows", exist_ok=True)
+with open("/tmp/rem-src/.github/workflows/copy-a.yml", "wb") as _h:
+    _h.write(b"canonical bytes\n")
+
+CALLS.clear()
+stub(_rem_stub())
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)], "/tmp/rem-src", 1608)
+_puts = [c for c in CALLS if "PUT" in c]
+record(_err is None and len(_puts) == 1
+       and any("contents/.github/workflows/copy-a.yml" in a for a in _puts[0])
+       and any(a.startswith("branch=chore/1608") for a in _puts[0]),
+       "remediation: writes the named copy to the remediation branch",
+       f"err={_err} puts={len(_puts)}")
+
+# A file already present on the branch must be sent WITH its sha, or the API
+# rejects the update; absent means create. Getting this backwards fails every
+# second dispatch, which is the shape that looks intermittent.
+CALLS.clear()
+stub(_rem_stub(missing_on_branch=False))
+guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", True)], "/tmp/rem-src", 1608)
+_puts = [c for c in CALLS if "PUT" in c]
+record(any(a.startswith("sha=existingsha") for a in _puts[0]),
+       "remediation: an existing file on the branch is updated with its sha",
+       str(_puts[0]))
+
+# A RE-DISPATCH MUST BE IDEMPOTENT. The second `--create-prs` run finds the branch
+# already carrying the canon from the first. PUTting identical bytes answers 409
+# (or races the sha) and remediation records a failure, so the audit goes red as if
+# the fleet could not be written -- while the open PR already has the canon.
+# standards-sync.py skips the write for the same reason. (Bugbot, PR #238.)
+CALLS.clear()
+stub(_rem_stub(missing_on_branch=False, branch_body=b"canonical bytes\n"))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", True)],
+                              "/tmp/rem-src", 1608)
+_puts = [c for c in CALLS if "PUT" in c]
+record(_err is None and not _puts,
+       "remediation: a copy already matching the canon is not re-written",
+       f"err={_err} puts={len(_puts)}")
+
+# ...and the PR is still ensured, or the first run's work would never be reviewable.
+record(any(c[0] == "pr" and c[1] in ("list", "create") for c in CALLS),
+       "remediation: the PR is still ensured when every write was skipped",
+       str([c[:2] for c in CALLS]))
+
+CALLS.clear()
+stub(_rem_stub(missing_on_branch=True))
+guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)], "/tmp/rem-src", 1608)
+_puts = [c for c in CALLS if "PUT" in c]
+record(not any(a.startswith("sha=") for a in _puts[0]),
+       "remediation: a missing file is CREATED, with no sha argument",
+       str(_puts[0]))
+
+# 422 on the ref create means the branch exists: reuse it. That is what makes a
+# re-dispatch idempotent rather than a second PR.
+CALLS.clear()
+stub(_rem_stub(ref_status=422))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)], "/tmp/rem-src", 1608)
+record(_err is None and any("PUT" in c for c in CALLS),
+       "remediation: an existing branch (422) is reused, not treated as fatal",
+       f"err={_err}")
+
+# Any OTHER branch-create failure is fatal: a branch we could not create is not a
+# branch we may write to.
+CALLS.clear()
+stub(_rem_stub(ref_status=403))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)], "/tmp/rem-src", 1608)
+record(_err is not None and not any("PUT" in c for c in CALLS),
+       "remediation: a non-422 branch failure aborts before writing anything",
+       f"err={_err}")
+
+# A failed write must return an error. Returning None would report the drift as
+# fixed while it is still there -- the fail-open this whole guard refuses.
+CALLS.clear()
+stub(_rem_stub(fail=409))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)], "/tmp/rem-src", 1608)
+record(_err is not None and "cannot write" in _err,
+       "remediation: a rejected write returns an error, never a silent success",
+       f"err={_err}")
+
+# An open PR already tracking the branch must not produce a second one.
+CALLS.clear()
+stub(_rem_stub(has_pr=True))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)], "/tmp/rem-src", 1608)
+record(_err is None and not any(c[:2] == ["pr", "create"] for c in CALLS),
+       "remediation: an existing open PR is refreshed, not duplicated",
+       f"err={_err}")
+
+
+# --- the eventual-consistency race (Bugbot, #227) -----------------------------
+# A ref created an instant ago can 404 for a file the base demonstrably has. For a
+# DRIFTED copy that 404 is provably a lie, and believing it means a sha-less PUT
+# against an existing path -> 422 -> remediation fails on the commonest dispatch
+# there is: fresh branch, drifted file.
+guard.time.sleep = lambda _s: None  # no real backoff in tests
+
+
+def _flaky(n_404s, on_fresh_branch=True):
+    state = {"reads": 0}
+
+    def handler(args):
+        CALLS.append(list(args))
+        joined = " ".join(args)
+        if "git/ref/heads/" in joined and "-X" not in joined:
+            return "basesha123\n"
+        if "git/refs" in joined and "-X" in args:
+            if on_fresh_branch:
+                return "{}"
+            raise guard.GhError(422, "Reference already exists (HTTP 422)")
+        if "contents/" in joined and "-X" not in args:
+            state["reads"] += 1
+            if state["reads"] <= n_404s:
+                raise guard.GhError(404, "Not Found (HTTP 404)")
+            # Drifted content, so the write is not skipped and this case still
+            # exercises the sha-bearing PUT it was written for.
+            return json.dumps({
+                "sha": "realsha",
+                "content": base64.b64encode(b"drifted bytes\n").decode("ascii"),
+            })
+        if "-X" in args and "PUT" in args:
+            return "{}"
+        if args[0] == "pr" and args[1] == "list":
+            return "\n"
+        if args[0] == "pr" and args[1] == "create":
+            return "https://github.com/acme/repo/pull/9\n"
+        return "{}"
+    return handler
+
+
+CALLS.clear()
+stub(_flaky(2))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", True)],
+                              "/tmp/rem-src", 1608)
+_puts = [c for c in CALLS if "PUT" in c]
+record(_err is None and _puts and any(a.startswith("sha=realsha") for a in _puts[0]),
+       "remediation: a transient 404 on a fresh branch is retried, not read as absence",
+       f"err={_err} put={_puts[0] if _puts else None}")
+
+# ...and if it NEVER appears, refuse. A sha-less write against a path the base has
+# is the thing being prevented; failing closed is the correct outcome.
+CALLS.clear()
+stub(_flaky(99))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", True)],
+                              "/tmp/rem-src", 1608)
+record(_err is not None and "refusing a sha-less write" in _err
+       and not any("PUT" in c for c in CALLS),
+       "remediation: a 404 that never resolves fails CLOSED, with no sha-less write",
+       f"err={_err}")
+
+# A MISSING copy is allowed to 404 - that is the create case - but only after a
+# confirming re-read, so a single blip is not trusted.
+CALLS.clear()
+stub(_flaky(99))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", False)],
+                              "/tmp/rem-src", 1608)
+_reads = [c for c in CALLS if "contents/" in " ".join(c) and "-X" not in c]
+record(_err is None and len(_reads) == 2,
+       "remediation: a missing copy confirms absence with a re-read before creating",
+       f"err={_err} reads={len(_reads)}")
+
+
+# A REUSED branch may legitimately 404: it can have been cut before the file
+# existed on the base, so that 404 is honest and permanent. Retrying then failing
+# closed strands the repo forever -- the shape that stuck standards-sync (#197).
+CALLS.clear()
+stub(_flaky(99, on_fresh_branch=False))
+_err = guard.remediate_copies("acme", "repo", "develop", [("copy-a.yml", True)],
+                              "/tmp/rem-src", 1608)
+_puts = [c for c in CALLS if "PUT" in c]
+record(_err is None and len(_puts) == 1
+       and not any(a.startswith("sha=") for a in _puts[0]),
+       "remediation: a REUSED branch's 404 is honest - create, do not fail closed",
+       f"err={_err} puts={len(_puts)}")
+
 
 failed = [row for row in RESULTS if not row[0]]
 print(f"\npass={len(RESULTS) - len(failed)} fail={len(failed)}")
