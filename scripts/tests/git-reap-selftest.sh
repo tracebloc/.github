@@ -340,6 +340,17 @@ assert_out "  …and blocks the absence claim rather than just warning" \
   "SKIP     unmerged" "$out"
 assert_not_out "  …so no branch is told there is no evidence" \
   "no merge evidence" "$out"
+# And POSITIVE evidence is equally poisoned: both tests key on the unverified
+# default — `--is-ancestor` against it, and the PR list queried with
+# `--base` from it. Asserting only the KEEP path let a version through where
+# --delete still reaped on wrong-base evidence. Nothing may be a candidate.
+assert_out "  …the squash-merged branch is skipped, not reaped" \
+  "SKIP     squashed" "$out"
+assert_out "  …and so is the ancestor, whose test used the same default" \
+  "SKIP     ancestral" "$out"
+assert_not_out "  …nothing is a reap candidate at all" "would go " "$out"
+out=$(run_reap "$T" no-remote-default --all --delete)
+assert_not_out "  …and --delete deletes nothing" "deleted  " "$out"
 rm -rf "$T"
 
 echo

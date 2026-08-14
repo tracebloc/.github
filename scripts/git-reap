@@ -171,14 +171,20 @@ if [ "$have_gh" = 1 ]; then
   fi
 fi
 
-# An UNVERIFIED default poisons absence exactly as an unreadable list does, and
-# saying so in a warning is not the same as acting on it: a complete list read
-# against a possibly-stale base still set pr_evidence=1, and every branch then
-# fell through to "KEEP — no merge evidence", a proven negative derived from the
-# wrong question. A guard that only prints is advice, not a gate (Bugbot).
-if [ "$pr_evidence" = 1 ] && [ "$default_verified" = 0 ]; then
-  pr_evidence=0
-  pr_problem="the default branch could not be confirmed, so a complete merged-PR list for ${DEFAULT#origin/} still proves nothing"
+# An UNVERIFIED default poisons EVERY verdict, not just the absence one, and my
+# first attempt at this only cleared pr_evidence — which gates the "no merge
+# evidence" line and nothing else. Both POSITIVE tests key on $DEFAULT too:
+# `--is-ancestor "$br" "$DEFAULT"`, and the $prs list itself, which was queried
+# with `--base "${DEFAULT#origin/}"`. So with a stale origin/HEAD and a failed
+# `gh repo view`, --delete could still force-remove a branch on merge evidence
+# read against the wrong base — the same fail-open class as the sibling-merge
+# bug, one layer down (Bugbot).
+#
+# There is no sound verdict to give without a trustworthy default, so the loop
+# below refuses all of them rather than picking which half to distrust.
+default_problem=""
+if [ "$default_verified" = 0 ]; then
+  default_problem="the default branch could not be confirmed, so neither an ancestor test nor a --base-filtered PR list means anything against ${DEFAULT#origin/}"
 fi
 
 reaped=0; kept=0; skipped=0
@@ -197,6 +203,13 @@ while IFS=$'\t' read -r br track; do
   if grep -qxF -- "$br" <<<"$pinned"; then
     echo "  keep     $br — checked out in a worktree"
     kept=$((kept+1)); continue
+  fi
+
+  # Before any evidence is weighed, because an unverified default invalidates
+  # the positive tests as well as the negative one.
+  if [ -n "$default_problem" ]; then
+    echo "  SKIP     $br — $default_problem (failing closed)"
+    skipped=$((skipped+1)); continue
   fi
 
   reason=""
