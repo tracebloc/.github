@@ -70,7 +70,7 @@ except ImportError:  # pragma: no cover - the workflow installs it explicitly
 TOP_LEVEL_KEYS = {
     "schema_version", "org", "pinned_ref", "audit_branch", "source_repo",
     "reusables", "copies", "shared_reasons", "repos", "protection_policy",
-    "ruleset_policy", "quality_files",
+    "ruleset_policy", "quality_files", "caller_inputs",
 }
 REQUIRED_TOP_LEVEL = TOP_LEVEL_KEYS - {"shared_reasons"}
 REPO_KEYS = {
@@ -379,6 +379,40 @@ def _policy_block(value, where: str) -> dict:
     return dict(value)
 
 
+def _caller_inputs_block(value, reusables: "list[str]", where: str) -> dict:
+    """Validate `caller_inputs`: which caller inputs must carry which value.
+
+    A FLOOR, NOT THE WHOLE SET. A caller may pass any number of other inputs;
+    these are the ones whose value decides whether the check can FAIL, so they
+    are the ones asserted. Keyed by reusable, so a repo that does not call it is
+    simply not measured against it.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        die(f"{where}: expected a mapping of reusable -> {{input: value}}.")
+    out: dict = {}
+    for reusable, inputs in value.items():
+        if reusable not in reusables:
+            die(
+                f"{where}.{reusable}: not listed under `reusables`. An input "
+                "policy for a reusable nothing declares is measured against "
+                "nobody."
+            )
+        if not isinstance(inputs, dict) or not inputs:
+            die(f"{where}.{reusable}: expected a non-empty mapping of input -> value.")
+        for key, want in inputs.items():
+            if not isinstance(key, str) or not key.strip():
+                die(f"{where}.{reusable}: input names must be non-empty strings.")
+            if not isinstance(want, (bool, int, str)):
+                die(
+                    f"{where}.{reusable}.{key}: expected a scalar, got "
+                    f"{type(want).__name__}."
+                )
+        out[reusable] = dict(inputs)
+    return out
+
+
 def _ruleset_policy_block(value, where: str) -> dict:
     """Validate one ruleset-kind policy.
 
@@ -536,6 +570,10 @@ def load_inventory(path: str) -> dict:
             die(f"{path}: `{key}` must contain only non-empty strings.")
         if len(set(value)) != len(value):
             die(f"{path}: `{key}` contains duplicates.")
+
+    data["caller_inputs"] = _caller_inputs_block(
+        data.get("caller_inputs"), data["reusables"], f"{path}.caller_inputs"
+    )
     reusables = list(data["reusables"])
     copies = list(data["copies"])
     quality_files = list(data["quality_files"])
@@ -1026,13 +1064,28 @@ def load_release_train(org: str) -> "set[str]":
     return set()  # unreachable; keeps the return type honest
 
 
-def collect_uses(node, found: "list[str]") -> None:
-    """Walk a parsed workflow and collect every `uses:` string value."""
+def collect_uses(node, found: "list[tuple[str, dict]]") -> None:
+    """Walk a parsed workflow and collect every `uses:` with the `with:` beside it.
+
+    THE INPUTS ARE THE POINT, not a bonus (backend#1977). A caller being present
+    only proves the reusable RUNS. Whether it can FAIL is decided by the inputs
+    the caller passes -- and that has been wrong twice, silently, on required
+    checks: `.github#207` (an OR-precedence bug made `action-pins-soft-fail:
+    false` a no-op in 4 repos) and backend#1681 (`soft-fail` left at its default
+    of true on three PUBLIC repos, so `quality / gitleaks` reported findings and
+    exited 0). Both were found by a human reading YAML.
+
+    `with` is a SIBLING KEY of `uses` in the same mapping, so it is available
+    exactly here and nowhere later -- the old version walked past it and the
+    inputs were gone by the time anything compared a caller to the inventory.
+    """
     if isinstance(node, dict):
+        uses = node.get("uses")
+        if isinstance(uses, str):
+            inputs = node.get("with")
+            found.append((uses.strip(), inputs if isinstance(inputs, dict) else {}))
         for key, value in node.items():
-            if key == "uses" and isinstance(value, str):
-                found.append(value.strip())
-            else:
+            if key != "uses":
                 collect_uses(value, found)
     elif isinstance(node, list):
         for item in node:
@@ -1176,13 +1229,13 @@ def read_repo(
             # unreadable, never as "contains no caller".
             out.errors.append(f"{path}: unparseable YAML ({exc.__class__.__name__})")
             continue
-        refs: "list[str]" = []
+        refs: "list[tuple[str, dict]]" = []
         collect_uses(parsed, refs)
-        for ref in refs:
+        for ref, inputs in refs:
             match = ORG_USES.match(ref)
             if match:
                 out.callers.setdefault(match.group("name"), []).append(
-                    (filename, match.group("ref"))
+                    (filename, match.group("ref"), inputs)
                 )
     return out
 
@@ -1870,6 +1923,7 @@ def main() -> int:
     remediated = 0
     reusables = list(inventory["reusables"])
     copies = list(inventory["copies"])
+    caller_inputs = inventory.get("caller_inputs") or {}
     quality_files = list(inventory["quality_files"])
     check_source_reusables(args.source_dir, reusables)
     source_shas = load_source_copies(args.source_dir, copies)
@@ -1959,14 +2013,35 @@ def main() -> int:
                         f"{read.branch}."
                     )
                     continue
-                for filename, ref in hits:
+                want_inputs = caller_inputs.get(reusable, {})
+                for filename, ref, got_inputs in hits:
                     if ref != pinned_ref:
                         findings.append(
                             f"{name}: {filename} calls {reusable}@{ref}, expected "
                             f"@{pinned_ref}."
                         )
+                    # ARMED, not merely present (backend#1977). A caller can
+                    # exist, run, report -- and be unable to fail, because the
+                    # input that decides that was left at a permissive default.
+                    # A MISSING key is a finding, not a pass: `soft-fail`
+                    # defaults to true, so omitting it is exactly the state this
+                    # asserts against.
+                    for key, want in sorted(want_inputs.items()):
+                        if key not in got_inputs:
+                            findings.append(
+                                f"{name}: {filename} calls {reusable} without "
+                                f"`{key}`, so it takes the reusable's default. "
+                                f"Expected `{key}: {want}` - the check runs but "
+                                "cannot fail."
+                            )
+                        elif got_inputs[key] != want:
+                            findings.append(
+                                f"{name}: {filename} passes `{key}: "
+                                f"{got_inputs[key]}` to {reusable}, expected "
+                                f"`{want}`."
+                            )
             elif hits:
-                where = ", ".join(sorted(f for f, _ in hits))
+                where = ", ".join(sorted(f for f, _, _ in hits))
                 findings.append(
                     f"{name}: {reusable} is marked `exempt` but a caller exists "
                     f"({where}). The exemption is stale - promote it to `required` "
@@ -1975,7 +2050,7 @@ def main() -> int:
 
         for reusable, hits in sorted(read.callers.items()):
             if reusable not in reusables and reusable not in copies:
-                where = ", ".join(sorted(f for f, _ in hits))
+                where = ", ".join(sorted(f for f, _, _ in hits))
                 findings.append(
                     f"{name}: {where} calls {reusable}, which is not listed under "
                     "`reusables` in repo-inventory.yml. Either the reusable is new "
