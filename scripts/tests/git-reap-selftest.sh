@@ -98,6 +98,14 @@ make_repo() {
 #   fail      `gh pr list` exits non-zero (network down, rate limit, bad token)
 #   truncated exactly PR_LIMIT rows, none of them "squashed"
 #   empty     a readable, complete, empty list
+#   other-base
+#             "squashed" merged, but into a SIBLING FEATURE branch. The real `gh`
+#             filters by base server-side, so this row is only visible to a query
+#             that forgot --base — which is precisely the bug being asserted.
+#
+# The stub reads --base out of its own argv rather than ignoring it, because the
+# behaviour under test IS whether git-reap passes it. A stub that discarded the
+# flag would answer identically either way and the case below could not fail.
 stub_gh() {
   local bin="$1" mode="$2" work="$3"
   local sha
@@ -107,11 +115,17 @@ stub_gh() {
 #!/usr/bin/env bash
 [ "\$1" = "auth" ] && exit 0
 if [ "\$1" = "pr" ] && [ "\$2" = "list" ]; then
+  base=""
+  while [ \$# -gt 0 ]; do
+    if [ "\$1" = "--base" ]; then base="\$2"; fi
+    shift
+  done
   case "$mode" in
     fail) exit 1 ;;
-    truncated) for i in \$(seq 1 1000); do echo "filler-\$i deadbeef"; done; exit 0 ;;
+    truncated) i=1; while [ \$i -le 1000 ]; do echo "filler-\$i deadbeef"; i=\$((i+1)); done; exit 0 ;;
     empty) exit 0 ;;
     stale-sha) echo "squashed 1111111111111111111111111111111111111111"; exit 0 ;;
+    other-base) [ -n "\$base" ] || echo "squashed $sha"; exit 0 ;;
     *) echo "squashed $sha"; exit 0 ;;
   esac
 fi
@@ -250,6 +264,29 @@ if git -C "$T/work" rev-parse --verify --quiet squashed >/dev/null; then
   ok "--delete leaves a name-only match alone"
 else
   no "--delete leaves a name-only match alone" "unlanded work was force-deleted"
+fi
+rm -rf "$T"
+
+# --- 9. A PR merged into a SIBLING BRANCH is not merged HERE ---------------
+# `gh pr list --state merged` is unfiltered by base, so a branch squash-merged
+# into another feature branch answered "yes, merged" to a question about
+# develop. `--is-ancestor` had already said it was not on develop; the PR row
+# overrode that, and --delete force-removed commits that never landed. The org
+# has a `sibling-merge` closure label, so this is a path that happens.
+#
+# The stub only emits the row when --base is ABSENT, mirroring the real gh's
+# server-side filter — so this case reddens if the flag is ever dropped again.
+T=$(mktemp -d)
+make_repo "$T"
+out=$(run_reap "$T" other-base)
+assert_out "a PR merged into a sibling branch is not evidence for develop" \
+  "KEEP     squashed" "$out"
+assert_not_out "  …and is certainly not reaped" "would go squashed" "$out"
+run_reap "$T" other-base --delete >/dev/null
+if git -C "$T/work" rev-parse --verify --quiet squashed >/dev/null; then
+  ok "--delete leaves a sibling-merged branch alone"
+else
+  no "--delete leaves a sibling-merged branch alone" "unlanded work was force-deleted"
 fi
 rm -rf "$T"
 

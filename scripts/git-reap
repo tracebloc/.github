@@ -111,12 +111,23 @@ if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then have_gh
 # it claims. A local branch that is BEHIND its merged head also stops matching,
 # which is the conservative direction: it is kept, and `git merge-base
 # --is-ancestor` already reaps the ordinary merged case anyway (Bugbot).
+#
+# The query is also filtered by BASE, and that is not a detail. "A MERGED pull
+# request exists for this head" is only evidence of landing if the PR landed on
+# the branch we are measuring against. An unfiltered `gh pr list` counts a PR
+# squash-merged into a SIBLING FEATURE branch — which is not hypothetical here:
+# the org has a `sibling-merge` label for exactly that closure path, and a
+# stacked-PR mis-merge into a feature base has happened. Such a branch is merged
+# into something, is not on develop, and `git merge-base --is-ancestor` above
+# correctly says so — then the PR row overrode it and `--delete` force-removed
+# commits that never reached develop. Filtering by base makes the two agree
+# (Bugbot).
 PR_LIMIT=1000
 prs=""
 pr_evidence=0
 pr_problem=""
 if [ "$have_gh" = 1 ]; then
-  if prs=$(gh pr list --state merged --limit "$PR_LIMIT" --json headRefName,headRefOid --jq '.[] | .headRefName + " " + .headRefOid' 2>/dev/null); then
+  if prs=$(gh pr list --state merged --base "${DEFAULT#origin/}" --limit "$PR_LIMIT" --json headRefName,headRefOid --jq '.[] | .headRefName + " " + .headRefOid' 2>/dev/null); then
     pr_count=$(grep -c . <<<"$prs")
     if [ "$pr_count" -ge "$PR_LIMIT" ]; then
       pr_problem="the merged-PR list hit the --limit $PR_LIMIT cap, so absence from it proves nothing"
