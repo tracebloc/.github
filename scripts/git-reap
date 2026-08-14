@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+#
+# git reap — delete local branches whose work has provably landed (backend#2001).
+#
+# Install once, then it works from any repo checkout as `git reap`:
+#   curl -fsSL https://raw.githubusercontent.com/tracebloc/.github/develop/scripts/git-reap \
+#     -o ~/.local/bin/git-reap && chmod +x ~/.local/bin/git-reap
+#
+# WHY THIS EXISTS, and why `git branch -d` is not enough:
+#
+# We squash-merge. A squash-merged branch is NOT an ancestor of develop — the
+# squashed commit is a different commit with a different sha — so
+# `git branch --merged` never lists it and `git branch -d` REFUSES to delete it.
+# Every obvious cleanup command therefore reports nothing to do on a checkout
+# full of dead branches, and people reasonably conclude they are clean. Measured
+# 2026-08-14: one workspace held 459 local branches, 367 of them redundant, and
+# the org held 465 remote branches whose last commit predated June 2026.
+#
+# WHY `[gone]` ALONE IS THE WRONG SIGNAL — the trap this script exists to avoid.
+# With delete_branch_on_merge enabled (on in all 19 repos since backend#1981), a
+# merged branch's upstream goes [gone] on the next fetch. But so does the upstream
+# of a branch whose PR was CLOSED WITHOUT MERGING, and so does one somebody
+# deleted by hand. A one-liner that reaps every [gone] branch destroys work that
+# never landed — on the 2026-08-14 backlog it would have taken 35 such branches.
+#
+# So [gone] only narrows the candidate set. The DECISION needs positive evidence
+# that the content is on the default branch:
+#
+#   1. the branch is an ancestor of the default branch (a real merge), or
+#   2. GitHub reports a MERGED pull request for that exact head ref.
+#
+# Anything else is kept and reported with its commit count. FAILS CLOSED: no gh,
+# no auth, no network, an ambiguous answer or an unparseable state means KEEP.
+# "I could not tell" is never treated as "it merged".
+#
+# One `gh pr list` per repo, never per branch: a per-branch call exhausts the API
+# rate limit on a repo with hundreds of branches.
+#
+# Usage:
+#   git reap            # dry run — say what would go and why (default)
+#   git reap --delete   # actually delete
+#   git reap --all      # also consider branches whose upstream is still alive
+#
+set -uo pipefail
+
+DELETE=0
+SCAN_ALL=0
+for arg in "$@"; do
+  case "$arg" in
+    --delete|-f) DELETE=1 ;;
+    --all|-a)    SCAN_ALL=1 ;;
+    --help|-h)
+      sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) echo "git reap: unknown option '$arg' (try --help)" >&2; exit 2 ;;
+  esac
+done
+
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "git reap: not a git repository" >&2; exit 2; }
+
+# Never touch an integration branch, whatever its upstream says.
+PROTECTED_RE='^(develop|staging|main|master|gh-pages|HEAD)$'
+
+git fetch --prune --quiet 2>/dev/null || echo "git reap: fetch failed — working from possibly stale refs" >&2
+
+DEFAULT=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)
+if [ -z "$DEFAULT" ]; then
+  for guess in origin/develop origin/main origin/master; do
+    git rev-parse --verify --quiet "$guess" >/dev/null && { DEFAULT="$guess"; break; }
+  done
+fi
+[ -n "$DEFAULT" ] || { echo "git reap: cannot determine the default branch — refusing to guess" >&2; exit 2; }
+
+# Branch checked out here or in any linked worktree cannot be deleted; naming it
+# is more useful than a git error.
+pinned=$(git worktree list --porcelain | awk '/^branch /{sub("refs/heads/","",$2); print $2}')
+
+have_gh=0
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then have_gh=1; fi
+
+# One PR query per repo, not per branch: a per-branch call burns the API rate
+# limit on a repo with hundreds of branches.
+prs=""
+if [ "$have_gh" = 1 ]; then
+  prs=$(gh pr list --state merged --limit 1000 --json headRefName --jq '.[].headRefName' 2>/dev/null) || prs=""
+fi
+
+reaped=0; kept=0; skipped=0
+while IFS=$'\t' read -r br track; do
+  [ -n "$br" ] || continue
+  printf '%s' "$br" | grep -Eq "$PROTECTED_RE" && continue
+  if [ "$SCAN_ALL" = 0 ] && [ "$track" != "[gone]" ]; then continue; fi
+
+  if printf '%s\n' "$pinned" | grep -qxF "$br"; then
+    echo "  keep     $br — checked out in a worktree"
+    kept=$((kept+1)); continue
+  fi
+
+  reason=""
+  if git merge-base --is-ancestor "$br" "$DEFAULT" 2>/dev/null; then
+    reason="ancestor of ${DEFAULT#origin/}"
+  elif [ "$have_gh" = 1 ] && printf '%s\n' "$prs" | grep -qxF "$br"; then
+    reason="squash-merged (MERGED PR for this head)"
+  fi
+
+  if [ -z "$reason" ]; then
+    if [ "$have_gh" = 0 ]; then
+      echo "  SKIP     $br — no gh auth, cannot prove it merged (failing closed)"
+      skipped=$((skipped+1))
+    else
+      ahead=$(git rev-list --count "$DEFAULT..$br" 2>/dev/null || echo '?')
+      echo "  KEEP     $br — no merge evidence, $ahead commit(s) not on ${DEFAULT#origin/}"
+      kept=$((kept+1))
+    fi
+    continue
+  fi
+
+  sha=$(git rev-parse --short "$br")
+  if [ "$DELETE" = 1 ]; then
+    if git branch -D "$br" >/dev/null 2>&1; then
+      echo "  deleted  $br ($sha) — $reason"
+      reaped=$((reaped+1))
+    else
+      echo "  FAILED   $br — git refused the delete"
+      kept=$((kept+1))
+    fi
+  else
+    echo "  would go $br ($sha) — $reason"
+    reaped=$((reaped+1))
+  fi
+done < <(git for-each-ref --format='%(refname:short)%09%(upstream:track)' refs/heads)
+
+echo
+if [ "$DELETE" = 1 ]; then
+  echo "reaped=$reaped kept=$kept skipped=$skipped"
+else
+  echo "would reap=$reaped keep=$kept skipped=$skipped   (re-run with --delete)"
+fi
+[ "$reaped" = 0 ] && [ "$kept" = 0 ] && [ "$skipped" = 0 ] && echo "  nothing to consider"
+exit 0
