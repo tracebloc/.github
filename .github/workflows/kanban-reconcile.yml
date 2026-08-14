@@ -809,12 +809,33 @@ jobs:
               # Sibling visibility label - written AFTER the status so a label
               # failure can never cost the card its column (.github#157's
               # ordering lesson), and inside the wet path so dry runs skip it.
-              # Hard-fails per the PROJECTS_KANBAN_TOKEN write rule.
+              #
+              # COUNTED, NOT FATAL (backend#1598). These writes used to run bare
+              # under `set -euo pipefail`, which was described as "hard-fails per
+              # the PROJECTS_KANBAN_TOKEN write rule" - but a hard fail HERE does
+              # not fail one item, it ABORTS THE WHOLE SWEEP mid-loop. Every
+              # item after this one goes unprocessed, and `added.tsv` is left
+              # truncated at the failure point while still being read afterwards
+              # as though it were the complete record.
+              #
+              # A 403 on a label write is also the single most likely failure in
+              # this step: PROJECTS_KANBAN_TOKEN is one user PAT shared by CI,
+              # the conformance gate, the weekly cron and any local script, on
+              # one 5,000/hr budget.
+              #
+              # So the failure is recorded in `add_fail` instead. The run still
+              # goes red at the end of the step - the rule is kept - but the
+              # remaining items are swept first and the record stays complete.
+              # Fail closed, finish the work.
               if [ "${SIB:-0}" = "1" ]; then
                 if ! gh api "repos/$ORG/$REPO/labels/sibling-merge" >/dev/null 2>&1; then
-                  gh api "repos/$ORG/$REPO/labels" -f name=sibling-merge -f color=bfdadc -f description="Merged into a sibling feature branch; content ships via the parent PR (backend#1437)" >/dev/null
+                  gh api "repos/$ORG/$REPO/labels" -f name=sibling-merge -f color=bfdadc -f description="Merged into a sibling feature branch; content ships via the parent PR (backend#1437)" >/dev/null \
+                    || echo "[WARN] $REPO#$NUM: could not CREATE the sibling-merge label"
                 fi
-                gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=sibling-merge" >/dev/null
+                if ! gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=sibling-merge" >/dev/null 2>&1; then
+                  echo "[WARN] $REPO#$NUM: status set, but the sibling-merge label write failed"
+                  add_fail=$((add_fail+1))
+                fi
               fi
               printf '%s\t%s\n' "$REPO#$NUM" "$DESC" >> added.tsv
             else
