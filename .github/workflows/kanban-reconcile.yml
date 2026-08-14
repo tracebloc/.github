@@ -315,6 +315,28 @@ jobs:
             printf '%s' "$STATUS_ORDER" | tr '\t' '\n' \
               | awk -v s="$1" 'BEGIN{i=-1} i<0 && $0==s {i=NR} END{print i}'
           }
+          # selftest:classify-start  (byte-identical in kanban-reconcile.yml)
+          # Is this column a DEPLOY STATE? Answered from the board's own ORDER --
+          # any column at or after "On dev" and at or before "Prod" -- so a column
+          # INSERTED between them is classified correctly with no edit here
+          # (backend#1846). Only `col_index` differs between the two workflows,
+          # because only their inputs differ; this decision must not.
+          #
+          #   yes      a deploy state
+          #   no       not one -- including NO COLUMN AT ALL, which is evidence
+          #            nothing deployed rather than a column we cannot place
+          #   unknown  a column the board does not report
+          #   noboard  the board is missing an anchor, so nothing can be placed
+          classify_column() {
+            case "${1:-}" in
+              ""|"No status") echo no; return ;;
+            esac
+            _c=$(col_index "$1"); _d=$(col_index "On dev"); _p=$(col_index "Prod")
+            if [ "$_d" -lt 0 ] || [ "$_p" -lt 0 ]; then echo noboard; return; fi
+            if [ "$_c" -lt 0 ]; then echo unknown; return; fi
+            if [ "$_c" -ge "$_d" ] && [ "$_c" -le "$_p" ]; then echo yes; else echo no; fi
+          }
+          # selftest:classify-end
 
           while IFS= read -r line; do
             ITEM_ID=$(echo "$line"  | jq -r '.id')
@@ -399,24 +421,17 @@ jobs:
                   # before "Prod", in the board's own order -- so a column
                   # INSERTED between them (which is exactly how "Staging (agent
                   # review)" arrived) is classified correctly with no edit here.
-                  # NO STATUS IS NOT AN UNPLACEABLE COLUMN (Bugbot, .github#252).
-                  # `$COL` is the literal "No status" when the field is null, and
-                  # treating that as unplaceable would skip exactly the cards this
-                  # backstop exists to terminalize -- they would stay closed,
-                  # non-terminal and unarchived forever. The ABSENCE of a column is
-                  # evidence that nothing deployed; an UNRECOGNISED column is not.
-                  if [ -z "$COL" ] || [ "$COL" = "No status" ]; then
-                    _ci=0; _di=1; _pi=1        # placeable, and before On dev
-                  else
-                    _ci=$(col_index "$COL"); _di=$(col_index "On dev"); _pi=$(col_index "Prod")
-                  fi
-                  # UNKNOWN MUST NOT FALL OPEN: a column this workflow cannot
-                  # place, or a board missing an anchor, is not evidence that
-                  # nothing shipped. Treated as a deploy state -- leaving a card
-                  # where it is costs nothing; asserting Done over a deploy erases
-                  # the fact that it shipped.
-                  if [ "$_di" -lt 0 ] || [ "$_pi" -lt 0 ] || [ "$_ci" -lt 0 ] \
-                     || { [ "$_ci" -ge "$_di" ] && [ "$_ci" -le "$_pi" ]; }; then
+                  # UNKNOWN MUST NOT FALL OPEN, and it leans the OPPOSITE way to
+                  # the router's: this loop decides whether to ASSERT Done, so a
+                  # column it cannot place -- or a board missing an anchor -- is
+                  # treated AS a deploy state and left alone. Leaving a card where
+                  # it is costs nothing; asserting "nothing shipped" over work
+                  # that did erases the fact.
+                  # selftest:policy-start
+                  _ds=$(classify_column "$COL")
+                  if [ "$_ds" != "no" ]; then _skip=yes; else _skip=no; fi
+                  # selftest:policy-end
+                  if [ "$_skip" = "yes" ]; then
                     echo "  [SKIP] $REPO#$NUM closed-completed in $COL - a deploy state (or unplaceable), so NOT Done; D8 says follow the PR's stage"
                   else
                       # The column is NOT sufficient evidence on its own. It was the only
