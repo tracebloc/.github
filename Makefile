@@ -22,8 +22,14 @@
 #   blocked-gate-selftest.yml -> `selftest-blocked-marker`
 #   standards-sync.yml        -> `selftest-standards-sync`
 #   version-bump-gate-selftest.yml -> `selftest-version-bump-gate`
+#   bricked-prs-selftest.yml  -> `selftest-bricked-prs`
+#   kanban-columns.yml        -> `selftest-kanban-columns`
+#   kanban-deploy-state-selftest.yml -> `selftest-kanban-deploy-state`
 #
-# When one of those workflows changes, change the matching line here.
+# When one of those workflows changes, change the matching line here. Adding a
+# NEW selftest needs no edit to this list to be CAUGHT — `selftests-cover`
+# fails until it is wired up (backend#1966). The list is here to say which
+# workflow each target mirrors, not to be the record of what exists.
 #
 # TWO THINGS CI DOES THAT `check` DOES NOT — named, not hidden:
 #
@@ -83,13 +89,13 @@ help:
 	@echo "tracebloc/.github — make targets"
 	@echo
 	@echo "  check       ruff + shellcheck + house-rules + action-pins + actionlint"
-	@echo "              + all four selftests — run this before every push (~18 s)"
+	@echo "              + all $(words $(SELFTEST_FILES)) selftests — run this before every push (~18 s)"
 	@echo "  check-all   the same, plus gitleaks (needs the gitleaks binary)"
 	@echo "  setup       preflight the tools check needs; installs the pre-push hook"
 	@echo "  install-hooks  (re)install the git pre-push hook that runs 'make check'"
 	@echo
 	@echo "  lint            ruff + shellcheck + house-rules + action-pins + actionlint"
-	@echo "  selftests       all four gate selftests"
+	@echo "  selftests       all $(words $(SELFTEST_FILES)) gate selftests (+ the coverage assertion)"
 	@echo "  credential-scan gitleaks over the whole history, as code-quality.yml runs it"
 	@echo "  audit           caller-drift.py against the live org — needs a token"
 	@echo
@@ -219,13 +225,70 @@ actionlint: guard-actionlint guard-shellcheck
 
 # ---- selftests ---------------------------------------------------
 #
-# The four gate selftests, each the `selftest` job of its workflow. All are
+# The gate selftests, each the `selftest` job of its workflow. All are
 # token-free and network-free, which is exactly why they belong in `check`:
 # in CI every one of them is behind a `paths:` filter, so a PR that refactors
 # a gate without touching its named trigger paths never runs them. Locally
 # there is no filter and no reason for one — they cost ~15 s together.
+#
+# HOW MANY THERE ARE IS DERIVED, NEVER RESTATED (backend#1966). This file used
+# to say "all four" in four places while CI ran six, and by the time that was
+# filed develop had seven — the count went stale twice over. `SELFTEST_FILES`
+# comes from the directory, `selftests-cover` fails if any of them is not wired
+# to a target, and every message prints `$(words ...)`. Nothing hand-maintains N.
+#
+# The per-selftest targets stay explicit on purpose rather than being generated
+# from the glob: the invocations are NOT uniform. selftest-blocked-marker runs a
+# SECOND command, version-bump-gate is bash, and only some need PyYAML. A
+# glob-driven recipe would have silently dropped that second command — so what
+# is derived is the COVERAGE ASSERTION, not the invocation.
+SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-selftest.sh))
+
 .PHONY: selftests
-selftests: selftest-caller-drift selftest-blocked-marker selftest-standards-sync selftest-version-bump-gate
+selftests: selftests-cover selftest-caller-drift selftest-blocked-marker selftest-standards-sync selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns selftest-kanban-deploy-state
+
+# Guard the guard-runner. Two assertions, both fail-closed:
+#
+#   1. Every file under scripts/tests/ matches `*-selftest.{py,sh}`. Without
+#      this, a selftest added under any other name is invisible to the wildcard
+#      and assertion 2 passes vacuously — the exact inert-verification shape
+#      backend#1729 catalogued.
+#   2. Every matched file is RUN BY A RECIPE. SELFTEST_FILES is built by
+#      wildcard, so the variable line does not itself contain the paths.
+#
+# ASSERTION 2 SEARCHES RECIPE LINES ONLY (lines starting with a tab), and that
+# is the whole correctness of it. An earlier revision grepped the entire file —
+# and passed on an unwired selftest because a COMMENT in this very block named
+# it. A guard that a comment can satisfy is inert verification of itself, which
+# is a fine joke to make once and never ship. Recipe-only means a match is a
+# command that actually runs.
+#
+# Mutation-proved, all three reddening and each with its anchor asserted:
+# a new `*-selftest.py` with no target; a file in scripts/tests/ off-convention;
+# and unwiring an existing selftest's recipe line.
+.PHONY: selftests-cover
+selftests-cover:
+	@fail=0; \
+	for path in scripts/tests/*; do \
+	  [ -e "$$path" ] || continue; \
+	  case "$$path" in \
+	    *-selftest.py|*-selftest.sh) ;; \
+	    *) echo "$$path does not match '*-selftest.{py,sh}', so the selftest wildcard cannot see it."; \
+	       echo "  Rename it, or teach SELFTEST_FILES about the new convention — do NOT"; \
+	       echo "  leave it unmatched: assertion 2 below would then pass without covering it."; \
+	       fail=1 ;; \
+	  esac; \
+	done; \
+	for f in $(SELFTEST_FILES); do \
+	  sed -n 's/^	//p' Makefile | grep -qF -- "$$f" || { \
+	    echo "$$f is not run by any target in this Makefile."; \
+	    echo "  'make check' would report green without it, which breaks this file's"; \
+	    echo "  own 'thin wrapper of what CI runs' contract. Add a selftest-* target"; \
+	    echo "  and list it under 'selftests'."; \
+	    fail=1; }; \
+	done; \
+	[ "$$fail" = 0 ] || exit 1; \
+	echo "selftests-cover: all $(words $(SELFTEST_FILES)) selftests are wired to a target"
 
 .PHONY: selftest-caller-drift
 selftest-caller-drift: guard-pyyaml
@@ -244,10 +307,29 @@ selftest-blocked-marker:
 selftest-standards-sync: guard-pyyaml
 	$(PYTHON) scripts/tests/standards-sync-selftest.py
 
-# The slowest of the four (~15 s): it builds a throwaway git repo per case.
+# The slowest of them all (~15 s): it builds a throwaway git repo per case.
 .PHONY: selftest-version-bump-gate
 selftest-version-bump-gate: guard-pyyaml
 	bash scripts/tests/version-bump-gate-selftest.sh
+
+# guard-pyyaml, mirroring bricked-prs-selftest.yml's `pip install pyyaml` step:
+# bricked-prs.py imports caller-drift.py for the protection reader, and that
+# module hard-fails without PyYAML by design. Measured with the module blocked:
+# exit 2 without it.
+.PHONY: selftest-bricked-prs
+selftest-bricked-prs: guard-pyyaml
+	$(PYTHON) scripts/tests/bricked-prs-selftest.py
+
+# NO guard-pyyaml, and that is asserted rather than assumed: kanban-columns.yml
+# runs this with no pip step, and it was measured to pass with the yaml module
+# blocked. Do not add a dependency this selftest does not have.
+.PHONY: selftest-kanban-columns
+selftest-kanban-columns:
+	$(PYTHON) scripts/tests/kanban-columns-selftest.py
+
+.PHONY: selftest-kanban-deploy-state
+selftest-kanban-deploy-state: guard-pyyaml
+	$(PYTHON) scripts/tests/kanban-deploy-state-selftest.py
 
 # ---- CI steps that need something a working tree does not have ----
 
@@ -411,9 +493,14 @@ guard-gitleaks:
 	  echo "         (URL and SHA-256 are in .github/workflows/code-quality.yml)"; \
 	  exit 1; }
 
-# PyYAML, which three of the four selftests import. Every workflow that runs
-# them pip-installs 'pyyaml==6.0.2' on a clean setup-python first, so an
-# ImportError here is a missing dependency and not a broken test.
+# PyYAML, which most of the selftests import (directly, or via a module that
+# hard-fails without it). Every workflow that runs one of those pip-installs
+# 'pyyaml==6.0.2' on a clean setup-python first, so an ImportError here is a
+# missing dependency and not a broken test.
+#
+# No count here on purpose: it was "three of the four" while there were six.
+# Which targets depend on this is visible at the targets themselves, and each
+# one was measured with the yaml module blocked rather than guessed.
 .PHONY: guard-pyyaml
 guard-pyyaml:
 	@$(PYTHON) -c 'import yaml' 2>/dev/null || { \
