@@ -30,14 +30,26 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WF = os.path.join(HERE, os.pardir, os.pardir,
-                  ".github", "workflows", "kanban-closure-router.yml")
+WORKFLOWS = os.path.join(HERE, os.pardir, os.pardir, ".github", "workflows")
+
+# BOTH COPIES, and the second one is why this list exists (Bugbot, .github#252).
+#
+# The classification lives in two files because the two workflows genuinely
+# cannot share code: kanban-closure-router.yml is a REUSABLE workflow that runs
+# in the CALLER's checkout, so a script in this repo is not on disk for it, while
+# kanban-reconcile.yml runs here and works from step outputs rather than `$PROJ`.
+# Two copies is forced by the architecture -- so the guarantee has to be that
+# they AGREE, which is what this file asserts. Testing only one would leave the
+# same two-copy rot the change itself exists to close, one level up.
+ROUTER = os.path.join(WORKFLOWS, "kanban-closure-router.yml")
+RECONCILE = os.path.join(WORKFLOWS, "kanban-reconcile.yml")
 
 RESULTS: "list[tuple[bool, str, str]]" = []
 
@@ -47,7 +59,7 @@ def record(ok: bool, name: str, detail: str) -> None:
     print(f"{'PASS' if ok else 'FAIL'}  {name}\n        {detail}")
 
 
-def extract_col_index() -> str:
+def extract_col_index(WF) -> str:
     """Pull `col_index()` out of the workflow's run: block, verbatim."""
     doc = yaml.safe_load(open(WF))
     runs = [s["run"] for j in doc["jobs"].values()
@@ -61,11 +73,20 @@ def extract_col_index() -> str:
             indent = len(block) - len(block.lstrip())
             return "\n".join(ln[indent:] if ln[:indent].isspace() else ln
                              for ln in block.splitlines())
-    sys.exit("could not find col_index() in the workflow — did it get renamed? "
-             "This test refuses to fall back to a copy.")
+    sys.exit(f"could not find col_index() in {os.path.basename(WF)} — did it get "
+             "renamed? This test refuses to fall back to a copy.")
 
 
-COL_INDEX = extract_col_index()
+# Each copy takes its board differently: the router reads `$PROJ`, reconcile a
+# tab-separated `$STATUS_ORDER` passed between steps. The PREAMBLE differs; the
+# verdict must not.
+COPIES = {
+    "router": (extract_col_index(ROUTER),
+               lambda names: "PROJ='%s'" % proj(names)),
+    "reconcile": (extract_col_index(RECONCILE),
+                  lambda names: 'STATUS_ORDER=$(printf %%s %s)'
+                                % shlex.quote("\t".join(names))),
+}
 
 # The live board's order, as the API returns it.
 BOARD = ["Backlog", "North Stars", "Ready", "In progress", "Code review",
@@ -79,13 +100,14 @@ def proj(names) -> str:
                    "options": [{"name": n} for n in names]}]}}}}})
 
 
-def classify(current: str, names=None) -> str:
-    """Run the EXTRACTED function plus the guard's own comparison."""
+def classify_one(copy: str, current: str, names=None) -> str:
+    """Run ONE extracted copy plus the guard's own comparison."""
     names = BOARD if names is None else names
+    fn, preamble = COPIES[copy]
     script = f"""
 set -euo pipefail
-PROJ='{proj(names)}'
-{COL_INDEX}
+{preamble(names)}
+{fn}
 cur_i=$(col_index "{current}")
 dev_i=$(col_index "On dev")
 prod_i=$(col_index "Prod")
@@ -101,6 +123,20 @@ fi
     if out.returncode != 0:
         return f"ERROR: {out.stderr.strip()}"
     return out.stdout.strip()
+
+
+def classify(current: str, names=None) -> str:
+    """Both copies, and they must AGREE — that agreement is the guarantee.
+
+    Two implementations exist because the workflows cannot share code (see
+    COPIES). A divergence between them is the failure this file is really
+    guarding, so it is reported as a disagreement rather than silently taking
+    one answer.
+    """
+    verdicts = {c: classify_one(c, current, names) for c in COPIES}
+    if len(set(verdicts.values())) != 1:
+        return "DISAGREE: " + ", ".join(f"{c}={v}" for c, v in verdicts.items())
+    return next(iter(verdicts.values()))
 
 
 # 1. Every deploy state, including the one the old list missed.
