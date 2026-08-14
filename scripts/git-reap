@@ -90,9 +90,11 @@ fi
 # UNVERIFIED and says so: the PR path already fails closed without gh, but the
 # ancestor path does not, and a silent stale default is exactly what this tool
 # must not have (Bugbot).
+default_verified=0
 if [ "$have_gh" = 1 ] &&
    remote_default=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null) &&
    [ -n "$remote_default" ]; then
+  default_verified=1
   if [ "$DEFAULT" != "origin/$remote_default" ]; then
     echo "git reap: origin/HEAD says ${DEFAULT:-<unset>}, the remote says $remote_default — using the remote and refreshing origin/HEAD" >&2
     git remote set-head origin "$remote_default" >/dev/null 2>&1 || true
@@ -167,6 +169,16 @@ if [ "$have_gh" = 1 ]; then
   else
     pr_problem="the merged-PR list could not be read (gh pr list failed)"
   fi
+fi
+
+# An UNVERIFIED default poisons absence exactly as an unreadable list does, and
+# saying so in a warning is not the same as acting on it: a complete list read
+# against a possibly-stale base still set pr_evidence=1, and every branch then
+# fell through to "KEEP — no merge evidence", a proven negative derived from the
+# wrong question. A guard that only prints is advice, not a gate (Bugbot).
+if [ "$pr_evidence" = 1 ] && [ "$default_verified" = 0 ]; then
+  pr_evidence=0
+  pr_problem="the default branch could not be confirmed, so a complete merged-PR list for ${DEFAULT#origin/} still proves nothing"
 fi
 
 reaped=0; kept=0; skipped=0

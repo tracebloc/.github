@@ -332,6 +332,14 @@ make_repo "$T"
 out=$(run_reap "$T" no-remote-default --all)
 assert_out "an unconfirmable default branch is announced as UNVERIFIED" \
   "UNVERIFIED" "$out"
+# And announcing it is not enough. The list read fine, so pr_evidence would have
+# been 1 and every branch would have fallen through to "no merge evidence" — a
+# proven negative from a base nothing could confirm. It must SKIP instead: a
+# guard that only prints is advice, not a gate.
+assert_out "  …and blocks the absence claim rather than just warning" \
+  "SKIP     unmerged" "$out"
+assert_not_out "  …so no branch is told there is no evidence" \
+  "no merge evidence" "$out"
 rm -rf "$T"
 
 echo
