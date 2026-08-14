@@ -207,6 +207,29 @@ record(classify("On dev", [n for n in BOARD if n != "Prod"]) == "noboard",
        "a board with no 'Prod' column refuses rather than guessing",
        "each workflow then applies its own fail-closed direction — see below")
 
+# 7b. BOTH ANCHORS PRESENT, BUT REVERSED (backend#1994). Case 7 removes an anchor;
+#     the hole was that EXISTENCE was checked and ORDER never was. Since the whole
+#     thesis here is that POSITION decides rather than a name, the board's option
+#     ORDER is load-bearing — and one drag of the Status options is enough to
+#     invert it. With `Prod` sorting before `On dev` the range `>= _d && <= _p` is
+#     unsatisfiable, so before the fix EVERY column answered `no`, `Prod`
+#     included: the router would write Done over shipped state and reconcile would
+#     then assert it. That is the fail-open this classification exists to close.
+d_i, p_i = BOARD.index("On dev"), BOARD.index("Prod")
+inverted_board = list(BOARD)
+inverted_board[d_i], inverted_board[p_i] = inverted_board[p_i], inverted_board[d_i]
+# An inert input and a working guard produce the same green line, so assert the
+# board really is inverted and otherwise UNCHANGED — the only difference from
+# BOARD must be the anchors' order, or this case proves something else.
+assert inverted_board.index("Prod") < inverted_board.index("On dev"), inverted_board
+assert sorted(inverted_board) == sorted(BOARD), inverted_board
+for col in ("FR on staging", "Prod"):
+    verdict = classify(col, inverted_board)
+    record(verdict == "noboard",
+           f"{col!r} on a board whose anchors are INVERTED refuses, not 'no'",
+           f"-> {verdict}; an unsatisfiable range must fail closed rather than "
+           "report every deploy column as free to overwrite")
+
 # ---------------------------------------------------------------------------
 # 8. EACH WORKFLOW'S OWN POLICY, run verbatim (Bugbot, .github#252).
 #
