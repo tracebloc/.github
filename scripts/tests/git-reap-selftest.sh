@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+#
+# git-reap selftest — the decision, exercised against real git repositories.
+#
+# git-reap deletes branches. Its entire safety argument is one sentence in its
+# own header: "FAILS CLOSED … 'I could not tell' is never treated as 'it
+# merged'." A claim like that in a comment is a claim that should be a machine
+# check — where it isn't, it decays into a doc that teaches the bypass. Two of
+# the three defects this suite was written for were the code contradicting that
+# exact sentence.
+#
+# Every case builds a throwaway repo with real commits and a real squash-merge,
+# and stubs `gh` on PATH so the merged-PR list can be made unreadable, truncated
+# or empty on demand. Nothing here talks to GitHub.
+#
+# Run: bash scripts/tests/git-reap-selftest.sh
+set -uo pipefail
+
+REAP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/git-reap"
+[ -x "$REAP" ] || { echo "FATAL: $REAP is not executable"; exit 1; }
+
+pass=0
+fail=0
+
+ok() { printf '  ok    %s\n' "$1"; pass=$((pass + 1)); }
+no() { printf '  FAIL  %s\n     %s\n' "$1" "$2"; fail=$((fail + 1)); }
+
+# assert_out <name> <expected-substring> <output>
+assert_out() {
+  if grep -qF -- "$2" <<<"$3"; then ok "$1"; else no "$1" "expected to find: $2"; fi
+}
+assert_not_out() {
+  if grep -qF -- "$2" <<<"$3"; then no "$1" "must NOT contain: $2"; else ok "$1"; fi
+}
+
+# make_repo <dir> — an "origin" with develop, plus a clone holding:
+#   squashed  — content landed on develop as a DIFFERENT commit (the squash case)
+#   unmerged  — real work that never landed
+#   ancestral — a plain fast-forward merge, an ancestor of develop
+# Each of squashed/unmerged has its upstream deleted, so both are [gone]: that
+# is the whole point — [gone] alone cannot tell them apart.
+make_repo() {
+  local root="$1" origin="$1/origin" work="$1/work"
+  mkdir -p "$origin"
+  git init -q --bare --initial-branch=develop "$origin"
+
+  git init -q --initial-branch=develop "$work"
+  git -C "$work" config user.email t@t.io
+  git -C "$work" config user.name t
+  echo base >"$work/f"
+  git -C "$work" add f
+  git -C "$work" commit -qm base
+  git -C "$work" remote add origin "$origin"
+  git -C "$work" push -q -u origin develop
+
+  # ancestral: merged by fast-forward, so it IS an ancestor of develop.
+  git -C "$work" checkout -qb ancestral
+  echo a >>"$work/f"
+  git -C "$work" commit -qam a
+  git -C "$work" push -q -u origin ancestral
+  git -C "$work" checkout -q develop
+  git -C "$work" merge -q --ff-only ancestral
+  git -C "$work" push -q origin develop
+
+  # squashed: its content is on develop under a different sha.
+  git -C "$work" checkout -qb squashed
+  echo s >"$work/g"
+  git -C "$work" add g
+  git -C "$work" commit -qm s
+  git -C "$work" push -q -u origin squashed
+  git -C "$work" checkout -q develop
+  echo s >"$work/g"
+  git -C "$work" add g
+  git -C "$work" commit -qm "squash of squashed"
+  git -C "$work" push -q origin develop
+
+  # unmerged: real work, nowhere on develop.
+  git -C "$work" checkout -qb unmerged
+  echo u >"$work/h"
+  git -C "$work" add h
+  git -C "$work" commit -qm u
+  git -C "$work" push -q -u origin unmerged
+
+  git -C "$work" checkout -q develop
+  git -C "$origin" branch -D ancestral >/dev/null 2>&1
+  git -C "$origin" branch -D squashed >/dev/null 2>&1
+  git -C "$origin" branch -D unmerged >/dev/null 2>&1
+  git -C "$work" fetch -q --prune origin
+  git -C "$origin" symbolic-ref HEAD refs/heads/develop
+  git -C "$work" remote set-head origin develop >/dev/null 2>&1
+}
+
+# stub_gh <bindir> <mode> — a fake `gh` on PATH.
+#   ok:<n>    a readable list of n merged heads, "squashed" among them
+#   fail      `gh pr list` exits non-zero (network down, rate limit, bad token)
+#   truncated exactly PR_LIMIT rows, none of them "squashed"
+stub_gh() {
+  local bin="$1" mode="$2"
+  mkdir -p "$bin"
+  cat >"$bin/gh" <<STUB
+#!/usr/bin/env bash
+[ "\$1" = "auth" ] && exit 0
+if [ "\$1" = "pr" ] && [ "\$2" = "list" ]; then
+  case "$mode" in
+    fail) exit 1 ;;
+    truncated) for i in \$(seq 1 1000); do echo "filler-\$i"; done; exit 0 ;;
+    empty) exit 0 ;;
+    *) echo squashed; exit 0 ;;
+  esac
+fi
+exit 0
+STUB
+  chmod +x "$bin/gh"
+}
+
+run_reap() {
+  local root="$1" mode="$2"
+  shift 2
+  stub_gh "$root/bin" "$mode"
+  (cd "$root/work" && PATH="$root/bin:$PATH" bash "$REAP" "$@" 2>&1)
+}
+
+echo "== git-reap selftest =="
+
+# --- 1. The happy path, so the rest of the suite is known not to be vacuous ---
+T=$(mktemp -d)
+make_repo "$T"
+out=$(run_reap "$T" ok)
+assert_out "a squash-merged branch is reaped" "squashed" "$out"
+assert_out "  …on PR evidence" "squash-merged (MERGED PR for this head)" "$out"
+assert_out "an ancestor of develop is reaped" "ancestor of develop" "$out"
+assert_out "unmerged work is KEPT" "KEEP     unmerged" "$out"
+assert_not_out "unmerged work is never skipped as unprovable" "SKIP     unmerged" "$out"
+rm -rf "$T"
+
+# --- 2. An unreadable PR list is NOT an empty one -------------------------
+# The defect: `|| prs=""` made a failed query indistinguishable from "no merged
+# PRs", so every branch was reported KEEP "no merge evidence" — a proven
+# negative asserted from a read that never happened.
+T=$(mktemp -d)
+make_repo "$T"
+out=$(run_reap "$T" fail)
+assert_out "a failed PR read SKIPs rather than claiming no evidence" \
+  "SKIP     squashed" "$out"
+assert_out "  …and says why" "could not be read" "$out"
+assert_not_out "a failed PR read never asserts the negative" \
+  "KEEP     squashed — no merge evidence" "$out"
+assert_out "the ancestor case still decides — it needs no PR list" \
+  "ancestor of develop" "$out"
+rm -rf "$T"
+
+# --- 3. A truncated PR list cannot prove absence --------------------------
+# gh truncates at --limit silently. The old backlog this tool exists to clear
+# is precisely what falls out of a newest-first 1000 window.
+T=$(mktemp -d)
+make_repo "$T"
+out=$(run_reap "$T" truncated)
+assert_out "a capped PR list SKIPs rather than proving absence" \
+  "SKIP     squashed" "$out"
+assert_out "  …and names the cap" "hit the --limit 1000 cap" "$out"
+rm -rf "$T"
+
+# --- 4. A genuinely empty list is still evidence --------------------------
+# The fail-closed fix must not swallow the real answer: a readable, complete,
+# empty list DOES prove no merged PR exists.
+T=$(mktemp -d)
+make_repo "$T"
+out=$(run_reap "$T" empty)
+assert_out "an empty-but-readable list still yields a verdict" \
+  "KEEP     squashed" "$out"
+assert_not_out "  …not a SKIP" "SKIP     squashed" "$out"
+rm -rf "$T"
+
+# --- 5. Nothing is deleted in the default dry run -------------------------
+T=$(mktemp -d)
+make_repo "$T"
+run_reap "$T" ok >/dev/null
+if git -C "$T/work" rev-parse --verify --quiet squashed >/dev/null; then
+  ok "the default run deletes nothing"
+else
+  no "the default run deletes nothing" "squashed was deleted without --delete"
+fi
+out=$(run_reap "$T" ok --delete)
+if git -C "$T/work" rev-parse --verify --quiet squashed >/dev/null; then
+  no "--delete removes a proven-merged branch" "squashed survived --delete"
+else
+  ok "--delete removes a proven-merged branch"
+fi
+if git -C "$T/work" rev-parse --verify --quiet unmerged >/dev/null; then
+  ok "--delete leaves unproven work alone"
+else
+  no "--delete leaves unproven work alone" "unmerged was destroyed"
+fi
+rm -rf "$T"
+
+# --- 6. A branch checked out in a linked worktree is pinned ---------------
+# One of the `printf | grep -q` sites. Read as a miss, this deletes the branch
+# a colleague is standing on.
+T=$(mktemp -d)
+make_repo "$T"
+git -C "$T/work" worktree add -q "$T/wt" squashed 2>/dev/null
+out=$(run_reap "$T" ok)
+assert_out "a worktree-pinned branch is kept" "checked out in a worktree" "$out"
+rm -rf "$T"
+
+# --- 7. Integration branches are never candidates ------------------------
+T=$(mktemp -d)
+make_repo "$T"
+git -C "$T/work" branch main develop 2>/dev/null
+git -C "$T/work" branch staging develop 2>/dev/null
+out=$(run_reap "$T" ok --all)
+for protected in develop staging main; do
+  assert_not_out "$protected is never a candidate" "  deleted  $protected" "$out"
+  assert_not_out "$protected is never even reported" " $protected —" "$out"
+done
+rm -rf "$T"
+
+echo
+printf '%d passed, %d failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ] || exit 1

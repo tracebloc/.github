@@ -1,0 +1,46 @@
+name: git-reap selftest
+
+# git-reap deletes branches, and its whole safety argument is one sentence in
+# its own header: "I could not tell" is never treated as "it merged". Two of the
+# three defects found in review were the code contradicting that exact sentence
+# -- a failed `gh pr list` and a silently truncated one both read as "no merged
+# PRs", so a branch nobody had verified was reported as having no merge
+# evidence. A claim like that belongs in a machine check, not a comment.
+#
+# Offline: the suite builds throwaway git repos and stubs `gh` on PATH, so it
+# needs no token and reaches no network. Path-filtered like the other selftests
+# -- it only has to run when the thing it tests changes.
+
+on:
+  pull_request:
+    paths:
+      - scripts/git-reap
+      - scripts/tests/git-reap-selftest.sh
+      - .github/workflows/git-reap-selftest.yml
+  push:
+    branches: [main, develop, staging]
+    paths:
+      - scripts/git-reap
+      - scripts/tests/git-reap-selftest.sh
+      - .github/workflows/git-reap-selftest.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: git-reap-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # The suite creates real branches and real merges; a committer identity is
+      # not configured on a fresh runner.
+      - run: |
+          git config --global user.email "selftest@tracebloc.io"
+          git config --global user.name "git-reap selftest"
+          git config --global init.defaultBranch develop
+      - run: bash scripts/tests/git-reap-selftest.sh

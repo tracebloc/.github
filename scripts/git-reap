@@ -80,18 +80,55 @@ if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then have_gh
 
 # One PR query per repo, not per branch: a per-branch call burns the API rate
 # limit on a repo with hundreds of branches.
+#
+# The list is EVIDENCE OF ABSENCE only when it is both readable and complete,
+# and neither is free:
+#
+#   - `|| prs=""` collapsed a failed query into "zero merged PRs". Every branch
+#     then fell through to the have_gh=1 path and was reported as "no merge
+#     evidence" — a proven negative, asserted from a read that never happened.
+#     The header two screens up promises "an ambiguous answer means KEEP" and
+#     "I could not tell is never treated as it merged"; an unreadable list is
+#     the ambiguous answer, so it has to reach the same SKIP the missing-gh case
+#     does (Bugbot).
+#   - `gh` truncates at --limit SILENTLY. A no-match against a newest-first
+#     partial window is not an absence, and the old squash-merged backlog this
+#     tool exists to clear is exactly what sorts out of that window first.
+#
+# Matches remain sound in both cases — a branch FOUND in a partial list really
+# did merge. Only absence is unprovable, and absence is what deletes nothing and
+# prints a claim. So a match still counts; a miss becomes SKIP.
+PR_LIMIT=1000
 prs=""
+pr_evidence=0
+pr_problem=""
 if [ "$have_gh" = 1 ]; then
-  prs=$(gh pr list --state merged --limit 1000 --json headRefName --jq '.[].headRefName' 2>/dev/null) || prs=""
+  if prs=$(gh pr list --state merged --limit "$PR_LIMIT" --json headRefName --jq '.[].headRefName' 2>/dev/null); then
+    pr_count=$(grep -c . <<<"$prs")
+    if [ "$pr_count" -ge "$PR_LIMIT" ]; then
+      pr_problem="the merged-PR list hit the --limit $PR_LIMIT cap, so absence from it proves nothing"
+    else
+      pr_evidence=1
+    fi
+  else
+    pr_problem="the merged-PR list could not be read (gh pr list failed)"
+  fi
 fi
 
 reaped=0; kept=0; skipped=0
 while IFS=$'\t' read -r br track; do
   [ -n "$br" ] || continue
-  printf '%s' "$br" | grep -Eq "$PROTECTED_RE" && continue
+  # A herestring, never `printf | grep -q`. Under `set -o pipefail` a `grep -q`
+  # that exits on its first match can SIGPIPE a still-writing printf, and
+  # pipefail then reports the pipeline as a MISS — so a protected branch reads
+  # as unprotected, a merged head as unmerged, and a pinned worktree as free.
+  # The failure is input-size dependent (it needs the write to outrun the 64K
+  # pipe buffer), which is the worst kind: it passes every small test and turns
+  # up on the 459-branch checkout this tool was written for (Bugbot).
+  [[ "$br" =~ $PROTECTED_RE ]] && continue
   if [ "$SCAN_ALL" = 0 ] && [ "$track" != "[gone]" ]; then continue; fi
 
-  if printf '%s\n' "$pinned" | grep -qxF "$br"; then
+  if grep -qxF -- "$br" <<<"$pinned"; then
     echo "  keep     $br — checked out in a worktree"
     kept=$((kept+1)); continue
   fi
@@ -99,13 +136,16 @@ while IFS=$'\t' read -r br track; do
   reason=""
   if git merge-base --is-ancestor "$br" "$DEFAULT" 2>/dev/null; then
     reason="ancestor of ${DEFAULT#origin/}"
-  elif [ "$have_gh" = 1 ] && printf '%s\n' "$prs" | grep -qxF "$br"; then
+  elif [ "$have_gh" = 1 ] && grep -qxF -- "$br" <<<"$prs"; then
     reason="squash-merged (MERGED PR for this head)"
   fi
 
   if [ -z "$reason" ]; then
     if [ "$have_gh" = 0 ]; then
       echo "  SKIP     $br — no gh auth, cannot prove it merged (failing closed)"
+      skipped=$((skipped+1))
+    elif [ "$pr_evidence" = 0 ]; then
+      echo "  SKIP     $br — $pr_problem (failing closed)"
       skipped=$((skipped+1))
     else
       ahead=$(git rev-list --count "$DEFAULT..$br" 2>/dev/null || echo '?')
