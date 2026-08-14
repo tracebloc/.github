@@ -91,19 +91,6 @@ jobs:
             echo "$PROJ" | jq -r --arg n "$1" '.data.organization.projectV2.fields.nodes[]
               | select(.name=="Status") | .options[] | select(.name==$n) | .id'
           }
-          # WHICH COLUMNS ARE DEPLOY STATES, ASKED OF THE BOARD (backend#1846).
-          # The twin of the router's `col_index` (.github#249), and the second of
-          # the two hand-maintained lists that had to agree. One of them rotted --
-          # the router carried the pre-rename "Staging (human review)" while the
-          # board's column is "Staging (agent review)", so a card hand-closed
-          # there lost its deploy state (.github#237). Two copies of one list is
-          # how that happens; the board's own ORDER is the thing neither copy can
-          # drift from.
-          col_index() {
-            echo "$PROJ" | jq -r --arg s "$1" \
-              '[.data.organization.projectV2.fields.nodes[]
-                | select(.name=="Status") | .options[].name] | index($s) // -1'
-          }
           # Rename window (backend#1592): ask for the NEW column name, fall back to
           # the OLD one. The UI rename flips the board in a single instant with no
           # period where both exist, so every resolver has to work on both sides of
@@ -124,6 +111,16 @@ jobs:
             echo "in_progress_opt=$(opt 'In progress')"
             echo "on_dev_opt=$(opt 'On dev')"
             echo "fr_staging_opt=$(opt_either 'Staging (human review)' 'FR on staging')"
+            # THE BOARD'S COLUMN ORDER, published because `$PROJ` does not survive
+            # this step -- every `run:` is a new shell (Bugbot, .github#252). The
+            # classify step needs the ORDER to tell a deploy state from a planning
+            # column without a hand-maintained list (backend#1846), and it has no
+            # project JSON of its own; it works off the option ids above.
+            # Tab-separated: a Status column may contain spaces and parentheses,
+            # but never a tab.
+            printf 'status_order=%s\n' "$(echo "$PROJ" | jq -r '
+              [.data.organization.projectV2.fields.nodes[]
+                | select(.name=="Status") | .options[].name] | join("\t")')"
           } >> "$GITHUB_OUTPUT"
 
       - name: Pull non-terminal items
@@ -296,6 +293,28 @@ jobs:
           # set a stage, this step derives it from the closing PR's base branch.
           ON_DEV_OPT="${{ steps.ids.outputs.on_dev_opt }}"
           FR_STAGING_OPT="${{ steps.ids.outputs.fr_staging_opt }}"
+          # The board's Status columns IN ORDER, resolved in the `ids` step --
+          # `$PROJ` does not survive into this shell (Bugbot, .github#252).
+          STATUS_ORDER="${{ steps.ids.outputs.status_order }}"
+
+          # WHICH COLUMNS ARE DEPLOY STATES, ASKED OF THE BOARD (backend#1846).
+          # The twin of the router's helper (.github#249), and the reason the class
+          # stayed open after #237: TWO hand-maintained lists had to agree and one
+          # rotted -- the router carried the pre-rename "Staging (human review)"
+          # while the board's column is "Staging (agent review)", so a card
+          # hand-closed there lost its deploy state. The board's own ORDER is the
+          # thing neither copy can drift from.
+          # awk, NOT `grep | head | cut`. Under `set -euo pipefail` a grep that
+          # finds nothing fails the pipeline, and `_ci=$(col_index ...)` is a bare
+          # assignment -- so an UNRECOGNISED column would abort the whole classify
+          # step instead of being handled as unplaceable. Verified: the assignment
+          # form never reached the next line. Same trap as release-train#73, and
+          # this is the reason a helper that reports "not found" must not do it by
+          # failing. awk always exits 0 and prints -1 for a miss.
+          col_index() {
+            printf '%s' "$STATUS_ORDER" | tr '\t' '\n' \
+              | awk -v s="$1" 'BEGIN{i=-1} i<0 && $0==s {i=NR} END{print i}'
+          }
 
           while IFS= read -r line; do
             ITEM_ID=$(echo "$line"  | jq -r '.id')
@@ -380,7 +399,17 @@ jobs:
                   # before "Prod", in the board's own order -- so a column
                   # INSERTED between them (which is exactly how "Staging (agent
                   # review)" arrived) is classified correctly with no edit here.
-                  _ci=$(col_index "$COL"); _di=$(col_index "On dev"); _pi=$(col_index "Prod")
+                  # NO STATUS IS NOT AN UNPLACEABLE COLUMN (Bugbot, .github#252).
+                  # `$COL` is the literal "No status" when the field is null, and
+                  # treating that as unplaceable would skip exactly the cards this
+                  # backstop exists to terminalize -- they would stay closed,
+                  # non-terminal and unarchived forever. The ABSENCE of a column is
+                  # evidence that nothing deployed; an UNRECOGNISED column is not.
+                  if [ -z "$COL" ] || [ "$COL" = "No status" ]; then
+                    _ci=0; _di=1; _pi=1        # placeable, and before On dev
+                  else
+                    _ci=$(col_index "$COL"); _di=$(col_index "On dev"); _pi=$(col_index "Prod")
+                  fi
                   # UNKNOWN MUST NOT FALL OPEN: a column this workflow cannot
                   # place, or a board missing an anchor, is not evidence that
                   # nothing shipped. Treated as a deploy state -- leaving a card
