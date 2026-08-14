@@ -90,12 +90,18 @@ make_repo() {
   git -C "$work" remote set-head origin develop >/dev/null 2>&1
 }
 
-# stub_gh <bindir> <mode> — a fake `gh` on PATH.
-#   ok:<n>    a readable list of n merged heads, "squashed" among them
+# stub_gh <bindir> <mode> <work> — a fake `gh` on PATH. Rows are "name sha",
+# which is what the real query returns and what the match requires.
+#   ok        a readable list holding "squashed" at its CURRENT tip
+#   stale-sha "squashed" is listed, but at some OTHER sha — a branch whose PR
+#             merged and then got another commit, or a reused branch name
 #   fail      `gh pr list` exits non-zero (network down, rate limit, bad token)
 #   truncated exactly PR_LIMIT rows, none of them "squashed"
+#   empty     a readable, complete, empty list
 stub_gh() {
-  local bin="$1" mode="$2"
+  local bin="$1" mode="$2" work="$3"
+  local sha
+  sha=$(git -C "$work" rev-parse squashed 2>/dev/null || echo 0000000000000000000000000000000000000000)
   mkdir -p "$bin"
   cat >"$bin/gh" <<STUB
 #!/usr/bin/env bash
@@ -103,9 +109,10 @@ stub_gh() {
 if [ "\$1" = "pr" ] && [ "\$2" = "list" ]; then
   case "$mode" in
     fail) exit 1 ;;
-    truncated) for i in \$(seq 1 1000); do echo "filler-\$i"; done; exit 0 ;;
+    truncated) for i in \$(seq 1 1000); do echo "filler-\$i deadbeef"; done; exit 0 ;;
     empty) exit 0 ;;
-    *) echo squashed; exit 0 ;;
+    stale-sha) echo "squashed 1111111111111111111111111111111111111111"; exit 0 ;;
+    *) echo "squashed $sha"; exit 0 ;;
   esac
 fi
 exit 0
@@ -116,7 +123,7 @@ STUB
 run_reap() {
   local root="$1" mode="$2"
   shift 2
-  stub_gh "$root/bin" "$mode"
+  stub_gh "$root/bin" "$mode" "$root/work"
   (cd "$root/work" && PATH="$root/bin:$PATH" bash "$REAP" "$@" 2>&1)
 }
 
@@ -127,7 +134,7 @@ T=$(mktemp -d)
 make_repo "$T"
 out=$(run_reap "$T" ok)
 assert_out "a squash-merged branch is reaped" "squashed" "$out"
-assert_out "  …on PR evidence" "squash-merged (MERGED PR for this head)" "$out"
+assert_out "  …on PR evidence" "squash-merged (MERGED PR for this exact head)" "$out"
 assert_out "an ancestor of develop is reaped" "ancestor of develop" "$out"
 assert_out "unmerged work is KEPT" "KEEP     unmerged" "$out"
 assert_not_out "unmerged work is never skipped as unprovable" "SKIP     unmerged" "$out"
@@ -208,11 +215,42 @@ T=$(mktemp -d)
 make_repo "$T"
 git -C "$T/work" branch main develop 2>/dev/null
 git -C "$T/work" branch staging develop 2>/dev/null
+# Stand somewhere else. Checked out on develop, the worktree pin protects it and
+# this case proves nothing about PROTECTED_RE for the one branch that matters
+# most — it passed under a mutated regex for exactly that reason.
+git -C "$T/work" checkout -q unmerged
 out=$(run_reap "$T" ok --all)
 for protected in develop staging main; do
-  assert_not_out "$protected is never a candidate" "  deleted  $protected" "$out"
-  assert_not_out "$protected is never even reported" " $protected —" "$out"
+  # The needle is the DRY-RUN verb. The first version of this case looked for
+  # "deleted", which a dry run never prints — so a broken PROTECTED_RE emitting
+  # "would go main (sha) — …" left the suite green, and the guard protecting
+  # integration branches from `--delete --all` could not fail (Bugbot). Assert
+  # the branch is not named as a candidate in either verb.
+  assert_not_out "$protected is not a dry-run candidate" "would go $protected " "$out"
+  assert_not_out "$protected is not a delete candidate" "deleted  $protected " "$out"
+  # Not merely un-reaped — never CONSIDERED. A protected branch reaching any
+  # verdict line means PROTECTED_RE let it into the loop.
+  assert_not_out "$protected is never considered" " $protected " "$out"
 done
+rm -rf "$T"
+
+# --- 8. A merged NAME is not a merged BRANCH ------------------------------
+# The evidence matched on headRefName alone, so a branch that merged and then
+# took another commit — or a reused branch name — still counted as merged. With
+# --delete that force-removes work that never landed, which is the exact
+# opposite of the header's promise, and `git branch -D` issues no warning.
+T=$(mktemp -d)
+make_repo "$T"
+out=$(run_reap "$T" stale-sha)
+assert_out "a merged name at a different sha is not evidence" \
+  "KEEP     squashed" "$out"
+assert_not_out "  …and is certainly not reaped" "would go squashed" "$out"
+run_reap "$T" stale-sha --delete >/dev/null
+if git -C "$T/work" rev-parse --verify --quiet squashed >/dev/null; then
+  ok "--delete leaves a name-only match alone"
+else
+  no "--delete leaves a name-only match alone" "unlanded work was force-deleted"
+fi
 rm -rf "$T"
 
 echo

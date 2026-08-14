@@ -98,12 +98,25 @@ if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then have_gh
 # Matches remain sound in both cases — a branch FOUND in a partial list really
 # did merge. Only absence is unprovable, and absence is what deletes nothing and
 # prints a claim. So a match still counts; a miss becomes SKIP.
+#
+# The list carries the head SHA as well as the name, and the match below needs
+# BOTH. A name-only match says "a branch called this merged once" — not "this
+# branch merged". Push another commit after the merge, or reuse a branch name
+# (`fix/typo` twice, months apart), and the name still matches while the tip is
+# work that has never landed. With --delete that is a force-delete of unmerged
+# commits, from a tool whose header promises the opposite, and git's own safety
+# net is off: `git branch -D` does not warn.
+#
+# Requiring the tip to equal the merged PR's headRefOid makes the check say what
+# it claims. A local branch that is BEHIND its merged head also stops matching,
+# which is the conservative direction: it is kept, and `git merge-base
+# --is-ancestor` already reaps the ordinary merged case anyway (Bugbot).
 PR_LIMIT=1000
 prs=""
 pr_evidence=0
 pr_problem=""
 if [ "$have_gh" = 1 ]; then
-  if prs=$(gh pr list --state merged --limit "$PR_LIMIT" --json headRefName --jq '.[].headRefName' 2>/dev/null); then
+  if prs=$(gh pr list --state merged --limit "$PR_LIMIT" --json headRefName,headRefOid --jq '.[] | .headRefName + " " + .headRefOid' 2>/dev/null); then
     pr_count=$(grep -c . <<<"$prs")
     if [ "$pr_count" -ge "$PR_LIMIT" ]; then
       pr_problem="the merged-PR list hit the --limit $PR_LIMIT cap, so absence from it proves nothing"
@@ -136,8 +149,8 @@ while IFS=$'\t' read -r br track; do
   reason=""
   if git merge-base --is-ancestor "$br" "$DEFAULT" 2>/dev/null; then
     reason="ancestor of ${DEFAULT#origin/}"
-  elif [ "$have_gh" = 1 ] && grep -qxF -- "$br" <<<"$prs"; then
-    reason="squash-merged (MERGED PR for this head)"
+  elif [ "$have_gh" = 1 ] && grep -qxF -- "$br $(git rev-parse "$br")" <<<"$prs"; then
+    reason="squash-merged (MERGED PR for this exact head)"
   fi
 
   if [ -z "$reason" ]; then
