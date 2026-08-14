@@ -63,20 +63,50 @@ PROTECTED_RE='^(develop|staging|main|master|gh-pages|HEAD)$'
 
 git fetch --prune --quiet 2>/dev/null || echo "git reap: fetch failed — working from possibly stale refs" >&2
 
+have_gh=0
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then have_gh=1; fi
+
 DEFAULT=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)
 if [ -z "$DEFAULT" ]; then
   for guess in origin/develop origin/main origin/master; do
     git rev-parse --verify --quiet "$guess" >/dev/null && { DEFAULT="$guess"; break; }
   done
 fi
+
+# origin/HEAD is a LOCAL CACHE of the remote's default branch. It is written at
+# clone time and `git fetch` never updates it, so it goes stale the moment the
+# remote's default moves — measured on 9 of 19 clones in this org, every one still
+# pointing at `main` after the move to `develop`.
+#
+# Every use of DEFAULT below is wrong when it is stale, in both directions. The
+# ancestor check reaps a branch that landed on `main` but never on `develop`. The
+# --base filter reads a COMPLETE merged-PR list for the wrong base, sets
+# pr_evidence=1 on it, and the KEEP line then reports "no merge evidence" as a
+# proven negative — the same contradiction the header forbids for an unreadable or
+# truncated list, arrived at from a clean read of the wrong question.
+#
+# So it is verified against the authority rather than trusted, and gh is already
+# required for the evidence path that matters. When gh cannot answer, the value is
+# UNVERIFIED and says so: the PR path already fails closed without gh, but the
+# ancestor path does not, and a silent stale default is exactly what this tool
+# must not have (Bugbot).
+if [ "$have_gh" = 1 ] &&
+   remote_default=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null) &&
+   [ -n "$remote_default" ]; then
+  if [ "$DEFAULT" != "origin/$remote_default" ]; then
+    echo "git reap: origin/HEAD says ${DEFAULT:-<unset>}, the remote says $remote_default — using the remote and refreshing origin/HEAD" >&2
+    git remote set-head origin "$remote_default" >/dev/null 2>&1 || true
+    DEFAULT="origin/$remote_default"
+  fi
+elif [ -n "$DEFAULT" ]; then
+  echo "git reap: cannot reach the remote to confirm the default branch — treating $DEFAULT as UNVERIFIED (a stale origin/HEAD would make every verdict below wrong)" >&2
+fi
+
 [ -n "$DEFAULT" ] || { echo "git reap: cannot determine the default branch — refusing to guess" >&2; exit 2; }
 
 # Branch checked out here or in any linked worktree cannot be deleted; naming it
 # is more useful than a git error.
 pinned=$(git worktree list --porcelain | awk '/^branch /{sub("refs/heads/","",$2); print $2}')
-
-have_gh=0
-if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then have_gh=1; fi
 
 # One PR query per repo, not per branch: a per-branch call burns the API rate
 # limit on a repo with hundreds of branches.

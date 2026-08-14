@@ -102,6 +102,9 @@ make_repo() {
 #             "squashed" merged, but into a SIBLING FEATURE branch. The real `gh`
 #             filters by base server-side, so this row is only visible to a query
 #             that forgot --base — which is precisely the bug being asserted.
+#   no-remote-default
+#             `gh repo view` fails, so the default branch cannot be confirmed and
+#             a possibly-stale origin/HEAD must be announced as UNVERIFIED.
 #
 # The stub reads --base out of its own argv rather than ignoring it, because the
 # behaviour under test IS whether git-reap passes it. A stub that discarded the
@@ -114,6 +117,15 @@ stub_gh() {
   cat >"$bin/gh" <<STUB
 #!/usr/bin/env bash
 [ "\$1" = "auth" ] && exit 0
+# The authority for the default branch. git-reap asks this because origin/HEAD is
+# a clone-time cache that fetch never refreshes; the stub answers "develop", which
+# is what make_repo actually builds.
+if [ "\$1" = "repo" ] && [ "\$2" = "view" ]; then
+  case "$mode" in
+    no-remote-default) exit 1 ;;
+    *) echo "develop"; exit 0 ;;
+  esac
+fi
 if [ "\$1" = "pr" ] && [ "\$2" = "list" ]; then
   base=""
   while [ \$# -gt 0 ]; do
@@ -288,6 +300,38 @@ if git -C "$T/work" rev-parse --verify --quiet squashed >/dev/null; then
 else
   no "--delete leaves a sibling-merged branch alone" "unlanded work was force-deleted"
 fi
+rm -rf "$T"
+
+# --- 10. A stale origin/HEAD is corrected, not trusted ---------------------
+# origin/HEAD is a clone-time cache and `git fetch` never refreshes it. Stale, it
+# poisons every verdict: --is-ancestor measures against the wrong branch, and the
+# --base filter reads a COMPLETE merged-PR list for the wrong base and calls that
+# a proven negative. Measured on 9 of 19 clones in this org, all still on `main`.
+T=$(mktemp -d)
+make_repo "$T"
+# A REAL main on the origin, then point origin/HEAD at it while develop is still
+# the true default — the exact drift these clones have. It has to resolve: a
+# dangling symref just makes `git symbolic-ref` return empty and the fallback
+# loop picks develop anyway, so the case would pass without testing anything.
+git -C "$T/origin" branch main develop
+git -C "$T/work" fetch origin --quiet
+git -C "$T/work" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+out=$(run_reap "$T" ok --all)
+assert_out "a stale origin/HEAD is reported rather than trusted" \
+  "the remote says develop" "$out"
+# With the default corrected back to develop, the squash evidence resolves again.
+assert_out "  …and the corrected default restores the merge evidence" \
+  "squash-merged" "$out"
+rm -rf "$T"
+
+# --- 11. An unconfirmable default branch says so --------------------------
+# gh cannot answer, so origin/HEAD might be stale and nothing can prove otherwise.
+# Silence here would be the fail-open the header forbids.
+T=$(mktemp -d)
+make_repo "$T"
+out=$(run_reap "$T" no-remote-default --all)
+assert_out "an unconfirmable default branch is announced as UNVERIFIED" \
+  "UNVERIFIED" "$out"
 rm -rf "$T"
 
 echo
