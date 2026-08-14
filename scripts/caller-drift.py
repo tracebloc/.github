@@ -48,12 +48,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 
 try:
     import yaml
@@ -68,12 +70,44 @@ except ImportError:  # pragma: no cover - the workflow installs it explicitly
 TOP_LEVEL_KEYS = {
     "schema_version", "org", "pinned_ref", "audit_branch", "source_repo",
     "reusables", "copies", "shared_reasons", "repos", "protection_policy",
-    "ruleset_policy",
+    "ruleset_policy", "quality_files",
 }
 REQUIRED_TOP_LEVEL = TOP_LEVEL_KEYS - {"shared_reasons"}
 REPO_KEYS = {
     "visibility", "release_train", "callers", "copies", "protection", "rulesets",
+    "quality_files",
 }
+
+# ----------------------------------------------------------------- quality files
+#
+# Files every repo must CARRY, asserted by presence at a fixed path (backend#1608
+# increment 5). Distinct from `copies`, which are workflow files compared byte for
+# byte against the canonical original: these are per-repo BY DESIGN -- backend's
+# BUGBOT.md is about Django and Celery, cli's is about Go -- so content cannot be
+# compared and presence is the whole assertion.
+#
+# WHY PRESENCE IS WORTH ASSERTING AT ALL. Both files are read by a tool, not by a
+# reviewer who would notice them missing: CLAUDE.md is what an AI session is told
+# to follow, and `.cursor/BUGBOT.md` is what Bugbot reads before reviewing a diff.
+# A repo without them does not fail; it gets silently worse review than its peers,
+# which is not a state anything else in the org reports. Adding a repo to the org
+# forces a row here, which is the same forcing function the caller family provides.
+#
+# NOT the org-standards block inside CLAUDE.md -- scripts/standards-sync.py owns
+# that, and asserting it here would be a second mechanism for one property.
+#
+# `.gitleaks.toml` is deliberately NOT modelled. It is 7/20 and that is correct:
+# it is a per-repo allowlist you add when you hit a false positive, not a control.
+# The control is `quality / gitleaks` being a REQUIRED status check, which
+# protection_policy.required_checks already asserts on all 16 train repos. Adding
+# the file here would generate nine exemption rows for zero security value and
+# make a tuning file read as a security gap -- inert verification, which is the
+# pattern backend#1729 exists to catch.
+#
+# Modes, not just presence. A tree entry can be a directory, a submodule or a
+# SYMLINK (mode 120000) at the asserted path, and a symlink to nowhere satisfies
+# "the path exists" while being no guide at all.
+REGULAR_FILE_MODES = ("100644", "100755")
 
 # ---------------------------------------------------------------------- rulesets
 #
@@ -494,7 +528,7 @@ def load_inventory(path: str) -> dict:
             "default branch - that is exactly the under-reporting this corrects."
         )
 
-    for key in ("reusables", "copies"):
+    for key in ("reusables", "copies", "quality_files"):
         value = data[key]
         if not isinstance(value, list):
             die(f"{path}: `{key}` must be a list.")
@@ -504,14 +538,36 @@ def load_inventory(path: str) -> dict:
             die(f"{path}: `{key}` contains duplicates.")
     reusables = list(data["reusables"])
     copies = list(data["copies"])
+    quality_files = list(data["quality_files"])
     if not reusables:
         die(
             f"{path}: `reusables` is empty. An empty inventory would pass "
             "vacuously, which is worse than no guard at all."
         )
+    if not quality_files:
+        die(
+            f"{path}: `quality_files` is empty. Like `reusables`, an empty list "
+            "passes vacuously for all 20 repos, which is worse than no family."
+        )
     overlap = set(reusables) & set(copies)
     if overlap:
         die(f"{path}: {sorted(overlap)} listed as both a reusable and a copy.")
+    # Repo-relative paths, matched against git tree paths exactly. An absolute or
+    # `..`-bearing path can never equal a tree path, so it would assert nothing
+    # while looking like an assertion -- the whole defect class this guard is for.
+    for item in quality_files:
+        if item != item.strip():
+            die(f"{path}: quality_files entry {item!r} has surrounding whitespace.")
+        if item.startswith("/") or item.endswith("/") or "//" in item:
+            die(
+                f"{path}: quality_files entry {item!r} must be a repo-relative "
+                "path with no leading or trailing slash."
+            )
+        if ".." in item.split("/"):
+            die(
+                f"{path}: quality_files entry {item!r} contains `..`, which can "
+                "never match a git tree path."
+            )
 
     policy = data["protection_policy"]
     if not isinstance(policy, dict):
@@ -567,6 +623,10 @@ def load_inventory(path: str) -> dict:
             # documented variant, because the thing it permits (a squash promotion,
             # an extra bypass actor) is exactly what the property exists to catch.
             ("rulesets", RULESET_KINDS, {"exempt"}),
+            # Presence is binary, so there is no `divergent` here either: the
+            # files are per-repo by design and their CONTENT is never compared,
+            # which leaves nothing for a documented content variance to describe.
+            ("quality_files", quality_files, {"exempt"}),
         ):
             cells = entry[section]
             if not isinstance(cells, dict):
@@ -630,6 +690,211 @@ def load_source_copies(source_dir: str, copies: "list[str]") -> "dict[str, str]"
                 "everything."
             )
     return shas
+
+
+def read_source_copy(source_dir: str, name: str) -> bytes:
+    """The canonical bytes of a copy. load_source_copies() already proved it reads."""
+    path = os.path.join(source_dir, ".github", "workflows", name)
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+# ------------------------------------------------------------------ remediation
+#
+# WHAT --create-prs WILL AND WILL NOT FIX, and why the boundary is here.
+#
+# The ask (backend#1608 item 4) is "open the missing-piece PR per repo", because
+# detection alone still leaves the manual work; it only makes it visible. But a
+# pull request is the right instrument for exactly one of the five families, and
+# pretending otherwise would be worse than not automating at all:
+#
+#   copies             REMEDIABLE. Byte-identical by definition, and the guard
+#                      already holds the canonical bytes it compares against, so
+#                      the fix is exact rather than generated.
+#
+#   callers            NOT remediable. Caller content is repo-specific: measured
+#                      2026-08-12, all EIGHT sampled repos have a different
+#                      code-quality-caller.yml, because each passes its own
+#                      toolchain inputs. A generated caller would be a plausible
+#                      file that is wrong for that repo -- worse than an absent
+#                      one, which at least reports as a finding.
+#
+#   protection,        NOT remediable BY PR. These are API settings, not files in
+#   required_checks,   the tree. No commit can change them, so a PR that claimed
+#   rulesets           to fix them would be theatre. They stay report-only, and
+#                      arming them by hand stays deliberate (backend#1276).
+#
+# And within `copies`, only entries whose inventory state is `required` are
+# touched. `divergent` means a human wrote down WHY this repo differs -- cli pins
+# actions/stale@v11 where canon pins v9, and the newer pin may well be the better
+# one. A script that silently overwrote a recorded decision with the canonical
+# bytes would destroy the very judgement the inventory exists to preserve. Same
+# for `exempt`. Those are reported, never rewritten.
+
+
+def _read_copy_on_head(
+    full: str, path: str, head: str, expect_file: bool
+) -> "tuple[str, bytes | None, str | None]":
+    """(blob sha, decoded bytes, error) for `path` on `head`.
+
+    THE CONTENT IS READ, NOT JUST THE SHA. Without it the caller cannot tell an
+    already-correct copy from a drifted one, so a re-dispatch PUTs bytes that are
+    already there and records a remediation failure on the 409 -- see the skip in
+    remediate_copies(). standards-sync.py's _read_head_file returns both for the
+    same reason. ("" , None) means the file genuinely is absent.
+
+    Ported from standards-sync.py's _read_head_file and for the same reason: a ref
+    created an instant ago is eventually consistent, so reading a file on it can
+    transiently 404 even though the base it was cut from has that file. When the
+    caller KNOWS the base has it, a 404 cannot be true yet -- retry with backoff and
+    fail CLOSED if it never appears, because believing it means a sha-less write
+    against an existing path. When the base has no file, one confirming re-read
+    still guards against trusting a single blip.
+    """
+    attempts = 5 if expect_file else 2
+    delay = 1.0
+    last = ""
+    for attempt in range(1, attempts + 1):
+        try:
+            raw = gh(["api", f"repos/{full}/contents/{path}?ref={head}"])
+            try:
+                blob = json.loads(raw)
+                body = base64.b64decode(blob.get("content", ""))
+            except (ValueError, binascii.Error) as exc:
+                return "", None, f"{path} on {head} did not decode: {exc!r}"
+            return str(blob.get("sha", "")).strip(), body, None
+        except GhError as exc:
+            if exc.status == 404:
+                if not expect_file and attempt >= 2:
+                    return "", None, None  # absence confirmed by a re-read
+                last = f"404 (attempt {attempt}/{attempts})"
+            else:
+                last = str(exc)
+        if attempt < attempts:
+            time.sleep(delay)
+            delay = min(delay * 2, 8.0)
+    if expect_file:
+        return "", None, (
+            f"cannot read {path} on {head}: the base has the file but this ref kept "
+            f"answering {last} after {attempts} attempts - refusing a sha-less write"
+        )
+    return "", None, f"cannot read {path} on {head} after {attempts} attempts: {last}"
+
+
+def _ensure_copy_pr(full: str, head: str, base: str, issue: int, names: "list[str]") -> "str | None":
+    try:
+        existing = gh(["pr", "list", "-R", full, "--head", head, "--base", base,
+                       "--state", "open", "--json", "number", "--jq", ".[0].number // empty"])
+    except GhError as exc:
+        return f"cannot list PRs: {exc}"
+    if existing.strip():
+        return None  # an open PR already tracks the branch; the write above refreshed it
+
+    listed = ", ".join(f"`{n}`" for n in names)
+    body = (
+        f"Realigns {listed} with the canonical copy in `tracebloc/.github`.\n\n"
+        "These files are **copies, not callers** — nothing resolves them at run time, so a\n"
+        "drifted or missing copy produces no failing run anywhere. Only the conformance\n"
+        "audit notices, which is why this PR exists.\n\n"
+        "Opened by the conformance harness (`caller-drift.py --create-prs`). It rewrites\n"
+        "only copies marked `required` in `repo-inventory.yml`; entries marked `divergent`\n"
+        "or `exempt` carry a written reason and are never touched.\n\n"
+        f"Part of tracebloc/backend#{issue}.\n\n"
+        "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"
+    )
+    try:
+        out = gh(["pr", "create", "-R", full, "--base", base, "--head", head,
+                  "--title", f"chore(ci): realign canonical workflow copies (backend#{issue})",
+                  "--body", body])
+    except GhError as exc:
+        return f"cannot open PR: {exc}"
+
+    # Assignee = whoever dispatched the run (D31). Non-fatal: a missing assignee is
+    # visible on the PR and cheap to add by hand, and failing here would strand a
+    # branch that was already pushed correctly.
+    actor = os.environ.get("GITHUB_ACTOR", "").strip()
+    if actor:
+        try:
+            gh(["pr", "edit", out.strip() or head, "-R", full, "--add-assignee", actor])
+        except GhError as exc:
+            sys.stderr.write(f"::warning::{full}: could not assign @{actor}: {exc}\n")
+    return None
+
+
+def remediate_copies(
+    org: str, repo: str, base: str, entries: "list[tuple[str, bool]]",
+    source_dir: str, issue: int
+) -> "str | None":
+    """Push canonical copies onto a branch and open/refresh the PR.
+
+    Returns an error string, or None on success. Never raises: one repo that
+    cannot be written must not abort remediation for the rest, and must not be
+    reported as done.
+    """
+    head = f"chore/{issue}-conformance-copies"
+    full = f"{org}/{repo}"
+
+    try:
+        base_sha = gh(["api", f"repos/{full}/git/ref/heads/{base}", "--jq", ".object.sha"]).strip()
+    except GhError as exc:
+        return f"cannot resolve {base} head: {exc}"
+    if not base_sha:
+        return f"cannot resolve {base} head: empty sha"
+
+    branch_is_fresh = True
+    try:
+        gh(["api", "-X", "POST", f"repos/{full}/git/refs",
+            "-f", f"ref=refs/heads/{head}", "-f", f"sha={base_sha}"])
+    except GhError as exc:
+        # 422 means the branch already exists: reuse it, which is what makes a
+        # re-dispatch idempotent instead of a second PR. Anything else is fatal —
+        # a branch we could not create is not a branch we may write to.
+        if exc.status != 422:
+            return f"cannot create branch {head}: {exc}"
+        # A REUSED branch is a different situation, and conflating the two is how
+        # standards-sync got stuck (its #197): that ref may have been cut BEFORE the
+        # file existed on the base, so a 404 on it is honest and permanent. Retrying
+        # five times and then failing closed would strand the repo forever. Only a
+        # branch created moments ago may be presumed to be lying.
+        branch_is_fresh = False
+
+    for name, on_base in entries:
+        payload = read_source_copy(source_dir, name)
+        encoded = base64.b64encode(payload).decode("ascii")
+        path = f".github/workflows/{name}"
+        # A DRIFTED copy exists on the base, so on a branch cut from that base a 404
+        # cannot be true -- it is the eventual-consistency window standards-sync.py
+        # already pays for (design rule 5). Believing it produces a sha-less PUT
+        # against an existing path, which the API rejects with 422, and remediation
+        # then fails on the most common dispatch of all: fresh branch, drifted file.
+        # Only a MISSING copy may legitimately 404. (Bugbot, #227.)
+        current, body, rerr = _read_copy_on_head(
+            full, path, head, expect_file=on_base and branch_is_fresh
+        )
+        if rerr:
+            return rerr
+        # SKIP AN IDENTICAL WRITE. A re-dispatch normally finds the branch already
+        # carrying the canon from the first run; PUTting the same bytes answers
+        # 409 (or races the sha) and remediation records a failure, so the audit
+        # goes red as if the fleet could not be written. standards-sync.py skips
+        # the write for exactly this reason, which is what makes 422 branch reuse
+        # idempotent there. (Bugbot, PR #238.)
+        if body is not None and body == payload:
+            continue
+        args = ["api", "-X", "PUT", f"repos/{full}/contents/{path}",
+                "-f", f"message=chore(ci): realign {name} with tracebloc/.github (backend#{issue})",
+                "-f", f"content={encoded}", "-f", f"branch={head}"]
+        if current:
+            args += ["-f", f"sha={current}"]
+        try:
+            gh(args)
+        except GhError as exc:
+            # 409/422 here means someone else wrote the branch between the read and
+            # the write. Refusing is right: retrying blind would clobber whatever
+            # they pushed.
+            return f"cannot write {path} on {head}: {exc}"
+
+    return _ensure_copy_pr(full, head, base, issue, [n for n, _ in entries])
 
 
 def check_source_reusables(source_dir: str, listed: "list[str]") -> None:
@@ -783,6 +1048,11 @@ class RepoRead:
         self.branches: "set[str]" = set()
         self.callers: "dict[str, list[tuple[str, str]]]" = {}
         self.copies: "dict[str, str]" = {}
+        # path -> {"type":, "mode":, "size":} for each asserted quality file that
+        # the tree carries. A path ABSENT from this dict means the tree was read
+        # successfully and did not contain it -- never that the read failed, which
+        # returns early with an error and no verdict at all.
+        self.quality_files: "dict[str, dict]" = {}
         self.has_workflow_dir = False
         self.errors: "list[str]" = []
 
@@ -791,7 +1061,10 @@ class RepoRead:
         return not self.errors
 
 
-def read_repo(org: str, name: str, meta: dict, copies: "list[str]") -> RepoRead:
+def read_repo(
+    org: str, name: str, meta: dict, copies: "list[str]",
+    quality_files: "list[str]",
+) -> RepoRead:
     out = RepoRead(name)
 
     try:
@@ -848,6 +1121,34 @@ def read_repo(org: str, name: str, meta: dict, copies: "list[str]") -> RepoRead:
         if item.get("type") == "blob" and WORKFLOW_PATH.match(item.get("path") or "")
     ]
     out.has_workflow_dir = bool(workflows)
+
+    # Quality files come out of the SAME tree, so they cost no extra call and
+    # inherit its fail-closed properties: a 403, an unparseable payload or a
+    # truncated tree already returned above, and only a fully-read tree can reach
+    # this loop. That is what makes "not in out.quality_files" mean absent.
+    #
+    # `size` is recorded rather than assumed, because a zero-byte file at the right
+    # path satisfies presence while carrying no guidance. A blob whose size the API
+    # did not report is UNREADABLE, not empty -- guessing either way here would be
+    # the guard deciding a fact it does not have.
+    wanted_files = set(quality_files)
+    for item in entries:
+        item_path = item.get("path")
+        if item_path not in wanted_files:
+            continue
+        item_type = item.get("type")
+        size = item.get("size")
+        if item_type == "blob" and not isinstance(size, int):
+            out.errors.append(
+                f"{item_path}: tree entry has no size, so it cannot be told from "
+                "an empty file"
+            )
+            continue
+        out.quality_files[item_path] = {
+            "type": item_type,
+            "mode": item.get("mode"),
+            "size": size,
+        }
 
     for item in workflows:
         path = item["path"]
@@ -1343,6 +1644,64 @@ def evaluate_rulesets(
                     )
 
 
+def evaluate_quality_files(
+    name: str, entry: dict, quality_files: "list[str]", found: "dict[str, dict]",
+    findings: "list[str]",
+) -> None:
+    """Assert one repo's quality files (backend#1608 increment 5).
+
+    Takes the already-read tree facts rather than doing its own read, so there is
+    no second code path that could conclude "absent" from a failure. `found` is
+    only ever populated from a fully-read, untruncated tree; a repo whose read
+    failed never reaches this function, and its whole row is recorded unreadable.
+
+    Both directions are asserted, as everywhere else in this file:
+      required  the file must be present, a regular file, and non-empty
+      exempt    the file must be ABSENT; if it turns up, the exemption is stale
+    """
+    for file_path in quality_files:
+        state, reason = entry["quality_files"][file_path]
+        got = found.get(file_path)
+
+        if state == "required":
+            if got is None:
+                findings.append(
+                    f"{name}: MISSING required {file_path}. Nothing else in the org "
+                    "reports its absence - the tools that read it simply get less "
+                    "context here than in every peer repo."
+                )
+                continue
+            if got["type"] != "blob":
+                findings.append(
+                    f"{name}: {file_path} exists but is a {got['type']!r}, not a "
+                    "file."
+                )
+                continue
+            if got["mode"] not in REGULAR_FILE_MODES:
+                findings.append(
+                    f"{name}: {file_path} is mode {got['mode']} (a symlink or "
+                    "submodule), not a regular file. The path resolving is not the "
+                    "same as the guidance being there."
+                )
+                continue
+            if got["size"] == 0:
+                findings.append(
+                    f"{name}: {file_path} is present but EMPTY (0 bytes), which "
+                    "satisfies a presence check and carries no guidance."
+                )
+            continue
+
+        # exempt: the claim is that the file is legitimately absent. If it exists,
+        # say so -- the same staleness rule the caller, copy, protection and
+        # ruleset families each apply to their own exemptions.
+        if got is not None:
+            findings.append(
+                f"{name}: {file_path} is marked `exempt` but the file exists. The "
+                f"exemption is stale - promote it to `required`. (reason on file: "
+                f"{reason[:80]})"
+            )
+
+
 def render_matrix(matrix: dict, inventory: dict) -> "list[str]":
     """The one screen (backend#1608 increment 3).
 
@@ -1358,7 +1717,7 @@ def render_matrix(matrix: dict, inventory: dict) -> "list[str]":
       ?    that family could not be READ (never conflated with OK -- an
            unreadable family is the state this guard exists to refuse)
     """
-    families = ("callers", "copies", "protection", "rulesets")
+    families = ("callers", "copies", "quality_files", "protection", "rulesets")
     out = [
         "<details><summary><b>Conformance matrix</b> - every repo x every family, "
         "including what passed</summary>",
@@ -1375,8 +1734,9 @@ def render_matrix(matrix: dict, inventory: dict) -> "list[str]":
             continue
         rendered = []
         for fam in families:
-            # Only protection and rulesets can be partially unread: callers and
-            # copies come from the repo read, which fails the whole row first.
+            # Only protection and rulesets can be partially unread: callers,
+            # copies and quality_files all come from the one repo read, which
+            # fails the whole row first.
             unread = cells.get(f"{fam}_unread", 0) if fam in ("protection", "rulesets") else 0
             n = cells.get(fam, 0)
             if unread:
@@ -1400,6 +1760,13 @@ def main() -> int:
         "--source-dir", default=".",
         help="checkout of tracebloc/.github, holding the canonical copies",
     )
+    parser.add_argument(
+        "--create-prs",
+        action="store_true",
+        help="remediate drifted/missing REQUIRED copies by opening a PR per repo. "
+             "Only the `copies` family is remediable - see the remediation block "
+             "above for why callers and protection are not.",
+    )
     parser.add_argument("--summary", default=os.environ.get("GITHUB_STEP_SUMMARY"))
     parser.add_argument("--output", default=os.environ.get("GITHUB_OUTPUT"))
     args = parser.parse_args()
@@ -1408,8 +1775,14 @@ def main() -> int:
     org = inventory["org"]
     pinned_ref = inventory["pinned_ref"]
     source_repo = inventory["source_repo"]
+    # {(repo, branch): [copy_name, ...]} - REQUIRED copies that are missing or
+    # drifted. Populated during the audit so remediation never re-derives what
+    # counts as broken from a second, drifting copy of the rules.
+    remediable: "dict[tuple[str, str], list[str]]" = {}
+    remediation_failures: "list[str]" = []
     reusables = list(inventory["reusables"])
     copies = list(inventory["copies"])
+    quality_files = list(inventory["quality_files"])
     check_source_reusables(args.source_dir, reusables)
     source_shas = load_source_copies(args.source_dir, copies)
 
@@ -1461,7 +1834,7 @@ def main() -> int:
     for name in audited:
         entry = inventory["repos"][name]
         meta = active[name]
-        read = read_repo(org, name, meta, copies)
+        read = read_repo(org, name, meta, copies, quality_files)
         if not read.ok:
             for problem in read.errors:
                 unreadable.append(f"{name}: {problem}")
@@ -1533,6 +1906,7 @@ def main() -> int:
                     findings.append(
                         f"{name}: MISSING required copy {copy_name} on {read.branch}."
                     )
+                    remediable.setdefault((name, read.branch), []).append((copy_name, False))
                 elif name == source_repo:
                     # This repo holds the canonical file. Comparing the audit branch
                     # against the checkout would flag any PR that edits a copy, so
@@ -1546,6 +1920,9 @@ def main() -> int:
                         f"{source_shas[copy_name][:12]}). It is a copy, not a "
                         "caller, so nothing else would ever notice."
                     )
+                    # True: the file EXISTS on the base (that is what drifted). A
+                    # 404 for it on a fresh branch is therefore provably a lie.
+                    remediable.setdefault((name, read.branch), []).append((copy_name, True))
             elif state == "divergent":
                 if actual is None:
                     findings.append(
@@ -1564,6 +1941,19 @@ def main() -> int:
                     "The exemption is stale."
                 )
 
+        _m["copies"] = len(findings) - _mark
+        _mark = len(findings)
+
+        # Quality files (backend#1608 increment 5). Evaluated from the tree
+        # read_repo already fetched, so this family has no read of its own and no
+        # separate unreadable bucket: if the tree could not be read, the row above
+        # was recorded unreadable and this line was never reached.
+        evaluate_quality_files(
+            name, entry, quality_files, read.quality_files, findings,
+        )
+        _m["quality_files"] = len(findings) - _mark
+        _mark = len(findings)
+
         # Protection is read from the branch LIST already gathered by read_repo,
         # so it costs no extra enumeration and inherits its pagination.
         #
@@ -1576,8 +1966,6 @@ def main() -> int:
         # throw away real caller findings before anything was written.
         # Fail-closed means the run still goes RED - it must not mean the results
         # are destroyed. (Bugbot, .github#196.)
-        _m["copies"] = len(findings) - _mark
-        _mark = len(findings)
         _pmark = len(protection_unreadable)
 
         evaluate_protection(
@@ -1613,11 +2001,17 @@ def main() -> int:
     unreadable.extend(ruleset_unreadable)
 
     report = [
-        "### Repo conformance drift",
+        # Not "…drift": this block is now also the body of the standing conformance
+        # issue (backend#1608 item 3), where it is rendered under a verdict line
+        # that may well be "Conformant" — a heading asserting drift above a green
+        # matrix reads as a contradiction on the one screen people are meant to
+        # trust. The report states what it surveyed; the verdict states the outcome.
+        "### Repo conformance",
         "",
         f"Inventory: **{len(inventory['repos'])}** repos x **{len(reusables)}** "
-        f"reusables + **{len(copies)}** copies + **{len(PROTECTION_ROLES)}** "
-        f"branch-protection roles + **{len(RULESET_KINDS)}** ruleset kinds. "
+        f"reusables + **{len(copies)}** copies + **{len(quality_files)}** quality "
+        f"files + **{len(PROTECTION_ROLES)}** branch-protection roles + "
+        f"**{len(RULESET_KINDS)}** ruleset kinds. "
         f"Audited **{evaluated}** of **{len(audited)}** "
         "on the develop-first branch.",
         "",
@@ -1667,6 +2061,56 @@ def main() -> int:
         report.append("No drift. Every repo read, every entry matched.")
         report.append("")
 
+    # ---------------------------------------------------------- remediation
+    # After the report is built, so the findings a run reports and the ones it
+    # fixes can never come from two different evaluations.
+    #
+    # Deliberately NOT gated on `unreadable`: a repo we could not read is not a
+    # repo we may write to, but it says nothing about the repos we did read.
+    # Refusing to remediate anything because one repo 403'd would make the
+    # feature useless in exactly the conditions it is for.
+    if args.create_prs:
+        if not remediable:
+            report.append("### Remediation")
+            report.append("")
+            report.append(
+                "Nothing to remediate: no `required` copy is missing or drifted. "
+                "Entries marked `divergent` or `exempt` are never rewritten - they "
+                "record a decision, and the harness does not overrule one."
+            )
+            report.append("")
+        else:
+            issue = 1608
+            rows = ["| repo | branch | copies | result |", "|---|---|---|---|"]
+            for (repo_name, branch), entries in sorted(remediable.items()):
+                error = remediate_copies(org, repo_name, branch, entries, args.source_dir, issue)
+                if error:
+                    # Its OWN list, not `unreadable`. The exit path derives
+                    # "caller/copy state UNKNOWN" by subtracting the protection and
+                    # ruleset lists from `unreadable`, so a failed WRITE pushed in
+                    # there would be reported as a failed READ -- the wrong diagnosis
+                    # on the one line an operator acts from.
+                    remediation_failures.append(f"{repo_name}: {error}")
+                listed = ", ".join(f"`{n}`" for n, _ in entries)
+                rows.append(
+                    f"| `{repo_name}` | `{branch}` | {listed} | "
+                    f"{'PR opened/refreshed' if not error else 'FAILED: ' + error} |"
+                )
+            report.append("### Remediation")
+            report.append("")
+            report.extend(rows)
+            report.append("")
+            if remediation_failures:
+                # "I tried to fix it and could not" must not report as the same green
+                # as "there was nothing to fix". Failing the run is handled at the
+                # exit path below, on its own branch with its own message.
+                report.append(
+                    f"**{len(remediation_failures)} repo(s) could not be remediated:**"
+                )
+                report.append("")
+                report.extend(f"- {line}" for line in remediation_failures)
+                report.append("")
+
     text = "\n".join(report)
     print(text)
     if args.summary:
@@ -1689,6 +2133,24 @@ def main() -> int:
             with open(args.output, "a", encoding="utf-8") as handle:
                 handle.write(f"findings={len(findings)}\n")
                 handle.write(f"unreadable={len(unreadable)}\n")
+                # DECOMPOSED, because `unreadable` is the merged list and the
+                # watchdog headline reads it as "repos that could not be read".
+                # A clean caller/copy/quality audit with one failed protection or
+                # ruleset read was therefore announced as repos never read -- a
+                # true count under a false name, pointing at the wrong problem.
+                # Same reason `remediation_failures` got its own output above.
+                # (Bugbot, #238.)
+                handle.write(
+                    "caller_unreadable="
+                    f"{len(unreadable) - len(protection_unreadable) - len(ruleset_unreadable)}\n"
+                )
+                handle.write(f"protection_unreadable={len(protection_unreadable)}\n")
+                handle.write(f"ruleset_unreadable={len(ruleset_unreadable)}\n")
+                # Its own output, because exit 2 now has two very different
+                # causes. Every exit-2 message describes UNREAD repos; a failed
+                # --create-prs would otherwise be headlined on the conformance
+                # issue as a read failure. (Bugbot, #227.)
+                handle.write(f"remediation_failures={len(remediation_failures)}\n")
                 handle.write(f"evaluated={evaluated}\n")
                 handle.write(f"report<<{delimiter}\n")
                 handle.write(body + "\n")
@@ -1716,6 +2178,16 @@ def main() -> int:
                 "ruleset state UNKNOWN"
             )
         sys.stderr.write("::error::" + "; ".join(parts) + ".\n")
+        return 2
+    if remediation_failures:
+        # Exit 2, not 1: with --create-prs the drift findings were expected (they are
+        # what it was asked to fix). What is NOT expected is being unable to fix them,
+        # and that leaves the fleet in an unknown state rather than a merely drifted
+        # one -- the same class as an unreadable repo.
+        sys.stderr.write(
+            f"::error::{len(remediation_failures)} repo(s) could not be remediated; "
+            "the drift they carry is still present.\n"
+        )
         return 2
     if findings:
         sys.stderr.write(

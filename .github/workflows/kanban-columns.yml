@@ -1,0 +1,69 @@
+# The board's Status column names and the workflows that write them are two
+# systems that must agree, and nothing checked that they did.
+#
+# The rename window for `FR on staging` was carried by hand across three PRs
+# (backend#1592). In between, the writers emitted a column the board did not
+# have, and only a fallback made it work — while an unresolvable Status was a
+# `::warning::` on a GREEN run (fixed in #246), so a frozen board and a working
+# board were indistinguishable.
+#
+# Runs on PRs that touch the writers OR this check, and daily — because the
+# board can be renamed in the UI at any time, with no PR to hang a check on.
+# That is the failure this is really for: a rename nobody pairs with a code
+# change.
+name: Kanban column conformance
+
+on:
+  pull_request:
+    # MUST LIST EVERY FILE IN `WRITERS`. It listed only the original two, so a PR
+    # touching just set-pr-status.yml or fr-pass-comment.yml never ran this check
+    # and a bad column write could merge until the next cron (Bugbot, #248). The
+    # selftest asserts this list against WRITERS, so they cannot drift apart.
+    paths:
+      - ".github/workflows/advance-deploy-env.yml"
+      - ".github/workflows/kanban-closure-router.yml"
+      - ".github/workflows/set-pr-status.yml"
+      - ".github/workflows/fr-pass-comment.yml"
+      - ".github/workflows/kanban-columns.yml"
+      - "scripts/kanban-columns-check.py"
+      - "scripts/tests/kanban-columns-selftest.py"
+  schedule:
+    # 06:15 UTC, before caller-drift at 06:30 — a board rename breaks promotions,
+    # so it should be the first thing the morning tells you.
+    - cron: "15 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kanban-columns
+  cancel-in-progress: false
+
+jobs:
+  selftest:
+    name: Selftest the checker
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Guard the guard: a checker that cannot fail is worse than no checker,
+      # because its green is read as conformance.
+      - run: python3 scripts/tests/kanban-columns-selftest.py
+
+  check:
+    name: Written Status names exist on the board
+    # Gate on selftest: a conformance PASS emitted by a checker whose own
+    # failure paths have regressed is a false green (the checker can't fail, so
+    # its success means nothing). Sibling guards caller-drift + standards-sync
+    # gate their audit on selftest for exactly this reason. (Bugbot, #247.)
+    needs: selftest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check
+        env:
+          # Reads the org project's Status field.
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+        run: python3 scripts/kanban-columns-check.py

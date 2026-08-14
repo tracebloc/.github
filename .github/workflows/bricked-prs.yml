@@ -1,0 +1,48 @@
+name: Bricked PRs
+
+# A required status check that never reports leaves a PR approved, with nothing
+# red to point at, and permanently unmergeable (backend#1721). It is the one CI
+# failure mode with NO red signal at all -- nobody is notified, and no reviewer
+# sees a problem, because there is no failure, only an absence. So it needs a
+# watcher; nothing inside a PR can detect it.
+#
+# Runs in tracebloc/.github only, like the other org-wide crons.
+
+on:
+  schedule:
+    # Every four hours. The failure is not urgent -- a bricked PR stays bricked
+    # -- but it is invisible, so the cost is the hours a human spends not
+    # realising. Four hours bounds that without adding noise.
+    - cron: "17 */4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bricked-prs
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Required checks that never report
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Without this the `pip install` below hits PEP 668 on ubuntu-latest
+      # (24.04): the runner's Python is externally managed, pip refuses, the step
+      # fails and THE AUDIT NEVER RUNS. A scheduled guard that cannot start is
+      # worse than none — nothing reports, and silence reads as "no bricked PRs".
+      # bricked-prs-selftest.yml already does this before the same install; this
+      # is that shape, not a new idea (Bugbot, #243).
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+      - name: Audit
+        env:
+          # Needs to read branch protection, rulesets and PRs across the org.
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+        run: python3 scripts/bricked-prs.py

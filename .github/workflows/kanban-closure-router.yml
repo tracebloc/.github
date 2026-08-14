@@ -68,7 +68,7 @@ jobs:
             if [ "$PR_MERGED" = "true" ]; then
               case "$BASE_REF" in
                 main|master) STATUS="Prod" ;;
-                staging)     STATUS="Staging (human review)" ;;
+                staging)     STATUS="FR on staging" ;;
                 develop)     STATUS="On dev" ;;
                 *)
                   # A PR merged into a SIBLING feature branch deploys nothing by
@@ -153,7 +153,7 @@ jobs:
               elif [ "$CLOSER_TYPE" = "PullRequest" ]; then
                 case "$CLOSING_PR_BASE" in
                   main|master) STATUS="Prod" ;;
-                  staging)     STATUS="Staging (human review)" ;;
+                  staging)     STATUS="FR on staging" ;;
                   develop)     STATUS="On dev" ;;
                   # Unrecognised base: mirror the pull_request branch's default so
                   # the issue and its PR agree.
@@ -226,16 +226,6 @@ jobs:
             | select(.name=="Status") | .id')
           STATUS_OPT=$(echo "$PROJ" | jq -r --arg s "$STATUS_NAME" '.data.organization.projectV2.fields.nodes[]
             | select(.name=="Status") | .options[] | select(.name==$s) | .id')
-          # Rename window (backend#1592): prefer the new column name, fall back to
-          # the old. Removed in step 3.
-          if [ -z "$STATUS_OPT" ] || [ "$STATUS_OPT" = "null" ]; then
-            if [ "$STATUS_NAME" = "Staging (human review)" ]; then
-              STATUS_OPT=$(echo "$PROJ" | jq -r --arg s "FR on staging" '.data.organization.projectV2.fields.nodes[]
-                | select(.name=="Status") | .options[] | select(.name==$s) | .id')
-              [ -n "$STATUS_OPT" ] && [ "$STATUS_OPT" != "null" ] && STATUS_NAME="FR on staging"
-            fi
-          fi
-
           if [ -z "$STATUS_OPT" ] || [ "$STATUS_OPT" = "null" ]; then
             echo "Could not resolve Status option '$STATUS_NAME' — aborting"
             exit 1
@@ -284,10 +274,38 @@ jobs:
           #
           # Only Done is guarded. A PR-derived Status is a deploy fact and may advance a
           # card normally.
+          # THE COLUMN LIST WAS STALE, AND THAT REOPENED THE HOLE IT CLOSES
+          # (backend#1846). `CURRENT_COL` is read from the BOARD, whose column is
+          # "Staging (agent review)" -- this list carried only the pre-rename
+          # "Staging (human review)". So an issue hand-closed while sitting in the
+          # agent-review column did not match, Done overwrote its deploy state,
+          # and kanban-archive.yml then hid the card entirely: exactly the
+          # sequence this guard exists to prevent, through a string that quietly
+          # stopped being true.
+          #
+          # kanban-reconcile.yml's equivalent guard already lists both names. Two
+          # copies of one list, one updated at the rename and one not, is how this
+          # drifted -- so when the rename window closes, drop the legacy name in
+          # BOTH places.
           if [ "$STATUS_NAME" = "Done" ]; then
             case "${CURRENT_COL:-}" in
-              "On dev"|"Staging (human review)"|"FR on staging"|"Ready for prod"|"Prod")
+              "On dev"|"Staging (agent review)"|"Staging (human review)"|"FR on staging"|"Ready for prod"|"Prod")
                 echo "::notice::#$NUMBER hand-closed but sits in '$CURRENT_COL', a deploy state - NOT setting Done (D8: follow the PR's stage)"
+                # AND SAY SO WHERE SOMEONE WILL SEE IT. Refusing is right, but it
+                # parks the card in a deploy state with no way to self-heal, and a
+                # run-log notice is invisible by the time anyone looks. The two
+                # real cases needed OPPOSITE answers -- backend#1493 had shipped
+                # via cli#452 and belonged in Prod; data-ingestors#488 was
+                # reverted and belonged in Done -- so no default is correct and
+                # only the person closing it knows which.
+                CLOSE_NOTE="Closed while the board still shows \`$CURRENT_COL\`, which records a deployment."
+                CLOSE_NOTE="$CLOSE_NOTE The automation will not overwrite a deploy state with \`Done\` (RFC-BACKEND-1405 D8),"
+                CLOSE_NOTE="$CLOSE_NOTE so this card stays where it is until someone says which happened:"
+                CLOSE_NOTE="$CLOSE_NOTE **it shipped** - move the card to the column it reached (\`Prod\` if it is in production);"
+                CLOSE_NOTE="$CLOSE_NOTE **nothing was deployed** (reverted, abandoned, superseded) - clear the deploy state, then \`Done\`."
+                CLOSE_NOTE="$CLOSE_NOTE Both cases are real and they need opposite answers, which is why this is not decided automatically."
+                gh issue comment "$NUMBER" --repo "$REPO_FULL" --body "$CLOSE_NOTE" >/dev/null 2>&1 \
+                  || echo "::warning::could not comment on #$NUMBER - it is parked in '$CURRENT_COL' with no note on the issue"
                 exit 0 ;;
             esac
           fi
