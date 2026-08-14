@@ -12,12 +12,22 @@ on:
   pull_request:
     paths:
       - .github/workflows/kanban-closure-router.yml
+      # RECONCILE TOO (Bugbot, .github#252). It carries the second copy of the
+      # classification, and omitting it here meant a PR touching only that copy
+      # never ran this check -- the guard could stay green while the thing it
+      # guards changed underneath it.
+      - .github/workflows/kanban-reconcile.yml
       - .github/workflows/kanban-deploy-state-selftest.yml
       - scripts/tests/kanban-deploy-state-selftest.py
   push:
     branches: [main, develop, staging]
     paths:
       - .github/workflows/kanban-closure-router.yml
+      # RECONCILE TOO (Bugbot, .github#252). It carries the second copy of the
+      # classification, and omitting it here meant a PR touching only that copy
+      # never ran this check -- the guard could stay green while the thing it
+      # guards changed underneath it.
+      - .github/workflows/kanban-reconcile.yml
       - .github/workflows/kanban-deploy-state-selftest.yml
       - scripts/tests/kanban-deploy-state-selftest.py
 

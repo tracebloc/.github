@@ -111,6 +111,16 @@ jobs:
             echo "in_progress_opt=$(opt 'In progress')"
             echo "on_dev_opt=$(opt 'On dev')"
             echo "fr_staging_opt=$(opt_either 'Staging (human review)' 'FR on staging')"
+            # THE BOARD'S COLUMN ORDER, published because `$PROJ` does not survive
+            # this step -- every `run:` is a new shell (Bugbot, .github#252). The
+            # classify step needs the ORDER to tell a deploy state from a planning
+            # column without a hand-maintained list (backend#1846), and it has no
+            # project JSON of its own; it works off the option ids above.
+            # Tab-separated: a Status column may contain spaces and parentheses,
+            # but never a tab.
+            printf 'status_order=%s\n' "$(echo "$PROJ" | jq -r '
+              [.data.organization.projectV2.fields.nodes[]
+                | select(.name=="Status") | .options[].name] | join("\t")')"
           } >> "$GITHUB_OUTPUT"
 
       - name: Pull non-terminal items
@@ -283,6 +293,50 @@ jobs:
           # set a stage, this step derives it from the closing PR's base branch.
           ON_DEV_OPT="${{ steps.ids.outputs.on_dev_opt }}"
           FR_STAGING_OPT="${{ steps.ids.outputs.fr_staging_opt }}"
+          # The board's Status columns IN ORDER, resolved in the `ids` step --
+          # `$PROJ` does not survive into this shell (Bugbot, .github#252).
+          STATUS_ORDER="${{ steps.ids.outputs.status_order }}"
+
+          # WHICH COLUMNS ARE DEPLOY STATES, ASKED OF THE BOARD (backend#1846).
+          # The twin of the router's helper (.github#249), and the reason the class
+          # stayed open after #237: TWO hand-maintained lists had to agree and one
+          # rotted -- the router carried the pre-rename "Staging (human review)"
+          # while the board's column is "Staging (agent review)", so a card
+          # hand-closed there lost its deploy state. The board's own ORDER is the
+          # thing neither copy can drift from.
+          # awk, NOT `grep | head | cut`. Under `set -euo pipefail` a grep that
+          # finds nothing fails the pipeline, and `_ci=$(col_index ...)` is a bare
+          # assignment -- so an UNRECOGNISED column would abort the whole classify
+          # step instead of being handled as unplaceable. Verified: the assignment
+          # form never reached the next line. Same trap as release-train#73, and
+          # this is the reason a helper that reports "not found" must not do it by
+          # failing. awk always exits 0 and prints -1 for a miss.
+          col_index() {
+            printf '%s' "$STATUS_ORDER" | tr '\t' '\n' \
+              | awk -v s="$1" 'BEGIN{i=-1} i<0 && $0==s {i=NR} END{print i}'
+          }
+          # selftest:classify-start  (byte-identical in kanban-reconcile.yml)
+          # Is this column a DEPLOY STATE? Answered from the board's own ORDER --
+          # any column at or after "On dev" and at or before "Prod" -- so a column
+          # INSERTED between them is classified correctly with no edit here
+          # (backend#1846). Only `col_index` differs between the two workflows,
+          # because only their inputs differ; this decision must not.
+          #
+          #   yes      a deploy state
+          #   no       not one -- including NO COLUMN AT ALL, which is evidence
+          #            nothing deployed rather than a column we cannot place
+          #   unknown  a column the board does not report
+          #   noboard  the board is missing an anchor, so nothing can be placed
+          classify_column() {
+            case "${1:-}" in
+              ""|"No status") echo no; return ;;
+            esac
+            _c=$(col_index "$1"); _d=$(col_index "On dev"); _p=$(col_index "Prod")
+            if [ "$_d" -lt 0 ] || [ "$_p" -lt 0 ]; then echo noboard; return; fi
+            if [ "$_c" -lt 0 ]; then echo unknown; return; fi
+            if [ "$_c" -ge "$_d" ] && [ "$_c" -le "$_p" ]; then echo yes; else echo no; fi
+          }
+          # selftest:classify-end
 
           while IFS= read -r line; do
             ITEM_ID=$(echo "$line"  | jq -r '.id')
@@ -363,11 +417,23 @@ jobs:
                   # that shipped to dev/staging and then stopped. Asserting something
                   # false is the worse of the two, so this reports and moves on; the
                   # conflict is flagged on backend#1411 for a human to settle.
-                  case "$COL" in
-                    "On dev"|"Staging (agent review)"|"Staging (human review)"|"FR on staging"|"Ready for prod"|"Prod")
-                      echo "  [SKIP] $REPO#$NUM closed-completed in $COL - a deploy state, so NOT Done; D8 says follow the PR's stage"
-                      ;;
-                    *)
+                  # A deploy state is any column at or after "On dev" and at or
+                  # before "Prod", in the board's own order -- so a column
+                  # INSERTED between them (which is exactly how "Staging (agent
+                  # review)" arrived) is classified correctly with no edit here.
+                  # UNKNOWN MUST NOT FALL OPEN, and it leans the OPPOSITE way to
+                  # the router's: this loop decides whether to ASSERT Done, so a
+                  # column it cannot place -- or a board missing an anchor -- is
+                  # treated AS a deploy state and left alone. Leaving a card where
+                  # it is costs nothing; asserting "nothing shipped" over work
+                  # that did erases the fact.
+                  # selftest:policy-start
+                  _ds=$(classify_column "$COL")
+                  if [ "$_ds" != "no" ]; then _skip=yes; else _skip=no; fi
+                  # selftest:policy-end
+                  if [ "$_skip" = "yes" ]; then
+                    echo "  [SKIP] $REPO#$NUM closed-completed in $COL - a deploy state (or unplaceable), so NOT Done; D8 says follow the PR's stage"
+                  else
                       # The column is NOT sufficient evidence on its own. It was the only
                       # check here until now, and it is circular: the column is exactly
                       # what is wrong when kanban-closure-router misses a close -- its
@@ -442,8 +508,7 @@ jobs:
                           echo "  [SKIP] $REPO#$NUM closed-completed but the closer lookup failed ($CLOSER) - refusing to assert Done"
                           ;;
                       esac
-                      ;;
-                  esac
+                  fi
                 fi
                 continue
               fi
@@ -802,19 +867,48 @@ jobs:
             if item=$(add_item "$NID") && [ -n "$item" ]; then
               if set_status "$item" "$OPT"; then
                 echo "[OK]   added $REPO#$NUM ($DESC)"
+                status_note="status set, but"
               else
                 echo "[WARN] added $REPO#$NUM but Status set failed"
                 add_fail=$((add_fail+1))
+                status_note="Status set failed, and"
               fi
               # Sibling visibility label - written AFTER the status so a label
               # failure can never cost the card its column (.github#157's
               # ordering lesson), and inside the wet path so dry runs skip it.
-              # Hard-fails per the PROJECTS_KANBAN_TOKEN write rule.
+              #
+              # COUNTED, NOT FATAL (backend#1598). These writes used to run bare
+              # under `set -euo pipefail`, which was described as "hard-fails per
+              # the PROJECTS_KANBAN_TOKEN write rule" - but a hard fail HERE does
+              # not fail one item, it ABORTS THE WHOLE SWEEP mid-loop. Every
+              # item after this one goes unprocessed, and `added.tsv` is left
+              # truncated at the failure point while still being read afterwards
+              # as though it were the complete record.
+              #
+              # A 403 on a label write is also the single most likely failure in
+              # this step: PROJECTS_KANBAN_TOKEN is one user PAT shared by CI,
+              # the conformance gate, the weekly cron and any local script, on
+              # one 5,000/hr budget.
+              #
+              # So the failure is recorded in `add_fail` instead. The run still
+              # goes red at the end of the step - the rule is kept - but the
+              # remaining items are swept first and the record stays complete.
+              # Fail closed, finish the work.
               if [ "${SIB:-0}" = "1" ]; then
                 if ! gh api "repos/$ORG/$REPO/labels/sibling-merge" >/dev/null 2>&1; then
-                  gh api "repos/$ORG/$REPO/labels" -f name=sibling-merge -f color=bfdadc -f description="Merged into a sibling feature branch; content ships via the parent PR (backend#1437)" >/dev/null
+                  gh api "repos/$ORG/$REPO/labels" -f name=sibling-merge -f color=bfdadc -f description="Merged into a sibling feature branch; content ships via the parent PR (backend#1437)" >/dev/null \
+                    || echo "[WARN] $REPO#$NUM: could not CREATE the sibling-merge label"
                 fi
-                gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=sibling-merge" >/dev/null
+                if ! label_err="$(gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=sibling-merge" 2>&1 >/dev/null)"; then
+                  # KEEP THE ERROR. A 403 is the failure this whole change exists
+                  # to survive, and "the label write failed" without a status or
+                  # body cannot tell a rate limit from a missing scope from a
+                  # deleted repo - so the log would say a write failed and leave
+                  # the operator no way to know which. stderr is captured;
+                  # stdout still goes to /dev/null (it is the created label JSON).
+                  echo "[WARN] $REPO#$NUM: $status_note the sibling-merge label write failed: ${label_err:-(no output)}"
+                  add_fail=$((add_fail+1))
+                fi
               fi
               printf '%s\t%s\n' "$REPO#$NUM" "$DESC" >> added.tsv
             else
@@ -836,7 +930,7 @@ jobs:
           # least stays missing and gets rediscovered by tomorrow's sweep; a
           # Status-less one counts as present and is never revisited by either pass.
           if [ "$add_fail" -ne 0 ]; then
-            echo "::error::$add_fail item(s) could not be added, or were added without a Status (see [FAIL]/[WARN] lines above). A card with no Status appears in no column."
+            echo "::error::$add_fail failure(s) in this sweep: an item that could not be added, one added without a Status, or a sibling-merge label that could not be written (see the [FAIL]/[WARN] lines above for which). A card with no Status appears in no column."
             exit 1
           fi
 
