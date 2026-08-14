@@ -1201,6 +1201,15 @@ record(not f and len(u) == 1,
        "rulesets: an unreadable read is UNREADABLE, never a silent pass", f"unreadable={u}")
 
 # Schema
+# The family must not be switchable off by deletion (Bugbot, .github#262). Both
+# of these leave the top-level key PRESENT, so schema validation passes -- and
+# the audit would then measure every caller against no inputs at all while
+# reporting the fleet conformant.
+expect_schema_failure("caller_inputs: null rejected",
+                      lambda d: d.__setitem__("caller_inputs", None))
+expect_schema_failure("caller_inputs: {} rejected",
+                      lambda d: d.__setitem__("caller_inputs", {}))
+
 expect_schema_failure("ruleset_policy missing a kind rejected",
                       lambda d: d["ruleset_policy"].pop("tag_trust_root"))
 expect_schema_failure("ruleset_policy with an unknown kind rejected",

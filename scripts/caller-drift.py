@@ -387,10 +387,27 @@ def _caller_inputs_block(value, reusables: "list[str]", where: str) -> dict:
     are the ones asserted. Keyed by reusable, so a repo that does not call it is
     simply not measured against it.
     """
+    # FAIL CLOSED ON ABSENT OR EMPTY (Bugbot, .github#262). Returning {} here
+    # made the whole family switchable off by deletion: the top-level key could
+    # stay present as `null` or `{}`, schema validation passed, and the audit
+    # then found no input floor for ANY reusable while reporting the fleet
+    # conformant. A guard that a comment can disable is the exact shape this
+    # file exists to refuse -- and it would have disabled the one property that
+    # proves a required check can fail at all.
     if value is None:
-        return {}
+        die(
+            f"{where}: is null. An empty input policy asserts nothing while "
+            "looking like a policy - state the inputs, or delete the key and "
+            "let the missing-key check fail."
+        )
     if not isinstance(value, dict):
         die(f"{where}: expected a mapping of reusable -> {{input: value}}.")
+    if not value:
+        die(
+            f"{where}: is empty. Every caller would then be measured against no "
+            "inputs at all, which is indistinguishable from the family being "
+            "switched off."
+        )
     out: dict = {}
     for reusable, inputs in value.items():
         if reusable not in reusables:
