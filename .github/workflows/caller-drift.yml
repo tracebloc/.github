@@ -399,12 +399,24 @@ jobs:
         if: always()
         env:
           CODE: ${{ steps.audit.outputs.exit_code }}
+          REMEDIATED: ${{ steps.audit.outputs.remediated }}
+          FINDINGS_TOTAL: ${{ steps.audit.outputs.findings_total }}
         run: |
           set -euo pipefail
           code="${CODE:-}"
           case "$code" in
             0)
-              echo "Every active repo read; every inventory entry matched."
+              # Exit 0 has TWO meanings after backend#1965: a clean match, or a
+              # fully remediated run (every finding got a PR). "every entry
+              # matched" is only true for the first -- printing it for a
+              # remediated run is the same false-green headline this change
+              # strips from the watchdog body, so the log branches on the same
+              # REMEDIATED signal the verdict does.
+              if [ "${REMEDIATED:-0}" != "0" ]; then
+                echo "Every active repo read; ${FINDINGS_TOTAL:-?} drift finding(s) remediated, every one with a PR open. The fleet is fixed-pending-merge, NOT yet conformant."
+              else
+                echo "Every active repo read; every inventory entry matched."
+              fi
               ;;
             1)
               echo "::error::Caller-inventory drift detected. See the run summary." >&2
