@@ -91,6 +91,19 @@ jobs:
             echo "$PROJ" | jq -r --arg n "$1" '.data.organization.projectV2.fields.nodes[]
               | select(.name=="Status") | .options[] | select(.name==$n) | .id'
           }
+          # WHICH COLUMNS ARE DEPLOY STATES, ASKED OF THE BOARD (backend#1846).
+          # The twin of the router's `col_index` (.github#249), and the second of
+          # the two hand-maintained lists that had to agree. One of them rotted --
+          # the router carried the pre-rename "Staging (human review)" while the
+          # board's column is "Staging (agent review)", so a card hand-closed
+          # there lost its deploy state (.github#237). Two copies of one list is
+          # how that happens; the board's own ORDER is the thing neither copy can
+          # drift from.
+          col_index() {
+            echo "$PROJ" | jq -r --arg s "$1" \
+              '[.data.organization.projectV2.fields.nodes[]
+                | select(.name=="Status") | .options[].name] | index($s) // -1'
+          }
           # Rename window (backend#1592): ask for the NEW column name, fall back to
           # the OLD one. The UI rename flips the board in a single instant with no
           # period where both exist, so every resolver has to work on both sides of
@@ -363,11 +376,20 @@ jobs:
                   # that shipped to dev/staging and then stopped. Asserting something
                   # false is the worse of the two, so this reports and moves on; the
                   # conflict is flagged on backend#1411 for a human to settle.
-                  case "$COL" in
-                    "On dev"|"Staging (agent review)"|"Staging (human review)"|"FR on staging"|"Ready for prod"|"Prod")
-                      echo "  [SKIP] $REPO#$NUM closed-completed in $COL - a deploy state, so NOT Done; D8 says follow the PR's stage"
-                      ;;
-                    *)
+                  # A deploy state is any column at or after "On dev" and at or
+                  # before "Prod", in the board's own order -- so a column
+                  # INSERTED between them (which is exactly how "Staging (agent
+                  # review)" arrived) is classified correctly with no edit here.
+                  _ci=$(col_index "$COL"); _di=$(col_index "On dev"); _pi=$(col_index "Prod")
+                  # UNKNOWN MUST NOT FALL OPEN: a column this workflow cannot
+                  # place, or a board missing an anchor, is not evidence that
+                  # nothing shipped. Treated as a deploy state -- leaving a card
+                  # where it is costs nothing; asserting Done over a deploy erases
+                  # the fact that it shipped.
+                  if [ "$_di" -lt 0 ] || [ "$_pi" -lt 0 ] || [ "$_ci" -lt 0 ] \
+                     || { [ "$_ci" -ge "$_di" ] && [ "$_ci" -le "$_pi" ]; }; then
+                    echo "  [SKIP] $REPO#$NUM closed-completed in $COL - a deploy state (or unplaceable), so NOT Done; D8 says follow the PR's stage"
+                  else
                       # The column is NOT sufficient evidence on its own. It was the only
                       # check here until now, and it is circular: the column is exactly
                       # what is wrong when kanban-closure-router misses a close -- its
@@ -442,8 +464,7 @@ jobs:
                           echo "  [SKIP] $REPO#$NUM closed-completed but the closer lookup failed ($CLOSER) - refusing to assert Done"
                           ;;
                       esac
-                      ;;
-                  esac
+                  fi
                 fi
                 continue
               fi
