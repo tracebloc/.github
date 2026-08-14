@@ -298,23 +298,47 @@ jobs:
               '[.data.organization.projectV2.fields.nodes[]
                 | select(.name=="Status") | .options[].name] | index($s) // -1'
           }
+          # selftest:classify-start  (byte-identical in kanban-reconcile.yml)
+          # Is this column a DEPLOY STATE? Answered from the board's own ORDER --
+          # any column at or after "On dev" and at or before "Prod" -- so a column
+          # INSERTED between them is classified correctly with no edit here
+          # (backend#1846). Only `col_index` differs between the two workflows,
+          # because only their inputs differ; this decision must not.
+          #
+          #   yes      a deploy state
+          #   no       not one -- including NO COLUMN AT ALL, which is evidence
+          #            nothing deployed rather than a column we cannot place
+          #   unknown  a column the board does not report
+          #   noboard  the board is missing an anchor, so nothing can be placed
+          classify_column() {
+            case "${1:-}" in
+              ""|"No status") echo no; return ;;
+            esac
+            _c=$(col_index "$1"); _d=$(col_index "On dev"); _p=$(col_index "Prod")
+            if [ "$_d" -lt 0 ] || [ "$_p" -lt 0 ]; then echo noboard; return; fi
+            if [ "$_c" -lt 0 ]; then echo unknown; return; fi
+            if [ "$_c" -ge "$_d" ] && [ "$_c" -le "$_p" ]; then echo yes; else echo no; fi
+          }
+          # selftest:classify-end
           if [ "$STATUS_NAME" = "Done" ]; then
-            cur_i=$(col_index "${CURRENT_COL:-}")
-            dev_i=$(col_index "On dev")
-            prod_i=$(col_index "Prod")
             # UNKNOWN MUST NOT FALL OPEN -- the other half of #1846. A column this
             # workflow cannot place used to sail past the `case` and let Done erase
             # a deploy state. Refusing costs a card sitting where it is; falling
             # open erases the fact that it shipped.
-            if [ "$dev_i" -lt 0 ] || [ "$prod_i" -lt 0 ]; then
-              echo "::error::the board reports no 'On dev' or 'Prod' column, so a deploy state cannot be recognised - refusing to set Done on #$NUMBER"
-              exit 1
-            fi
-            if [ "$cur_i" -lt 0 ]; then
-              echo "::notice::#$NUMBER sits in '${CURRENT_COL:-<unreadable>}', which this board does not report as a column - NOT setting Done rather than guessing"
-              exit 0
-            fi
-            if [ "$cur_i" -ge "$dev_i" ] && [ "$cur_i" -le "$prod_i" ]; then
+            # selftest:policy-start
+            _ds=$(classify_column "${CURRENT_COL:-}")
+            case "$_ds" in
+              noboard)
+                echo "::error::the board reports no 'On dev' or 'Prod' column, so a deploy state cannot be recognised - refusing to set Done on #$NUMBER"
+                exit 1 ;;
+              unknown)
+                echo "::notice::#$NUMBER sits in '${CURRENT_COL:-<unreadable>}', which this board does not report as a column - NOT setting Done rather than guessing"
+                exit 0 ;;
+              yes) _protect=yes ;;
+              *)   _protect=no ;;
+            esac
+            # selftest:policy-end
+            if [ "$_protect" = "yes" ]; then
               echo "::notice::#$NUMBER hand-closed but sits in '$CURRENT_COL', a deploy state - NOT setting Done (D8: follow the PR's stage)"
               # AND SAY SO WHERE SOMEONE WILL SEE IT. Refusing is right, but it
               # parks the card with no way to self-heal, and a run-log notice is

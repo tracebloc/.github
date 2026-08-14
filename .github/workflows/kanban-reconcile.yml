@@ -111,6 +111,16 @@ jobs:
             echo "in_progress_opt=$(opt 'In progress')"
             echo "on_dev_opt=$(opt 'On dev')"
             echo "fr_staging_opt=$(opt_either 'Staging (human review)' 'FR on staging')"
+            # THE BOARD'S COLUMN ORDER, published because `$PROJ` does not survive
+            # this step -- every `run:` is a new shell (Bugbot, .github#252). The
+            # classify step needs the ORDER to tell a deploy state from a planning
+            # column without a hand-maintained list (backend#1846), and it has no
+            # project JSON of its own; it works off the option ids above.
+            # Tab-separated: a Status column may contain spaces and parentheses,
+            # but never a tab.
+            printf 'status_order=%s\n' "$(echo "$PROJ" | jq -r '
+              [.data.organization.projectV2.fields.nodes[]
+                | select(.name=="Status") | .options[].name] | join("\t")')"
           } >> "$GITHUB_OUTPUT"
 
       - name: Pull non-terminal items
@@ -283,6 +293,50 @@ jobs:
           # set a stage, this step derives it from the closing PR's base branch.
           ON_DEV_OPT="${{ steps.ids.outputs.on_dev_opt }}"
           FR_STAGING_OPT="${{ steps.ids.outputs.fr_staging_opt }}"
+          # The board's Status columns IN ORDER, resolved in the `ids` step --
+          # `$PROJ` does not survive into this shell (Bugbot, .github#252).
+          STATUS_ORDER="${{ steps.ids.outputs.status_order }}"
+
+          # WHICH COLUMNS ARE DEPLOY STATES, ASKED OF THE BOARD (backend#1846).
+          # The twin of the router's helper (.github#249), and the reason the class
+          # stayed open after #237: TWO hand-maintained lists had to agree and one
+          # rotted -- the router carried the pre-rename "Staging (human review)"
+          # while the board's column is "Staging (agent review)", so a card
+          # hand-closed there lost its deploy state. The board's own ORDER is the
+          # thing neither copy can drift from.
+          # awk, NOT `grep | head | cut`. Under `set -euo pipefail` a grep that
+          # finds nothing fails the pipeline, and `_ci=$(col_index ...)` is a bare
+          # assignment -- so an UNRECOGNISED column would abort the whole classify
+          # step instead of being handled as unplaceable. Verified: the assignment
+          # form never reached the next line. Same trap as release-train#73, and
+          # this is the reason a helper that reports "not found" must not do it by
+          # failing. awk always exits 0 and prints -1 for a miss.
+          col_index() {
+            printf '%s' "$STATUS_ORDER" | tr '\t' '\n' \
+              | awk -v s="$1" 'BEGIN{i=-1} i<0 && $0==s {i=NR} END{print i}'
+          }
+          # selftest:classify-start  (byte-identical in kanban-reconcile.yml)
+          # Is this column a DEPLOY STATE? Answered from the board's own ORDER --
+          # any column at or after "On dev" and at or before "Prod" -- so a column
+          # INSERTED between them is classified correctly with no edit here
+          # (backend#1846). Only `col_index` differs between the two workflows,
+          # because only their inputs differ; this decision must not.
+          #
+          #   yes      a deploy state
+          #   no       not one -- including NO COLUMN AT ALL, which is evidence
+          #            nothing deployed rather than a column we cannot place
+          #   unknown  a column the board does not report
+          #   noboard  the board is missing an anchor, so nothing can be placed
+          classify_column() {
+            case "${1:-}" in
+              ""|"No status") echo no; return ;;
+            esac
+            _c=$(col_index "$1"); _d=$(col_index "On dev"); _p=$(col_index "Prod")
+            if [ "$_d" -lt 0 ] || [ "$_p" -lt 0 ]; then echo noboard; return; fi
+            if [ "$_c" -lt 0 ]; then echo unknown; return; fi
+            if [ "$_c" -ge "$_d" ] && [ "$_c" -le "$_p" ]; then echo yes; else echo no; fi
+          }
+          # selftest:classify-end
 
           while IFS= read -r line; do
             ITEM_ID=$(echo "$line"  | jq -r '.id')
@@ -363,11 +417,23 @@ jobs:
                   # that shipped to dev/staging and then stopped. Asserting something
                   # false is the worse of the two, so this reports and moves on; the
                   # conflict is flagged on backend#1411 for a human to settle.
-                  case "$COL" in
-                    "On dev"|"Staging (agent review)"|"Staging (human review)"|"FR on staging"|"Ready for prod"|"Prod")
-                      echo "  [SKIP] $REPO#$NUM closed-completed in $COL - a deploy state, so NOT Done; D8 says follow the PR's stage"
-                      ;;
-                    *)
+                  # A deploy state is any column at or after "On dev" and at or
+                  # before "Prod", in the board's own order -- so a column
+                  # INSERTED between them (which is exactly how "Staging (agent
+                  # review)" arrived) is classified correctly with no edit here.
+                  # UNKNOWN MUST NOT FALL OPEN, and it leans the OPPOSITE way to
+                  # the router's: this loop decides whether to ASSERT Done, so a
+                  # column it cannot place -- or a board missing an anchor -- is
+                  # treated AS a deploy state and left alone. Leaving a card where
+                  # it is costs nothing; asserting "nothing shipped" over work
+                  # that did erases the fact.
+                  # selftest:policy-start
+                  _ds=$(classify_column "$COL")
+                  if [ "$_ds" != "no" ]; then _skip=yes; else _skip=no; fi
+                  # selftest:policy-end
+                  if [ "$_skip" = "yes" ]; then
+                    echo "  [SKIP] $REPO#$NUM closed-completed in $COL - a deploy state (or unplaceable), so NOT Done; D8 says follow the PR's stage"
+                  else
                       # The column is NOT sufficient evidence on its own. It was the only
                       # check here until now, and it is circular: the column is exactly
                       # what is wrong when kanban-closure-router misses a close -- its
@@ -442,8 +508,7 @@ jobs:
                           echo "  [SKIP] $REPO#$NUM closed-completed but the closer lookup failed ($CLOSER) - refusing to assert Done"
                           ;;
                       esac
-                      ;;
-                  esac
+                  fi
                 fi
                 continue
               fi
