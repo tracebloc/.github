@@ -326,13 +326,21 @@ jobs:
           #   no       not one -- including NO COLUMN AT ALL, which is evidence
           #            nothing deployed rather than a column we cannot place
           #   unknown  a column the board does not report
-          #   noboard  the board is missing an anchor, so nothing can be placed
+          #   noboard  the board's anchors are MISSING OR INVERTED, so nothing can
+          #            be placed. Inverted counts as much as missing: this helper's
+          #            whole thesis is that POSITION decides, which makes option
+          #            ORDER load-bearing. Drag "Prod" above "On dev" and the range
+          #            _d.._p is unsatisfiable, so EVERY column -- "Prod" itself
+          #            included -- comes back `no`, the router writes Done over
+          #            shipped state and reconcile asserts it. A reordered board is
+          #            UNREADABLE, not evidence that nothing deployed, so it fails
+          #            closed exactly like a missing anchor (backend#1994).
           classify_column() {
             case "${1:-}" in
               ""|"No status") echo no; return ;;
             esac
             _c=$(col_index "$1"); _d=$(col_index "On dev"); _p=$(col_index "Prod")
-            if [ "$_d" -lt 0 ] || [ "$_p" -lt 0 ]; then echo noboard; return; fi
+            if [ "$_d" -lt 0 ] || [ "$_p" -lt 0 ] || [ "$_d" -gt "$_p" ]; then echo noboard; return; fi
             if [ "$_c" -lt 0 ]; then echo unknown; return; fi
             if [ "$_c" -ge "$_d" ] && [ "$_c" -le "$_p" ]; then echo yes; else echo no; fi
           }
