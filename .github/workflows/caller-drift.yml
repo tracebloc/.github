@@ -203,6 +203,8 @@ jobs:
           PROTECTION_UNREADABLE: ${{ steps.audit.outputs.protection_unreadable }}
           RULESET_UNREADABLE: ${{ steps.audit.outputs.ruleset_unreadable }}
           FINDINGS: ${{ steps.audit.outputs.findings }}
+          FINDINGS_TOTAL: ${{ steps.audit.outputs.findings_total }}
+          REMEDIATED: ${{ steps.audit.outputs.remediated }}
           REMEDIATION_FAILURES: ${{ steps.audit.outputs.remediation_failures }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -262,6 +264,14 @@ jobs:
             fi
           fi
 
+          # backend#1965: a REMEDIATED run is green, but it is not 'every entry
+          # matched' -- drift was found and is still on the fleet until those PRs
+          # merge. Saying Conformant here would be the mirror of the bug this
+          # change fixes: a true exit code under a false headline.
+          if [ "$code" = "0" ] && [ "${REMEDIATED:-0}" != "0" ]; then
+            verdict="✅ **Remediated** — ${FINDINGS_TOTAL:-?} drift finding(s), every one with a PR open. The fleet is NOT yet conformant, it is fixed-pending-merge: the next run goes red again if those PRs are closed unmerged."
+          fi
+
           # The verdict must not be able to contradict the counts printed beside it.
           # A clean exit code alongside a non-zero unreadable/findings count is not a
           # green fleet, it is a broken audit — and "✅ every repo read" printed above
@@ -269,6 +279,13 @@ jobs:
           # The script does not currently produce that pair, which is exactly why it
           # is worth pinning: the headline is DERIVED from the numbers, so it stays
           # true if the exit-code contract ever changes.
+          # FINDINGS is the UN-REMEDIATED count (backend#1965), which is exactly
+          # what keeps this guard meaningful after that change: a clean exit beside
+          # a finding nothing fixed is still a contradiction, a remediated one is
+          # not. Comparing the TOTAL here would make every successful --create-prs
+          # run report 'Inconsistent result ... fix the audit' -- trading a false
+          # red for a worse one, since that headline tells the reader to stop
+          # trusting the audit itself.
           if [ "$code" = "0" ] && { [ "${UNREADABLE:-0}" != "0" ] || [ "${FINDINGS:-0}" != "0" ]; }; then
             verdict="⚠️ **Inconsistent result** — the audit exited clean while reporting ${UNREADABLE:-?} unreadable and ${FINDINGS:-?} finding(s). Treat fleet conformance as UNKNOWN and fix the audit."
           fi
@@ -287,7 +304,11 @@ jobs:
             printf -- '---\n\n'
             printf '### Last audit: %s\n\n' "$now"
             printf -- '- Repos evaluated: **%s** (%s unreadable)\n' "${EVALUATED:-?}" "${UNREADABLE:-?}"
-            printf -- '- Findings: **%s**\n' "${FINDINGS:-?}"
+            printf -- '- Findings: **%s**' "${FINDINGS_TOTAL:-${FINDINGS:-?}}"
+            if [ "${REMEDIATED:-0}" != "0" ]; then
+              printf -- ' (%s with a PR open, %s still un-remediated)' "${REMEDIATED}" "${FINDINGS:-?}"
+            fi
+            printf -- '\n'
             printf -- '- Verdict: %s\n\n' "$verdict"
             if [ -n "${REPORT:-}" ]; then
               printf '%s\n\n' "$REPORT"
