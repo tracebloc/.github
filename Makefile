@@ -245,7 +245,15 @@ actionlint: guard-actionlint guard-shellcheck
 SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-selftest.sh))
 
 .PHONY: selftests
-selftests: selftests-cover selftest-caller-drift selftest-blocked-marker selftest-standards-sync selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns selftest-kanban-deploy-state
+# The targets that actually RUN a selftest. Named once: `selftests` depends on
+# them, and `selftests-cover` asks make what these would execute. Adding a
+# selftest target means adding it here, which is the single edit that both wires
+# it into `make check` and brings it under the coverage guard.
+SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-standards-sync \
+                    selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns \
+                    selftest-kanban-deploy-state
+
+selftests: selftests-cover $(SELFTEST_TARGETS)
 
 # Guard the guard-runner. Two assertions, both fail-closed:
 #
@@ -279,8 +287,10 @@ selftests-cover:
 	       fail=1 ;; \
 	  esac; \
 	done; \
+	cmds="$$(make --dry-run --no-print-directory $(SELFTEST_TARGETS) 2>/dev/null)"; \
+	[ -n "$$cmds" ] || { echo "could not ask make what $(SELFTEST_TARGETS) would run — refusing to report coverage"; exit 1; }; \
 	for f in $(SELFTEST_FILES); do \
-	  sed -n 's/^	//p' Makefile | grep -qF -- "$$f" || { \
+	  printf '%s\n' "$$cmds" | grep -qF -- "$$f" || { \
 	    echo "$$f is not run by any target in this Makefile."; \
 	    echo "  'make check' would report green without it, which breaks this file's"; \
 	    echo "  own 'thin wrapper of what CI runs' contract. Add a selftest-* target"; \
