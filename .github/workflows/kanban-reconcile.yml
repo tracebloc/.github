@@ -802,9 +802,11 @@ jobs:
             if item=$(add_item "$NID") && [ -n "$item" ]; then
               if set_status "$item" "$OPT"; then
                 echo "[OK]   added $REPO#$NUM ($DESC)"
+                status_note="status set, but"
               else
                 echo "[WARN] added $REPO#$NUM but Status set failed"
                 add_fail=$((add_fail+1))
+                status_note="Status set failed, and"
               fi
               # Sibling visibility label - written AFTER the status so a label
               # failure can never cost the card its column (.github#157's
@@ -839,7 +841,7 @@ jobs:
                   # deleted repo - so the log would say a write failed and leave
                   # the operator no way to know which. stderr is captured;
                   # stdout still goes to /dev/null (it is the created label JSON).
-                  echo "[WARN] $REPO#$NUM: status set, but the sibling-merge label write failed: ${label_err:-(no output)}"
+                  echo "[WARN] $REPO#$NUM: $status_note the sibling-merge label write failed: ${label_err:-(no output)}"
                   add_fail=$((add_fail+1))
                 fi
               fi
