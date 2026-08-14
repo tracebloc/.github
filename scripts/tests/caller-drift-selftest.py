@@ -1574,6 +1574,76 @@ record(_err is None and len(_puts) == 1
        f"err={_err} puts={len(_puts)}")
 
 
+# --------------------------------------------------------------- exit contract
+# backend#1965. The rule lived inline at the bottom of main(), reachable only by
+# a full audit against the live org -- so nothing asserted it, and `--create-prs`
+# reported a fully successful remediation as a red "Drift" run for as long as it
+# did. decide_exit() is that rule as a pure function, so the outcomes below are
+# assertions rather than a description.
+#
+# The three the ticket names, plus the ones that make the fix safe: partial
+# remediation must stay RED, and an unremediable family must not be swept green
+# just because --create-prs was passed.
+
+def _exit(**kw):
+    base = dict(findings=0, caller_unreadable=0, protection_unreadable=0,
+                ruleset_unreadable=0, remediation_failures=0, remediated=0)
+    base.update(kw)
+    return guard.decide_exit(**base)
+
+
+_c, _r = _exit()
+record(_c == 0 and _r == "", "exit: a clean fleet is 0", f"{_c} {_r!r}")
+
+_c, _r = _exit(findings=3)
+record(_c == 1 and "3 repo-conformance" in _r,
+       "exit: un-remediated findings are 1 (a plain audit is unchanged)", f"{_c} {_r!r}")
+
+# THE TICKET. Every finding got a PR -> the run did what it was asked.
+_c, _r = _exit(findings=3, remediated=3)
+record(_c == 0 and _r == "",
+       "exit: findings ALL remediated is 0, not 1 -- the reported bug", f"{_c} {_r!r}")
+
+# The half that keeps it honest, and the reason standards-sync's blanket
+# `return 0 if create_prs` could not simply be copied: `findings` here mixes
+# remediable copies with protection/ruleset/quality findings that no PR can fix.
+_c, _r = _exit(findings=5, remediated=2)
+record(_c == 1 and "3 repo-conformance drift finding(s) remain un-remediated" in _r
+       and "2 got a PR" in _r,
+       "exit: PARTIAL remediation stays RED and says how many are left", f"{_c} {_r!r}")
+
+_c, _r = _exit(findings=4, remediated=0)
+record(_c == 1,
+       "exit: --create-prs that remediated NOTHING is still red", f"{_c} {_r!r}")
+
+# Unknown outranks both, in both directions.
+_c, _r = _exit(findings=3, remediated=3, remediation_failures=1)
+record(_c == 2 and "could not be remediated" in _r,
+       "exit: a failed remediation is 2 even when the others succeeded", f"{_c} {_r!r}")
+
+_c, _r = _exit(findings=3, remediated=3, caller_unreadable=1)
+record(_c == 2 and "caller/copy state UNKNOWN" in _r,
+       "exit: an unreadable repo is 2 even when every finding was remediated", f"{_c} {_r!r}")
+
+_c, _r = _exit(protection_unreadable=1)
+record(_c == 2 and "protection state UNKNOWN" in _r,
+       "exit: an unreadable protection read is 2 and names protection", f"{_c} {_r!r}")
+
+_c, _r = _exit(ruleset_unreadable=1)
+record(_c == 2 and "ruleset state UNKNOWN" in _r,
+       "exit: an unreadable ruleset read is 2 and names rulesets", f"{_c} {_r!r}")
+
+# A remediator that ever fixes two findings with one entry must not read as
+# "some left over" -- pins the `>=` rather than `==`.
+_c, _r = _exit(findings=2, remediated=3)
+record(_c == 0, "exit: over-counting remediation is still green, not partial", f"{_c} {_r!r}")
+
+# Green must require the count to ACCOUNT for the findings, not merely be
+# non-zero. Without this, `remediated and ...` could decay into `if remediated`.
+_c, _r = _exit(findings=9, remediated=1)
+record(_c == 1, "exit: one PR does not make nine findings green", f"{_c} {_r!r}")
+
+
 failed = [row for row in RESULTS if not row[0]]
 print(f"\npass={len(RESULTS) - len(failed)} fail={len(failed)}")
 if failed:

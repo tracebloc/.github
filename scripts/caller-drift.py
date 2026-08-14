@@ -1753,6 +1753,91 @@ def render_matrix(matrix: dict, inventory: dict) -> "list[str]":
 # ------------------------------------------------------------------ evaluation
 
 
+def decide_exit(
+    *,
+    findings: int,
+    caller_unreadable: int,
+    protection_unreadable: int,
+    ruleset_unreadable: int,
+    remediation_failures: int,
+    remediated: int,
+) -> "tuple[int, str]":
+    """The exit contract, as a pure function of the counts (backend#1965).
+
+    EXTRACTED SO IT CAN BE ASSERTED. The rule used to live inline at the bottom
+    of main(), where the only way to reach it was a full audit against the live
+    org -- so the selftest asserted nothing about it and `--create-prs` was free
+    to report a successful remediation as a red Drift run for as long as it did.
+
+    THE CASE THIS FIXES. With --create-prs, remediation happens AFTER the report
+    is built and never touches `findings`, so a run that opened a PR for every
+    remediable copy still fell through to `if findings: return 1`. The watchdog
+    then headlines it "Drift" -- indistinguishable from "drift exists and nobody
+    has done anything".
+
+    WHY NOT standards-sync.py's RULE. Its `return 0 if args.create_prs else 1`
+    is safe there because it has ONE homogeneous drift family. Here `findings`
+    mixes callers, copies, protection, rulesets and quality, and only `required`
+    copies are remediable -- so a blanket create_prs rule would hide an
+    unremediable protection or ruleset finding behind a green run. That is a
+    fail-open in the guard written to refuse exactly that.
+
+    So the predicate is MEASURED, not assumed: `remediated` is the number of
+    remediable entries actually PR'd, every one of which was appended to
+    `findings` beside it, 1:1. Green requires that number to account for every
+    finding there is.
+
+    Returns (exit code, one-line reason). Codes:
+      0  nothing wrong, or everything wrong was remediated
+      1  findings remain un-remediated
+      2  could not evaluate, or could not remediate -- state is UNKNOWN
+    """
+    unreadable = caller_unreadable + protection_unreadable + ruleset_unreadable
+    if unreadable:
+        parts = []
+        if caller_unreadable:
+            parts.append(f"{caller_unreadable} repo read(s) failed - caller/copy state UNKNOWN")
+        if protection_unreadable:
+            parts.append(
+                f"{protection_unreadable} branch-protection read(s) failed - "
+                "protection state UNKNOWN"
+            )
+        if ruleset_unreadable:
+            parts.append(f"{ruleset_unreadable} ruleset read(s) failed - ruleset state UNKNOWN")
+        return 2, "; ".join(parts) + "."
+    if remediation_failures:
+        # Exit 2, not 1: with --create-prs the drift findings were expected (they are
+        # what it was asked to fix). What is NOT expected is being unable to fix them,
+        # and that leaves the fleet in an unknown state rather than a merely drifted
+        # one -- the same class as an unreadable repo.
+        return 2, (
+            f"{remediation_failures} repo(s) could not be remediated; "
+            "the drift they carry is still present."
+        )
+    if remediated and remediated >= findings:
+        # Every finding has a PR open. The drift is real and still on the fleet
+        # until those merge -- the report says so and the watchdog body carries
+        # the count -- but the RUN did what it was asked to, so it is not red.
+        # `>=` rather than `==` deliberately: a future remediator that fixes two
+        # findings with one entry must not read as "some left over".
+        return 0, ""
+    if findings:
+        # Clamped. Unreachable today -- the `>=` branch above catches
+        # remediated > findings -- but a message that can print "-1 findings
+        # remain" is one edit away from being reachable, and a nonsense count
+        # is how a real one stops being read. Found by mutating that branch out.
+        left = max(findings - remediated, 0)
+        if remediated:
+            # Partial. Red, and says so in the numbers rather than reporting the
+            # whole run as untouched drift.
+            return 1, (
+                f"{left} repo-conformance drift finding(s) remain un-remediated "
+                f"({remediated} got a PR; the rest are not remediable by this harness)."
+            )
+        return 1, f"{findings} repo-conformance drift finding(s)."
+    return 0, ""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inventory", default="repo-inventory.yml")
@@ -1780,6 +1865,9 @@ def main() -> int:
     # counts as broken from a second, drifting copy of the rules.
     remediable: "dict[tuple[str, str], list[str]]" = {}
     remediation_failures: "list[str]" = []
+    # Findings that ended the run with a PR open. Stays 0 without --create-prs,
+    # which is what keeps a plain audit's exit contract byte-identical.
+    remediated = 0
     reusables = list(inventory["reusables"])
     copies = list(inventory["copies"])
     quality_files = list(inventory["quality_files"])
@@ -2084,6 +2172,13 @@ def main() -> int:
             rows = ["| repo | branch | copies | result |", "|---|---|---|---|"]
             for (repo_name, branch), entries in sorted(remediable.items()):
                 error = remediate_copies(org, repo_name, branch, entries, args.source_dir, issue)
+                if not error:
+                    # Counted HERE, next to the write that earns it, and only for
+                    # entries that actually got a PR. Re-deriving it from
+                    # `remediable` at the exit path would count the ones that
+                    # FAILED too -- a green run for drift still sitting on the
+                    # fleet, which is the failure this ticket is about, inverted.
+                    remediated += len(entries)
                 if error:
                     # Its OWN list, not `unreadable`. The exit path derives
                     # "caller/copy state UNKNOWN" by subtracting the protection and
@@ -2131,7 +2226,17 @@ def main() -> int:
             body = body[:48000] + "\n\n[...truncated; see the run log for the rest]"
         try:
             with open(args.output, "a", encoding="utf-8") as handle:
-                handle.write(f"findings={len(findings)}\n")
+                # UN-REMEDIATED, not total (backend#1965). The workflow's
+                # consistency guard refuses `code == 0` beside a non-zero
+                # findings count -- correctly -- so a fully remediated run
+                # reporting its total here would trade a false "Drift" for a
+                # false "Inconsistent result ... fix the audit", which is worse:
+                # it tells the reader to stop trusting the audit. The drift is
+                # not hidden; `remediated` below carries it and the report body
+                # lists every finding.
+                handle.write(f"findings={max(len(findings) - remediated, 0)}\n")
+                handle.write(f"findings_total={len(findings)}\n")
+                handle.write(f"remediated={remediated}\n")
                 handle.write(f"unreadable={len(unreadable)}\n")
                 # DECOMPOSED, because `unreadable` is the merged list and the
                 # watchdog headline reads it as "repos that could not be read".
@@ -2160,41 +2265,19 @@ def main() -> int:
             # the run must still fail rather than look like a clean pass.
             die(f"could not write step outputs: {exc}")
 
-    if unreadable:
-        caller_failed = (
+    code, reason = decide_exit(
+        findings=len(findings),
+        caller_unreadable=(
             len(unreadable) - len(protection_unreadable) - len(ruleset_unreadable)
-        )
-        parts = []
-        if caller_failed:
-            parts.append(f"{caller_failed} repo read(s) failed - caller/copy state UNKNOWN")
-        if protection_unreadable:
-            parts.append(
-                f"{len(protection_unreadable)} branch-protection read(s) failed - "
-                "protection state UNKNOWN"
-            )
-        if ruleset_unreadable:
-            parts.append(
-                f"{len(ruleset_unreadable)} ruleset read(s) failed - "
-                "ruleset state UNKNOWN"
-            )
-        sys.stderr.write("::error::" + "; ".join(parts) + ".\n")
-        return 2
-    if remediation_failures:
-        # Exit 2, not 1: with --create-prs the drift findings were expected (they are
-        # what it was asked to fix). What is NOT expected is being unable to fix them,
-        # and that leaves the fleet in an unknown state rather than a merely drifted
-        # one -- the same class as an unreadable repo.
-        sys.stderr.write(
-            f"::error::{len(remediation_failures)} repo(s) could not be remediated; "
-            "the drift they carry is still present.\n"
-        )
-        return 2
-    if findings:
-        sys.stderr.write(
-            f"::error::{len(findings)} repo-conformance drift finding(s).\n"
-        )
-        return 1
-    return 0
+        ),
+        protection_unreadable=len(protection_unreadable),
+        ruleset_unreadable=len(ruleset_unreadable),
+        remediation_failures=len(remediation_failures),
+        remediated=remediated,
+    )
+    if reason:
+        sys.stderr.write(f"::error::{reason}\n")
+    return code
 
 
 if __name__ == "__main__":

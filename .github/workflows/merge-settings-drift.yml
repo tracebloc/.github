@@ -12,6 +12,15 @@
 # It also flags a repo left with NEITHER merge-commit NOR squash, which would
 # make it unmergeable — the failure mode the original sweep guarded against.
 #
+# It also guards delete_branch_on_merge (backend#1981). That setting was off on 10
+# of 19 repos, and the org had accumulated 1212 remote branches that were provably
+# merged with no open PR. The local half is the part that is easy to miss: we
+# squash-merge, so a merged branch is NOT an ancestor of develop — the squashed
+# commit is a different commit. `git branch --merged` never lists such a branch and
+# `git branch -d` refuses it, so the only reliable local "this is done" signal is
+# [gone] on the upstream, which exists ONLY if the server deleted the remote branch
+# on merge. With the setting off, no cleanup command can ever reap the branch.
+#
 # REPORT-ONLY by design. It never PATCHes a repo: a settings change should be a
 # visible, deliberate act, and the token then only needs read access rather than
 # standing administration:write over every repo (see backend#1343 on
@@ -60,6 +69,7 @@ jobs:
 
           drift=""       # rebase-merge enabled
           unmergeable="" # neither merge-commit nor squash
+          nodelete=""    # delete_branch_on_merge disabled
           failed=""      # settings unreadable, or not the booleans we expect
 
           # `gh api` inherits stdin, which would swallow the repo list; feed it
@@ -67,7 +77,7 @@ jobs:
           while IFS= read -r repo; do
             [ -n "$repo" ] || continue
             if ! settings=$(gh api "repos/$ORG/$repo" \
-                 --jq '[.allow_merge_commit, .allow_squash_merge, .allow_rebase_merge] | @tsv' \
+                 --jq '[.allow_merge_commit, .allow_squash_merge, .allow_rebase_merge, .delete_branch_on_merge] | @tsv' \
                  < /dev/null 2>/dev/null); then
               echo "  ?? $repo - could not read settings"
               failed="$failed $repo(read)"
@@ -76,15 +86,16 @@ jobs:
             merge=$(printf '%s' "$settings" | cut -f1)
             squash=$(printf '%s' "$settings" | cut -f2)
             rebase=$(printf '%s' "$settings" | cut -f3)
+            autodelete=$(printf '%s' "$settings" | cut -f4)
 
             # FAIL CLOSED on anything that is not a literal true/false. These
-            # three fields are only returned to a principal with admin on the
+            # four fields are only returned to a principal with admin on the
             # repo, so a token that can LIST but not read settings gets a
             # perfectly successful response with the keys absent — jq then
             # yields empty strings, which match neither branch below and would
             # have been silently counted as compliant. That is the same false
             # all-clear the zero-repo guard above exists to prevent.
-            for value in "$merge" "$squash" "$rebase"; do
+            for value in "$merge" "$squash" "$rebase" "$autodelete"; do
               case "$value" in
                 true | false) ;;
                 *)
@@ -94,6 +105,15 @@ jobs:
                   ;;
               esac
             done
+
+            # Independent of the merge-method checks below: a repo can have
+            # perfectly correct merge methods and still never delete a head
+            # branch. Checked with its own `if`, not an `elif`, so a repo that
+            # is wrong twice is reported twice.
+            if [ "$autodelete" = "false" ]; then
+              echo "  !! $repo - delete_branch_on_merge is DISABLED"
+              nodelete="$nodelete $repo"
+            fi
 
             if [ "$merge" = "false" ] && [ "$squash" = "false" ] && [ "$rebase" = "false" ]; then
               # Nothing could be merged at all. Reported, never "corrected".
@@ -117,6 +137,7 @@ jobs:
             echo "checked=$count"
             echo "drift=${drift# }"
             echo "unmergeable=${unmergeable# }"
+            echo "nodelete=${nodelete# }"
             echo "failed=${failed# }"
           } >> "$GITHUB_OUTPUT"
 
@@ -126,6 +147,7 @@ jobs:
             echo "Checked **$count** active repos (archived and forks excluded)."
             echo ""
             if [ -n "$drift" ]; then echo "- Rebase-merge enabled:$drift"; else echo "- Rebase-merge enabled: none"; fi
+            if [ -n "$nodelete" ]; then echo "- delete_branch_on_merge disabled:$nodelete"; else echo "- delete_branch_on_merge disabled: none"; fi
             if [ -n "$unmergeable" ]; then echo "- No merge method enabled:$unmergeable"; fi
             if [ -n "$failed" ]; then echo "- Settings unreadable:$failed"; fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -134,11 +156,12 @@ jobs:
         # Only speaks up when something is wrong - a weekly "all clear" comment
         # would train everyone to ignore it (see the design-system Amplify app,
         # backend#1344: five silent failures nobody read).
-        if: steps.audit.outputs.drift != '' || steps.audit.outputs.unmergeable != '' || steps.audit.outputs.failed != ''
+        if: steps.audit.outputs.drift != '' || steps.audit.outputs.unmergeable != '' || steps.audit.outputs.nodelete != '' || steps.audit.outputs.failed != ''
         env:
           GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
           DRIFT: ${{ steps.audit.outputs.drift }}
           UNMERGEABLE: ${{ steps.audit.outputs.unmergeable }}
+          NODELETE: ${{ steps.audit.outputs.nodelete }}
           FAILED: ${{ steps.audit.outputs.failed }}
           CHECKED: ${{ steps.audit.outputs.checked }}
           ORG: tracebloc
@@ -169,6 +192,19 @@ jobs:
               printf 'merge-commit or squash there FIRST, or you will leave it unmergeable.\n\n'
             fi
 
+            if [ -n "$NODELETE" ]; then
+              printf '### delete_branch_on_merge is disabled\n\n%s\n\n' "$NODELETE"
+              printf 'Merged head branches are never deleted in these repos, so stale branches\n'
+              printf 'accumulate on the server AND become unreapable locally: we squash-merge, so a\n'
+              printf 'merged branch is not an ancestor of `develop` and `git branch --merged` will\n'
+              printf 'never list it. The only reliable local signal is `[gone]` on the upstream, and\n'
+              printf 'that requires the server to have deleted the remote branch (backend#1981).\n\n'
+              printf '```bash\ngh api -X PATCH repos/%s/<repo> -F delete_branch_on_merge=true\n```\n\n' "$ORG"
+              printf 'This never touches `develop`, `staging`, `main`/`master` (branch protection\n'
+              printf 'refuses deletions) nor any branch that is not a merged PR head, such as\n'
+              printf '`gh-pages`. Enabling it does not clean up branches that are already stale.\n\n'
+            fi
+
             if [ -n "$UNMERGEABLE" ]; then
               printf '### No merge method is enabled\n\n%s\n\n' "$UNMERGEABLE"
               printf 'Nothing can be merged in these repos at all. Disabling rebase is not the fix\n'
@@ -191,7 +227,7 @@ jobs:
       - name: Fail the run when drift was found but not corrected
         # A green run must mean "settings are correct", not merely "the check
         # executed" - otherwise the badge lies.
-        if: steps.audit.outputs.failed != '' || steps.audit.outputs.unmergeable != '' || steps.audit.outputs.drift != ''
+        if: steps.audit.outputs.failed != '' || steps.audit.outputs.unmergeable != '' || steps.audit.outputs.nodelete != '' || steps.audit.outputs.drift != ''
         run: |
           echo "::error::Merge-settings drift detected and not corrected - see the run summary and the comment on backend#1337."
           exit 1
