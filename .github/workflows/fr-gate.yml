@@ -93,7 +93,7 @@ jobs:
           echo "::error::Manual promotion PRs are retired — promotions into this branch go through the release train (tracebloc/release-train → Actions → 'Release train'). For a single-repo emergency prod fix use the 'hotfix' label; 'skip-fr-gate' remains the audited full override."
           exit 1
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
         with:
           fetch-depth: 0
