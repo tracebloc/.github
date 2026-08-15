@@ -1,0 +1,61 @@
+name: Selftests
+
+# EVERY SELFTEST, ON EVERY PR, AS ONE REQUIRED CHECK (backend#1680).
+#
+# WHY THIS EXISTS. This repo has eight selftest suites and, before this file,
+# seven of them ran only from their own path-filtered workflow and NONE was a
+# required status check. So a change to `caller-drift.py` ran the caller-drift
+# selftest and nothing else, a change to a shared helper ran whichever
+# filter happened to match, and a red suite blocked no merge at all.
+#
+# That is the org's own rule turned on itself: a guard in a non-required job is
+# advice, not a gate (backend#1729). These suites guard the reusables every
+# other repo's CI depends on -- they are the last place advice is good enough.
+#
+# NO `paths:` FILTER, DELIBERATELY. Two reasons, and the second is the one that
+# bites:
+#   1. The suites are cross-cutting. `caller-drift-selftest.py` imports the
+#      guard, `kanban-deploy-state-selftest.py` extracts and runs shell out of
+#      TWO workflows, and `selftests-cover` reads the Makefile. A filter that
+#      names the obvious file misses the edit that actually broke them.
+#   2. A REQUIRED check that is path-filtered never reports on a PR the filter
+#      skips, so the PR waits at "Expected -- waiting for status" forever. This
+#      org has hit that twice (`client#665`, `pii-gate/pii-check`). A required
+#      check must run on every PR or not be required.
+#
+# The whole suite is 34 seconds and 346 assertions, so there is nothing to buy
+# by filtering.
+#
+# `make selftests` is the SAME target a contributor runs and the same one the
+# pre-push hook runs, so this job cannot drift from local (backend#1606). It
+# depends on `selftests-cover`, which fails if a selftest file exists that no
+# target runs -- so adding a suite without wiring it is caught here too.
+
+on:
+  pull_request:
+  push:
+    branches: [develop, staging, main]
+
+concurrency:
+  group: selftests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  selftests:
+    name: selftests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install what the suites need
+        # PyYAML only -- the suites stub every network seam, so nothing else is
+        # required. Pinned to the version repo-inventory.yml's own guard uses.
+        run: python -m pip install --quiet 'pyyaml==6.0.2'
+      - name: make selftests
+        run: make selftests
