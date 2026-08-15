@@ -101,7 +101,6 @@ reusables:
   - wip-limit-check.yml
   - blocked-gate.yml
   - version-bump-gate.yml
-  - version-bump-pr.yml
 
 # Copies, not callers: these are duplicated into each repo, so the guard compares
 # content (git blob sha against the checked-out source) instead of looking for a
@@ -315,15 +314,6 @@ shared_reasons:
     it. Requiring it in any repo would land this guard red on day one; the decision to wire it
     up or delete it is backend#1415 follow-up work. Exempt everywhere, deliberately and in
     writing.
-  version_bump_pr_never_wired: &version_bump_pr_never_wired >-
-    version-bump-pr has ZERO callers anywhere in the org and cannot be called as
-    written: it requires a `pr-token` secret no repo supplies. It is Layer 2 of
-    backend#1563 - the automated post-release bump-PR opener, meant to prevent the
-    version staleness that stalled tracebloc-py-package's prod leg (backend#1561).
-    It shipped and was never wired up, and nothing said so, because the guard
-    enumerated this list rather than the source directory (backend#1681 added that
-    check, which is what surfaced it). Exempt everywhere in writing until it is
-    wired or deleted - the same posture as wip-limit-check.
   blocked_gate_rollout_pending: &blocked_gate_rollout_pending >-
     blocked-gate has ZERO callers so far, deliberately and for exactly one PR. The
     reusable and its selftest land first so the MATCHING can be reviewed on its own -
@@ -333,9 +323,11 @@ shared_reasons:
     from its audit branch over the API, so adding a caller and flipping its entry to
     `required` in one PR fails on a caller that is not on the audit branch yet.
     STAGED, NOT PARKED. If this anchor is still here once the rollout PR has merged,
-    it has become the same finding as wip_limit_check_has_no_callers and
-    version_bump_pr_never_wired: a reusable that shipped, was never wired up, and had
-    a written excuse for it. Treat it as a defect then, not a justification.
+    it has become the same finding as wip_limit_check_has_no_callers: a reusable that
+    shipped, was never wired up, and had a written excuse for it. Treat it as a defect
+    then, not a justification. That comparison used to name version_bump_pr_never_wired
+    too; version-bump-pr.yml was DELETED under backend#1563 rather than wired, which is
+    the other way this ends and the better one when nothing is calling it.
     Arming is a briefing decision rather than a silent flip because two live PRs go red
     the moment it is on - client#490 ("HOLD until v0.8.0 image") and client-runtime#192
     ("DO NOT MERGE") - which is the gate working as intended (backend#1752,
@@ -425,8 +417,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
       # Remediated 2026-08-06 (.github#171, backend#1603). The repo that HOSTS
       # code-quality.yml was the only repo not running it, so the action-pins job
@@ -485,8 +475,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -518,8 +506,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -563,8 +549,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml:
         exempt: *advance_deploy_env_caller_missing
       code-quality.yml:
@@ -598,8 +582,6 @@ repos:
       tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -634,8 +616,6 @@ repos:
       tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -668,8 +648,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -700,8 +678,6 @@ repos:
       tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -732,8 +708,6 @@ repos:
       tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -787,8 +761,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       # Flipped exempt -> required 2026-08-04: the caller was added on MAIN only
       # (docs#70, a docs-exception direct merge) where the develop-first audit
       # could not see it. docs#80's backmerge brought it onto develop.
@@ -849,8 +821,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -927,8 +897,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -967,8 +935,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -1024,8 +990,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml:
         exempt: *code_quality_caller_missing
@@ -1085,8 +1049,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       # Per-caller reasons, not one blanket text (Bugbot, .github#138). The first
       # version of this block asserted "no hop to gate" for all nine, which is only
       # true for some of them and silently overwrote reasons that were already
@@ -1145,8 +1107,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -1179,8 +1139,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -1211,8 +1169,6 @@ repos:
       tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -1250,8 +1206,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
