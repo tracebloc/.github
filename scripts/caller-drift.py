@@ -971,9 +971,12 @@ def check_source_reusables(source_dir: str, listed: "list[str]") -> None:
 
     `version-bump-pr.yml` is how that surfaced (backend#1681): shipped, never
     listed, zero callers org-wide, and requiring a `pr-token` secret no repo
-    supplies. It is Layer 2 of backend#1563, meant to stop the version staleness
+    supplies. It was Layer 2 of backend#1563, meant to stop the version staleness
     that stalled tracebloc-py-package's prod leg -- and nothing said it was never
-    wired up.
+    wired up. That file no longer exists: #1563 decided to DELETE it rather than
+    wire it, since Layer 1 (`version-bump-gate`) already turns the stall into a
+    loud block. The example is kept because the blind spot it exposed is the
+    reason this function exists, not because the file is still there.
 
     Deliberately a die(), not a finding: the inventory is the contract, and a
     contract that does not mention half the artifacts it governs cannot be

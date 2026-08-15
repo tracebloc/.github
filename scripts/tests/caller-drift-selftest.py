@@ -1230,7 +1230,9 @@ expect_schema_failure("rulesets exemption with no reason rejected",
 #
 # The guard iterated the inventory's `reusables` list and never the source
 # directory, so a reusable that shipped without being listed was compared against
-# no repo and reported by nothing. version-bump-pr.yml lived in that blind spot.
+# no repo and reported by nothing. version-bump-pr.yml lived in that blind spot;
+# it was deleted under backend#1563 rather than wired up, but the blind spot is
+# what these cases are about, so they do not depend on that file existing.
 
 def _src_tree(names_and_bodies):
     """A throwaway source dir with .github/workflows/<name> files."""
