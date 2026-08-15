@@ -120,10 +120,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Authenticates as the tracebloc-release-train App (backend#2036) instead of
+      # one human's PAT. Needs BOTH grants: `organization_projects: write` to advance
+      # the card and `issues: write` to post the outcome comment and its reaction.
+      # `owner:` makes the token ORG-scoped -- a repo-scoped one cannot reach an org
+      # ProjectV2. No fallback to the old PAT: a fallback would let a broken App path
+      # look like a working migration.
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Decide the outcome and advance the card
         id: assess
         env:
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG: ${{ inputs.org }}
           PROJECT_NUMBER: ${{ inputs.project-number }}
           ALLOW_SELF_SIGNOFF: ${{ inputs.allow-self-signoff }}
@@ -468,7 +482,7 @@ jobs:
         # could publish anything, THAT is the case most in need of reporting.
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO_FULL: ${{ github.repository }}
           NUMBER: ${{ github.event.issue.number }}
           COMMENT_ID: ${{ github.event.comment.id }}
