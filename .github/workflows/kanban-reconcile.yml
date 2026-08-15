@@ -58,14 +58,35 @@ jobs:
   reconcile:
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
       ORG: tracebloc
       PROJECT_NUMBER: 2
       DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
       MAX_MOVES: 100
     steps:
+      # Authenticates as the tracebloc-release-train App (backend#2036) instead of
+      # one human's PAT -- the credential this sweep shares with fifteen other
+      # workflows and with its owner's own shell. Needs both grants:
+      # `organization_projects: write` to move and archive cards, `issues: write`
+      # for the keep-open shield. `owner:` makes the token ORG-scoped; a repo-scoped
+      # one cannot reach an org ProjectV2.
+      #
+      # GH_TOKEN moved from job-level env to per-step, because a job-level env cannot
+      # read a step output. The file now names which steps hold a credential.
+      #
+      # No fallback to the old PAT: a fallback would let a broken App path look like
+      # a working migration.
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Resolve project + field/option IDs
         id: ids
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
@@ -124,6 +145,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Pull non-terminal items
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           : > items.ndjson
@@ -218,7 +241,11 @@ jobs:
         # North Stars gets keep-open (idempotent - adding an existing label is
         # a no-op). One-way by design: removal stays with humans, because the
         # label is also applied manually and an auto-remove would fight them.
-        # Write failures FAIL the step (the PROJECTS_KANBAN_TOKEN write rule).
+        # Write failures FAIL the step (the board-write rule). Named for the rule,
+        # not the credential: backend#2036 moved these writes to the App, and a rule
+        # named after a secret goes stale the moment the secret does.
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           SHIELDED=0
@@ -249,6 +276,8 @@ jobs:
 
       - name: Classify + plan moves
         id: plan
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           : > moves.tsv
@@ -557,6 +586,8 @@ jobs:
 
       - name: Apply moves
         if: steps.plan.outputs.planned != '0' && env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           PROJECT_ID="${{ steps.ids.outputs.project_id }}"
@@ -648,6 +679,7 @@ jobs:
         # heal. Needs only the resolved ids; has its own MAX_ADDS runaway guard.
         if: always() && steps.ids.outcome == 'success'
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           LOOKBACK_DAYS: 21
           MAX_ADDS: 60
           # Lower bound on the discovered sweep scope. 1 is deliberately loose - it
@@ -705,7 +737,7 @@ jobs:
           # listing above returning nothing, or the token losing org-wide contents
           # read - where zero is an absence of evidence, not evidence of health.
           if [ "${#SCOPE[@]}" -lt "$MIN_SCOPE" ]; then
-            echo "::error::Board-tracked scope is ${#SCOPE[@]} repo(s), below MIN_SCOPE=$MIN_SCOPE - refusing to report a clean sweep over an empty scope. Check PROJECTS_KANBAN_TOKEN still has org-wide contents:read."
+            echo "::error::Board-tracked scope is ${#SCOPE[@]} repo(s), below MIN_SCOPE=$MIN_SCOPE - refusing to report a clean sweep over an empty scope. Check the tracebloc-release-train App installation still covers every repo and still holds contents:read (backend#2036 moved this off PROJECTS_KANBAN_TOKEN; an App is installed on SELECTED repos, so a repo added to the org but never added to the installation reads as absent here)."
             exit 1
           fi
 
@@ -894,9 +926,13 @@ jobs:
               # as though it were the complete record.
               #
               # A 403 on a label write is also the single most likely failure in
-              # this step: PROJECTS_KANBAN_TOKEN is one user PAT shared by CI,
-              # the conformance gate, the weekly cron and any local script, on
-              # one 5,000/hr budget.
+              # this step. The original reason was that PROJECTS_KANBAN_TOKEN was
+              # one user PAT shared by CI, the conformance gate, the weekly cron
+              # and any local script on one 5,000/hr budget. backend#2036 moved
+              # this to the App, which removes THAT cause -- but not the class:
+              # an App is installed on SELECTED repos, so a repo outside the
+              # installation 403s here exactly as an exhausted PAT did. Counted
+              # rather than fatal for the same reason either way.
               #
               # So the failure is recorded in `add_fail` instead. The run still
               # goes red at the end of the step - the rule is kept - but the
