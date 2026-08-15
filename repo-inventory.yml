@@ -842,9 +842,53 @@ repos:
     visibility: private
     release_train: true
     protection:
+      # develop already requires the Vitest suite plus four more repo-specific
+      # contexts (Type check, Lint (ESLint), Ratchet guardrails, E2E tests
+      # (Cypress)); the baseline floor covers it and nothing here narrows it.
       develop: required
-      staging: required
-      prod: required
+      # WIDER than the fleet baseline, not narrower - `divergent` is the only
+      # cell shape that can state a repo's own set, and stating it is the point
+      # (backend#1975). Until 2026-08-15 both promotion branches required
+      # `gate / gate` + the two `quality/*` content gates and NO functional
+      # suite at all: this repo is the customer-facing UI, and it was the one
+      # train repo where a failing test could not block a promotion to prod.
+      # Every peer already requires one (backend: `Django + Bandit plugin`,
+      # client-runtime: `pytest`, design-system + tracebloc-website: their unit
+      # suites).
+      #
+      # `Unit tests (Vitest)` and not the other two candidates, deliberately:
+      #   - `API contract (real dev-API)` talks to a LIVE dev API, so requiring
+      #     it would block prod promotions on someone else's uptime.
+      #   - `E2E tests (Cypress)` is the same bet with a flakier suite.
+      # The Vitest job is the fast, hermetic one. Armed while green, per the
+      # rule that says never land a red gate: measured green in the last 14
+      # runs of tests.yml PER JOB (the workflow conclusion mixes six jobs and
+      # says nothing about this one), and it demonstrably REPORTS on a
+      # main-targeting PR (frontend-app#819, head aa4c3b9) - a required context
+      # that can never report leaves every PR waiting forever (client#665,
+      # pii-gate/pii-check).
+      staging:
+        divergent:
+          reason: >-
+            Requires MORE than the fleet baseline: the Vitest unit suite is
+            armed here on top of the three baseline contexts, so a red test
+            blocks the develop -> staging hop (backend#1975).
+          required_checks:
+            - gate / gate
+            - quality / gitleaks
+            - quality / house-rules
+            - Unit tests (Vitest)
+      prod:
+        divergent:
+          reason: >-
+            Requires MORE than the fleet baseline: the Vitest unit suite is
+            armed here on top of the three baseline contexts, so a red test
+            blocks the staging -> prod hop (backend#1975).
+          required_checks:
+            - gate / gate
+            - quality / gitleaks
+            - quality / house-rules
+            - Unit tests (Vitest)
     rulesets:
       promotion_merge_commit_only: required
       tag_trust_root:
