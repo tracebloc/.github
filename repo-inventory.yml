@@ -201,6 +201,12 @@ protection_policy:
   develop:
     classic_protection: true
     min_reviews: 1
+    # WHO MAY SKIP THE REVIEW (backend#1978). An EXACT allowlist, in the same
+    # style as ruleset_policy.bypass_actors and for the same reason: min_reviews
+    # asserts HOW MANY reviews are required and nothing asserted WHO may skip
+    # them, so a second app or a user added tomorrow read identically to today.
+    # Empty is the measured fleet state on develop (2026-08-15, all 16).
+    bypass_reviews: []
     enforce_admins: null            # deliberate escape hatch (backend#1276 D1)
     block_force_pushes: true
     block_deletions: true
@@ -217,6 +223,11 @@ protection_policy:
   staging:
     classic_protection: true
     min_reviews: 1
+    # The release train merges promotion PRs via this app's review-bypass
+    # (RFC-BACKEND-0008 D9/D14). It never bypasses `fr-gate`, which stays a
+    # required check. EXACT: measured 2026-08-15 as the ONLY bypass actor on
+    # every staging and prod branch in the fleet, so a second one is a finding.
+    bypass_reviews: ['App:tracebloc-release-train']
     enforce_admins: null
     block_force_pushes: true
     block_deletions: true
@@ -234,6 +245,11 @@ protection_policy:
   prod:
     classic_protection: true
     min_reviews: 1
+    # The release train merges promotion PRs via this app's review-bypass
+    # (RFC-BACKEND-0008 D9/D14). It never bypasses `fr-gate`, which stays a
+    # required check. EXACT: measured 2026-08-15 as the ONLY bypass actor on
+    # every staging and prod branch in the fleet, so a second one is a finding.
+    bypass_reviews: ['App:tracebloc-release-train']
     enforce_admins: true            # backend#1276 D1 - closed on every train prod branch
     block_force_pushes: true
     block_deletions: true

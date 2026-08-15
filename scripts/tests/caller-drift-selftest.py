@@ -54,6 +54,7 @@ def _policy(**over):
         "require_conversation_resolution": True,
         "strict": False,
         "required_checks": ["ci / build"],
+        "bypass_reviews": [],
     }
     base.update(over)
     return base
