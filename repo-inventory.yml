@@ -322,16 +322,6 @@ shared_reasons:
   set_pr_status_caller_missing: &set_pr_status_caller_missing >-
     no set-pr-status caller, so PRs here never post their gate status to the board.
     UNREMEDIATED.
-  bugbot_guide_missing: &bugbot_guide_missing >-
-    no .cursor/BUGBOT.md, so Bugbot reviews PRs here with no repo context: no statement of what
-    this repo is, which defect classes actually occur in it, or which findings are known
-    non-issues. Measured absent 2026-08-12 in rfcs; present in all 16 train
-    repos and in release-train. UNREMEDIATED - this exemption is the finding, not a
-    justification. Cheap to close (one file), and deliberately NOT closed in the same PR that
-    adds this family: the point of the family is that the gap is on the record and countable
-    rather than invisible.
-
-  # --- branch-protection reasons (backend#1608 increment 2, backend#1276) -----
   docs_no_required_review: &docs_no_required_review >-
     docs is exempt from required review on `staging` and `main` (Lukas, 2026-06-04): docs are
     content-only and low-risk, exempt from both the develop-only rule and the FR-gate. Every OTHER
@@ -714,16 +704,18 @@ repos:
       staging:
         divergent:
           reason: *docs_no_required_review
+          # `required_checks` is NO LONGER overridden here. Until 2026-08-13 both
+          # promotion branches carried `required_checks: []` - docs required no
+          # status check at all, on a PUBLIC repo - and the reason above already
+          # claimed the divergence "names `min_reviews` alone", which was false
+          # while that key sat beside it. Armed to the fleet baseline
+          # (gate / gate + gitleaks + house-rules) on 2026-08-13, so the policy
+          # assertion is live again and the sentence above is now true.
           min_reviews: 0
-          # docs requires NO status check on staging or prod - the 2026-06-04
-          # exemption is broader than review alone. Stated as [] so the gap is a
-          # sentence here rather than a silence.
-          required_checks: []
       prod:
         divergent:
           reason: *docs_no_required_review
-          min_reviews: 0
-          required_checks: []          # as staging, above
+          min_reviews: 0          # as staging, above
     rulesets:
       promotion_merge_commit_only: required
       tag_trust_root:
@@ -852,22 +844,14 @@ repos:
     release_train: true
     protection:
       develop: required
-      staging:
-        divergent:
-          reason: >-
-            Carries the fr-gate on both promotion branches but not the content
-            gates: `quality / gitleaks` and `quality / house-rules` are required
-            on develop and on neither staging nor prod (measured 2026-08-11).
-            This is a public repo, so the credential scan is the gate that matters most. Recorded as the narrower set rather than left silent -
-            backend#1681 tracks closing it.
-          required_checks:
-            - gate / gate
-      prod:
-        divergent:
-          reason: >-
-            As staging, above.
-          required_checks:
-            - gate / gate
+      # Closed 2026-08-13 (backend#1681). Both promotion branches carried the
+      # fr-gate but NOT the content gates: `quality / gitleaks` and
+      # `quality / house-rules` were required on develop and on neither staging
+      # nor prod, on a PUBLIC repo. Armed to the fleet baseline after measuring
+      # the caller green on both roles, so this is now `required` rather than a
+      # narrower set with a reason attached.
+      staging: required
+      prod: required
     rulesets:
       promotion_merge_commit_only: required
       tag_trust_root:
@@ -1024,29 +1008,19 @@ repos:
           decision nobody has taken, which is what the board card is now for (.github#138).
     quality_files:
       CLAUDE.md: required
-      ".cursor/BUGBOT.md":
-        exempt: *bugbot_guide_missing
+      ".cursor/BUGBOT.md": required
   start-training:
     visibility: public
     release_train: true
     protection:
       develop: required
-      staging:
-        divergent:
-          reason: >-
-            Carries the fr-gate on both promotion branches but not the content
-            gates: `quality / gitleaks` and `quality / house-rules` are required
-            on develop and on neither staging nor prod (measured 2026-08-11).
-            This is a public repo whose notebooks carry executed output cells - exactly where a token gets committed unnoticed - so the credential scan is the gate that matters most. Recorded as the narrower set rather than left silent -
-            backend#1681 tracks closing it.
-          required_checks:
-            - gate / gate
-      prod:
-        divergent:
-          reason: >-
-            As staging, above.
-          required_checks:
-            - gate / gate
+      # Closed 2026-08-13 (backend#1681). Both promotion branches carried the
+      # fr-gate but NOT the content gates, on a PUBLIC repo whose notebooks
+      # carry executed output cells - exactly where a token gets committed
+      # unnoticed, which is why the credential scan mattered most here. Armed to
+      # the fleet baseline after measuring the caller green on both roles.
+      staging: required
+      prod: required
     rulesets:
       promotion_merge_commit_only: required
       tag_trust_root:
