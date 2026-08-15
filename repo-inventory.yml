@@ -407,8 +407,44 @@ repos:
     visibility: public
     release_train: true
     protection:
-      develop: required
-      staging: required
+      # WIDER than the fleet baseline on develop and staging: `selftests` is
+      # armed on top of it, and stating it is the point (backend#1680).
+      #
+      # selftests.yml was added to be a required check -- its own header says so
+      # and cites the org rule it turns on itself: a guard in a non-required job
+      # is advice, not a gate (backend#1729). Nothing made it required, so the
+      # eight suites guarding the reusables every other repo's CI depends on
+      # could go red and block no merge. The workflow said "required" and the
+      # protection said nothing, which is the gap this cell closes: a later
+      # removal is now drift rather than silence.
+      develop:
+        divergent:
+          reason: >-
+            Requires MORE than the fleet baseline: the `selftests` job is armed
+            here on top of the three baseline contexts, so a red selftest blocks
+            the merge (backend#1680).
+          required_checks:
+            - quality / gitleaks
+            - quality / house-rules
+            - quality / action-pins
+            - selftests
+      staging:
+        divergent:
+          reason: >-
+            Requires MORE than the fleet baseline: the `selftests` job is armed
+            here on top of the three baseline contexts, so a red selftest blocks
+            the develop -> staging hop (backend#1680).
+          required_checks:
+            - gate / gate
+            - quality / gitleaks
+            - quality / house-rules
+            - selftests
+      # NOT YET on prod, deliberately, and this is a sequencing fact rather than
+      # a decision against it. `selftests.yml` reaches `staging` only when the
+      # promotion carrying it merges; until then a staging -> main PR's head
+      # cannot report the context, and a required check that never reports
+      # leaves the PR waiting forever (client#665, `pii-gate/pii-check`). Arm it
+      # here once staging carries the workflow -- backend#1680 carries the step.
       prod: required
     rulesets:
       promotion_merge_commit_only: required
