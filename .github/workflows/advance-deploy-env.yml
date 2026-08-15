@@ -127,10 +127,38 @@ jobs:
           echo "Found PRs: $PRS"
           echo "prs=$PRS" >> "$GITHUB_OUTPUT"
 
+      # THIS is the workflow backend#2036 was filed about. On 2026-08-14 at 06:22
+      # UTC, run 31776053792 on client-runtime died with
+      #     gh: API rate limit already exceeded for user ID 54042461
+      # exit 1 -- because every board caller in the fleet, both crons, the
+      # conformance gate and that person's own `gh` shared ONE user PAT's 5,000/hr.
+      # The workflow failed CLOSED, which is right, and the cost was still a card
+      # left behind its own shipped code until someone noticed.
+      #
+      # An installation token has a budget that is not shared with a human's
+      # interactive use and does not evaporate when that person rotates a token or
+      # leaves. `owner:` makes it ORG-scoped; a repo-scoped token cannot write an
+      # org ProjectV2.
+      #
+      # Gated behind the same `if:` as the step that uses it, so a push with no
+      # tracked branch or no PRs mints nothing.
+      #
+      # NO FALLBACK TO THE PAT: a fallback would let a broken App path keep
+      # working silently, so the migration would look complete while nothing had
+      # migrated (backend#1680's whole subject).
+      - name: Mint an installation token
+        id: app-token
+        if: steps.env.outputs.env != '' && steps.prs.outputs.prs != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Update project fields for each PR
         if: steps.env.outputs.env != '' && steps.prs.outputs.prs != ''
         env:
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG: ${{ inputs.org }}
           PROJECT_NUMBER: ${{ inputs.project-number }}
           DEPLOY_ENV: ${{ steps.env.outputs.env }}
