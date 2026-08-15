@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+#
+# git reap — delete local branches whose work has provably landed (backend#2001).
+#
+# Install once, then it works from any repo checkout as `git reap`:
+#   curl -fsSL https://raw.githubusercontent.com/tracebloc/.github/develop/scripts/git-reap \
+#     -o ~/.local/bin/git-reap && chmod +x ~/.local/bin/git-reap
+#
+# WHY THIS EXISTS, and why `git branch -d` is not enough:
+#
+# We squash-merge. A squash-merged branch is NOT an ancestor of develop — the
+# squashed commit is a different commit with a different sha — so
+# `git branch --merged` never lists it and `git branch -d` REFUSES to delete it.
+# Every obvious cleanup command therefore reports nothing to do on a checkout
+# full of dead branches, and people reasonably conclude they are clean. Measured
+# 2026-08-14: one workspace held 459 local branches, 367 of them redundant, and
+# the org held 465 remote branches whose last commit predated June 2026.
+#
+# WHY `[gone]` ALONE IS THE WRONG SIGNAL — the trap this script exists to avoid.
+# With delete_branch_on_merge enabled (on in all 19 repos since backend#1981), a
+# merged branch's upstream goes [gone] on the next fetch. But so does the upstream
+# of a branch whose PR was CLOSED WITHOUT MERGING, and so does one somebody
+# deleted by hand. A one-liner that reaps every [gone] branch destroys work that
+# never landed — on the 2026-08-14 backlog it would have taken 35 such branches.
+#
+# So [gone] only narrows the candidate set. The DECISION needs positive evidence
+# that the content is on the default branch:
+#
+#   1. the branch is an ancestor of the default branch (a real merge), or
+#   2. GitHub reports a MERGED pull request for that exact head ref.
+#
+# Anything else is kept and reported with its commit count. FAILS CLOSED: no gh,
+# no auth, no network, an ambiguous answer or an unparseable state means KEEP.
+# "I could not tell" is never treated as "it merged".
+#
+# One `gh pr list` per repo, never per branch: a per-branch call exhausts the API
+# rate limit on a repo with hundreds of branches.
+#
+# Usage:
+#   git reap            # dry run — say what would go and why (default)
+#   git reap --delete   # actually delete
+#   git reap --all      # also consider branches whose upstream is still alive
+#
+set -uo pipefail
+
+DELETE=0
+SCAN_ALL=0
+for arg in "$@"; do
+  case "$arg" in
+    --delete|-f) DELETE=1 ;;
+    --all|-a)    SCAN_ALL=1 ;;
+    --help|-h)
+      sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) echo "git reap: unknown option '$arg' (try --help)" >&2; exit 2 ;;
+  esac
+done
+
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "git reap: not a git repository" >&2; exit 2; }
+
+# Never touch an integration branch, whatever its upstream says.
+PROTECTED_RE='^(develop|staging|main|master|gh-pages|HEAD)$'
+
+git fetch --prune --quiet 2>/dev/null || echo "git reap: fetch failed — working from possibly stale refs" >&2
+
+have_gh=0
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then have_gh=1; fi
+
+DEFAULT=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)
+if [ -z "$DEFAULT" ]; then
+  for guess in origin/develop origin/main origin/master; do
+    git rev-parse --verify --quiet "$guess" >/dev/null && { DEFAULT="$guess"; break; }
+  done
+fi
+
+# origin/HEAD is a LOCAL CACHE of the remote's default branch. It is written at
+# clone time and `git fetch` never updates it, so it goes stale the moment the
+# remote's default moves — measured on 9 of 19 clones in this org, every one still
+# pointing at `main` after the move to `develop`.
+#
+# Every use of DEFAULT below is wrong when it is stale, in both directions. The
+# ancestor check reaps a branch that landed on `main` but never on `develop`. The
+# --base filter reads a COMPLETE merged-PR list for the wrong base, sets
+# pr_evidence=1 on it, and the KEEP line then reports "no merge evidence" as a
+# proven negative — the same contradiction the header forbids for an unreadable or
+# truncated list, arrived at from a clean read of the wrong question.
+#
+# So it is verified against the authority rather than trusted, and gh is already
+# required for the evidence path that matters. When gh cannot answer, the value is
+# UNVERIFIED and says so: the PR path already fails closed without gh, but the
+# ancestor path does not, and a silent stale default is exactly what this tool
+# must not have (Bugbot).
+default_verified=0
+if [ "$have_gh" = 1 ] &&
+   remote_default=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null) &&
+   [ -n "$remote_default" ]; then
+  default_verified=1
+  if [ "$DEFAULT" != "origin/$remote_default" ]; then
+    echo "git reap: origin/HEAD says ${DEFAULT:-<unset>}, the remote says $remote_default — using the remote and refreshing origin/HEAD" >&2
+    git remote set-head origin "$remote_default" >/dev/null 2>&1 || true
+    DEFAULT="origin/$remote_default"
+  fi
+elif [ -n "$DEFAULT" ]; then
+  echo "git reap: cannot reach the remote to confirm the default branch — treating $DEFAULT as UNVERIFIED (a stale origin/HEAD would make every verdict below wrong)" >&2
+fi
+
+[ -n "$DEFAULT" ] || { echo "git reap: cannot determine the default branch — refusing to guess" >&2; exit 2; }
+
+# Branch checked out here or in any linked worktree cannot be deleted; naming it
+# is more useful than a git error.
+pinned=$(git worktree list --porcelain | awk '/^branch /{sub("refs/heads/","",$2); print $2}')
+
+# One PR query per repo, not per branch: a per-branch call burns the API rate
+# limit on a repo with hundreds of branches.
+#
+# The list is EVIDENCE OF ABSENCE only when it is both readable and complete,
+# and neither is free:
+#
+#   - `|| prs=""` collapsed a failed query into "zero merged PRs". Every branch
+#     then fell through to the have_gh=1 path and was reported as "no merge
+#     evidence" — a proven negative, asserted from a read that never happened.
+#     The header two screens up promises "an ambiguous answer means KEEP" and
+#     "I could not tell is never treated as it merged"; an unreadable list is
+#     the ambiguous answer, so it has to reach the same SKIP the missing-gh case
+#     does (Bugbot).
+#   - `gh` truncates at --limit SILENTLY. A no-match against a newest-first
+#     partial window is not an absence, and the old squash-merged backlog this
+#     tool exists to clear is exactly what sorts out of that window first.
+#
+# Matches remain sound in both cases — a branch FOUND in a partial list really
+# did merge. Only absence is unprovable, and absence is what deletes nothing and
+# prints a claim. So a match still counts; a miss becomes SKIP.
+#
+# The list carries the head SHA as well as the name, and the match below needs
+# BOTH. A name-only match says "a branch called this merged once" — not "this
+# branch merged". Push another commit after the merge, or reuse a branch name
+# (`fix/typo` twice, months apart), and the name still matches while the tip is
+# work that has never landed. With --delete that is a force-delete of unmerged
+# commits, from a tool whose header promises the opposite, and git's own safety
+# net is off: `git branch -D` does not warn.
+#
+# Requiring the tip to equal the merged PR's headRefOid makes the check say what
+# it claims. A local branch that is BEHIND its merged head also stops matching,
+# which is the conservative direction: it is kept, and `git merge-base
+# --is-ancestor` already reaps the ordinary merged case anyway (Bugbot).
+#
+# The query is also filtered by BASE, and that is not a detail. "A MERGED pull
+# request exists for this head" is only evidence of landing if the PR landed on
+# the branch we are measuring against. An unfiltered `gh pr list` counts a PR
+# squash-merged into a SIBLING FEATURE branch — which is not hypothetical here:
+# the org has a `sibling-merge` label for exactly that closure path, and a
+# stacked-PR mis-merge into a feature base has happened. Such a branch is merged
+# into something, is not on develop, and `git merge-base --is-ancestor` above
+# correctly says so — then the PR row overrode it and `--delete` force-removed
+# commits that never reached develop. Filtering by base makes the two agree
+# (Bugbot).
+PR_LIMIT=1000
+prs=""
+pr_evidence=0
+pr_problem=""
+if [ "$have_gh" = 1 ]; then
+  if prs=$(gh pr list --state merged --base "${DEFAULT#origin/}" --limit "$PR_LIMIT" --json headRefName,headRefOid --jq '.[] | .headRefName + " " + .headRefOid' 2>/dev/null); then
+    pr_count=$(grep -c . <<<"$prs")
+    if [ "$pr_count" -ge "$PR_LIMIT" ]; then
+      pr_problem="the merged-PR list hit the --limit $PR_LIMIT cap, so absence from it proves nothing"
+    else
+      pr_evidence=1
+    fi
+  else
+    pr_problem="the merged-PR list could not be read (gh pr list failed)"
+  fi
+fi
+
+# An UNVERIFIED default poisons EVERY verdict, not just the absence one, and my
+# first attempt at this only cleared pr_evidence — which gates the "no merge
+# evidence" line and nothing else. Both POSITIVE tests key on $DEFAULT too:
+# `--is-ancestor "$br" "$DEFAULT"`, and the $prs list itself, which was queried
+# with `--base "${DEFAULT#origin/}"`. So with a stale origin/HEAD and a failed
+# `gh repo view`, --delete could still force-remove a branch on merge evidence
+# read against the wrong base — the same fail-open class as the sibling-merge
+# bug, one layer down (Bugbot).
+#
+# There is no sound verdict to give without a trustworthy default, so the loop
+# below refuses all of them rather than picking which half to distrust.
+default_problem=""
+if [ "$default_verified" = 0 ]; then
+  default_problem="the default branch could not be confirmed, so neither an ancestor test nor a --base-filtered PR list means anything against ${DEFAULT#origin/}"
+fi
+
+reaped=0; kept=0; skipped=0
+while IFS=$'\t' read -r br track; do
+  [ -n "$br" ] || continue
+  # A herestring, never `printf | grep -q`. Under `set -o pipefail` a `grep -q`
+  # that exits on its first match can SIGPIPE a still-writing printf, and
+  # pipefail then reports the pipeline as a MISS — so a protected branch reads
+  # as unprotected, a merged head as unmerged, and a pinned worktree as free.
+  # The failure is input-size dependent (it needs the write to outrun the 64K
+  # pipe buffer), which is the worst kind: it passes every small test and turns
+  # up on the 459-branch checkout this tool was written for (Bugbot).
+  [[ "$br" =~ $PROTECTED_RE ]] && continue
+  if [ "$SCAN_ALL" = 0 ] && [ "$track" != "[gone]" ]; then continue; fi
+
+  if grep -qxF -- "$br" <<<"$pinned"; then
+    echo "  keep     $br — checked out in a worktree"
+    kept=$((kept+1)); continue
+  fi
+
+  # Before any evidence is weighed, because an unverified default invalidates
+  # the positive tests as well as the negative one.
+  if [ -n "$default_problem" ]; then
+    echo "  SKIP     $br — $default_problem (failing closed)"
+    skipped=$((skipped+1)); continue
+  fi
+
+  reason=""
+  if git merge-base --is-ancestor "$br" "$DEFAULT" 2>/dev/null; then
+    reason="ancestor of ${DEFAULT#origin/}"
+  elif [ "$have_gh" = 1 ] && grep -qxF -- "$br $(git rev-parse "$br")" <<<"$prs"; then
+    reason="squash-merged (MERGED PR for this exact head)"
+  fi
+
+  if [ -z "$reason" ]; then
+    if [ "$have_gh" = 0 ]; then
+      echo "  SKIP     $br — no gh auth, cannot prove it merged (failing closed)"
+      skipped=$((skipped+1))
+    elif [ "$pr_evidence" = 0 ]; then
+      echo "  SKIP     $br — $pr_problem (failing closed)"
+      skipped=$((skipped+1))
+    else
+      ahead=$(git rev-list --count "$DEFAULT..$br" 2>/dev/null || echo '?')
+      echo "  KEEP     $br — no merge evidence, $ahead commit(s) not on ${DEFAULT#origin/}"
+      kept=$((kept+1))
+    fi
+    continue
+  fi
+
+  sha=$(git rev-parse --short "$br")
+  if [ "$DELETE" = 1 ]; then
+    if git branch -D "$br" >/dev/null 2>&1; then
+      echo "  deleted  $br ($sha) — $reason"
+      reaped=$((reaped+1))
+    else
+      echo "  FAILED   $br — git refused the delete"
+      kept=$((kept+1))
+    fi
+  else
+    echo "  would go $br ($sha) — $reason"
+    reaped=$((reaped+1))
+  fi
+done < <(git for-each-ref --format='%(refname:short)%09%(upstream:track)' refs/heads)
+
+echo
+if [ "$DELETE" = 1 ]; then
+  echo "reaped=$reaped kept=$kept skipped=$skipped"
+else
+  echo "would reap=$reaped keep=$kept skipped=$skipped   (re-run with --delete)"
+fi
+[ "$reaped" = 0 ] && [ "$kept" = 0 ] && [ "$skipped" = 0 ] && echo "  nothing to consider"
+exit 0

@@ -164,6 +164,39 @@ quality_files:
 # wrong finding on backend#1276 before it was caught. See the header comment on
 # `read_protection()` in scripts/caller-drift.py for how the merge works and why
 # it is per-property rather than per-system.
+# CALLER INPUTS (backend#1977). Which inputs a REQUIRED caller must pass, and
+# with what value.
+#
+# WHY THIS FAMILY EXISTS. Everything above proves a caller is PRESENT -- that the
+# reusable runs. It says nothing about whether the check can FAIL, which is
+# decided by the inputs the caller passes. That has been wrong twice, silently,
+# on checks that were required:
+#
+#   .github#207     an OR-precedence bug made `action-pins-soft-fail: false` a
+#                   NO-OP in four repos that believed it was armed.
+#   backend#1681    `soft-fail` sat at its default of true on model-zoo,
+#                   start-training and docs, so `quality / gitleaks` and
+#                   `quality / house-rules` reported findings and exited 0 --
+#                   required status checks, on PUBLIC repos, that could not fail.
+#
+# Both were found by a human reading YAML. Nothing detected either, and nothing
+# would have detected the third.
+#
+# A FLOOR, NOT THE WHOLE SET: a caller may pass any number of other inputs. Only
+# the ones that decide whether the check can fail are asserted here.
+#
+# A MISSING KEY IS A FINDING, NOT A PASS. `soft-fail` defaults to true, so a
+# caller that simply omits it is in precisely the state this exists to catch --
+# "absence means the permissive default" is the whole failure mode.
+#
+# Measured 2026-08-14, all 16 train repos: soft-fail=false and
+# action-pins-soft-fail=false. This states the status quo so a regression is a
+# finding, and it lands green rather than importing a backlog.
+caller_inputs:
+  code-quality.yml:
+    soft-fail: false
+    action-pins-soft-fail: false
+
 protection_policy:
   develop:
     classic_protection: true

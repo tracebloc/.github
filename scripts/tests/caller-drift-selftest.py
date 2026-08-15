@@ -68,6 +68,7 @@ MINIMAL = {
     "reusables": ["a.yml"],
     "copies": ["c.yml"],
     "quality_files": ["GUIDE.md"],
+    "caller_inputs": {"a.yml": {"soft-fail": False}},
     "protection_policy": {
         "develop": _policy(),
         "staging": _policy(),
@@ -420,7 +421,7 @@ read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
 record(
     read.ok
     and read.branch == "develop"
-    and read.callers.get("fr-gate.yml") == [("fr-gate-caller.yml", "main")],
+    and read.callers.get("fr-gate.yml") == [("fr-gate-caller.yml", "main", {})],
     "develop-first branch choice, and a caller under a NON-matching filename is found",
     f"branch={read.branch} callers={read.callers}")
 
@@ -458,9 +459,34 @@ def _unpinned(args):
 
 stub(_unpinned)
 read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
-record(read.ok and read.callers.get("fr-gate.yml") == [("fr-gate-caller.yml", "v1.2.3")],
+record(read.ok and read.callers.get("fr-gate.yml") == [("fr-gate-caller.yml", "v1.2.3", {})],
        "a caller on an unexpected ref is captured with its ref, for the pin check",
        f"callers={read.callers}")
+
+
+# THE INPUTS ARE CAPTURED, not walked past (backend#1977). `with:` is a sibling
+# key of `uses:`; the old collector kept only the string, so by the time anything
+# compared a caller to the inventory the inputs were gone. Two proofs: the
+# permissive value is captured verbatim (so the audit can call it a finding), and
+# an absent `with:` reads as {} rather than as "no caller".
+def _soft_fail_true(args):
+    if _branches(args):
+        return "main\n"
+    if _tree(args):
+        return TREE_ONE
+    return blob(
+        b"jobs:\n  gate:\n"
+        b"    uses: tracebloc/.github/.github/workflows/fr-gate.yml@main\n"
+        b"    with:\n      soft-fail: true\n")
+
+
+stub(_soft_fail_true)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+record(
+    read.ok
+    and read.callers.get("fr-gate.yml") == [("fr-gate-caller.yml", "main", {"soft-fail": True})],
+    "a caller's `with:` inputs are captured, so an unarmed caller is visible",
+    f"callers={read.callers}")
 
 
 def _copy_sha(args):
@@ -1175,6 +1201,15 @@ record(not f and len(u) == 1,
        "rulesets: an unreadable read is UNREADABLE, never a silent pass", f"unreadable={u}")
 
 # Schema
+# The family must not be switchable off by deletion (Bugbot, .github#262). Both
+# of these leave the top-level key PRESENT, so schema validation passes -- and
+# the audit would then measure every caller against no inputs at all while
+# reporting the fleet conformant.
+expect_schema_failure("caller_inputs: null rejected",
+                      lambda d: d.__setitem__("caller_inputs", None))
+expect_schema_failure("caller_inputs: {} rejected",
+                      lambda d: d.__setitem__("caller_inputs", {}))
+
 expect_schema_failure("ruleset_policy missing a kind rejected",
                       lambda d: d["ruleset_policy"].pop("tag_trust_root"))
 expect_schema_failure("ruleset_policy with an unknown kind rejected",
