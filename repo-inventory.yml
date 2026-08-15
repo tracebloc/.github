@@ -374,15 +374,25 @@ shared_reasons:
   docs_no_required_review: &docs_no_required_review >-
     docs is exempt from required review on `staging` and `main` (Lukas, 2026-06-04): docs are
     content-only and low-risk, exempt from both the develop-only rule and the FR-gate. Every OTHER
-    protection assertion still applies here - this divergence names `min_reviews` alone so a
-    regression in force-push, deletion or admin posture is still caught. `docs/staging` got its
-    classic-protection layer on 2026-08-10 (backend#1276), mirroring `docs/main` rather than the
-    fleet shape, which is why one reason covers both branches.
+    protection assertion still applies here - this divergence names `min_reviews` and
+    `bypass_reviews` and nothing else, so a regression in force-push, deletion or admin posture is
+    still caught. `bypass_reviews` is EMPTY here for the reason `min_reviews` is 0: with no
+    required review there is nothing to bypass, so granting the train an allowance would assert a
+    permission that cannot be exercised. Measured `required_pull_request_reviews: null` on both
+    branches, 2026-08-15. `docs/staging` got its classic-protection layer on 2026-08-10
+    (backend#1276), mirroring `docs/main` rather than the fleet shape, which is why one reason
+    covers both branches.
   not_a_pipeline_prod_branch: &not_a_pipeline_prod_branch >-
     not on the release train, so this `main` is a WORKING branch, not a pipeline prod branch, and
     backend#1276's `enforce_admins: true` decision does not reach it. Deliberate for release-train
     specifically: it is the tool used to REPAIR the pipeline, so locking it hardest is
     self-defeating. Measured false on claude-skills, release-train and rfcs, 2026-08-10.
+    The same "no pipeline here" fact governs `bypass_reviews`: the fleet `prod` policy grants
+    `App:tracebloc-release-train` a review bypass because the train merges promotion PRs on that
+    branch. It promotes nothing into these three, so it holds no allowance and the policy's
+    entry cannot apply. Each repo states its own `bypass_reviews` beside `enforce_admins` rather
+    than inheriting - an EXACT allowlist inherited from a role whose premise is false is how a
+    bypass gets granted by accident. Measured 2026-08-15.
   no_develop_branch_single_branch_repo: &no_develop_branch_single_branch_repo >-
     single-branch repo: `main` is the only integration branch, so there is no `develop` to protect.
     Structural, not a gap. Precise staleness rule, because an earlier draft of this note overstated
@@ -540,6 +550,7 @@ repos:
         divergent:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
+          bypass_reviews: []      # nothing promotes here; see the reason above
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
@@ -755,16 +766,20 @@ repos:
           reason: *docs_no_required_review
           # `required_checks` is NO LONGER overridden here. Until 2026-08-13 both
           # promotion branches carried `required_checks: []` - docs required no
-          # status check at all, on a PUBLIC repo - and the reason above already
-          # claimed the divergence "names `min_reviews` alone", which was false
-          # while that key sat beside it. Armed to the fleet baseline
+          # status check at all, on a PUBLIC repo - and the reason above claimed
+          # the divergence named `min_reviews` alone, which was false while that
+          # key sat beside it. Armed to the fleet baseline
           # (gate / gate + gitleaks + house-rules) on 2026-08-13, so the policy
-          # assertion is live again and the sentence above is now true.
+          # assertion is live again. The reason now enumerates BOTH keys it
+          # covers, for the same lesson: a reason that names one key while two
+          # diverge reads as a tighter guarantee than the file gives.
           min_reviews: 0
+          bypass_reviews: []
       prod:
         divergent:
           reason: *docs_no_required_review
           min_reviews: 0          # as staging, above
+          bypass_reviews: []      # as staging, above
     rulesets:
       promotion_merge_commit_only: required
       tag_trust_root:
@@ -940,6 +955,14 @@ repos:
         divergent:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
+          # The two humans with write access here hold a review bypass on this
+          # branch, and this is the file that says so out loud. Consistent with
+          # `enforce_admins: false` above and decided for the same reason: this
+          # repo is the tool used to REPAIR the pipeline, so a broken train must
+          # not also be unfixable. It is the widest allowance in the fleet, which
+          # is exactly why it is written down as an EXACT list - a third name
+          # appearing here is a finding, not a shrug. Measured 2026-08-15.
+          bypass_reviews: ['LukasWodka', 'saadqbal']
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
@@ -1005,6 +1028,7 @@ repos:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
           require_conversation_resolution: false
+          bypass_reviews: []      # nothing promotes here; see the reason above
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
