@@ -6,19 +6,24 @@
 # every repo on the next workflow run, and reaches every secret those repos
 # hold.
 #
-# Branch protection on `main` already sets `require_code_owner_reviews: true`,
-# but no CODEOWNERS file existed — so the requirement was vacuous and any two
-# of the seven org members could land a change to the gates themselves. This
-# file makes that flag mean something.
+# WHAT THIS FILE DOES, AND DOES NOT, DO -- measured 2026-08-16.
 #
-# Note on self-merge: as sole code owner, @LukasWodka cannot approve his own
-# PRs, so his changes still rely on the admin bypass (`enforce_admins: false`).
-# That is deliberate for now — the control this file adds is over the other six
-# members' changes. Adding a second owner would make it a true two-person rule
-# at the cost of a second gatekeeper.
-
-# Everything, by default.
-*                           @LukasWodka
+# It AUTO-REQUESTS a reviewer on the paths below. It does NOT gate the merge:
+# `require_code_owner_reviews` is `false` on develop, staging and main, so any
+# approving review turns the PR green. That is deliberate (a PR must never wait
+# on one specific person to be approvable), and it is stated here because the
+# header used to assert the opposite -- "branch protection on `main` already
+# sets require_code_owner_reviews: true" -- which was false when checked. A
+# CODEOWNERS file that misdescribes its own enforcement is worse than none: it
+# reads as a control while gating nothing.
+#
+# The `*` line is GONE, deliberately. It auto-requested the same person on every
+# PR in the repo they touch most, which reads in the UI as "waiting on Lukas"
+# long after someone else has approved -- and it made this the second `*` rule
+# in an org whose convention is narrow, security-only ownership with
+# author-picks-reviewer everywhere else. The two paths below are the ones that
+# actually carry the blast radius described at the top; a README or an issue
+# template does not.
 
 # The reusable workflows that define every gate in the org.
 /.github/workflows/         @LukasWodka
