@@ -41,8 +41,19 @@ jobs:
           python-version: '3.12'
       - name: Install PyYAML
         run: pip install --quiet pyyaml
+      # Authenticates as the tracebloc-release-train App (backend#2036) instead of
+      # one human's PAT. `owner:` yields an ORG-scoped installation token, which is
+      # what an org-wide read needs. No fallback to the PAT: a fallback would let a
+      # broken App path keep working silently.
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
       - name: Audit
         env:
           # Needs to read branch protection, rulesets and PRs across the org.
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: python3 scripts/bricked-prs.py
