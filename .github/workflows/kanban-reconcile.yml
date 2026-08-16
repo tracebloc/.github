@@ -241,14 +241,17 @@ jobs:
         # North Stars gets keep-open (idempotent - adding an existing label is
         # a no-op). One-way by design: removal stays with humans, because the
         # label is also applied manually and an auto-remove would fight them.
-        # Write failures FAIL the step (the board-write rule). Named for the rule,
-        # not the credential: backend#2036 moved these writes to the App, and a rule
-        # named after a secret goes stale the moment the secret does.
+        # Write failures FAIL the step (the board-write rule) -- but at the END of
+        # the sweep, not on the first one, so one unwritable repo cannot cost every
+        # issue behind it its shield. Named for the rule, not the credential:
+        # backend#2036 moved these writes to the App, and a rule named after a
+        # secret goes stale the moment the secret does.
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           SHIELDED=0
+          shield_fail=0
           while IFS= read -r line; do
             STATUS=$(echo "$line" | jq -r '.fieldValueByName.name // "No status"')
             TYPE=$(echo "$line" | jq -r '.content.__typename // ""')
@@ -265,14 +268,42 @@ jobs:
               echo "[DRY] would ensure keep-open on $REPO#$NUM"
               continue
             fi
+            # COUNTED, NOT FATAL-ON-FIRST -- the same shape the membership sweep
+            # below uses, and for a reason this loop makes sharp. These are bare
+            # writes under `set -e`, so the FIRST failure aborted the whole sweep
+            # and every North Stars issue after it silently kept no `keep-open`:
+            # one unwritable repo cost the shield for all the others, and the
+            # step's own log showed only where it stopped, not what it skipped.
+            #
+            # The likely failure is a 403 from a repo outside the App's
+            # installation (`repository_selection: selected`), which is not a
+            # property of the issue being processed -- so it must not decide the
+            # fate of the issues behind it.
             if ! gh api "repos/$ORG/$REPO/labels/keep-open" >/dev/null 2>&1; then
-              gh api "repos/$ORG/$REPO/labels" -f name=keep-open -f color=0e8a16 -f description="Exempt from the stale-backlog sweep" >/dev/null
+              if ! gh api "repos/$ORG/$REPO/labels" -f name=keep-open -f color=0e8a16 -f description="Exempt from the stale-backlog sweep" >/dev/null 2>&1; then
+                echo "[FAIL] could not create keep-open in $REPO (is the App installed on it?)"
+                shield_fail=$((shield_fail+1))
+                continue
+              fi
             fi
-            gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=keep-open" >/dev/null
+            if ! gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=keep-open" >/dev/null 2>&1; then
+              echo "[FAIL] could not label $REPO#$NUM keep-open (is the App installed on it?)"
+              shield_fail=$((shield_fail+1))
+              continue
+            fi
             SHIELDED=$((SHIELDED+1))
             echo "[OK] keep-open ensured on $REPO#$NUM (North Stars)"
           done < items.ndjson
-          echo "North Stars shield: $SHIELDED issue(s) ensured"
+          echo "North Stars shield: $SHIELDED issue(s) ensured, $shield_fail failed"
+          # Still fails the step -- the board-write rule is unchanged. What changed
+          # is WHEN: after every issue has been attempted, so the run reports the
+          # complete set of unshielded issues instead of the first one. A North
+          # Stars epic without `keep-open` is closed by the stale sweep and routed
+          # to Cancelled, which is exactly what this step exists to prevent.
+          if [ "$shield_fail" -ne 0 ]; then
+            echo "::error::$shield_fail North Stars issue(s) could not be shielded (see the [FAIL] lines above). They stay exposed to stale-backlog.yml, which closes and Cancels them."
+            exit 1
+          fi
 
       - name: Classify + plan moves
         id: plan
