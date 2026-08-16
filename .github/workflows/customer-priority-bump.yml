@@ -19,9 +19,23 @@ jobs:
     if: github.event.label.name == inputs.trigger-label
     runs-on: ubuntu-latest
     steps:
+      # Authenticates as the tracebloc-release-train App (backend#2036) instead of
+      # one human's PAT. This one needs `issues: write` -- it labels an issue in the
+      # calling repo -- which the App gained alongside `organization_projects: write`.
+      # `owner:` makes the token ORG-scoped so the same mint works for every caller.
+      # No fallback to the old PAT: a fallback would let a broken App path look like
+      # a working migration.
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Label the customer issue as priority
         env:
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO_FULL: ${{ github.repository }}
         run: |

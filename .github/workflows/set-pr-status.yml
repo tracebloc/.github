@@ -28,9 +28,30 @@ jobs:
             echo "status_name=Code review" >> "$GITHUB_OUTPUT"
           fi
 
+      # Board writes authenticate as the tracebloc-release-train App, not a human's
+      # PAT (backend#2036). The App's installation budget is separate from any
+      # person's interactive `gh` usage and does not vanish when someone is
+      # offboarded -- `PROJECTS_KANBAN_TOKEN` was ONE user PAT shared by every
+      # caller in the fleet, both crons, and that person's own shell, and it was
+      # measured exhausted in practice (client-runtime run 31776053792, exit 1).
+      #
+      # `owner:` makes this an ORG-scoped installation token. Without it the token
+      # is scoped to the calling repository, which cannot write an org ProjectV2.
+      #
+      # NO FALLBACK TO THE PAT, deliberately. A fallback would make a broken App
+      # path look like a working migration, which is the exact failure class this
+      # work exists to remove. If the mint fails, this job fails.
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Update PR Status on project
         env:
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG: ${{ inputs.org }}
           PROJECT_NUMBER: ${{ inputs.project-number }}
           STATUS_NAME: ${{ steps.target.outputs.status_name }}
@@ -79,9 +100,21 @@ jobs:
             sleep 5
           done
 
+          # FAIL CLOSED (backend#2037). This used to log the miss and `exit 0`, so a
+          # PR that lost the add-to-kanban race stayed at No Status behind a GREEN
+          # check -- nothing surfaced it, and the board's "no card sits at No Status"
+          # invariant was broken by the workflow that reports it upheld. backend#1950
+          # lost that race by four seconds and sat unnoticed.
+          #
+          # The retry budget is deliberately UNCHANGED at 5 x 5s. Widening it in the
+          # same change would hide how often the race is actually lost, and the point
+          # of failing closed is to find that out. If this turns out to be noisy, the
+          # measurement tells us what the window should be -- guessing does not.
           if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
-            echo "PR #$PR_NUMBER not on project after 5 retries — skipping."
-            exit 0
+            echo "::error::PR #$PR_NUMBER is not on project $PROJECT_NUMBER after 5 retries." \
+                 "add-to-kanban should have added it; it did not, or it lost the race." \
+                 "Re-run this job once the card exists."
+            exit 1
           fi
 
           # Pass the option ID with -f (raw string), NOT -F: ProjectV2 option IDs can

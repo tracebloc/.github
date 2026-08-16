@@ -251,7 +251,7 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 # it into `make check` and brings it under the coverage guard.
 SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-standards-sync \
                     selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns \
-                    selftest-kanban-deploy-state
+                    selftest-kanban-deploy-state selftest-git-reap
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -340,6 +340,14 @@ selftest-kanban-columns:
 .PHONY: selftest-kanban-deploy-state
 selftest-kanban-deploy-state: guard-pyyaml
 	$(PYTHON) scripts/tests/kanban-deploy-state-selftest.py
+
+# Builds a throwaway repo per case and stubs `gh` on PATH, so it needs neither a
+# token nor a network — but it DOES need a committer identity, which a bare CI
+# runner lacks. git-reap-selftest.yml configures one; a developer machine
+# already has it, so nothing is set here.
+.PHONY: selftest-git-reap
+selftest-git-reap:
+	bash scripts/tests/git-reap-selftest.sh
 
 # ---- CI steps that need something a working tree does not have ----
 

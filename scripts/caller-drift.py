@@ -70,7 +70,7 @@ except ImportError:  # pragma: no cover - the workflow installs it explicitly
 TOP_LEVEL_KEYS = {
     "schema_version", "org", "pinned_ref", "audit_branch", "source_repo",
     "reusables", "copies", "shared_reasons", "repos", "protection_policy",
-    "ruleset_policy", "quality_files",
+    "ruleset_policy", "quality_files", "caller_inputs",
 }
 REQUIRED_TOP_LEVEL = TOP_LEVEL_KEYS - {"shared_reasons"}
 REPO_KEYS = {
@@ -153,6 +153,11 @@ PROTECTION_ROLES = ("develop", "staging", "prod")
 POLICY_KEYS = {
     "classic_protection",              # bool: the classic protection object exists
     "min_reviews",                     # int: effective approving reviews >= this
+    # list[str]: EXACT allowlist of who may merge WITHOUT the required review.
+    # `min_reviews` asserts how many reviews are required; nothing asserted WHO
+    # may skip them, so a second app or a user added tomorrow read identically
+    # to today (backend#1978).
+    "bypass_reviews",
     "enforce_admins",                  # bool | null
     "block_force_pushes",              # bool
     "block_deletions",                 # bool
@@ -172,7 +177,8 @@ POLICY_KEYS = {
 # may not opt out of `classic_protection` -- that is `exempt`, which is a louder
 # word and shows up differently in the report.
 OVERRIDABLE = {
-    "min_reviews", "enforce_admins", "require_conversation_resolution", "strict",
+    "min_reviews", "bypass_reviews", "enforce_admins",
+    "require_conversation_resolution", "strict",
     # A repo may require FEWER contexts than the fleet baseline, but only with a
     # written reason naming the narrower set -- so the gap is a sentence in this
     # file rather than something a reader has to diff two API calls to discover.
@@ -313,6 +319,9 @@ def _policy_value(key: str, value, where: str, allow_null: bool) -> None:
     value for it, not switching the assertion off. Not asserting something is a
     fleet-policy decision, not a per-repo one.
     """
+    if key == "bypass_reviews":
+        _str_list(value, f"{where}.bypass_reviews", allow_empty=True)
+        return
     if key == "min_reviews":
         # bool is a subclass of int in Python, so `min_reviews: true` would slip
         # through a bare isinstance(value, int) check.
@@ -377,6 +386,57 @@ def _policy_block(value, where: str) -> dict:
     for key in POLICY_KEYS:
         _policy_value(key, value[key], where, allow_null=True)
     return dict(value)
+
+
+def _caller_inputs_block(value, reusables: "list[str]", where: str) -> dict:
+    """Validate `caller_inputs`: which caller inputs must carry which value.
+
+    A FLOOR, NOT THE WHOLE SET. A caller may pass any number of other inputs;
+    these are the ones whose value decides whether the check can FAIL, so they
+    are the ones asserted. Keyed by reusable, so a repo that does not call it is
+    simply not measured against it.
+    """
+    # FAIL CLOSED ON ABSENT OR EMPTY (Bugbot, .github#262). Returning {} here
+    # made the whole family switchable off by deletion: the top-level key could
+    # stay present as `null` or `{}`, schema validation passed, and the audit
+    # then found no input floor for ANY reusable while reporting the fleet
+    # conformant. A guard that a comment can disable is the exact shape this
+    # file exists to refuse -- and it would have disabled the one property that
+    # proves a required check can fail at all.
+    if value is None:
+        die(
+            f"{where}: is null. An empty input policy asserts nothing while "
+            "looking like a policy - state the inputs, or delete the key and "
+            "let the missing-key check fail."
+        )
+    if not isinstance(value, dict):
+        die(f"{where}: expected a mapping of reusable -> {{input: value}}.")
+    if not value:
+        die(
+            f"{where}: is empty. Every caller would then be measured against no "
+            "inputs at all, which is indistinguishable from the family being "
+            "switched off."
+        )
+    out: dict = {}
+    for reusable, inputs in value.items():
+        if reusable not in reusables:
+            die(
+                f"{where}.{reusable}: not listed under `reusables`. An input "
+                "policy for a reusable nothing declares is measured against "
+                "nobody."
+            )
+        if not isinstance(inputs, dict) or not inputs:
+            die(f"{where}.{reusable}: expected a non-empty mapping of input -> value.")
+        for key, want in inputs.items():
+            if not isinstance(key, str) or not key.strip():
+                die(f"{where}.{reusable}: input names must be non-empty strings.")
+            if not isinstance(want, (bool, int, str)):
+                die(
+                    f"{where}.{reusable}.{key}: expected a scalar, got "
+                    f"{type(want).__name__}."
+                )
+        out[reusable] = dict(inputs)
+    return out
 
 
 def _ruleset_policy_block(value, where: str) -> dict:
@@ -536,6 +596,10 @@ def load_inventory(path: str) -> dict:
             die(f"{path}: `{key}` must contain only non-empty strings.")
         if len(set(value)) != len(value):
             die(f"{path}: `{key}` contains duplicates.")
+
+    data["caller_inputs"] = _caller_inputs_block(
+        data.get("caller_inputs"), data["reusables"], f"{path}.caller_inputs"
+    )
     reusables = list(data["reusables"])
     copies = list(data["copies"])
     quality_files = list(data["quality_files"])
@@ -907,9 +971,12 @@ def check_source_reusables(source_dir: str, listed: "list[str]") -> None:
 
     `version-bump-pr.yml` is how that surfaced (backend#1681): shipped, never
     listed, zero callers org-wide, and requiring a `pr-token` secret no repo
-    supplies. It is Layer 2 of backend#1563, meant to stop the version staleness
+    supplies. It was Layer 2 of backend#1563, meant to stop the version staleness
     that stalled tracebloc-py-package's prod leg -- and nothing said it was never
-    wired up.
+    wired up. That file no longer exists: #1563 decided to DELETE it rather than
+    wire it, since Layer 1 (`version-bump-gate`) already turns the stall into a
+    loud block. The example is kept because the blind spot it exposed is the
+    reason this function exists, not because the file is still there.
 
     Deliberately a die(), not a finding: the inventory is the contract, and a
     contract that does not mention half the artifacts it governs cannot be
@@ -1026,13 +1093,28 @@ def load_release_train(org: str) -> "set[str]":
     return set()  # unreachable; keeps the return type honest
 
 
-def collect_uses(node, found: "list[str]") -> None:
-    """Walk a parsed workflow and collect every `uses:` string value."""
+def collect_uses(node, found: "list[tuple[str, dict]]") -> None:
+    """Walk a parsed workflow and collect every `uses:` with the `with:` beside it.
+
+    THE INPUTS ARE THE POINT, not a bonus (backend#1977). A caller being present
+    only proves the reusable RUNS. Whether it can FAIL is decided by the inputs
+    the caller passes -- and that has been wrong twice, silently, on required
+    checks: `.github#207` (an OR-precedence bug made `action-pins-soft-fail:
+    false` a no-op in 4 repos) and backend#1681 (`soft-fail` left at its default
+    of true on three PUBLIC repos, so `quality / gitleaks` reported findings and
+    exited 0). Both were found by a human reading YAML.
+
+    `with` is a SIBLING KEY of `uses` in the same mapping, so it is available
+    exactly here and nowhere later -- the old version walked past it and the
+    inputs were gone by the time anything compared a caller to the inventory.
+    """
     if isinstance(node, dict):
+        uses = node.get("uses")
+        if isinstance(uses, str):
+            inputs = node.get("with")
+            found.append((uses.strip(), inputs if isinstance(inputs, dict) else {}))
         for key, value in node.items():
-            if key == "uses" and isinstance(value, str):
-                found.append(value.strip())
-            else:
+            if key != "uses":
                 collect_uses(value, found)
     elif isinstance(node, list):
         for item in node:
@@ -1176,13 +1258,13 @@ def read_repo(
             # unreadable, never as "contains no caller".
             out.errors.append(f"{path}: unparseable YAML ({exc.__class__.__name__})")
             continue
-        refs: "list[str]" = []
+        refs: "list[tuple[str, dict]]" = []
         collect_uses(parsed, refs)
-        for ref in refs:
+        for ref, inputs in refs:
             match = ORG_USES.match(ref)
             if match:
                 out.callers.setdefault(match.group("name"), []).append(
-                    (filename, match.group("ref"))
+                    (filename, match.group("ref"), inputs)
                 )
     return out
 
@@ -1216,6 +1298,7 @@ class BranchProtection:
         self.branch = branch
         self.classic_present = False
         self.min_reviews = 0
+        self.bypass_reviews: "set[str]" = set()
         self.enforce_admins = False
         self.block_force_pushes = False
         self.block_deletions = False
@@ -1248,6 +1331,16 @@ def read_protection(org: str, name: str, branch: str) -> BranchProtection:
         out.classic_present = True
         reviews = classic.get("required_pull_request_reviews") or {}
         out.min_reviews = reviews.get("required_approving_review_count") or 0
+        # WHO MAY SKIP THE REVIEW. Normalised to one namespaced vocabulary so a
+        # user, a team and an app can never collide on a bare name.
+        allow = reviews.get("bypass_pull_request_allowances") or {}
+        out.bypass_reviews = set()
+        for u in allow.get("users") or []:
+            out.bypass_reviews.add(str(u.get("login")))
+        for g in allow.get("teams") or []:
+            out.bypass_reviews.add("Team:" + str(g.get("slug")))
+        for a in allow.get("apps") or []:
+            out.bypass_reviews.add("App:" + str(a.get("slug")))
         out.enforce_admins = bool((classic.get("enforce_admins") or {}).get("enabled"))
         # The classic API states these as ALLOW flags; the policy states them as
         # BLOCK flags. Invert here so the comparison downstream reads plainly.
@@ -1425,6 +1518,22 @@ def evaluate_protection(
                 if got.rulesets else " No ruleset covers it either."
             )
             fail(f"has NO classic branch protection.{cover}")
+        want_bypass = set(want.get("bypass_reviews") or [])
+        extra = got.bypass_reviews - want_bypass
+        if extra:
+            findings.append(
+                f"{name}: {branch} lets {sorted(extra)} merge WITHOUT the "
+                f"required review, and the policy does not allow it. "
+                f"`min_reviews: {want['min_reviews']}` is satisfied while that "
+                "actor skips it entirely."
+            )
+        gone = want_bypass - got.bypass_reviews
+        if gone:
+            findings.append(
+                f"{name}: {branch} no longer grants {sorted(gone)} a review "
+                "bypass. If that is intended, remove it from the policy - the "
+                "release train cannot promote without it."
+            )
         if got.min_reviews < want["min_reviews"]:
             fail(
                 f"requires {got.min_reviews} approving review(s), policy wants "
@@ -1870,6 +1979,7 @@ def main() -> int:
     remediated = 0
     reusables = list(inventory["reusables"])
     copies = list(inventory["copies"])
+    caller_inputs = inventory.get("caller_inputs") or {}
     quality_files = list(inventory["quality_files"])
     check_source_reusables(args.source_dir, reusables)
     source_shas = load_source_copies(args.source_dir, copies)
@@ -1959,14 +2069,35 @@ def main() -> int:
                         f"{read.branch}."
                     )
                     continue
-                for filename, ref in hits:
+                want_inputs = caller_inputs.get(reusable, {})
+                for filename, ref, got_inputs in hits:
                     if ref != pinned_ref:
                         findings.append(
                             f"{name}: {filename} calls {reusable}@{ref}, expected "
                             f"@{pinned_ref}."
                         )
+                    # ARMED, not merely present (backend#1977). A caller can
+                    # exist, run, report -- and be unable to fail, because the
+                    # input that decides that was left at a permissive default.
+                    # A MISSING key is a finding, not a pass: `soft-fail`
+                    # defaults to true, so omitting it is exactly the state this
+                    # asserts against.
+                    for key, want in sorted(want_inputs.items()):
+                        if key not in got_inputs:
+                            findings.append(
+                                f"{name}: {filename} calls {reusable} without "
+                                f"`{key}`, so it takes the reusable's default. "
+                                f"Expected `{key}: {want}` - the check runs but "
+                                "cannot fail."
+                            )
+                        elif got_inputs[key] != want:
+                            findings.append(
+                                f"{name}: {filename} passes `{key}: "
+                                f"{got_inputs[key]}` to {reusable}, expected "
+                                f"`{want}`."
+                            )
             elif hits:
-                where = ", ".join(sorted(f for f, _ in hits))
+                where = ", ".join(sorted(f for f, _, _ in hits))
                 findings.append(
                     f"{name}: {reusable} is marked `exempt` but a caller exists "
                     f"({where}). The exemption is stale - promote it to `required` "
@@ -1975,7 +2106,7 @@ def main() -> int:
 
         for reusable, hits in sorted(read.callers.items()):
             if reusable not in reusables and reusable not in copies:
-                where = ", ".join(sorted(f for f, _ in hits))
+                where = ", ".join(sorted(f for f, _, _ in hits))
                 findings.append(
                     f"{name}: {where} calls {reusable}, which is not listed under "
                     "`reusables` in repo-inventory.yml. Either the reusable is new "
