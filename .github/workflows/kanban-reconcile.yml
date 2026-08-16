@@ -279,15 +279,26 @@ jobs:
             # installation (`repository_selection: selected`), which is not a
             # property of the issue being processed -- so it must not decide the
             # fate of the issues behind it.
+            # A failed CREATE only WARNS, and the write is still attempted -- the
+            # same order the sibling-merge sequence below uses. The existence GET
+            # and the create are not the assertion; the LABEL WRITE is. A 422
+            # `already_exists` after a GET that failed for its own reasons (a race,
+            # a blip) means the label is there and the POST will succeed, so
+            # giving up here would count a failure and leave an issue unshielded
+            # over a probe, not over the thing being asserted.
             if ! gh api "repos/$ORG/$REPO/labels/keep-open" >/dev/null 2>&1; then
-              if ! gh api "repos/$ORG/$REPO/labels" -f name=keep-open -f color=0e8a16 -f description="Exempt from the stale-backlog sweep" >/dev/null 2>&1; then
-                echo "[FAIL] could not create keep-open in $REPO (is the App installed on it?)"
-                shield_fail=$((shield_fail+1))
-                continue
-              fi
+              gh api "repos/$ORG/$REPO/labels" -f name=keep-open -f color=0e8a16 -f description="Exempt from the stale-backlog sweep" >/dev/null \
+                || echo "[WARN] $REPO#$NUM: could not CREATE the keep-open label; attempting the write anyway"
             fi
-            if ! gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=keep-open" >/dev/null 2>&1; then
-              echo "[FAIL] could not label $REPO#$NUM keep-open (is the App installed on it?)"
+            # KEEP THE ERROR, exactly as the sibling-merge write does. `2>&1
+            # >/dev/null` captures stderr (the API error) and drops the label JSON
+            # nobody reads; the other order would throw away the only diagnostic
+            # the [FAIL] line has. A bare "the write failed" cannot tell a 403
+            # from a rate limit from a missing scope -- and a 403 from a repo
+            # outside the App's installation is the specific failure this change
+            # exists to survive, so the log has to be able to name it.
+            if ! label_err="$(gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=keep-open" 2>&1 >/dev/null)"; then
+              echo "[FAIL] $REPO#$NUM: keep-open write failed: ${label_err:-(no output)}"
               shield_fail=$((shield_fail+1))
               continue
             fi
