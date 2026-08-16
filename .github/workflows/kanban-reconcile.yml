@@ -58,14 +58,35 @@ jobs:
   reconcile:
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
       ORG: tracebloc
       PROJECT_NUMBER: 2
       DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
       MAX_MOVES: 100
     steps:
+      # Authenticates as the tracebloc-release-train App (backend#2036) instead of
+      # one human's PAT -- the credential this sweep shares with fifteen other
+      # workflows and with its owner's own shell. Needs both grants:
+      # `organization_projects: write` to move and archive cards, `issues: write`
+      # for the keep-open shield. `owner:` makes the token ORG-scoped; a repo-scoped
+      # one cannot reach an org ProjectV2.
+      #
+      # GH_TOKEN moved from job-level env to per-step, because a job-level env cannot
+      # read a step output. The file now names which steps hold a credential.
+      #
+      # No fallback to the old PAT: a fallback would let a broken App path look like
+      # a working migration.
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Resolve project + field/option IDs
         id: ids
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
@@ -124,6 +145,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Pull non-terminal items
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           : > items.ndjson
@@ -218,10 +241,17 @@ jobs:
         # North Stars gets keep-open (idempotent - adding an existing label is
         # a no-op). One-way by design: removal stays with humans, because the
         # label is also applied manually and an auto-remove would fight them.
-        # Write failures FAIL the step (the PROJECTS_KANBAN_TOKEN write rule).
+        # Write failures FAIL the step (the board-write rule) -- but at the END of
+        # the sweep, not on the first one, so one unwritable repo cannot cost every
+        # issue behind it its shield. Named for the rule, not the credential:
+        # backend#2036 moved these writes to the App, and a rule named after a
+        # secret goes stale the moment the secret does.
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           SHIELDED=0
+          shield_fail=0
           while IFS= read -r line; do
             STATUS=$(echo "$line" | jq -r '.fieldValueByName.name // "No status"')
             TYPE=$(echo "$line" | jq -r '.content.__typename // ""')
@@ -238,17 +268,58 @@ jobs:
               echo "[DRY] would ensure keep-open on $REPO#$NUM"
               continue
             fi
+            # COUNTED, NOT FATAL-ON-FIRST -- the same shape the membership sweep
+            # below uses, and for a reason this loop makes sharp. These are bare
+            # writes under `set -e`, so the FIRST failure aborted the whole sweep
+            # and every North Stars issue after it silently kept no `keep-open`:
+            # one unwritable repo cost the shield for all the others, and the
+            # step's own log showed only where it stopped, not what it skipped.
+            #
+            # The likely failure is a 403 from a repo outside the App's
+            # installation (`repository_selection: selected`), which is not a
+            # property of the issue being processed -- so it must not decide the
+            # fate of the issues behind it.
+            # A failed CREATE only WARNS, and the write is still attempted -- the
+            # same order the sibling-merge sequence below uses. The existence GET
+            # and the create are not the assertion; the LABEL WRITE is. A 422
+            # `already_exists` after a GET that failed for its own reasons (a race,
+            # a blip) means the label is there and the POST will succeed, so
+            # giving up here would count a failure and leave an issue unshielded
+            # over a probe, not over the thing being asserted.
             if ! gh api "repos/$ORG/$REPO/labels/keep-open" >/dev/null 2>&1; then
-              gh api "repos/$ORG/$REPO/labels" -f name=keep-open -f color=0e8a16 -f description="Exempt from the stale-backlog sweep" >/dev/null
+              gh api "repos/$ORG/$REPO/labels" -f name=keep-open -f color=0e8a16 -f description="Exempt from the stale-backlog sweep" >/dev/null \
+                || echo "[WARN] $REPO#$NUM: could not CREATE the keep-open label; attempting the write anyway"
             fi
-            gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=keep-open" >/dev/null
+            # KEEP THE ERROR, exactly as the sibling-merge write does. `2>&1
+            # >/dev/null` captures stderr (the API error) and drops the label JSON
+            # nobody reads; the other order would throw away the only diagnostic
+            # the [FAIL] line has. A bare "the write failed" cannot tell a 403
+            # from a rate limit from a missing scope -- and a 403 from a repo
+            # outside the App's installation is the specific failure this change
+            # exists to survive, so the log has to be able to name it.
+            if ! label_err="$(gh api -X POST "repos/$ORG/$REPO/issues/$NUM/labels" -f "labels[]=keep-open" 2>&1 >/dev/null)"; then
+              echo "[FAIL] $REPO#$NUM: keep-open write failed: ${label_err:-(no output)}"
+              shield_fail=$((shield_fail+1))
+              continue
+            fi
             SHIELDED=$((SHIELDED+1))
             echo "[OK] keep-open ensured on $REPO#$NUM (North Stars)"
           done < items.ndjson
-          echo "North Stars shield: $SHIELDED issue(s) ensured"
+          echo "North Stars shield: $SHIELDED issue(s) ensured, $shield_fail failed"
+          # Still fails the step -- the board-write rule is unchanged. What changed
+          # is WHEN: after every issue has been attempted, so the run reports the
+          # complete set of unshielded issues instead of the first one. A North
+          # Stars epic without `keep-open` is closed by the stale sweep and routed
+          # to Cancelled, which is exactly what this step exists to prevent.
+          if [ "$shield_fail" -ne 0 ]; then
+            echo "::error::$shield_fail North Stars issue(s) could not be shielded (see the [FAIL] lines above). They stay exposed to stale-backlog.yml, which closes and Cancels them."
+            exit 1
+          fi
 
       - name: Classify + plan moves
         id: plan
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           : > moves.tsv
@@ -557,6 +628,8 @@ jobs:
 
       - name: Apply moves
         if: steps.plan.outputs.planned != '0' && env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           PROJECT_ID="${{ steps.ids.outputs.project_id }}"
@@ -648,6 +721,7 @@ jobs:
         # heal. Needs only the resolved ids; has its own MAX_ADDS runaway guard.
         if: always() && steps.ids.outcome == 'success'
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           LOOKBACK_DAYS: 21
           MAX_ADDS: 60
           # Lower bound on the discovered sweep scope. 1 is deliberately loose - it
@@ -705,7 +779,7 @@ jobs:
           # listing above returning nothing, or the token losing org-wide contents
           # read - where zero is an absence of evidence, not evidence of health.
           if [ "${#SCOPE[@]}" -lt "$MIN_SCOPE" ]; then
-            echo "::error::Board-tracked scope is ${#SCOPE[@]} repo(s), below MIN_SCOPE=$MIN_SCOPE - refusing to report a clean sweep over an empty scope. Check PROJECTS_KANBAN_TOKEN still has org-wide contents:read."
+            echo "::error::Board-tracked scope is ${#SCOPE[@]} repo(s), below MIN_SCOPE=$MIN_SCOPE - refusing to report a clean sweep over an empty scope. Check the tracebloc-release-train App installation still covers every repo and still holds contents:read (backend#2036 moved this off PROJECTS_KANBAN_TOKEN; an App is installed on SELECTED repos, so a repo added to the org but never added to the installation reads as absent here)."
             exit 1
           fi
 
@@ -894,9 +968,13 @@ jobs:
               # as though it were the complete record.
               #
               # A 403 on a label write is also the single most likely failure in
-              # this step: PROJECTS_KANBAN_TOKEN is one user PAT shared by CI,
-              # the conformance gate, the weekly cron and any local script, on
-              # one 5,000/hr budget.
+              # this step. The original reason was that PROJECTS_KANBAN_TOKEN was
+              # one user PAT shared by CI, the conformance gate, the weekly cron
+              # and any local script on one 5,000/hr budget. backend#2036 moved
+              # this to the App, which removes THAT cause -- but not the class:
+              # an App is installed on SELECTED repos, so a repo outside the
+              # installation 403s here exactly as an exhausted PAT did. Counted
+              # rather than fatal for the same reason either way.
               #
               # So the failure is recorded in `add_fail` instead. The run still
               # goes red at the end of the step - the rule is kept - but the

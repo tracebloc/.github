@@ -153,6 +153,11 @@ PROTECTION_ROLES = ("develop", "staging", "prod")
 POLICY_KEYS = {
     "classic_protection",              # bool: the classic protection object exists
     "min_reviews",                     # int: effective approving reviews >= this
+    # list[str]: EXACT allowlist of who may merge WITHOUT the required review.
+    # `min_reviews` asserts how many reviews are required; nothing asserted WHO
+    # may skip them, so a second app or a user added tomorrow read identically
+    # to today (backend#1978).
+    "bypass_reviews",
     "enforce_admins",                  # bool | null
     "block_force_pushes",              # bool
     "block_deletions",                 # bool
@@ -172,7 +177,8 @@ POLICY_KEYS = {
 # may not opt out of `classic_protection` -- that is `exempt`, which is a louder
 # word and shows up differently in the report.
 OVERRIDABLE = {
-    "min_reviews", "enforce_admins", "require_conversation_resolution", "strict",
+    "min_reviews", "bypass_reviews", "enforce_admins",
+    "require_conversation_resolution", "strict",
     # A repo may require FEWER contexts than the fleet baseline, but only with a
     # written reason naming the narrower set -- so the gap is a sentence in this
     # file rather than something a reader has to diff two API calls to discover.
@@ -313,6 +319,9 @@ def _policy_value(key: str, value, where: str, allow_null: bool) -> None:
     value for it, not switching the assertion off. Not asserting something is a
     fleet-policy decision, not a per-repo one.
     """
+    if key == "bypass_reviews":
+        _str_list(value, f"{where}.bypass_reviews", allow_empty=True)
+        return
     if key == "min_reviews":
         # bool is a subclass of int in Python, so `min_reviews: true` would slip
         # through a bare isinstance(value, int) check.
@@ -962,9 +971,12 @@ def check_source_reusables(source_dir: str, listed: "list[str]") -> None:
 
     `version-bump-pr.yml` is how that surfaced (backend#1681): shipped, never
     listed, zero callers org-wide, and requiring a `pr-token` secret no repo
-    supplies. It is Layer 2 of backend#1563, meant to stop the version staleness
+    supplies. It was Layer 2 of backend#1563, meant to stop the version staleness
     that stalled tracebloc-py-package's prod leg -- and nothing said it was never
-    wired up.
+    wired up. That file no longer exists: #1563 decided to DELETE it rather than
+    wire it, since Layer 1 (`version-bump-gate`) already turns the stall into a
+    loud block. The example is kept because the blind spot it exposed is the
+    reason this function exists, not because the file is still there.
 
     Deliberately a die(), not a finding: the inventory is the contract, and a
     contract that does not mention half the artifacts it governs cannot be
@@ -1286,6 +1298,7 @@ class BranchProtection:
         self.branch = branch
         self.classic_present = False
         self.min_reviews = 0
+        self.bypass_reviews: "set[str]" = set()
         self.enforce_admins = False
         self.block_force_pushes = False
         self.block_deletions = False
@@ -1318,6 +1331,16 @@ def read_protection(org: str, name: str, branch: str) -> BranchProtection:
         out.classic_present = True
         reviews = classic.get("required_pull_request_reviews") or {}
         out.min_reviews = reviews.get("required_approving_review_count") or 0
+        # WHO MAY SKIP THE REVIEW. Normalised to one namespaced vocabulary so a
+        # user, a team and an app can never collide on a bare name.
+        allow = reviews.get("bypass_pull_request_allowances") or {}
+        out.bypass_reviews = set()
+        for u in allow.get("users") or []:
+            out.bypass_reviews.add(str(u.get("login")))
+        for g in allow.get("teams") or []:
+            out.bypass_reviews.add("Team:" + str(g.get("slug")))
+        for a in allow.get("apps") or []:
+            out.bypass_reviews.add("App:" + str(a.get("slug")))
         out.enforce_admins = bool((classic.get("enforce_admins") or {}).get("enabled"))
         # The classic API states these as ALLOW flags; the policy states them as
         # BLOCK flags. Invert here so the comparison downstream reads plainly.
@@ -1495,6 +1518,22 @@ def evaluate_protection(
                 if got.rulesets else " No ruleset covers it either."
             )
             fail(f"has NO classic branch protection.{cover}")
+        want_bypass = set(want.get("bypass_reviews") or [])
+        extra = got.bypass_reviews - want_bypass
+        if extra:
+            findings.append(
+                f"{name}: {branch} lets {sorted(extra)} merge WITHOUT the "
+                f"required review, and the policy does not allow it. "
+                f"`min_reviews: {want['min_reviews']}` is satisfied while that "
+                "actor skips it entirely."
+            )
+        gone = want_bypass - got.bypass_reviews
+        if gone:
+            findings.append(
+                f"{name}: {branch} no longer grants {sorted(gone)} a review "
+                "bypass. If that is intended, remove it from the policy - the "
+                "release train cannot promote without it."
+            )
         if got.min_reviews < want["min_reviews"]:
             fail(
                 f"requires {got.min_reviews} approving review(s), policy wants "

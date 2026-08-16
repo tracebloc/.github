@@ -101,7 +101,6 @@ reusables:
   - wip-limit-check.yml
   - blocked-gate.yml
   - version-bump-gate.yml
-  - version-bump-pr.yml
 
 # Copies, not callers: these are duplicated into each repo, so the guard compares
 # content (git blob sha against the checked-out source) instead of looking for a
@@ -201,6 +200,12 @@ protection_policy:
   develop:
     classic_protection: true
     min_reviews: 1
+    # WHO MAY SKIP THE REVIEW (backend#1978). An EXACT allowlist, in the same
+    # style as ruleset_policy.bypass_actors and for the same reason: min_reviews
+    # asserts HOW MANY reviews are required and nothing asserted WHO may skip
+    # them, so a second app or a user added tomorrow read identically to today.
+    # Empty is the measured fleet state on develop (2026-08-15, all 16).
+    bypass_reviews: []
     enforce_admins: null            # deliberate escape hatch (backend#1276 D1)
     block_force_pushes: true
     block_deletions: true
@@ -217,6 +222,11 @@ protection_policy:
   staging:
     classic_protection: true
     min_reviews: 1
+    # The release train merges promotion PRs via this app's review-bypass
+    # (RFC-BACKEND-0008 D9/D14). It never bypasses `fr-gate`, which stays a
+    # required check. EXACT: measured 2026-08-15 as the ONLY bypass actor on
+    # every staging and prod branch in the fleet, so a second one is a finding.
+    bypass_reviews: ['App:tracebloc-release-train']
     enforce_admins: null
     block_force_pushes: true
     block_deletions: true
@@ -234,6 +244,11 @@ protection_policy:
   prod:
     classic_protection: true
     min_reviews: 1
+    # The release train merges promotion PRs via this app's review-bypass
+    # (RFC-BACKEND-0008 D9/D14). It never bypasses `fr-gate`, which stays a
+    # required check. EXACT: measured 2026-08-15 as the ONLY bypass actor on
+    # every staging and prod branch in the fleet, so a second one is a finding.
+    bypass_reviews: ['App:tracebloc-release-train']
     enforce_admins: true            # backend#1276 D1 - closed on every train prod branch
     block_force_pushes: true
     block_deletions: true
@@ -299,15 +314,6 @@ shared_reasons:
     it. Requiring it in any repo would land this guard red on day one; the decision to wire it
     up or delete it is backend#1415 follow-up work. Exempt everywhere, deliberately and in
     writing.
-  version_bump_pr_never_wired: &version_bump_pr_never_wired >-
-    version-bump-pr has ZERO callers anywhere in the org and cannot be called as
-    written: it requires a `pr-token` secret no repo supplies. It is Layer 2 of
-    backend#1563 - the automated post-release bump-PR opener, meant to prevent the
-    version staleness that stalled tracebloc-py-package's prod leg (backend#1561).
-    It shipped and was never wired up, and nothing said so, because the guard
-    enumerated this list rather than the source directory (backend#1681 added that
-    check, which is what surfaced it). Exempt everywhere in writing until it is
-    wired or deleted - the same posture as wip-limit-check.
   blocked_gate_rollout_pending: &blocked_gate_rollout_pending >-
     blocked-gate has ZERO callers so far, deliberately and for exactly one PR. The
     reusable and its selftest land first so the MATCHING can be reviewed on its own -
@@ -317,9 +323,11 @@ shared_reasons:
     from its audit branch over the API, so adding a caller and flipping its entry to
     `required` in one PR fails on a caller that is not on the audit branch yet.
     STAGED, NOT PARKED. If this anchor is still here once the rollout PR has merged,
-    it has become the same finding as wip_limit_check_has_no_callers and
-    version_bump_pr_never_wired: a reusable that shipped, was never wired up, and had
-    a written excuse for it. Treat it as a defect then, not a justification.
+    it has become the same finding as wip_limit_check_has_no_callers: a reusable that
+    shipped, was never wired up, and had a written excuse for it. Treat it as a defect
+    then, not a justification. That comparison used to name version_bump_pr_never_wired
+    too; version-bump-pr.yml was DELETED under backend#1563 rather than wired, which is
+    the other way this ends and the better one when nothing is calling it.
     Arming is a briefing decision rather than a silent flip because two live PRs go red
     the moment it is on - client#490 ("HOLD until v0.8.0 image") and client-runtime#192
     ("DO NOT MERGE") - which is the gate working as intended (backend#1752,
@@ -358,15 +366,25 @@ shared_reasons:
   docs_no_required_review: &docs_no_required_review >-
     docs is exempt from required review on `staging` and `main` (Lukas, 2026-06-04): docs are
     content-only and low-risk, exempt from both the develop-only rule and the FR-gate. Every OTHER
-    protection assertion still applies here - this divergence names `min_reviews` alone so a
-    regression in force-push, deletion or admin posture is still caught. `docs/staging` got its
-    classic-protection layer on 2026-08-10 (backend#1276), mirroring `docs/main` rather than the
-    fleet shape, which is why one reason covers both branches.
+    protection assertion still applies here - this divergence names `min_reviews` and
+    `bypass_reviews` and nothing else, so a regression in force-push, deletion or admin posture is
+    still caught. `bypass_reviews` is EMPTY here for the reason `min_reviews` is 0: with no
+    required review there is nothing to bypass, so granting the train an allowance would assert a
+    permission that cannot be exercised. Measured `required_pull_request_reviews: null` on both
+    branches, 2026-08-15. `docs/staging` got its classic-protection layer on 2026-08-10
+    (backend#1276), mirroring `docs/main` rather than the fleet shape, which is why one reason
+    covers both branches.
   not_a_pipeline_prod_branch: &not_a_pipeline_prod_branch >-
     not on the release train, so this `main` is a WORKING branch, not a pipeline prod branch, and
     backend#1276's `enforce_admins: true` decision does not reach it. Deliberate for release-train
     specifically: it is the tool used to REPAIR the pipeline, so locking it hardest is
     self-defeating. Measured false on claude-skills, release-train and rfcs, 2026-08-10.
+    The same "no pipeline here" fact governs `bypass_reviews`: the fleet `prod` policy grants
+    `App:tracebloc-release-train` a review bypass because the train merges promotion PRs on that
+    branch. It promotes nothing into these three, so it holds no allowance and the policy's
+    entry cannot apply. Each repo states its own `bypass_reviews` beside `enforce_admins` rather
+    than inheriting - an EXACT allowlist inherited from a role whose premise is false is how a
+    bypass gets granted by accident. Measured 2026-08-15.
   no_develop_branch_single_branch_repo: &no_develop_branch_single_branch_repo >-
     single-branch repo: `main` is the only integration branch, so there is no `develop` to protect.
     Structural, not a gap. Precise staleness rule, because an earlier draft of this note overstated
@@ -389,8 +407,44 @@ repos:
     visibility: public
     release_train: true
     protection:
-      develop: required
-      staging: required
+      # WIDER than the fleet baseline on develop and staging: `selftests` is
+      # armed on top of it, and stating it is the point (backend#1680).
+      #
+      # selftests.yml was added to be a required check -- its own header says so
+      # and cites the org rule it turns on itself: a guard in a non-required job
+      # is advice, not a gate (backend#1729). Nothing made it required, so the
+      # eight suites guarding the reusables every other repo's CI depends on
+      # could go red and block no merge. The workflow said "required" and the
+      # protection said nothing, which is the gap this cell closes: a later
+      # removal is now drift rather than silence.
+      develop:
+        divergent:
+          reason: >-
+            Requires MORE than the fleet baseline: the `selftests` job is armed
+            here on top of the three baseline contexts, so a red selftest blocks
+            the merge (backend#1680).
+          required_checks:
+            - quality / gitleaks
+            - quality / house-rules
+            - quality / action-pins
+            - selftests
+      staging:
+        divergent:
+          reason: >-
+            Requires MORE than the fleet baseline: the `selftests` job is armed
+            here on top of the three baseline contexts, so a red selftest blocks
+            the develop -> staging hop (backend#1680).
+          required_checks:
+            - gate / gate
+            - quality / gitleaks
+            - quality / house-rules
+            - selftests
+      # NOT YET on prod, deliberately, and this is a sequencing fact rather than
+      # a decision against it. `selftests.yml` reaches `staging` only when the
+      # promotion carrying it merges; until then a staging -> main PR's head
+      # cannot report the context, and a required check that never reports
+      # leaves the PR waiting forever (client#665, `pii-gate/pii-check`). Arm it
+      # here once staging carries the workflow -- backend#1680 carries the step.
       prod: required
     rulesets:
       promotion_merge_commit_only: required
@@ -399,8 +453,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
       # Remediated 2026-08-06 (.github#171, backend#1603). The repo that HOSTS
       # code-quality.yml was the only repo not running it, so the action-pins job
@@ -459,8 +511,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -492,8 +542,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -524,6 +572,7 @@ repos:
         divergent:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
+          bypass_reviews: []      # nothing promotes here; see the reason above
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
@@ -536,8 +585,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml:
         exempt: *advance_deploy_env_caller_missing
       code-quality.yml:
@@ -571,8 +618,6 @@ repos:
       tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -607,8 +652,6 @@ repos:
       tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -641,8 +684,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -673,8 +714,6 @@ repos:
       tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -705,8 +744,6 @@ repos:
       tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -739,16 +776,20 @@ repos:
           reason: *docs_no_required_review
           # `required_checks` is NO LONGER overridden here. Until 2026-08-13 both
           # promotion branches carried `required_checks: []` - docs required no
-          # status check at all, on a PUBLIC repo - and the reason above already
-          # claimed the divergence "names `min_reviews` alone", which was false
-          # while that key sat beside it. Armed to the fleet baseline
+          # status check at all, on a PUBLIC repo - and the reason above claimed
+          # the divergence named `min_reviews` alone, which was false while that
+          # key sat beside it. Armed to the fleet baseline
           # (gate / gate + gitleaks + house-rules) on 2026-08-13, so the policy
-          # assertion is live again and the sentence above is now true.
+          # assertion is live again. The reason now enumerates BOTH keys it
+          # covers, for the same lesson: a reason that names one key while two
+          # diverge reads as a tighter guarantee than the file gives.
           min_reviews: 0
+          bypass_reviews: []
       prod:
         divergent:
           reason: *docs_no_required_review
           min_reviews: 0          # as staging, above
+          bypass_reviews: []      # as staging, above
     rulesets:
       promotion_merge_commit_only: required
       tag_trust_root:
@@ -756,8 +797,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       # Flipped exempt -> required 2026-08-04: the caller was added on MAIN only
       # (docs#70, a docs-exception direct merge) where the develop-first audit
       # could not see it. docs#80's backmerge brought it onto develop.
@@ -818,8 +857,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -842,9 +879,53 @@ repos:
     visibility: private
     release_train: true
     protection:
+      # develop already requires the Vitest suite plus four more repo-specific
+      # contexts (Type check, Lint (ESLint), Ratchet guardrails, E2E tests
+      # (Cypress)); the baseline floor covers it and nothing here narrows it.
       develop: required
-      staging: required
-      prod: required
+      # WIDER than the fleet baseline, not narrower - `divergent` is the only
+      # cell shape that can state a repo's own set, and stating it is the point
+      # (backend#1975). Until 2026-08-15 both promotion branches required
+      # `gate / gate` + the two `quality/*` content gates and NO functional
+      # suite at all: this repo is the customer-facing UI, and it was the one
+      # train repo where a failing test could not block a promotion to prod.
+      # Every peer already requires one (backend: `Django + Bandit plugin`,
+      # client-runtime: `pytest`, design-system + tracebloc-website: their unit
+      # suites).
+      #
+      # `Unit tests (Vitest)` and not the other two candidates, deliberately:
+      #   - `API contract (real dev-API)` talks to a LIVE dev API, so requiring
+      #     it would block prod promotions on someone else's uptime.
+      #   - `E2E tests (Cypress)` is the same bet with a flakier suite.
+      # The Vitest job is the fast, hermetic one. Armed while green, per the
+      # rule that says never land a red gate: measured green in the last 14
+      # runs of tests.yml PER JOB (the workflow conclusion mixes six jobs and
+      # says nothing about this one), and it demonstrably REPORTS on a
+      # main-targeting PR (frontend-app#819, head aa4c3b9) - a required context
+      # that can never report leaves every PR waiting forever (client#665,
+      # pii-gate/pii-check).
+      staging:
+        divergent:
+          reason: >-
+            Requires MORE than the fleet baseline: the Vitest unit suite is
+            armed here on top of the three baseline contexts, so a red test
+            blocks the develop -> staging hop (backend#1975).
+          required_checks:
+            - gate / gate
+            - quality / gitleaks
+            - quality / house-rules
+            - Unit tests (Vitest)
+      prod:
+        divergent:
+          reason: >-
+            Requires MORE than the fleet baseline: the Vitest unit suite is
+            armed here on top of the three baseline contexts, so a red test
+            blocks the staging -> prod hop (backend#1975).
+          required_checks:
+            - gate / gate
+            - quality / gitleaks
+            - quality / house-rules
+            - Unit tests (Vitest)
     rulesets:
       promotion_merge_commit_only: required
       tag_trust_root:
@@ -852,8 +933,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -892,8 +971,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -924,6 +1001,14 @@ repos:
         divergent:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
+          # The two humans with write access here hold a review bypass on this
+          # branch, and this is the file that says so out loud. Consistent with
+          # `enforce_admins: false` above and decided for the same reason: this
+          # repo is the tool used to REPAIR the pipeline, so a broken train must
+          # not also be unfixable. It is the widest allowance in the fleet, which
+          # is exactly why it is written down as an EXACT list - a third name
+          # appearing here is a finding, not a shrug. Measured 2026-08-15.
+          bypass_reviews: ['LukasWodka', 'saadqbal']
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
@@ -941,8 +1026,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml:
         exempt: *code_quality_caller_missing
@@ -989,6 +1072,7 @@ repos:
           reason: *not_a_pipeline_prod_branch
           enforce_admins: false
           require_conversation_resolution: false
+          bypass_reviews: []      # nothing promotes here; see the reason above
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
@@ -1001,8 +1085,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       # Per-caller reasons, not one blanket text (Bugbot, .github#138). The first
       # version of this block asserted "no hop to gate" for all nine, which is only
       # true for some of them and silently overwrote reasons that were already
@@ -1061,8 +1143,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -1095,8 +1175,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -1127,8 +1205,6 @@ repos:
       tag_trust_root: required
     callers:
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -1166,8 +1242,6 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      version-bump-pr.yml:
-        exempt: *version_bump_pr_never_wired
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml

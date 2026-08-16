@@ -34,13 +34,30 @@ jobs:
   archive:
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
       ORG: tracebloc
       PROJECT_NUMBER: 2
       DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
     steps:
+      # Board writes authenticate as the tracebloc-release-train App (backend#2036),
+      # not as a human's PAT. `owner:` makes it an ORG-scoped installation token --
+      # a repo-scoped one cannot touch an org ProjectV2. No fallback to the old PAT:
+      # a fallback would make a broken App path look like a working migration.
+      #
+      # GH_TOKEN moved from job-level env to per-step because a job-level env cannot
+      # read a step output. That is an improvement, not a workaround -- it now says
+      # exactly which steps hold a credential.
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Resolve project id
         id: ids
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC2016  # $names are GraphQL variables, not shell - keep literal
@@ -52,6 +69,8 @@ jobs:
           echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
 
       - name: Collect un-archived terminal items (Prod / Cancelled)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           : > terminal.ids
@@ -91,6 +110,8 @@ jobs:
           echo "Un-archived terminal items: $(wc -l < terminal.ids)"
 
       - name: Archive them
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           PROJECT_ID="${{ steps.ids.outputs.project_id }}"
