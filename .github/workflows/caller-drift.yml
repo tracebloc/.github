@@ -167,7 +167,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::The installation token is empty. Without it the org listing" \
+            echo "::error::PROJECTS_KANBAN_TOKEN is empty. Without it the org listing" \
                  "returns nothing and every check would pass against an empty scope." >&2
             exit 1
           fi
@@ -265,8 +265,8 @@ jobs:
           # its own: it fires only when `what` is ENTIRELY empty, so a listing gap
           # MIXED with any other cause was silently dropped from the sentence rather
           # than mis-named -- the same true-count-false-name class, one step further
-          # along (Bugbot, #278). Its fix is "widen the App installation", which no
-          # other clause would ever suggest.
+          # along (Bugbot, #278). Its fix is a token-visibility one -- widen whatever
+          # credential this audit runs as -- which no other clause would suggest.
           if [ "${LISTING_UNREADABLE:-0}" != "0" ]; then
           [ -n "$what" ] && what="$what; "
           what="${what}${LISTING_UNREADABLE} declared repo(s) missing from the org listing (fleet coverage UNKNOWN)"

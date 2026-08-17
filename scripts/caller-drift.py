@@ -2000,8 +2000,10 @@ def decide_exit(
         # Its OWN clause, for the reason the other three have theirs (Bugbot, #238
         # and again #278): a declared repo missing from the org listing is neither a
         # caller-read failure nor a control-plane failure, and announcing it as one
-        # sends the reader to the wrong fix. This one's fix is almost always "widen
-        # the App installation", which no other clause would ever suggest.
+        # sends the reader to the wrong fix. This one's fix is a token-visibility
+        # change, which no other clause would ever suggest. Named by role rather
+        # than by credential -- this script has already outlived one migration, and
+        # naming the App here was wrong within the same PR that added it.
         if listing_unreadable:
             parts.append(
                 f"{listing_unreadable} declared repo(s) missing from the org listing - "
@@ -2112,19 +2114,27 @@ def main() -> int:
             "arrives with no callers and nothing required of it; add an entry."
         )
     # A DECLARED REPO MISSING FROM THE LISTING IS NOT PROOF IT LEFT THE ORG
-    # (Bugbot, #278). Under the org-member PAT the listing WAS the whole org, so
-    # `inventory - active` could only mean archived/renamed/deleted, and telling the
-    # operator to remove the entry was sound advice. An App installation token lists
-    # only the repos the installation covers, so the same set now also contains
-    # repos that simply were not read -- and following the old advice would delete a
+    # (Bugbot, #278). The listing is only ever as wide as the token's visibility.
+    # With a token that sees the whole org, `inventory - active` could only mean
+    # archived/renamed/deleted, and telling the operator to remove the entry was
+    # sound advice. With any narrower credential the same set also holds repos that
+    # were simply never read -- and following the old advice would delete a
     # legitimate entry and permanently shrink the audited fleet.
+    #
+    # DELIBERATELY CREDENTIAL-AGNOSTIC. An earlier version of these messages named
+    # the App installation, written while this audit was being migrated to it. It
+    # then stayed on PROJECTS_KANBAN_TOKEN (see caller-drift.yml), so every message
+    # sent the reader to widen a credential this audit never mints -- a real failure
+    # under the wrong fix, which is the class this PR keeps closing (Bugbot, #278).
+    # Describe the SYMPTOM and name the token by its role, so the text stays true
+    # whichever credential the workflow supplies.
     #
     # Probe each one instead of guessing, and only call it drift when the repo is
     # readable AND actually inactive:
     #
     #   readable, archived/fork  -> genuine drift, same finding as before
     #   readable, active         -> the LISTING was incomplete, not the repo gone
-    #   unreadable               -> cannot tell; outside the installation or absent
+    #   unreadable               -> cannot tell; out of the token's scope or absent
     #
     # The last two are read failures, so they suppress an all-clear rather than
     # manufacturing a finding. Same rule merge-settings-drift now applies to its own
@@ -2137,8 +2147,8 @@ def main() -> int:
             listing_unreadable.append(
                 f"{name}: declared in repo-inventory.yml, absent from the org listing, "
                 f"and unreadable ({exc.detail}). Cannot distinguish 'left the org' from "
-                "'outside the App installation' - widen the installation or remove the "
-                "entry, but do not assume which."
+                "'outside this audit token's scope' - widen the token's repo visibility "
+                "or remove the entry, but do not assume which."
             )
             continue
         if not isinstance(meta, dict):
@@ -2157,7 +2167,7 @@ def main() -> int:
             listing_unreadable.append(
                 f"{name}: declared in repo-inventory.yml and READABLE AND ACTIVE, but "
                 "absent from the org listing - so the listing is incomplete, not the "
-                "repo gone. Check the App installation covers every declared repo."
+                "repo gone. Check this audit's token can see every declared repo."
             )
 
     audited = sorted(set(active) & set(inventory["repos"]))
