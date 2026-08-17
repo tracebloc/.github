@@ -233,14 +233,30 @@ protection_policy:
     require_conversation_resolution: true
     strict: false
     # fr-gate is the promotion gate; gitleaks/house-rules are the content gates.
-    # `quality / action-pins` is NOT here: it is required on all 16 develops and
-    # none of the 32 staging/prod branches (measured 2026-08-11). That asymmetry
-    # is unexplained rather than decided, so this file does not bless it -
-    # backend#1681 carries the question.
+    # `quality / action-pins` JOINED THEM on 2026-08-16 (backend#1976). It was
+    # required on 16/16 develops and 1/16 prods, and this file recorded that
+    # asymmetry as "unexplained rather than decided". Decided now, and armed on
+    # all 30 unarmed branches before this entry landed. The reason it is not
+    # sufficient to gate only develop:
+    #
+    #   The promotion lane is covered - nothing reaches staging or prod through it
+    #   without having been on develop, where the check is required. The HOTFIX
+    #   lane is not: it merges straight to a prod branch, skipping develop
+    #   entirely. `hotfix-repo.sh` does refuse a hotfix whose non-`gate / gate`
+    #   checks are not green, but that is a property of a SCRIPT, and nothing
+    #   compels anyone to use it -- a hotfix PR with a red action-pins could be
+    #   merged from the UI by any writer with one approval, because the context
+    #   was not required on the branch. Under time pressure, during an incident,
+    #   is exactly when the merge button gets used instead of the script.
+    #
+    # Armed while green: `quality / action-pins` already reported SUCCESS on
+    # promotion PRs to staging and main across the fleet before arming (.github#276,
+    # backend#2054, cli#514), so no branch gained a context that had never reported.
     required_checks:
       - gate / gate
       - quality / gitleaks
       - quality / house-rules
+      - quality / action-pins
   prod:
     classic_protection: true
     min_reviews: 1
@@ -255,14 +271,15 @@ protection_policy:
     require_conversation_resolution: true
     strict: false
     # fr-gate is the promotion gate; gitleaks/house-rules are the content gates.
-    # `quality / action-pins` is NOT here: it is required on all 16 develops and
-    # none of the 32 staging/prod branches (measured 2026-08-11). That asymmetry
-    # is unexplained rather than decided, so this file does not bless it -
-    # backend#1681 carries the question.
+    # `quality / action-pins` joined them on 2026-08-16 (backend#1976) - see the
+    # staging entry above for the decision and the hotfix-lane reasoning behind it.
+    # This is the branch role that reasoning is actually about: prod is where the
+    # hotfix lane lands.
     required_checks:
       - gate / gate
       - quality / gitleaks
       - quality / house-rules
+      - quality / action-pins
 
 # The ruleset contract (backend#1681). GitHub's second protection system, which
 # nothing audited until now - so the merge-method restriction on every promotion
@@ -421,8 +438,11 @@ repos:
         divergent:
           reason: >-
             Requires MORE than the fleet baseline: the `selftests` job is armed
-            here on top of the three baseline contexts, so a red selftest blocks
-            the merge (backend#1680).
+            here on top of the develop baseline, so a red selftest blocks the
+            merge (backend#1680). MORE, never fewer - an override REPLACES the
+            baseline list rather than extending it, so every baseline context is
+            restated here deliberately. See the staging cell below for the defect
+            that rule exists to prevent.
           required_checks:
             - quality / gitleaks
             - quality / house-rules
@@ -432,12 +452,19 @@ repos:
         divergent:
           reason: >-
             Requires MORE than the fleet baseline: the `selftests` job is armed
-            here on top of the three baseline contexts, so a red selftest blocks
-            the develop -> staging hop (backend#1680).
+            here on top of the staging baseline, so a red selftest blocks the
+            develop -> staging hop (backend#1680). MORE, never fewer - an
+            override REPLACES the baseline list (`want.update(overrides)` in
+            evaluate_protection), so every baseline context has to be restated
+            here or it stops being asserted on this branch. That is how
+            `quality / action-pins` went missing when the staging baseline was
+            raised in backend#1976 (Bugbot, #277): the fleet gained a context and
+            this cell silently kept asserting the old set.
           required_checks:
             - gate / gate
             - quality / gitleaks
             - quality / house-rules
+            - quality / action-pins
             - selftests
       # NOT YET on prod, deliberately, and this is a sequencing fact rather than
       # a decision against it. `selftests.yml` reaches `staging` only when the
@@ -576,6 +603,13 @@ repos:
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
+          # The same is true of the three `quality / *` contexts, including
+          # `quality / action-pins` added to the baseline by backend#1976: they
+          # are reported by the code-quality caller, which this repo records as
+          # `exempt: *code_quality_caller_missing` above. Requiring a context
+          # nothing reports leaves every PR pending forever (client#665), so
+          # this cell drops them BECAUSE the producer is absent, not because the
+          # rule was judged not to matter here.
           required_checks: []
     rulesets:
       promotion_merge_commit_only:
@@ -908,23 +942,31 @@ repos:
         divergent:
           reason: >-
             Requires MORE than the fleet baseline: the Vitest unit suite is
-            armed here on top of the three baseline contexts, so a red test
-            blocks the develop -> staging hop (backend#1975).
+            armed here on top of the staging baseline, so a red test blocks the
+            develop -> staging hop (backend#1975). MORE, never fewer - an
+            override REPLACES the baseline list, so every baseline context is
+            restated here or it stops being asserted on this branch
+            (backend#1976, Bugbot on #277).
           required_checks:
             - gate / gate
             - quality / gitleaks
             - quality / house-rules
+            - quality / action-pins
             - Unit tests (Vitest)
       prod:
         divergent:
           reason: >-
             Requires MORE than the fleet baseline: the Vitest unit suite is
-            armed here on top of the three baseline contexts, so a red test
-            blocks the staging -> prod hop (backend#1975).
+            armed here on top of the prod baseline, so a red test blocks the
+            staging -> prod hop (backend#1975). MORE, never fewer - an override
+            REPLACES the baseline list, so every baseline context is restated
+            here or it stops being asserted on this branch (backend#1976,
+            Bugbot on #277).
           required_checks:
             - gate / gate
             - quality / gitleaks
             - quality / house-rules
+            - quality / action-pins
             - Unit tests (Vitest)
     rulesets:
       promotion_merge_commit_only: required
@@ -1012,6 +1054,13 @@ repos:
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
+          # The same is true of the three `quality / *` contexts, including
+          # `quality / action-pins` added to the baseline by backend#1976: they
+          # are reported by the code-quality caller, which this repo records as
+          # `exempt: *code_quality_caller_missing` above. Requiring a context
+          # nothing reports leaves every PR pending forever (client#665), so
+          # this cell drops them BECAUSE the producer is absent, not because the
+          # rule was judged not to matter here.
           # Stated as its REAL set rather than [] - this repo is the tool that
           # performs every promotion, so its own gates are worth guarding.
           required_checks:
@@ -1076,6 +1125,13 @@ repos:
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
+          # The same is true of the three `quality / *` contexts, including
+          # `quality / action-pins` added to the baseline by backend#1976: they
+          # are reported by the code-quality caller, which this repo records as
+          # `exempt: *code_quality_caller_missing` above. Requiring a context
+          # nothing reports leaves every PR pending forever (client#665), so
+          # this cell drops them BECAUSE the producer is absent, not because the
+          # rule was judged not to matter here.
           required_checks: []
     rulesets:
       promotion_merge_commit_only:
