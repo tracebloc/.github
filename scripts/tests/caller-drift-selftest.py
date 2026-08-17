@@ -18,6 +18,8 @@ import copy
 import importlib.util
 import inspect
 import json
+import re
+import pathlib
 import os
 import sys
 import tempfile
@@ -1201,6 +1203,134 @@ guard.evaluate_rulesets("repo", _rs_entry(), RPOLICY, BR, "acme", f, u)
 record(not f and len(u) == 1,
        "rulesets: an unreadable read is UNREADABLE, never a silent pass", f"unreadable={u}")
 
+# COVERAGE ARITHMETIC (Bugbot, #278). `evaluated` drives a die() that discards the
+# whole report, and it assumed every name in `unreadable` was an AUDITED one. The
+# stale-inventory probe records repos from `inventory - active`, which are by
+# definition not audited -- so routing them into the shared bucket subtracts names
+# that were never in the total. Enough of them and a run with plenty of verdicts
+# aborts as though nothing could be read, precisely in the partial-installation
+# case the probe exists to describe.
+# WHICH BUCKET GETS THE BLAME (Bugbot, #278). The caller/copy count is whatever the
+# merged list has left after every typed bucket is removed, and the subtraction was
+# written out twice -- so a fourth bucket landed in only one of them and listing gaps
+# were announced as caller-read failures. Asserted through the real function so a
+# missed bucket reddens here instead of agreeing with a copy of the sum.
+# THE WIRING, not just the function (backend#1729 rule 5: a test that still passes
+# under the mutation is vacuous). Breaking caller_read_failures() reddens the cases
+# below, but DROPPING A BUCKET AT ITS CALL SITE did not -- and that is precisely the
+# defect being fixed: the bucket existed and was not passed. main() is not reachable
+# from this selftest (no org-listing stub), so assert it from the SOURCE instead:
+# every `*_unreadable` bucket main() declares must appear in the call. Derived from
+# the declarations, so a fifth bucket is covered the moment it is declared.
+_src = pathlib.Path(guard.__file__).read_text()
+
+# EVERY *_unreadable OUTPUT MUST BE SURFACED BY THE WORKFLOW (Bugbot, #278, third
+# time). The script emits a decomposed count per bucket so the watchdog headline can
+# name WHICH read failed; a bucket the workflow never reads falls back to the merged
+# count, or -- worse, when mixed with another cause -- is dropped from the sentence
+# entirely. That has now happened three times in one PR: decide_exit, the step
+# outputs, and the watchdog phrase were each updated separately and each was missed
+# once. Derive the expectation from what the script EMITS rather than from a list
+# someone maintains, so a fifth bucket is covered the moment it is written out.
+_wf = pathlib.Path(__file__).resolve().parent.parent.parent / ".github/workflows/caller-drift.yml"
+# Keyed on the EMITTED STRING LITERAL, not on the shape of the call around it.
+# The first version matched `handle.write(f"x_unreadable=` on one line, and
+# `caller_unreadable` is written across two -- so the guard built to stop a
+# bucket being dropped silently omitted the very bucket that had been dropped
+# three times. Dropping CALLER_UNREADABLE from the workflow left all three
+# wiring assertions green (Bugbot, #278). A guard blind to one of the four
+# things it guards is worse than no guard: it reports coverage it lacks.
+_emitted = set(re.findall(r'"(\w+_unreadable)=', _src))
+_surfaced = {m.lower() for m in re.findall(r'^\s*(\w+_UNREADABLE):', _wf.read_text(), re.M)}
+record(bool(_emitted) and _emitted <= _surfaced,
+       "wiring: every *_unreadable output the script emits is read by the workflow",
+       f"emitted={sorted(_emitted)} surfaced={sorted(_surfaced)}")
+_phrase = re.search(r'what=""(.*?)\[ -z "\$what" \]', _wf.read_text(), re.S)
+_named = {m.lower() for m in re.findall(r'\$\{(\w+_UNREADABLE):', _phrase.group(1) if _phrase else "")}
+record(bool(_phrase) and _emitted <= _named,
+       "wiring: every *_unreadable bucket gets its own clause in the watchdog phrase",
+       f"emitted={sorted(_emitted)} named={sorted(_named)}")
+
+_declared = set(re.findall(r'^\s*(\w+_unreadable): "list\[str\]" = \[\]', _src, re.M))
+_call = re.search(r'=\s*caller_read_failures\((.*?)\n\s*\)', _src, re.S)
+_passed = set(re.findall(r'len\((\w+_unreadable)\)', _call.group(1) if _call else ""))
+record(bool(_declared) and bool(_call) and _declared == _passed,
+       "wiring: every declared *_unreadable bucket is passed to caller_read_failures",
+       f"declared={sorted(_declared)} passed={sorted(_passed)}")
+
+record(guard.caller_read_failures(5, 0, 0, 4) == 1,
+       "caller_read_failures: listing gaps are subtracted, not blamed on callers",
+       f"got {guard.caller_read_failures(5, 0, 0, 4)}, want 1")
+record(guard.caller_read_failures(10, 2, 3, 4) == 1,
+       "caller_read_failures: all typed buckets are removed",
+       f"got {guard.caller_read_failures(10, 2, 3, 4)}, want 1")
+record(guard.caller_read_failures(3, 0, 0, 0) == 3,
+       "caller_read_failures: with no typed buckets every record is a caller failure",
+       f"got {guard.caller_read_failures(3, 0, 0, 0)}, want 3")
+record(guard.caller_read_failures(2, 2, 2, 0) == 0,
+       "caller_read_failures: a double-counted bucket clamps at 0, never negative",
+       f"got {guard.caller_read_failures(2, 2, 2, 0)}, want 0")
+
+record(guard.coverage(["a", "b", "c"], []) == 3,
+       "coverage: nothing unreadable means everything was evaluated",
+       f"got {guard.coverage(['a','b','c'], [])}")
+record(guard.coverage(["a", "b", "c"], ["b: protection unreadable"]) == 2,
+       "coverage: an AUDITED repo's read failure reduces coverage",
+       f"got {guard.coverage(['a','b','c'], ['b: x'])}")
+record(guard.coverage(["a", "b", "c"],
+                      ["x: absent from listing", "y: absent from listing",
+                       "z: absent from listing", "w: absent from listing"]) == 3,
+       "coverage: listing gaps are NOT audited repos and must not reduce coverage",
+       "four non-audited names must not zero out three real verdicts")
+record(guard.coverage(["a"], ["a: unreadable", "x: absent", "y: absent"]) == 0,
+       "coverage: a genuinely unreadable audited repo still reaches zero",
+       f"got {guard.coverage(['a'], ['a: u', 'x: a', 'y: a'])}")
+
+# ABSENT bypass_actors IS NOT AN EMPTY ALLOWLIST (Bugbot, #278).
+#
+# GitHub returns `bypass_actors` only to a caller with WRITE access to the
+# ruleset; everyone else gets a 200 without the field. This is THE fail-open case
+# and it is invisible without these two cases: `promotion_merge_commit_only`
+# asserts `bypass_actors: []`, so folding a missing field into `[]` satisfies the
+# assertion WITHOUT the field ever having been read -- on all 32 promotion
+# branches. It was unreachable under the org-admin PAT, which always saw the
+# field, so no existing case could have caught it (backend#2036).
+promo_no_bypass = json.loads(json.dumps(PROMO_OK))
+del promo_no_bypass["bypass_actors"]
+_stub_rulesets(promo_no_bypass)
+f, u = [], []
+guard.evaluate_rulesets("repo", _rs_entry(), RPOLICY, BR, "acme", f, u)
+record(not f and len(u) == 1 and "bypass_actors" in u[0],
+       "rulesets: a 200 that OMITS bypass_actors is UNREADABLE, not an empty allowlist",
+       f"findings={f} unreadable={u}")
+
+# THE MUTATION ANCHOR for the case above. If the omission is ever folded back into
+# `raw.get("bypass_actors") or []`, the case above still passes trivially unless
+# something asserts the DISTINCTION itself: present-and-empty must stay a real,
+# assertable value, or the fix would just make every empty allowlist unreadable
+# and break the 32 branches it is meant to protect.
+record(guard.RepoRuleset(PROMO_OK).bypass_present is True
+       and guard.RepoRuleset(promo_no_bypass).bypass_present is False
+       and guard.RepoRuleset(PROMO_OK).bypass == [],
+       "rulesets: present-and-empty and absent are DISTINGUISHED, not both []",
+       f"present={guard.RepoRuleset(PROMO_OK).bypass_present} "
+       f"absent={guard.RepoRuleset(promo_no_bypass).bypass_present}")
+
+# The other direction of the same root cause: a policy expecting a NON-empty
+# allowlist went falsely RED, naming actors as missing that are simply invisible.
+# Six of these on .github#278 before the fix. Must now read as unreadable too.
+tag_no_bypass = {"id": 9, "name": "Protect v* release tags", "target": "tag",
+                 "enforcement": "active",
+                 "conditions": {"ref_name": {"include": ["refs/tags/v*"]}},
+                 "rules": [{"type": "creation"}, {"type": "update"},
+                           {"type": "deletion"}]}
+_stub_rulesets(PROMO_OK, tag_no_bypass)
+f, u = [], []
+guard.evaluate_rulesets("repo", _rs_entry(tag="required"), RPOLICY, BR, "acme", f, u)
+record(not any("bypass actors: missing" in x for x in f) and len(u) == 1,
+       "rulesets: an invisible allowlist is not reported as MISSING actors",
+       f"findings={f} unreadable={u}")
+
 # Schema
 # The family must not be switchable off by deletion (Bugbot, .github#262). Both
 # of these leave the top-level key PRESENT, so schema validation passes -- and
@@ -1625,7 +1755,8 @@ record(_err is None and len(_puts) == 1
 
 def _exit(**kw):
     base = dict(findings=0, caller_unreadable=0, protection_unreadable=0,
-                ruleset_unreadable=0, remediation_failures=0, remediated=0)
+                ruleset_unreadable=0, listing_unreadable=0,
+                remediation_failures=0, remediated=0)
     base.update(kw)
     return guard.decide_exit(**base)
 
@@ -1636,6 +1767,23 @@ record(_c == 0 and _r == "", "exit: a clean fleet is 0", f"{_c} {_r!r}")
 _c, _r = _exit(findings=3)
 record(_c == 1 and "3 repo-conformance" in _r,
        "exit: un-remediated findings are 1 (a plain audit is unchanged)", f"{_c} {_r!r}")
+
+# A listing gap is exit 2, and the headline must name IT rather than blaming
+# caller/copy reads (Bugbot, #278). Its fix is "widen the App installation", which
+# no other clause would ever suggest -- a true count under a false name sends the
+# reader to the wrong place, the same defect the decomposition fixed in #238.
+_c, _r = _exit(listing_unreadable=4)
+record(_c == 2 and "missing from the org listing" in _r
+       and "caller/copy" not in _r,
+       "exit: a listing gap is 2 and is NOT announced as a caller-read failure",
+       f"{_c} {_r!r}")
+
+# All four buckets at once: every cause must be named, none swallowed.
+_c, _r = _exit(caller_unreadable=1, protection_unreadable=2,
+               ruleset_unreadable=3, listing_unreadable=4)
+record(_c == 2 and "caller/copy" in _r and "branch-protection" in _r
+       and "ruleset" in _r and "org listing" in _r,
+       "exit: all four unreadable causes are named separately", f"{_c} {_r!r}")
 
 # THE TICKET. Every finding got a PR -> the run did what it was asked.
 _c, _r = _exit(findings=3, remediated=3)
