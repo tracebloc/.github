@@ -1201,6 +1201,28 @@ guard.evaluate_rulesets("repo", _rs_entry(), RPOLICY, BR, "acme", f, u)
 record(not f and len(u) == 1,
        "rulesets: an unreadable read is UNREADABLE, never a silent pass", f"unreadable={u}")
 
+# COVERAGE ARITHMETIC (Bugbot, #278). `evaluated` drives a die() that discards the
+# whole report, and it assumed every name in `unreadable` was an AUDITED one. The
+# stale-inventory probe records repos from `inventory - active`, which are by
+# definition not audited -- so routing them into the shared bucket subtracts names
+# that were never in the total. Enough of them and a run with plenty of verdicts
+# aborts as though nothing could be read, precisely in the partial-installation
+# case the probe exists to describe.
+record(guard.coverage(["a", "b", "c"], []) == 3,
+       "coverage: nothing unreadable means everything was evaluated",
+       f"got {guard.coverage(['a','b','c'], [])}")
+record(guard.coverage(["a", "b", "c"], ["b: protection unreadable"]) == 2,
+       "coverage: an AUDITED repo's read failure reduces coverage",
+       f"got {guard.coverage(['a','b','c'], ['b: x'])}")
+record(guard.coverage(["a", "b", "c"],
+                      ["x: absent from listing", "y: absent from listing",
+                       "z: absent from listing", "w: absent from listing"]) == 3,
+       "coverage: listing gaps are NOT audited repos and must not reduce coverage",
+       "four non-audited names must not zero out three real verdicts")
+record(guard.coverage(["a"], ["a: unreadable", "x: absent", "y: absent"]) == 0,
+       "coverage: a genuinely unreadable audited repo still reaches zero",
+       f"got {guard.coverage(['a'], ['a: u', 'x: a', 'y: a'])}")
+
 # ABSENT bypass_actors IS NOT AN EMPTY ALLOWLIST (Bugbot, #278).
 #
 # GitHub returns `bypass_actors` only to a caller with WRITE access to the

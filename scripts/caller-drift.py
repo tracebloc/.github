@@ -1588,6 +1588,32 @@ def _actor(entry: dict) -> str:
     return kind if ident is None else f"{kind}:{ident}"
 
 
+def coverage(audited: "list[str]", unreadable: "list[str]") -> int:
+    """How many audited repos actually produced a verdict.
+
+    `audited` is the intersection of the org listing and the inventory; each entry
+    in `unreadable` is prefixed `"<repo>: "`. The result drives a die() that
+    discards the entire report, so the arithmetic has ONE precondition: every name
+    in `unreadable` must also be in `audited`. Subtracting a name that was never in
+    the total under-counts coverage, and a large enough under-count aborts a run
+    that had plenty of verdicts.
+
+    Extracted so the rule is callable rather than inline (backend#1729 rule 9): the
+    selftest and the mutation both go through this function, so breaking it here
+    reddens the test instead of the test agreeing with its own copy of the sum.
+
+    It is deliberately TOLERANT of a stray name rather than trusting the caller:
+    only names present in `audited` count against it. The precondition is the
+    caller's to keep -- protection, ruleset and listing failures each have their own
+    bucket and merge in after this is computed -- but honouring it here as well
+    means a future fourth bucket wired to the wrong list cannot silently abort every
+    run (Bugbot, #278, where listing gaps from `inventory - active` did exactly
+    that).
+    """
+    seen = {line.split(":", 1)[0] for line in unreadable}
+    return len(audited) - len(seen & set(audited))
+
+
 class RepoRuleset:
     """One ruleset, reduced to the properties the inventory asserts."""
 
@@ -2027,6 +2053,18 @@ def main() -> int:
     # as branch protection failing, and vice versa (Bugbot, .github#212).
     protection_unreadable: "list[str]" = []
     ruleset_unreadable: "list[str]" = []
+    # A THIRD bucket, for the same reason as the two above (Bugbot, #278). The
+    # stale-inventory probe below records repos that are DECLARED but absent from
+    # the org listing. Those names are in `inventory - active`, so they are NOT in
+    # `audited` -- and `evaluated` is computed as
+    # `len(audited) - len(names in unreadable)`, an arithmetic that assumes every
+    # unreadable name is an audited one. Putting listing gaps in the shared bucket
+    # subtracts names that were never in the total, under-counting coverage; once
+    # gaps outnumber covered repos, `evaluated <= 0` trips the die() and discards
+    # the whole report as if every audited repo were unreadable. That is exactly
+    # the partial-installation case the probe exists to describe, so it would abort
+    # precisely when it is most needed.
+    listing_unreadable: "list[str]" = []
 
     untracked = sorted(set(active) - set(inventory["repos"]))
     for name in untracked:
@@ -2057,7 +2095,7 @@ def main() -> int:
         try:
             meta = gh_json(["api", f"repos/{org}/{name}"])
         except GhError as exc:
-            unreadable.append(
+            listing_unreadable.append(
                 f"{name}: declared in repo-inventory.yml, absent from the org listing, "
                 f"and unreadable ({exc.detail}). Cannot distinguish 'left the org' from "
                 "'outside the App installation' - widen the installation or remove the "
@@ -2065,7 +2103,7 @@ def main() -> int:
             )
             continue
         if not isinstance(meta, dict):
-            unreadable.append(
+            listing_unreadable.append(
                 f"{name}: declared in repo-inventory.yml, absent from the org listing, "
                 "and its repo read did not return an object."
             )
@@ -2077,7 +2115,7 @@ def main() -> int:
                 "active repo. Remove or correct the entry."
             )
         else:
-            unreadable.append(
+            listing_unreadable.append(
                 f"{name}: declared in repo-inventory.yml and READABLE AND ACTIVE, but "
                 "absent from the org listing - so the listing is incomplete, not the "
                 "repo gone. Check the App installation covers every declared repo."
@@ -2278,8 +2316,8 @@ def main() -> int:
         _m["rulesets_unread"] = len(ruleset_unreadable) - _rmark
         matrix[name] = _m
 
-    # Computed from repo-read failures ONLY, before the two lists are merged.
-    evaluated = len(audited) - len({line.split(":", 1)[0] for line in unreadable})
+    # Computed from repo-read failures ONLY, before the other lists are merged.
+    evaluated = coverage(audited, unreadable)
     if evaluated <= 0:
         die(
             f"all {len(audited)} inventoried repos were unreadable: "
@@ -2289,6 +2327,9 @@ def main() -> int:
     # without ever being able to trigger the abort above.
     unreadable.extend(protection_unreadable)
     unreadable.extend(ruleset_unreadable)
+    # Listing gaps merge here too, so they are REPORTED and still fail the run
+    # without having been able to distort `evaluated` above.
+    unreadable.extend(listing_unreadable)
 
     report = [
         # Not "…drift": this block is now also the body of the standing conformance
