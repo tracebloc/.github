@@ -1608,6 +1608,20 @@ class RepoRuleset:
                 methods = params.get("allowed_merge_methods")
                 if isinstance(methods, list):
                     self.merge_methods = sorted(m for m in methods if isinstance(m, str))
+        # ABSENT IS NOT EMPTY. GitHub returns `bypass_actors` only to a caller with
+        # WRITE access to the ruleset ("to prevent leaking sensitive information");
+        # for anyone else the field is simply not in the 200. `.get(...) or []`
+        # collapses that into an empty allowlist, which is a real value the policy
+        # asserts -- `promotion_merge_commit_only` expects exactly `[]`, so the
+        # assertion MATCHES without the field ever having been read. Fail-open on
+        # the allowlist this audit exists to enforce, on all 32 promotion branches
+        # (Bugbot, #278). The tag rulesets fail the other way and go falsely red.
+        #
+        # Recording presence separately is what lets read_rulesets() refuse. Do not
+        # fold this back into a `or []`: under the org-admin PAT the field was
+        # always present, so this whole distinction was unreachable until
+        # backend#2036 moved the audit onto a least-privilege App identity.
+        self.bypass_present = isinstance(raw.get("bypass_actors"), list)
         self.bypass = sorted(
             _actor(a) for a in (raw.get("bypass_actors") or []) if isinstance(a, dict)
         )
@@ -1647,7 +1661,22 @@ def read_rulesets(org: str, name: str) -> "tuple[list[RepoRuleset], str | None]"
             return ([], f"ruleset {row['id']} unreadable ({exc.detail})")
         if not isinstance(full, dict):
             return ([], f"ruleset {row['id']} did not return an object")
-        out.append(RepoRuleset(full))
+        parsed = RepoRuleset(full)
+        # A 200 that OMITS bypass_actors is an incomplete read, not an empty
+        # allowlist -- see RepoRuleset.bypass_present. Refuse here rather than in
+        # each comparison, so no downstream assertion can be made against a field
+        # that was never returned. This is the same rule the docstring above states
+        # for the cheaper endpoints, applied to the case where the RIGHT endpoint
+        # answers 200 and still withholds the field.
+        if not parsed.bypass_present:
+            return (
+                [],
+                f"ruleset {row['id']} ({parsed.name!r}) returned no `bypass_actors`: "
+                "GitHub returns that field only to a caller with WRITE access to the "
+                "ruleset, so the allowlist could not be read. Treating it as empty "
+                "would silently satisfy any policy expecting an empty allowlist.",
+            )
+        out.append(parsed)
     return (out, None)
 
 
@@ -2005,12 +2034,54 @@ def main() -> int:
             f"{name}: active in {org} but absent from repo-inventory.yml. A new repo "
             "arrives with no callers and nothing required of it; add an entry."
         )
+    # A DECLARED REPO MISSING FROM THE LISTING IS NOT PROOF IT LEFT THE ORG
+    # (Bugbot, #278). Under the org-member PAT the listing WAS the whole org, so
+    # `inventory - active` could only mean archived/renamed/deleted, and telling the
+    # operator to remove the entry was sound advice. An App installation token lists
+    # only the repos the installation covers, so the same set now also contains
+    # repos that simply were not read -- and following the old advice would delete a
+    # legitimate entry and permanently shrink the audited fleet.
+    #
+    # Probe each one instead of guessing, and only call it drift when the repo is
+    # readable AND actually inactive:
+    #
+    #   readable, archived/fork  -> genuine drift, same finding as before
+    #   readable, active         -> the LISTING was incomplete, not the repo gone
+    #   unreadable               -> cannot tell; outside the installation or absent
+    #
+    # The last two are read failures, so they suppress an all-clear rather than
+    # manufacturing a finding. Same rule merge-settings-drift now applies to its own
+    # listing; this is the sibling case that commit should have covered too.
     stale = sorted(set(inventory["repos"]) - set(active))
     for name in stale:
-        findings.append(
-            f"{name}: in repo-inventory.yml but not an active repo in {org} "
-            "(archived, forked, renamed or deleted). Remove or correct the entry."
-        )
+        try:
+            meta = gh_json(["api", f"repos/{org}/{name}"])
+        except GhError as exc:
+            unreadable.append(
+                f"{name}: declared in repo-inventory.yml, absent from the org listing, "
+                f"and unreadable ({exc.detail}). Cannot distinguish 'left the org' from "
+                "'outside the App installation' - widen the installation or remove the "
+                "entry, but do not assume which."
+            )
+            continue
+        if not isinstance(meta, dict):
+            unreadable.append(
+                f"{name}: declared in repo-inventory.yml, absent from the org listing, "
+                "and its repo read did not return an object."
+            )
+            continue
+        if meta.get("archived") or meta.get("fork"):
+            state = "archived" if meta.get("archived") else "a fork"
+            findings.append(
+                f"{name}: in repo-inventory.yml but {state} in {org}, so it is not an "
+                "active repo. Remove or correct the entry."
+            )
+        else:
+            unreadable.append(
+                f"{name}: declared in repo-inventory.yml and READABLE AND ACTIVE, but "
+                "absent from the org listing - so the listing is incomplete, not the "
+                "repo gone. Check the App installation covers every declared repo."
+            )
 
     audited = sorted(set(active) & set(inventory["repos"]))
     if not audited:

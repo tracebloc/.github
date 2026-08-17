@@ -1201,6 +1201,51 @@ guard.evaluate_rulesets("repo", _rs_entry(), RPOLICY, BR, "acme", f, u)
 record(not f and len(u) == 1,
        "rulesets: an unreadable read is UNREADABLE, never a silent pass", f"unreadable={u}")
 
+# ABSENT bypass_actors IS NOT AN EMPTY ALLOWLIST (Bugbot, #278).
+#
+# GitHub returns `bypass_actors` only to a caller with WRITE access to the
+# ruleset; everyone else gets a 200 without the field. This is THE fail-open case
+# and it is invisible without these two cases: `promotion_merge_commit_only`
+# asserts `bypass_actors: []`, so folding a missing field into `[]` satisfies the
+# assertion WITHOUT the field ever having been read -- on all 32 promotion
+# branches. It was unreachable under the org-admin PAT, which always saw the
+# field, so no existing case could have caught it (backend#2036).
+promo_no_bypass = json.loads(json.dumps(PROMO_OK))
+del promo_no_bypass["bypass_actors"]
+_stub_rulesets(promo_no_bypass)
+f, u = [], []
+guard.evaluate_rulesets("repo", _rs_entry(), RPOLICY, BR, "acme", f, u)
+record(not f and len(u) == 1 and "bypass_actors" in u[0],
+       "rulesets: a 200 that OMITS bypass_actors is UNREADABLE, not an empty allowlist",
+       f"findings={f} unreadable={u}")
+
+# THE MUTATION ANCHOR for the case above. If the omission is ever folded back into
+# `raw.get("bypass_actors") or []`, the case above still passes trivially unless
+# something asserts the DISTINCTION itself: present-and-empty must stay a real,
+# assertable value, or the fix would just make every empty allowlist unreadable
+# and break the 32 branches it is meant to protect.
+record(guard.RepoRuleset(PROMO_OK).bypass_present is True
+       and guard.RepoRuleset(promo_no_bypass).bypass_present is False
+       and guard.RepoRuleset(PROMO_OK).bypass == [],
+       "rulesets: present-and-empty and absent are DISTINGUISHED, not both []",
+       f"present={guard.RepoRuleset(PROMO_OK).bypass_present} "
+       f"absent={guard.RepoRuleset(promo_no_bypass).bypass_present}")
+
+# The other direction of the same root cause: a policy expecting a NON-empty
+# allowlist went falsely RED, naming actors as missing that are simply invisible.
+# Six of these on .github#278 before the fix. Must now read as unreadable too.
+tag_no_bypass = {"id": 9, "name": "Protect v* release tags", "target": "tag",
+                 "enforcement": "active",
+                 "conditions": {"ref_name": {"include": ["refs/tags/v*"]}},
+                 "rules": [{"type": "creation"}, {"type": "update"},
+                           {"type": "deletion"}]}
+_stub_rulesets(PROMO_OK, tag_no_bypass)
+f, u = [], []
+guard.evaluate_rulesets("repo", _rs_entry(tag="required"), RPOLICY, BR, "acme", f, u)
+record(not any("bypass actors: missing" in x for x in f) and len(u) == 1,
+       "rulesets: an invisible allowlist is not reported as MISSING actors",
+       f"findings={f} unreadable={u}")
+
 # Schema
 # The family must not be switchable off by deletion (Bugbot, .github#262). Both
 # of these leave the top-level key PRESENT, so schema validation passes -- and
