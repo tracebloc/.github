@@ -1588,6 +1588,29 @@ def _actor(entry: dict) -> str:
     return kind if ident is None else f"{kind}:{ident}"
 
 
+def caller_read_failures(merged: int, *typed: int) -> int:
+    """How many of the merged unreadable records are caller/copy failures.
+
+    `merged` is the length of the single merged `unreadable` list; `typed` is the
+    length of every bucket that is NOT a caller/copy failure -- protection,
+    rulesets, listing gaps, and whatever comes next. Caller failures are whatever
+    is left, because they are the only class with no bucket of its own.
+
+    A FUNCTION rather than an inline subtraction, and variadic rather than fixed,
+    for one reason: the subtraction was written out twice and adding a fourth
+    bucket meant remembering to edit both. It wasn't remembered, so App-installation
+    coverage holes were reported as caller/copy read failures -- a true count under
+    a false name, which is the exact defect the decomposition was introduced to fix
+    (Bugbot, #238, then #278). Passing buckets positionally means a new one is
+    either passed here or visibly absent at the call site.
+
+    Never negative: a caller that double-counts a bucket would otherwise produce a
+    negative headline count, which reads as nonsense rather than as the wiring bug
+    it is. Clamped, and the clamp is asserted.
+    """
+    return max(merged - sum(typed), 0)
+
+
 def coverage(audited: "list[str]", unreadable: "list[str]") -> int:
     """How many audited repos actually produced a verdict.
 
@@ -1923,6 +1946,7 @@ def decide_exit(
     caller_unreadable: int,
     protection_unreadable: int,
     ruleset_unreadable: int,
+    listing_unreadable: int,
     remediation_failures: int,
     remediated: int,
 ) -> "tuple[int, str]":
@@ -1956,7 +1980,12 @@ def decide_exit(
       1  findings remain un-remediated
       2  could not evaluate, or could not remediate -- state is UNKNOWN
     """
-    unreadable = caller_unreadable + protection_unreadable + ruleset_unreadable
+    unreadable = (
+        caller_unreadable
+        + protection_unreadable
+        + ruleset_unreadable
+        + listing_unreadable
+    )
     if unreadable:
         parts = []
         if caller_unreadable:
@@ -1968,6 +1997,16 @@ def decide_exit(
             )
         if ruleset_unreadable:
             parts.append(f"{ruleset_unreadable} ruleset read(s) failed - ruleset state UNKNOWN")
+        # Its OWN clause, for the reason the other three have theirs (Bugbot, #238
+        # and again #278): a declared repo missing from the org listing is neither a
+        # caller-read failure nor a control-plane failure, and announcing it as one
+        # sends the reader to the wrong fix. This one's fix is almost always "widen
+        # the App installation", which no other clause would ever suggest.
+        if listing_unreadable:
+            parts.append(
+                f"{listing_unreadable} declared repo(s) missing from the org listing - "
+                "fleet coverage UNKNOWN"
+            )
         return 2, "; ".join(parts) + "."
     if remediation_failures:
         # Exit 2, not 1: with --create-prs the drift findings were expected (they are
@@ -2331,6 +2370,18 @@ def main() -> int:
     # without having been able to distort `evaluated` above.
     unreadable.extend(listing_unreadable)
 
+    # Derived ONCE and passed to both consumers (the step outputs and decide_exit).
+    # It was written out twice as an inline subtraction, and adding a fourth bucket
+    # then meant remembering to edit both -- which is how `listing_unreadable`
+    # silently landed in the caller/copy count (Bugbot, #278). One expression, so a
+    # fifth bucket cannot be half-wired.
+    caller_unreadable_count = caller_read_failures(
+        len(unreadable),
+        len(protection_unreadable),
+        len(ruleset_unreadable),
+        len(listing_unreadable),
+    )
+
     report = [
         # Not "…drift": this block is now also the body of the standing conformance
         # issue (backend#1608 item 3), where it is rendered under a verdict line
@@ -2488,12 +2539,20 @@ def main() -> int:
                 # true count under a false name, pointing at the wrong problem.
                 # Same reason `remediation_failures` got its own output above.
                 # (Bugbot, #238.)
+                #
+                # EVERY non-caller bucket must be subtracted here. `listing_unreadable`
+                # is the fourth and was missed when it was added, so App-installation
+                # coverage holes were counted as caller/copy read failures -- the same
+                # true-count-false-name defect this decomposition exists to prevent,
+                # reintroduced by a new bucket rather than by this line changing
+                # (Bugbot, #278).
                 handle.write(
                     "caller_unreadable="
-                    f"{len(unreadable) - len(protection_unreadable) - len(ruleset_unreadable)}\n"
+                    f"{caller_unreadable_count}\n"
                 )
                 handle.write(f"protection_unreadable={len(protection_unreadable)}\n")
                 handle.write(f"ruleset_unreadable={len(ruleset_unreadable)}\n")
+                handle.write(f"listing_unreadable={len(listing_unreadable)}\n")
                 # Its own output, because exit 2 now has two very different
                 # causes. Every exit-2 message describes UNREAD repos; a failed
                 # --create-prs would otherwise be headlined on the conformance
@@ -2510,11 +2569,10 @@ def main() -> int:
 
     code, reason = decide_exit(
         findings=len(findings),
-        caller_unreadable=(
-            len(unreadable) - len(protection_unreadable) - len(ruleset_unreadable)
-        ),
+        caller_unreadable=caller_unreadable_count,
         protection_unreadable=len(protection_unreadable),
         ruleset_unreadable=len(ruleset_unreadable),
+        listing_unreadable=len(listing_unreadable),
         remediation_failures=len(remediation_failures),
         remediated=remediated,
     )

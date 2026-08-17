@@ -18,6 +18,8 @@ import copy
 import importlib.util
 import inspect
 import json
+import re
+import pathlib
 import os
 import sys
 import tempfile
@@ -1208,6 +1210,39 @@ record(not f and len(u) == 1,
 # that were never in the total. Enough of them and a run with plenty of verdicts
 # aborts as though nothing could be read, precisely in the partial-installation
 # case the probe exists to describe.
+# WHICH BUCKET GETS THE BLAME (Bugbot, #278). The caller/copy count is whatever the
+# merged list has left after every typed bucket is removed, and the subtraction was
+# written out twice -- so a fourth bucket landed in only one of them and listing gaps
+# were announced as caller-read failures. Asserted through the real function so a
+# missed bucket reddens here instead of agreeing with a copy of the sum.
+# THE WIRING, not just the function (backend#1729 rule 5: a test that still passes
+# under the mutation is vacuous). Breaking caller_read_failures() reddens the cases
+# below, but DROPPING A BUCKET AT ITS CALL SITE did not -- and that is precisely the
+# defect being fixed: the bucket existed and was not passed. main() is not reachable
+# from this selftest (no org-listing stub), so assert it from the SOURCE instead:
+# every `*_unreadable` bucket main() declares must appear in the call. Derived from
+# the declarations, so a fifth bucket is covered the moment it is declared.
+_src = pathlib.Path(guard.__file__).read_text()
+_declared = set(re.findall(r'^\s*(\w+_unreadable): "list\[str\]" = \[\]', _src, re.M))
+_call = re.search(r'=\s*caller_read_failures\((.*?)\n\s*\)', _src, re.S)
+_passed = set(re.findall(r'len\((\w+_unreadable)\)', _call.group(1) if _call else ""))
+record(bool(_declared) and bool(_call) and _declared == _passed,
+       "wiring: every declared *_unreadable bucket is passed to caller_read_failures",
+       f"declared={sorted(_declared)} passed={sorted(_passed)}")
+
+record(guard.caller_read_failures(5, 0, 0, 4) == 1,
+       "caller_read_failures: listing gaps are subtracted, not blamed on callers",
+       f"got {guard.caller_read_failures(5, 0, 0, 4)}, want 1")
+record(guard.caller_read_failures(10, 2, 3, 4) == 1,
+       "caller_read_failures: all typed buckets are removed",
+       f"got {guard.caller_read_failures(10, 2, 3, 4)}, want 1")
+record(guard.caller_read_failures(3, 0, 0, 0) == 3,
+       "caller_read_failures: with no typed buckets every record is a caller failure",
+       f"got {guard.caller_read_failures(3, 0, 0, 0)}, want 3")
+record(guard.caller_read_failures(2, 2, 2, 0) == 0,
+       "caller_read_failures: a double-counted bucket clamps at 0, never negative",
+       f"got {guard.caller_read_failures(2, 2, 2, 0)}, want 0")
+
 record(guard.coverage(["a", "b", "c"], []) == 3,
        "coverage: nothing unreadable means everything was evaluated",
        f"got {guard.coverage(['a','b','c'], [])}")
@@ -1692,7 +1727,8 @@ record(_err is None and len(_puts) == 1
 
 def _exit(**kw):
     base = dict(findings=0, caller_unreadable=0, protection_unreadable=0,
-                ruleset_unreadable=0, remediation_failures=0, remediated=0)
+                ruleset_unreadable=0, listing_unreadable=0,
+                remediation_failures=0, remediated=0)
     base.update(kw)
     return guard.decide_exit(**base)
 
@@ -1703,6 +1739,23 @@ record(_c == 0 and _r == "", "exit: a clean fleet is 0", f"{_c} {_r!r}")
 _c, _r = _exit(findings=3)
 record(_c == 1 and "3 repo-conformance" in _r,
        "exit: un-remediated findings are 1 (a plain audit is unchanged)", f"{_c} {_r!r}")
+
+# A listing gap is exit 2, and the headline must name IT rather than blaming
+# caller/copy reads (Bugbot, #278). Its fix is "widen the App installation", which
+# no other clause would ever suggest -- a true count under a false name sends the
+# reader to the wrong place, the same defect the decomposition fixed in #238.
+_c, _r = _exit(listing_unreadable=4)
+record(_c == 2 and "missing from the org listing" in _r
+       and "caller/copy" not in _r,
+       "exit: a listing gap is 2 and is NOT announced as a caller-read failure",
+       f"{_c} {_r!r}")
+
+# All four buckets at once: every cause must be named, none swallowed.
+_c, _r = _exit(caller_unreadable=1, protection_unreadable=2,
+               ruleset_unreadable=3, listing_unreadable=4)
+record(_c == 2 and "caller/copy" in _r and "branch-protection" in _r
+       and "ruleset" in _r and "org listing" in _r,
+       "exit: all four unreadable causes are named separately", f"{_c} {_r!r}")
 
 # THE TICKET. Every finding got a PR -> the run did what it was asked.
 _c, _r = _exit(findings=3, remediated=3)
