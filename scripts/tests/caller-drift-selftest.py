@@ -1223,6 +1223,27 @@ record(not f and len(u) == 1,
 # every `*_unreadable` bucket main() declares must appear in the call. Derived from
 # the declarations, so a fifth bucket is covered the moment it is declared.
 _src = pathlib.Path(guard.__file__).read_text()
+
+# EVERY *_unreadable OUTPUT MUST BE SURFACED BY THE WORKFLOW (Bugbot, #278, third
+# time). The script emits a decomposed count per bucket so the watchdog headline can
+# name WHICH read failed; a bucket the workflow never reads falls back to the merged
+# count, or -- worse, when mixed with another cause -- is dropped from the sentence
+# entirely. That has now happened three times in one PR: decide_exit, the step
+# outputs, and the watchdog phrase were each updated separately and each was missed
+# once. Derive the expectation from what the script EMITS rather than from a list
+# someone maintains, so a fifth bucket is covered the moment it is written out.
+_wf = pathlib.Path(__file__).resolve().parent.parent.parent / ".github/workflows/caller-drift.yml"
+_emitted = set(re.findall(r'handle\.write\(f?"(\w+_unreadable)=', _src))
+_surfaced = {m.lower() for m in re.findall(r'^\s*(\w+_UNREADABLE):', _wf.read_text(), re.M)}
+record(bool(_emitted) and _emitted <= _surfaced,
+       "wiring: every *_unreadable output the script emits is read by the workflow",
+       f"emitted={sorted(_emitted)} surfaced={sorted(_surfaced)}")
+_phrase = re.search(r'what=""(.*?)\[ -z "\$what" \]', _wf.read_text(), re.S)
+_named = {m.lower() for m in re.findall(r'\$\{(\w+_UNREADABLE):', _phrase.group(1) if _phrase else "")}
+record(bool(_phrase) and _emitted <= _named,
+       "wiring: every *_unreadable bucket gets its own clause in the watchdog phrase",
+       f"emitted={sorted(_emitted)} named={sorted(_named)}")
+
 _declared = set(re.findall(r'^\s*(\w+_unreadable): "list\[str\]" = \[\]', _src, re.M))
 _call = re.search(r'=\s*caller_read_failures\((.*?)\n\s*\)', _src, re.S)
 _passed = set(re.findall(r'len\((\w+_unreadable)\)', _call.group(1) if _call else ""))

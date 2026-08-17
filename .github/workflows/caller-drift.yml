@@ -236,6 +236,7 @@ jobs:
           CALLER_UNREADABLE: ${{ steps.audit.outputs.caller_unreadable }}
           PROTECTION_UNREADABLE: ${{ steps.audit.outputs.protection_unreadable }}
           RULESET_UNREADABLE: ${{ steps.audit.outputs.ruleset_unreadable }}
+          LISTING_UNREADABLE: ${{ steps.audit.outputs.listing_unreadable }}
           FINDINGS: ${{ steps.audit.outputs.findings }}
           FINDINGS_TOTAL: ${{ steps.audit.outputs.findings_total }}
           REMEDIATED: ${{ steps.audit.outputs.remediated }}
@@ -260,8 +261,20 @@ jobs:
           [ -n "$what" ] && what="$what; "
           what="${what}${RULESET_UNREADABLE} ruleset read(s) failed (ruleset state UNKNOWN)"
           fi
+          # The fourth bucket, and the reason the fallback below is not enough on
+          # its own: it fires only when `what` is ENTIRELY empty, so a listing gap
+          # MIXED with any other cause was silently dropped from the sentence rather
+          # than mis-named -- the same true-count-false-name class, one step further
+          # along (Bugbot, #278). Its fix is "widen the App installation", which no
+          # other clause would ever suggest.
+          if [ "${LISTING_UNREADABLE:-0}" != "0" ]; then
+          [ -n "$what" ] && what="$what; "
+          what="${what}${LISTING_UNREADABLE} declared repo(s) missing from the org listing (fleet coverage UNKNOWN)"
+          fi
           # Fall back to the merged count rather than an empty sentence if a
-          # future read type is added and not surfaced here.
+          # future read type is added and not surfaced here. The selftest asserts
+          # that every `*_unreadable` output the script emits IS surfaced above, so
+          # this is a backstop rather than the plan.
           [ -z "$what" ] && what="${UNREADABLE:-0} read(s) failed"
           # Built once: TWO verdicts quote it, and fixing only the first would
           # leave the second still saying "repo(s) could not be read".
