@@ -1233,7 +1233,14 @@ _src = pathlib.Path(guard.__file__).read_text()
 # once. Derive the expectation from what the script EMITS rather than from a list
 # someone maintains, so a fifth bucket is covered the moment it is written out.
 _wf = pathlib.Path(__file__).resolve().parent.parent.parent / ".github/workflows/caller-drift.yml"
-_emitted = set(re.findall(r'handle\.write\(f?"(\w+_unreadable)=', _src))
+# Keyed on the EMITTED STRING LITERAL, not on the shape of the call around it.
+# The first version matched `handle.write(f"x_unreadable=` on one line, and
+# `caller_unreadable` is written across two -- so the guard built to stop a
+# bucket being dropped silently omitted the very bucket that had been dropped
+# three times. Dropping CALLER_UNREADABLE from the workflow left all three
+# wiring assertions green (Bugbot, #278). A guard blind to one of the four
+# things it guards is worse than no guard: it reports coverage it lacks.
+_emitted = set(re.findall(r'"(\w+_unreadable)=', _src))
 _surfaced = {m.lower() for m in re.findall(r'^\s*(\w+_UNREADABLE):', _wf.read_text(), re.M)}
 record(bool(_emitted) and _emitted <= _surfaced,
        "wiring: every *_unreadable output the script emits is read by the workflow",
