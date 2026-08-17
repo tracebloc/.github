@@ -127,28 +127,43 @@ jobs:
         # empty value rather than letting a skipped audit look clean.
         run: python -m pip install --quiet --disable-pip-version-check 'pyyaml==6.0.2'
 
-      # Authenticates as the tracebloc-release-train App (backend#2036) instead of
-      # one human's PAT. `owner:` yields an ORG-scoped installation token; a
-      # repo-scoped one cannot enumerate the org. No fallback to the PAT: a
-      # fallback would let a broken App path keep working silently, which is the
-      # defect class this whole audit exists to catch.
-      - name: Mint an installation token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
-          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-
+      # THE ONE AUDIT THAT DOES NOT AUTHENTICATE AS THE APP, and this is a decision
+      # rather than an omission (backend#2036, decided by Lukas 2026-08-17).
+      #
+      # Its three siblings -- standards-sync, merge-settings-drift, bricked-prs --
+      # moved to the tracebloc-release-train App. This one cannot, because it is the
+      # only audit that asserts ruleset BYPASS ALLOWLISTS, and GitHub returns
+      # `bypass_actors` only to a caller with WRITE access to the ruleset:
+      #
+      #   "To prevent leaking sensitive information, the bypass_actors property is
+      #    only returned if the user making the API request has write access to the
+      #    ruleset."
+      #
+      # So no read-level permission can fix it. `administration: read` was granted
+      # and measured: it fixed all 52 branch-protection reads and left every
+      # `bypass_actors` withheld. The only sufficient grant is
+      # `administration: write`, which would give an App invoked by ~14 workflows on
+      # every PR and push the power to REWRITE branch protection and every ruleset
+      # across the fleet -- including the `v*` tag trust root whose bypass list this
+      # audit exists to police. Granting write over the trust root in order to read
+      # who may bypass it makes the auditor one of the actors it audits.
+      #
+      # So this stays on PROJECTS_KANBAN_TOKEN, deliberately, and #2036 closes with
+      # the PAT alive for exactly this one consumer. That is the SAFEST place for a
+      # privileged credential to remain: a weekly cron, never event-triggered, so no
+      # outside contributor can influence when it runs, and it never writes.
+      #
+      # DO NOT "finish" #2036 by pointing this at the App. If a future GitHub release
+      # returns `bypass_actors` to a read-scoped caller, migrate then and delete this
+      # comment. Until it does, a green audit here means the allowlist was actually
+      # read -- which under the App it would not be (see the `bypass_present` note in
+      # caller-drift.py, and the 16 unreadable records that change produced).
       - name: Check the audit token is present
-        # KEPT, and pointed at the minted token. A failed mint fails its own step,
-        # so this looks redundant -- but the thing it guards against is an EMPTY
-        # token reaching the audit, and empty is exactly what makes this guard
+        # Guards an EMPTY token reaching the audit, which is what makes this guard
         # fail open: the org listing returns nothing and every check passes against
-        # an empty scope. That reasoning is unchanged by where the token comes
-        # from, so the assertion stays.
+        # an empty scope.
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
@@ -160,7 +175,7 @@ jobs:
       - name: Compare every active repo against repo-inventory.yml
         id: audit
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
           # The event is asserted explicitly rather than inferred from `inputs`
           # being unset — same expression standards-sync.yml uses. Writing to
           # twenty repos is not something a cron may decide to do, and a
@@ -213,7 +228,7 @@ jobs:
           always()
           && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
           CODE: ${{ steps.audit.outputs.exit_code }}
           REPORT: ${{ steps.audit.outputs.report }}
           EVALUATED: ${{ steps.audit.outputs.evaluated }}
@@ -364,7 +379,7 @@ jobs:
           && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
           && steps.audit.outputs.exit_code != '0'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
           CODE: ${{ steps.audit.outputs.exit_code }}
           REPORT: ${{ steps.audit.outputs.report }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
