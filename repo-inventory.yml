@@ -438,8 +438,11 @@ repos:
         divergent:
           reason: >-
             Requires MORE than the fleet baseline: the `selftests` job is armed
-            here on top of the three baseline contexts, so a red selftest blocks
-            the merge (backend#1680).
+            here on top of the develop baseline, so a red selftest blocks the
+            merge (backend#1680). MORE, never fewer - an override REPLACES the
+            baseline list rather than extending it, so every baseline context is
+            restated here deliberately. See the staging cell below for the defect
+            that rule exists to prevent.
           required_checks:
             - quality / gitleaks
             - quality / house-rules
@@ -449,12 +452,19 @@ repos:
         divergent:
           reason: >-
             Requires MORE than the fleet baseline: the `selftests` job is armed
-            here on top of the three baseline contexts, so a red selftest blocks
-            the develop -> staging hop (backend#1680).
+            here on top of the staging baseline, so a red selftest blocks the
+            develop -> staging hop (backend#1680). MORE, never fewer - an
+            override REPLACES the baseline list (`want.update(overrides)` in
+            evaluate_protection), so every baseline context has to be restated
+            here or it stops being asserted on this branch. That is how
+            `quality / action-pins` went missing when the staging baseline was
+            raised in backend#1976 (Bugbot, #277): the fleet gained a context and
+            this cell silently kept asserting the old set.
           required_checks:
             - gate / gate
             - quality / gitleaks
             - quality / house-rules
+            - quality / action-pins
             - selftests
       # NOT YET on prod, deliberately, and this is a sequencing fact rather than
       # a decision against it. `selftests.yml` reaches `staging` only when the
@@ -593,6 +603,13 @@ repos:
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
+          # The same is true of the three `quality / *` contexts, including
+          # `quality / action-pins` added to the baseline by backend#1976: they
+          # are reported by the code-quality caller, which this repo records as
+          # `exempt: *code_quality_caller_missing` above. Requiring a context
+          # nothing reports leaves every PR pending forever (client#665), so
+          # this cell drops them BECAUSE the producer is absent, not because the
+          # rule was judged not to matter here.
           required_checks: []
     rulesets:
       promotion_merge_commit_only:
@@ -925,23 +942,31 @@ repos:
         divergent:
           reason: >-
             Requires MORE than the fleet baseline: the Vitest unit suite is
-            armed here on top of the three baseline contexts, so a red test
-            blocks the develop -> staging hop (backend#1975).
+            armed here on top of the staging baseline, so a red test blocks the
+            develop -> staging hop (backend#1975). MORE, never fewer - an
+            override REPLACES the baseline list, so every baseline context is
+            restated here or it stops being asserted on this branch
+            (backend#1976, Bugbot on #277).
           required_checks:
             - gate / gate
             - quality / gitleaks
             - quality / house-rules
+            - quality / action-pins
             - Unit tests (Vitest)
       prod:
         divergent:
           reason: >-
             Requires MORE than the fleet baseline: the Vitest unit suite is
-            armed here on top of the three baseline contexts, so a red test
-            blocks the staging -> prod hop (backend#1975).
+            armed here on top of the prod baseline, so a red test blocks the
+            staging -> prod hop (backend#1975). MORE, never fewer - an override
+            REPLACES the baseline list, so every baseline context is restated
+            here or it stops being asserted on this branch (backend#1976,
+            Bugbot on #277).
           required_checks:
             - gate / gate
             - quality / gitleaks
             - quality / house-rules
+            - quality / action-pins
             - Unit tests (Vitest)
     rulesets:
       promotion_merge_commit_only: required
@@ -1029,6 +1054,13 @@ repos:
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
+          # The same is true of the three `quality / *` contexts, including
+          # `quality / action-pins` added to the baseline by backend#1976: they
+          # are reported by the code-quality caller, which this repo records as
+          # `exempt: *code_quality_caller_missing` above. Requiring a context
+          # nothing reports leaves every PR pending forever (client#665), so
+          # this cell drops them BECAUSE the producer is absent, not because the
+          # rule was judged not to matter here.
           # Stated as its REAL set rather than [] - this repo is the tool that
           # performs every promotion, so its own gates are worth guarding.
           required_checks:
@@ -1093,6 +1125,13 @@ repos:
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
+          # The same is true of the three `quality / *` contexts, including
+          # `quality / action-pins` added to the baseline by backend#1976: they
+          # are reported by the code-quality caller, which this repo records as
+          # `exempt: *code_quality_caller_missing` above. Requiring a context
+          # nothing reports leaves every PR pending forever (client#665), so
+          # this cell drops them BECAUSE the producer is absent, not because the
+          # rule was judged not to matter here.
           required_checks: []
     rulesets:
       promotion_merge_commit_only:
