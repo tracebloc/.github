@@ -127,7 +127,41 @@ jobs:
         # empty value rather than letting a skipped audit look clean.
         run: python -m pip install --quiet --disable-pip-version-check 'pyyaml==6.0.2'
 
+      # THE ONE AUDIT THAT DOES NOT AUTHENTICATE AS THE APP, and this is a decision
+      # rather than an omission (backend#2036, decided by Lukas 2026-08-17).
+      #
+      # Its three siblings -- standards-sync, merge-settings-drift, bricked-prs --
+      # moved to the tracebloc-release-train App. This one cannot, because it is the
+      # only audit that asserts ruleset BYPASS ALLOWLISTS, and GitHub returns
+      # `bypass_actors` only to a caller with WRITE access to the ruleset:
+      #
+      #   "To prevent leaking sensitive information, the bypass_actors property is
+      #    only returned if the user making the API request has write access to the
+      #    ruleset."
+      #
+      # So no read-level permission can fix it. `administration: read` was granted
+      # and measured: it fixed all 52 branch-protection reads and left every
+      # `bypass_actors` withheld. The only sufficient grant is
+      # `administration: write`, which would give an App invoked by ~14 workflows on
+      # every PR and push the power to REWRITE branch protection and every ruleset
+      # across the fleet -- including the `v*` tag trust root whose bypass list this
+      # audit exists to police. Granting write over the trust root in order to read
+      # who may bypass it makes the auditor one of the actors it audits.
+      #
+      # So this stays on PROJECTS_KANBAN_TOKEN, deliberately, and #2036 closes with
+      # the PAT alive for exactly this one consumer. That is the SAFEST place for a
+      # privileged credential to remain: a weekly cron, never event-triggered, so no
+      # outside contributor can influence when it runs, and it never writes.
+      #
+      # DO NOT "finish" #2036 by pointing this at the App. If a future GitHub release
+      # returns `bypass_actors` to a read-scoped caller, migrate then and delete this
+      # comment. Until it does, a green audit here means the allowlist was actually
+      # read -- which under the App it would not be (see the `bypass_present` note in
+      # caller-drift.py, and the 16 unreadable records that change produced).
       - name: Check the audit token is present
+        # Guards an EMPTY token reaching the audit, which is what makes this guard
+        # fail open: the org listing returns nothing and every check passes against
+        # an empty scope.
         env:
           GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
         run: |
@@ -202,6 +236,7 @@ jobs:
           CALLER_UNREADABLE: ${{ steps.audit.outputs.caller_unreadable }}
           PROTECTION_UNREADABLE: ${{ steps.audit.outputs.protection_unreadable }}
           RULESET_UNREADABLE: ${{ steps.audit.outputs.ruleset_unreadable }}
+          LISTING_UNREADABLE: ${{ steps.audit.outputs.listing_unreadable }}
           FINDINGS: ${{ steps.audit.outputs.findings }}
           FINDINGS_TOTAL: ${{ steps.audit.outputs.findings_total }}
           REMEDIATED: ${{ steps.audit.outputs.remediated }}
@@ -226,8 +261,20 @@ jobs:
           [ -n "$what" ] && what="$what; "
           what="${what}${RULESET_UNREADABLE} ruleset read(s) failed (ruleset state UNKNOWN)"
           fi
+          # The fourth bucket, and the reason the fallback below is not enough on
+          # its own: it fires only when `what` is ENTIRELY empty, so a listing gap
+          # MIXED with any other cause was silently dropped from the sentence rather
+          # than mis-named -- the same true-count-false-name class, one step further
+          # along (Bugbot, #278). Its fix is a token-visibility one -- widen whatever
+          # credential this audit runs as -- which no other clause would suggest.
+          if [ "${LISTING_UNREADABLE:-0}" != "0" ]; then
+          [ -n "$what" ] && what="$what; "
+          what="${what}${LISTING_UNREADABLE} declared repo(s) missing from the org listing (fleet coverage UNKNOWN)"
+          fi
           # Fall back to the merged count rather than an empty sentence if a
-          # future read type is added and not surfaced here.
+          # future read type is added and not surfaced here. The selftest asserts
+          # that every `*_unreadable` output the script emits IS surfaced above, so
+          # this is a backstop rather than the plan.
           [ -z "$what" ] && what="${UNREADABLE:-0} read(s) failed"
           # Built once: TWO verdicts quote it, and fixing only the first would
           # leave the second still saying "repo(s) could not be read".
