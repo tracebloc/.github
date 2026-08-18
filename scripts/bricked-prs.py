@@ -74,6 +74,29 @@ from pathlib import Path
 # nobody reads -- the failure mode of the always-red check one repo over.
 MIN_HEAD_AGE_MINUTES = 60
 
+# THE REVIEWER CAN GO MISSING THE SAME WAY A CHECK CAN (backend#2114).
+#
+# Cursor Bugbot's auto-trigger silently drops PRs. Measured 2026-08-17: five open
+# PRs across cli, release-train and .github carried no `Cursor Bugbot` check at all,
+# while PRs opened minutes before and hours after were reviewed normally. No
+# discriminator survived -- not diff size (a 1-file/66-line PR was reviewed, a
+# 1-file/29-line one was not), not file type, not repo, not time, not quota.
+# Posting `bugbot run` started a review within a minute and both came back clean, so
+# the reviews were not failing; they were never starting.
+#
+# This is the same shape as the required-check case above and belongs in the same
+# watcher for the same reason: the PR shows a full green check list, and nothing
+# distinguishes "Bugbot found nothing" from "Bugbot never ran". It was caught by a
+# human noticing a missing row.
+#
+# A `skipped` Bugbot check COUNTS AS PRESENT and is deliberately not a finding: it
+# ran and decided, which is a verdict. Only total absence is the silent drop.
+BUGBOT_CONTEXT = "Cursor Bugbot"
+# Bugbot does not review bot-authored PRs, and that is correct rather than a drop --
+# dependabot[bot]'s absence was the one legitimate case in the measurement. Derived
+# from the author suffix GitHub sets, not a hand-kept list of bot names.
+BOT_AUTHOR_SUFFIX = "[bot]"
+
 # `gh pr list` truncates at --limit and says nothing about it, so a repo with
 # more open PRs than this would be audited PARTIALLY and reported clean -- the
 # fail-open shape this watcher exists to remove, in the watcher itself. The cap
@@ -116,7 +139,7 @@ def open_prs(org: str, name: str, base: str) -> "list[dict]":
     raw = CD.gh([
         "pr", "list", "--repo", f"{org}/{name}", "--state", "open",
         "--base", base, "--limit", str(PR_LIST_LIMIT), "--json",
-        "number,isDraft,title,mergeStateStatus,reviewDecision,statusCheckRollup,url,headRefOid",
+        "number,isDraft,title,mergeStateStatus,reviewDecision,statusCheckRollup,url,headRefOid,author",
     ])
     try:
         prs = json.loads(raw)
@@ -226,6 +249,34 @@ def audit_repo(org: str, name: str, roles: "dict[str, str]") -> "tuple[list, lis
         for pr in prs:
             if pr.get("isDraft"):
                 continue
+
+            # THE REVIEWER, before the checks. Absence of Bugbot is its own cause
+            # with its own remedy -- post `bugbot run` -- which no other finding
+            # here would ever suggest. Reported even when the required checks are
+            # all present, because that is exactly the case that reads as a clean
+            # green PR (backend#2114).
+            author = ((pr.get("author") or {}).get("login") or "")
+            if not author.endswith(BOT_AUTHOR_SUFFIX) \
+               and BUGBOT_CONTEXT not in present_contexts(pr):
+                age = head_age_minutes(org, name, pr.get("headRefOid") or "")
+                # Same young-head rule as below: a review that has not started YET
+                # is not a drop, and an unreadable age is treated as young so a
+                # false finding cannot make the report ignorable.
+                if age is not None and age >= MIN_HEAD_AGE_MINUTES:
+                    findings.append({
+                        "cause": "bugbot-absent",
+                        "repo": name,
+                        "branch": branch,
+                        "role": role,
+                        "number": pr.get("number"),
+                        "url": pr.get("url"),
+                        "title": (pr.get("title") or "")[:70],
+                        "missing": [BUGBOT_CONTEXT],
+                        "mergeStateStatus": pr.get("mergeStateStatus"),
+                        "reviewDecision": pr.get("reviewDecision") or "REVIEW_REQUIRED",
+                        "headAgeMinutes": round(age),
+                    })
+
             missing = sorted(required - present_contexts(pr))
             if missing:
                 # Young head -> "has not reported YET", which is not this
@@ -309,35 +360,47 @@ def main() -> int:
     if args.json:
         print(json.dumps({"findings": findings, "errors": errors}, indent=2))
     else:
+        # ONE LABEL PER CAUSE. `bugbot-absent` is NOT a bricked PR -- the PR can
+        # merge perfectly well; what is missing is the REVIEW. Rendering it as
+        # BRICKED would send the reader to branch protection for a problem fixed by
+        # one comment, which is the true-count-false-name defect this file already
+        # avoids for `conflicted` (backend#2114).
+        LABELS = {"conflicted": "CONFLICTED", "bugbot-absent": "UNREVIEWED"}
         for f in findings:
-            label = ("CONFLICTED" if f["cause"] == "conflicted" else "BRICKED")
-            print(f"{label} {f['repo']}#{f['number']} -> {f['branch']}")
+            print(f"{LABELS.get(f['cause'], 'BRICKED')} {f['repo']}#{f['number']} -> {f['branch']}")
             print(f"        missing: {', '.join(f['missing'])}")
             if f["cause"] == "conflicted":
                 print("        cause: merge conflict — no merge commit, so no "
                       "pull_request run. Rebase; do not touch protection.")
+            elif f["cause"] == "bugbot-absent":
+                print("        cause: Bugbot's auto-trigger dropped this PR — it was "
+                      "never reviewed, which reads identically to a clean review.")
+                print("        fix:   comment `bugbot run` on the PR.")
             print(f"        {f['reviewDecision']} / {f['mergeStateStatus']}  {f['url']}")
             print(f"        {f['title']}")
         for e in errors:
             print(f"COULD NOT AUDIT {e}")
         if not findings and not errors:
-            print(f"No PR is missing a required context ({len(names)} repos audited).")
+            print(f"No PR is missing a required context or a review "
+                  f"({len(names)} repos audited).")
 
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as fh:
             if findings:
-                fh.write("## Bricked PRs — a required check that never reported\n\n")
+                fh.write("## PRs a human would read as fine\n\n")
                 fh.write("| repo | PR | missing context(s) | cause | review | merge state |\n")
                 fh.write("|---|---|---|---|---|---|\n")
                 for f in findings:
-                    cause = ("merge conflict — rebase, do not touch protection"
-                             if f["cause"] == "conflicted" else "never reported")
+                    cause = {"conflicted": "merge conflict — rebase, do not touch protection",
+                             "bugbot-absent": "**never reviewed** — comment `bugbot run`",
+                             }.get(f["cause"], "never reported")
                     fh.write(f"| `{f['repo']}` | [#{f['number']}]({f['url']}) | "
                              f"`{'`, `'.join(f['missing'])}` | {cause} | "
                              f"{f['reviewDecision']} | {f['mergeStateStatus']} |\n")
-                fh.write("\nEach is approved-or-approvable with **nothing red to point at**, "
-                         "and cannot merge until the context reports or stops being required.\n")
+                fh.write("\nEach shows **nothing red to point at**. A bricked PR cannot merge "
+                         "until the context reports or stops being required; an unreviewed one "
+                         "merges perfectly well, which is the worse of the two.\n")
             if errors:
                 fh.write("\n## Could not audit\n\n")
                 for e in errors:

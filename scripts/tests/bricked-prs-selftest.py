@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -62,12 +63,24 @@ def install(protection, prs, age=999.0):
     bp.head_age_minutes = lambda org, name, sha: age
 
 
-def pr(number=1, draft=False, contexts=(), state="CLEAN", review="APPROVED"):
+def pr(number=1, draft=False, contexts=(), state="CLEAN", review="APPROVED",
+       author="a-human", bugbot=True):
+    """A NORMAL PR carries a Cursor Bugbot check, so the default fixture has one.
+
+    Otherwise every case written for the required-check logic would also trip the
+    bugbot-absent finding, and the two would be impossible to test apart. Absence
+    is constructed explicitly with `bugbot=False`, which is the point: it is a
+    deviation, not the baseline (backend#2114).
+    """
+    rollup = [{"name": c} for c in contexts]
+    if bugbot:
+        rollup.append({"name": "Cursor Bugbot"})
     return {
         "number": number, "isDraft": draft, "title": "t", "url": "u",
         "headRefOid": "deadbeef", "mergeStateStatus": state,
         "reviewDecision": review,
-        "statusCheckRollup": [{"name": c} for c in contexts],
+        "author": {"login": author},
+        "statusCheckRollup": rollup,
     }
 
 
@@ -104,12 +117,66 @@ record(not f, "a draft PR is not reported", f"findings={f}")
 install(FakeProtection({"legacy"}), [{
     "number": 9, "isDraft": False, "title": "t", "url": "u",
     "headRefOid": "d", "mergeStateStatus": "CLEAN", "reviewDecision": "APPROVED",
-    "statusCheckRollup": [{"context": "legacy"}],
+    "author": {"login": "a-human"},
+    "statusCheckRollup": [{"context": "legacy"}, {"name": "Cursor Bugbot"}],
 }])
 f, e = bp.audit_repo("o", "r", ROLES)
 record(not f, "a legacy status context counts as present",
        "the rollup carries check runs as `name` and statuses as `context`; "
        f"reading only one under-reports every legacy check (findings={f})")
+
+# --- the REVIEWER can go missing too (backend#2114) -------------------------
+# Measured 2026-08-17: Bugbot's auto-trigger dropped five open PRs across three
+# repos while reviewing others opened minutes before and hours after. The PR shows
+# a full green check list and nothing distinguishes "found nothing" from "never
+# ran" -- it was caught by a human noticing a missing row.
+
+# A PR with every required check present but NO Bugbot is still a finding. This is
+# the case that reads as a completely clean PR, which is why it needs reporting.
+install(FakeProtection({"gate"}), [pr(contexts=["gate"], bugbot=False)])
+f, e = bp.audit_repo("o", "r", ROLES)
+record(len(f) == 1 and f[0]["cause"] == "bugbot-absent",
+       "a green PR with no Bugbot check IS a finding", f"findings={f}")
+
+# Its own cause, because its remedy -- post `bugbot run` -- is one no other finding
+# here would suggest. Conflating it with a missing required check sends someone to
+# edit branch protection.
+install(FakeProtection({"gate"}), [pr(contexts=[], bugbot=False)])
+f, e = bp.audit_repo("o", "r", ROLES)
+record(sorted(x["cause"] for x in f) == ["bugbot-absent", "never-reported"],
+       "a missing check and a missing REVIEW are reported as separate causes",
+       f"causes={[x['cause'] for x in f]}")
+
+# Present is present. A SKIPPED Bugbot ran and decided; that is a verdict, not the
+# silent drop this exists to catch.
+install(FakeProtection({"gate"}), [pr(contexts=["gate"])])
+f, e = bp.audit_repo("o", "r", ROLES)
+record(not f, "a PR carrying a Bugbot check is not reported", f"findings={f}")
+
+# Bots are exempt, and that is measured rather than assumed: dependabot[bot] was
+# the one legitimately-absent case in the sample. Keyed on GitHub's `[bot]` suffix,
+# not a hand-kept list of names that would go stale.
+install(FakeProtection({"gate"}), [pr(contexts=["gate"], bugbot=False, author="dependabot[bot]")])
+f, e = bp.audit_repo("o", "r", ROLES)
+record(not f, "a bot-authored PR with no Bugbot is NOT a finding", f"findings={f}")
+
+# Same young-head rule as the required-check case: a review that has not started
+# yet is not a drop.
+install(FakeProtection({"gate"}), [pr(contexts=["gate"], bugbot=False)], age=5)
+f, e = bp.audit_repo("o", "r", ROLES)
+record(not f, "a young head is not reported as a missing review", f"findings={f}")
+
+# The LABEL matters as much as the finding. An unreviewed PR is not bricked -- it
+# merges perfectly well -- so rendering it as BRICKED would send the reader to
+# branch protection for something one comment fixes. Asserted from the source,
+# because the rendering lives in main() and no case above reaches it.
+_src = pathlib.Path(bp.__file__).read_text()
+record('"bugbot-absent": "UNREVIEWED"' in _src,
+       "an absent review renders as UNREVIEWED, not BRICKED",
+       "a missing review and a missing check need different labels")
+record('bugbot run' in _src,
+       "the report names the remedy (`bugbot run`), which no other cause suggests",
+       "a finding whose fix is unstated gets triaged as noise")
 
 # 6. FAIL CLOSED. An unreadable branch is not a clean branch.
 install(FakeProtection(set(), error="classic protection unreadable (502)"), [pr()])
