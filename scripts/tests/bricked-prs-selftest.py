@@ -130,6 +130,23 @@ record(not f, "a legacy status context counts as present",
        "the rollup carries check runs as `name` and statuses as `context`; "
        f"reading only one under-reports every legacy check (findings={f})")
 
+# A branch with ZERO required checks must STILL surface a missing review
+# (saadqbal + Bugbot, #282). The reviewer check does not depend on branch
+# protection, and gating it on `required` made the watcher silent on exactly the
+# branches with the least protection. Case 8 above did not catch this because the
+# default fixture now carries a Bugbot row.
+install(FakeProtection(set()), [pr(contexts=[], bugbot=False)])
+f, e = bp.audit_repo("o", "r", ROLES)
+record(len(f) == 1 and f[0]["cause"] == "bugbot-absent",
+       "a branch with NO required checks still reports a missing review",
+       f"findings={f}")
+
+# And it still reports nothing when the review IS there — the zero-required branch
+# must not become noisy in the other direction.
+install(FakeProtection(set()), [pr(contexts=[])])
+f, e = bp.audit_repo("o", "r", ROLES)
+record(not f, "a zero-required branch with a review present is quiet", f"findings={f}")
+
 # --- the REVIEWER can go missing too (backend#2114) -------------------------
 # Measured 2026-08-17: Bugbot's auto-trigger dropped five open PRs across three
 # repos while reviewing others opened minutes before and hours after. The PR shows
@@ -196,8 +213,13 @@ _src = pathlib.Path(bp.__file__).read_text()
 record('"bugbot-absent": "UNREVIEWED"' in _src,
        "an absent review renders as UNREVIEWED, not BRICKED",
        "a missing review and a missing check need different labels")
-record('bugbot run' in _src,
-       "the report names the remedy (`bugbot run`), which no other cause suggests",
+# ASSERT THE RENDERED LINE, not the bare phrase (saadqbal, #282). `bugbot run`
+# also appears in this module's comments, so `'bugbot run' in _src` matched whether
+# or not the remedy was ever PRINTED -- deleting the print left the suite green.
+# My mutation missed it too, because it replaced every occurrence including the
+# comments, so it failed for the wrong reason and read as coverage.
+record('fix:   comment `bugbot run` on the PR.' in _src,
+       "the report PRINTS the remedy (`bugbot run`), which no other cause suggests",
        "a finding whose fix is unstated gets triaged as noise")
 
 # 6. FAIL CLOSED. An unreadable branch is not a clean branch.

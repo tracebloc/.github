@@ -250,9 +250,12 @@ def audit_repo(org: str, name: str, roles: "dict[str, str]") -> "tuple[list, lis
             errors.append(f"{name}/{branch}: {prot.error}")
             continue
         required = set(prot.required_checks)
-        if not required:
-            continue
-
+        # NO early `continue` on an empty required set (saadqbal + Bugbot, #282).
+        # The reviewer check below does not depend on branch protection, and gating
+        # it here made a missing review STRUCTURALLY UNREPORTABLE on exactly the
+        # branches with the least protection -- the watcher going quiet where it is
+        # needed most, and saying nothing about having skipped them. The
+        # required-check block keeps its own `if required:` guard instead.
         try:
             prs = open_prs(org, name, branch)
         except CD.GhError as exc:
@@ -268,13 +271,19 @@ def audit_repo(org: str, name: str, roles: "dict[str, str]") -> "tuple[list, lis
             # here would ever suggest. Reported even when the required checks are
             # all present, because that is exactly the case that reads as a clean
             # green PR (backend#2114).
+            # ONE age lookup per PR, reused by both checks below (saadqbal, #282).
+            # Calling it per-check cost two uncached API calls for a PR missing both
+            # a review and a required context, and made this function's own
+            # docstring -- "one or two API calls per candidate" -- stale.
+            age = head_age_minutes(org, name, pr.get("headRefOid") or "")
+            young = age is None or age < MIN_HEAD_AGE_MINUTES
+
             if not (pr.get("author") or {}).get(BOT_AUTHOR_FIELD) \
                and BUGBOT_CONTEXT not in present_contexts(pr):
-                age = head_age_minutes(org, name, pr.get("headRefOid") or "")
                 # Same young-head rule as below: a review that has not started YET
                 # is not a drop, and an unreadable age is treated as young so a
                 # false finding cannot make the report ignorable.
-                if age is not None and age >= MIN_HEAD_AGE_MINUTES:
+                if not young:
                     findings.append({
                         "cause": "bugbot-absent",
                         "repo": name,
@@ -289,14 +298,13 @@ def audit_repo(org: str, name: str, roles: "dict[str, str]") -> "tuple[list, lis
                         "headAgeMinutes": round(age),
                     })
 
-            missing = sorted(required - present_contexts(pr))
+            missing = sorted(required - present_contexts(pr)) if required else []
             if missing:
                 # Young head -> "has not reported YET", which is not this
                 # watcher's finding. An unreadable age is treated as young: a
                 # false "bricked" is what makes the report ignorable, and the
                 # next run picks it up anyway.
-                age = head_age_minutes(org, name, pr.get("headRefOid") or "")
-                if age is None or age < MIN_HEAD_AGE_MINUTES:
+                if young:
                     continue
                 findings.append({
                     # A conflict is a different diagnosis with a different fix,
