@@ -93,9 +93,22 @@ MIN_HEAD_AGE_MINUTES = 60
 # ran and decided, which is a verdict. Only total absence is the silent drop.
 BUGBOT_CONTEXT = "Cursor Bugbot"
 # Bugbot does not review bot-authored PRs, and that is correct rather than a drop --
-# dependabot[bot]'s absence was the one legitimate case in the measurement. Derived
-# from the author suffix GitHub sets, not a hand-kept list of bot names.
-BOT_AUTHOR_SUFFIX = "[bot]"
+# Dependabot's absence was the one legitimate case in the measurement.
+#
+# KEYED ON `is_bot`, NOT ON THE LOGIN (Bugbot, .github#282). The first version tested
+# `login.endswith("[bot]")`, which NEVER MATCHES: `gh pr list --json author` returns
+# `{"is_bot": true, "login": "app/dependabot"}` -- the `owner[bot]` form is what the
+# REST API and the web UI show, not what this command returns. So every Dependabot PR
+# without a Bugbot review would have been reported UNREVIEWED.
+#
+# Worse, the selftest fixtured `dependabot[bot]` -- the shape I assumed rather than the
+# shape I measured -- so the exemption test passed while the exemption could not fire.
+# A fixture invented instead of measured is a test that asserts its author's belief,
+# which is the failure this whole guard exists to catch, one level in.
+#
+# `is_bot` is in the same JSON payload already being fetched, so this costs nothing and
+# cannot drift the way a name-matching rule would.
+BOT_AUTHOR_FIELD = "is_bot"
 
 # `gh pr list` truncates at --limit and says nothing about it, so a repo with
 # more open PRs than this would be audited PARTIALLY and reported clean -- the
@@ -255,8 +268,7 @@ def audit_repo(org: str, name: str, roles: "dict[str, str]") -> "tuple[list, lis
             # here would ever suggest. Reported even when the required checks are
             # all present, because that is exactly the case that reads as a clean
             # green PR (backend#2114).
-            author = ((pr.get("author") or {}).get("login") or "")
-            if not author.endswith(BOT_AUTHOR_SUFFIX) \
+            if not (pr.get("author") or {}).get(BOT_AUTHOR_FIELD) \
                and BUGBOT_CONTEXT not in present_contexts(pr):
                 age = head_age_minutes(org, name, pr.get("headRefOid") or "")
                 # Same young-head rule as below: a review that has not started YET

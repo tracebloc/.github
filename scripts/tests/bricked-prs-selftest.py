@@ -64,7 +64,7 @@ def install(protection, prs, age=999.0):
 
 
 def pr(number=1, draft=False, contexts=(), state="CLEAN", review="APPROVED",
-       author="a-human", bugbot=True):
+       author="a-human", is_bot=False, bugbot=True):
     """A NORMAL PR carries a Cursor Bugbot check, so the default fixture has one.
 
     Otherwise every case written for the required-check logic would also trip the
@@ -79,7 +79,12 @@ def pr(number=1, draft=False, contexts=(), state="CLEAN", review="APPROVED",
         "number": number, "isDraft": draft, "title": "t", "url": "u",
         "headRefOid": "deadbeef", "mergeStateStatus": state,
         "reviewDecision": review,
-        "author": {"login": author},
+        # THE SHAPE `gh pr list --json author` ACTUALLY RETURNS, measured rather
+        # than assumed: `{"is_bot": true, "login": "app/dependabot"}`. The first
+        # version of this fixture used `dependabot[bot]`, which is the REST/UI form
+        # and never appears here -- so the exemption test passed while the exemption
+        # could not fire (Bugbot, .github#282).
+        "author": {"login": author, "is_bot": is_bot},
         "statusCheckRollup": rollup,
     }
 
@@ -156,9 +161,26 @@ record(not f, "a PR carrying a Bugbot check is not reported", f"findings={f}")
 # Bots are exempt, and that is measured rather than assumed: dependabot[bot] was
 # the one legitimately-absent case in the sample. Keyed on GitHub's `[bot]` suffix,
 # not a hand-kept list of names that would go stale.
-install(FakeProtection({"gate"}), [pr(contexts=["gate"], bugbot=False, author="dependabot[bot]")])
+install(FakeProtection({"gate"}), [pr(contexts=["gate"], bugbot=False,
+                                      author="app/dependabot", is_bot=True)])
 f, e = bp.audit_repo("o", "r", ROLES)
 record(not f, "a bot-authored PR with no Bugbot is NOT a finding", f"findings={f}")
+
+# The login form is NOT what exempts, and asserting that is the point: a PR whose
+# login merely LOOKS bot-ish but is not flagged `is_bot` must still be reported,
+# or the rule drifts back to name-matching.
+install(FakeProtection({"gate"}), [pr(contexts=["gate"], bugbot=False,
+                                      author="dependabot[bot]", is_bot=False)])
+f, e = bp.audit_repo("o", "r", ROLES)
+record(len(f) == 1 and f[0]["cause"] == "bugbot-absent",
+       "a bot-LOOKING login that is not flagged is_bot IS still reported",
+       f"findings={f}")
+
+# And the real shape exempts even when the login carries no bot marker at all.
+install(FakeProtection({"gate"}), [pr(contexts=["gate"], bugbot=False,
+                                      author="some-app", is_bot=True)])
+f, e = bp.audit_repo("o", "r", ROLES)
+record(not f, "is_bot alone exempts, whatever the login looks like", f"findings={f}")
 
 # Same young-head rule as the required-check case: a review that has not started
 # yet is not a drop.
