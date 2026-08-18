@@ -1,0 +1,30 @@
+name: Close stale backlog issues
+
+# Thin caller. The rule, the 30-case decision table and the board-awareness live in
+# tracebloc/.github (backend#1979) — this file exists only to say WHEN.
+#
+# It replaced a byte-identical copy of `actions/stale`, which exempted on labels
+# only and therefore auto-closed items in `North Stars`, `Ready for prod` and every
+# other column after 8 weeks of silence (backend#1597 item 1). Only issues whose
+# board Status is exactly `Backlog` are now eligible; an unreadable Status is
+# skipped, never closed.
+
+on:
+  schedule:
+    - cron: '0 0 * * 1'  # Mondays 00:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Log what would be warned or closed, and change nothing"
+        type: boolean
+        default: false
+
+jobs:
+  stale:
+    # `@main` like every other caller in the fleet, including this repo's own. A
+    # local path ref would make .github the one repo testing a different version of
+    # the rule than everyone else runs -- which is the drift this migration removes.
+    uses: tracebloc/.github/.github/workflows/stale-backlog.yml@main
+    with:
+      dry-run: ${{ inputs.dry-run == true }}
+    secrets: inherit

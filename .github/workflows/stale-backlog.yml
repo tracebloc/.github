@@ -1,33 +1,110 @@
 name: Close stale backlog issues
 
-on:
-  schedule:
-    - cron: '0 0 * * 1'  # Mondays 00:00 UTC
-  workflow_dispatch: {}
+# REUSABLE, and it had to become one before the bug could be fixed
+# (backend#1979 → backend#1597 item 1).
+#
+# THE BUG: `actions/stale` exempts on LABELS ONLY. It has no concept of the board,
+# so an item in `North Stars`, `Ready for prod` or `In progress` went stale and
+# auto-closed after 8 weeks of silence exactly like a Backlog item — a strategic
+# priority archived because nobody commented on it. `kanban-reconcile.yml` carries a
+# "Shield North Stars from the stale sweep" step, which is the workaround admitting
+# it rather than the fix.
+#
+# Board awareness cannot be expressed as a label, so it cannot be a config knob on
+# an action — it needs a script. And a script cannot be maintained as sixteen
+# byte-identical copies, which is why this was a 16-way copy that had to become a
+# reusable first. Fixing the copy model was the prerequisite, not the goal.
+#
+# The eligibility rule is an ALLOW-LIST OF ONE: exactly `Backlog`. Every other
+# column, an issue with no card, and a Status that could not be read are all
+# skipped. A column added next year is therefore safe by default — a deny-list of
+# the columns we happened to think of would make it eligible and nobody would find
+# out until something was closed.
+#
+# FAIL CLOSED HERE MEANS SKIP, not act. Every other guard in this org fails closed
+# by refusing to report clean; this one is destructive, so an unreadable board must
+# mean "leave it alone". `strict: true` additionally fails the run so an outage is
+# visible rather than merely harmless.
+#
+# The logic and its 30-case decision table live in tracebloc/.github
+# (`scripts/stale-backlog.py`, `scripts/tests/stale-backlog-selftest.py`); callers
+# stay thin so the rule has exactly one home.
 
+on:
+  workflow_call:
+    inputs:
+      project-number:
+        description: "The org project whose Status decides eligibility."
+        type: number
+        default: 2
+      dry-run:
+        description: "Log what would be warned or closed, and change nothing."
+        type: boolean
+        default: false
+      strict:
+        description: >-
+          Fail the run when any issue had no readable board Status. They are always
+          skipped either way; this decides whether "I could not tell" is loud.
+        type: boolean
+        default: false
+      script-ref:
+        description: >-
+          Ref of tracebloc/.github the sweep script is taken from. Callers pin this
+          workflow at `@main`, so `main` is the matching version. Override only to
+          test a change to the script before it merges.
+        type: string
+        default: "main"
+
+# Only `contents: read`: the sweep's writes go through the App token minted below,
+# not through GITHUB_TOKEN. Asking for `issues: write` here would exceed a minimal
+# caller's grant and fail the run at startup with no jobs — the same constraint
+# code-quality.yml documents.
 permissions:
-  issues: write
-  pull-requests: write
+  contents: read
 
 jobs:
   stale:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9.1.0
+      # The board read needs org-project access and the writes need issues:write,
+      # both of which the tracebloc-release-train App holds (backend#2036). This
+      # workflow is App-native from the start and never had a PAT to migrate off.
+      # `owner:` makes the token ORG-scoped; a repo-scoped one cannot read the
+      # project at all, and this sweep would then skip every issue as UNKNOWN —
+      # silent and safe, but wrong.
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          days-before-issue-stale: 42  # 6 weeks of no activity → warning
-          days-before-issue-close: 14  # +2 weeks of silence → close
-          stale-issue-label: 'stale'
-          stale-issue-message: |
-            👋 This issue has had no activity for 6 weeks.
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
 
-            If it's still relevant, please leave a comment with current context (or assign someone). Otherwise it will auto-close in 2 weeks.
+      # The script comes from .github, not the caller: one copy of the rule.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tracebloc/.github
+          ref: ${{ inputs.script-ref }}
+          path: .stale-tools
+          persist-credentials: false
 
-            To exempt permanently, add the `keep-open` label.
-          close-issue-message: |
-            Closing due to 8+ weeks of inactivity. Please reopen with current context if relevant.
-          exempt-issue-labels: 'keep-open,blocked'
-          # PRs: don't auto-stale — branch protection + active reviews govern those
-          days-before-pr-stale: -1
-          days-before-pr-close: -1
-          operations-per-run: 50
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # The decision table runs BEFORE the sweep, in the caller's own run. A sweep
+      # whose eligibility rule has regressed must not run at all: the failure is
+      # destructive and unattended, so the tests are a gate rather than a report.
+      - name: Selftest the eligibility rule
+        run: python3 .stale-tools/scripts/tests/stale-backlog-selftest.py
+
+      - name: Sweep
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          python3 .stale-tools/scripts/stale-backlog.py \
+            --repo "${{ github.repository }}" \
+            --project "${{ inputs.project-number }}" \
+            ${{ inputs.dry-run && '--dry-run' || '' }} \
+            ${{ inputs.strict && '--strict' || '' }}
