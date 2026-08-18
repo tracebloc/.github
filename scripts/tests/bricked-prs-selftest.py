@@ -250,6 +250,42 @@ record(not f and not e, "a branch requiring nothing produces no findings", f"fin
 
 # 9. An unreadable PR list is an error, not an empty list.
 bp.CD.read_protection = lambda org, name, branch: FakeProtection({"gate"})
+# --- a rollup at the page size is UNKNOWN, never a finding -----------------
+# `gh` asks for `contexts(first: 100)` and does not say when it truncated, so a
+# context dropped by pagination looks exactly like a context that never ran. That
+# is fail-open in the one direction this whole file exists to close.
+#
+# The fixture is built so that WITHOUT the guard it yields two findings -- no
+# Bugbot and the required check missing -- and both are confident and wrong. So a
+# green result here cannot come from the scenario being harmless.
+big = pr(number=90, contexts=[f"filler-{i}" for i in range(bp.ROLLUP_CONTEXT_CAP)],
+         bugbot=False)
+install(FakeProtection(["build"]), [big])
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not findings and len(errors) == 1,
+       "a rollup at the page size produces an ERROR and no findings",
+       f"findings={[f['cause'] for f in findings]} errors={errors} — "
+       "without the guard this is bugbot-absent + never-reported, both false")
+record(errors and "NOT audited" in errors[0] and "#90" in errors[0],
+       "the error names the PR and says it was not audited",
+       f"errors={errors} — a silent skip is the same fail-open with better manners")
+
+# One under the cap is a NORMAL audit. Without this the guard could be `>= 0` and
+# the test above would still pass; this is what makes the boundary mean something.
+small = pr(number=91, contexts=[f"filler-{i}" for i in range(bp.ROLLUP_CONTEXT_CAP - 2)],
+           bugbot=False)
+install(FakeProtection(["build"]), [small])
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not errors and {f["cause"] for f in findings} == {"bugbot-absent", "never-reported"},
+       "one context under the page size is audited normally",
+       f"findings={[f['cause'] for f in findings]} errors={errors}")
+
+record(bp.rollup_truncated({"statusCheckRollup": [{"name": "x"}]}) is False
+       and bp.rollup_truncated({"statusCheckRollup": []}) is False,
+       "a small rollup is not truncated",
+       "the polarity, asserted directly rather than only through audit_repo")
+
+
 def _boom(org, name, base):
     raise bp.CD.GhError(None, "pr list exploded")
 bp.open_prs = _boom

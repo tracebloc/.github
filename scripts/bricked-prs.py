@@ -119,6 +119,22 @@ BOT_AUTHOR_FIELD = "is_bot"
 # that refuses.
 PR_LIST_LIMIT = 200
 
+# `gh pr list --json statusCheckRollup` asks GraphQL for `contexts(first: 100)` and
+# says nothing when a head has more than that -- the SAME silent-truncation shape as
+# PR_LIST_LIMIT above, one level in, and it fails in the direction this file is about:
+# a context dropped by pagination is indistinguishable from a context that never ran,
+# so a truncated rollup reports `Cursor Bugbot` absent on a PR Bugbot reviewed fine.
+#
+# NOT hypothetical the way the cap on PR_LIST_LIMIT is. Measured 2026-08-18:
+# client#746 carries 77 distinct contexts (81 check runs; the rollup is latest-per-
+# context, so the two numbers differing is correct and not truncation). 77 is 23 away.
+#
+# I could not construct a >100 head to observe the truncation, so this constant is
+# gh's page size and not something derived from a failing observation -- stated here
+# rather than dressed up, and the selftest exercises the guard on a synthetic rollup
+# so the branch is proven reachable even though the live input has not appeared yet.
+ROLLUP_CONTEXT_CAP = 100
+
 HERE = Path(__file__).resolve().parent
 
 
@@ -225,6 +241,16 @@ def head_age_minutes(org: str, name: str, sha: str) -> "float | None":
     return (datetime.now(timezone.utc) - when).total_seconds() / 60.0
 
 
+def rollup_truncated(pr: dict) -> bool:
+    """True when this PR's rollup may be missing contexts to pagination.
+
+    `>=`, not `>`: at exactly the cap there is no way to tell a head with 100
+    contexts from a head with 140, and "cannot tell" is a finding here rather
+    than an assumption of the happier reading.
+    """
+    return len(pr.get("statusCheckRollup") or []) >= ROLLUP_CONTEXT_CAP
+
+
 def present_contexts(pr: dict) -> "set[str]":
     out = set()
     for entry in pr.get("statusCheckRollup") or []:
@@ -264,6 +290,20 @@ def audit_repo(org: str, name: str, roles: "dict[str, str]") -> "tuple[list, lis
 
         for pr in prs:
             if pr.get("isDraft"):
+                continue
+
+            # REFUSE RATHER THAN GUESS (saadqbal, #282). Every conclusion below is
+            # drawn from `present_contexts`, so a truncated rollup poisons both of
+            # them -- and it poisons them SILENTLY, producing a confident UNREVIEWED
+            # on a PR that was reviewed. An error keeps it visible and out of the
+            # findings table, which is the same treatment an unreadable branch gets.
+            if rollup_truncated(pr):
+                errors.append(
+                    f"{name}/{branch}#{pr.get('number')}: "
+                    f"{len(pr.get('statusCheckRollup') or [])} rollup contexts at or "
+                    f"over the {ROLLUP_CONTEXT_CAP} page size, so the context list may "
+                    "be partial -- this PR was NOT audited"
+                )
                 continue
 
             # THE REVIEWER, before the checks. Absence of Bugbot is its own cause
