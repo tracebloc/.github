@@ -306,46 +306,71 @@ def audit_repo(org: str, name: str, roles: "dict[str, str]") -> "tuple[list, lis
                 )
                 continue
 
-            # THE REVIEWER, before the checks. Absence of Bugbot is its own cause
-            # with its own remedy -- post `bugbot run` -- which no other finding
-            # here would ever suggest. Reported even when the required checks are
-            # all present, because that is exactly the case that reads as a clean
-            # green PR (backend#2114).
-            # ONE age lookup per PR, reused by both checks below (saadqbal, #282).
-            # Calling it per-check cost two uncached API calls for a PR missing both
-            # a review and a required context, and made this function's own
-            # docstring -- "one or two API calls per candidate" -- stale.
-            age = head_age_minutes(org, name, pr.get("headRefOid") or "")
-            young = age is None or age < MIN_HEAD_AGE_MINUTES
-
-            if not (pr.get("author") or {}).get(BOT_AUTHOR_FIELD) \
-               and BUGBOT_CONTEXT not in present_contexts(pr):
-                # Same young-head rule as below: a review that has not started YET
-                # is not a drop, and an unreadable age is treated as young so a
-                # false finding cannot make the report ignorable.
-                if not young:
-                    findings.append({
-                        "cause": "bugbot-absent",
-                        "repo": name,
-                        "branch": branch,
-                        "role": role,
-                        "number": pr.get("number"),
-                        "url": pr.get("url"),
-                        "title": (pr.get("title") or "")[:70],
-                        "missing": [BUGBOT_CONTEXT],
-                        "mergeStateStatus": pr.get("mergeStateStatus"),
-                        "reviewDecision": pr.get("reviewDecision") or "REVIEW_REQUIRED",
-                        "headAgeMinutes": round(age),
-                    })
-
+            # DECIDE WHAT LOOKS WRONG FIRST, DATE THE HEAD AFTER.
+            #
+            # Two review findings pulled in opposite directions here and the order is
+            # what reconciles them. saadqbal (#282): calling `head_age_minutes` inside
+            # each check below cost TWO uncached API calls for a PR missing both a
+            # review and a required context. Hoisting it above both fixed that and
+            # broke the other half -- Bugbot (#282): every HEALTHY PR then paid a
+            # lookup whose answer nothing consumed, on the very shared credential
+            # backend#2036 exists because it was measured exhausted.
+            #
+            # Classifying before dating satisfies both without a cache: at most one
+            # lookup per PR, and none at all for a PR with nothing to report. It also
+            # restores this loop's agreement with `head_age_minutes`'s own docstring
+            # ("Called ONLY for a PR that already looks bricked"), which the hoist had
+            # quietly made false.
+            #
+            # THE REVIEWER IS ITS OWN CAUSE. Absence of Bugbot has a remedy -- post
+            # `bugbot run` -- that no other finding here would ever suggest, and it is
+            # reported even when every required check is present, because that is
+            # exactly the case that reads as a clean green PR (backend#2114).
+            unreviewed = (not (pr.get("author") or {}).get(BOT_AUTHOR_FIELD)
+                          and BUGBOT_CONTEXT not in present_contexts(pr))
             missing = sorted(required - present_contexts(pr)) if required else []
+            if not unreviewed and not missing:
+                continue
+
+            age = head_age_minutes(org, name, pr.get("headRefOid") or "")
+
+            # AN UNDATEABLE HEAD IS UNKNOWN, NOT YOUNG (Bugbot, #282). This used to
+            # fold into `young` and drop the PR silently, which is the one shape this
+            # watcher exists to remove: a candidate that looks wrong, cannot be
+            # judged, and produces nothing at all. `head_age_minutes` returns None
+            # only when a read FAILED (an empty suite list falls back to the commit
+            # date), so this is a real API failure and not a quiet PR -- and if it is
+            # persistent, the finding never surfaces. Same treatment as a truncated
+            # rollup above: an error, visible, out of the findings table.
+            if age is None:
+                errors.append(
+                    f"{name}/{branch}#{pr.get('number')}: "
+                    f"{'no Bugbot review' if unreviewed else 'missing ' + ', '.join(missing)}"
+                    ", but its head could not be dated, so young-vs-bricked is UNKNOWN"
+                    " -- this PR was NOT audited"
+                )
+                continue
+
+            # A young head has not reported YET, which is not this watcher's finding.
+            if age < MIN_HEAD_AGE_MINUTES:
+                continue
+
+            if unreviewed:
+                findings.append({
+                    "cause": "bugbot-absent",
+                    "repo": name,
+                    "branch": branch,
+                    "role": role,
+                    "number": pr.get("number"),
+                    "url": pr.get("url"),
+                    "title": (pr.get("title") or "")[:70],
+                    "missing": [BUGBOT_CONTEXT],
+                    "mergeStateStatus": pr.get("mergeStateStatus"),
+                    "reviewDecision": pr.get("reviewDecision") or "REVIEW_REQUIRED",
+                    "headAgeMinutes": round(age),
+                })
+
             if missing:
-                # Young head -> "has not reported YET", which is not this
-                # watcher's finding. An unreadable age is treated as young: a
-                # false "bricked" is what makes the report ignorable, and the
-                # next run picks it up anyway.
-                if young:
-                    continue
                 findings.append({
                     # A conflict is a different diagnosis with a different fix,
                     # and conflating the two sends someone to edit branch

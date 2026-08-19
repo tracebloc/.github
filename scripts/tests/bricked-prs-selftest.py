@@ -250,6 +250,63 @@ record(not f and not e, "a branch requiring nothing produces no findings", f"fin
 
 # 9. An unreadable PR list is an error, not an empty list.
 bp.CD.read_protection = lambda org, name, branch: FakeProtection({"gate"})
+# --- the age lookup is paid by CANDIDATES ONLY ------------------------------
+# saadqbal (#282) wanted one lookup instead of two; Bugbot (#282) wanted none on a
+# healthy PR. Both are the same requirement read from opposite ends, and neither is
+# observable from a finding count -- so these assert the CALL COUNT directly.
+#
+# `install()` replaces head_age_minutes wholesale, so the counter wraps it here
+# rather than hiding inside the helper: a test that cannot see the call cannot
+# assert anything about when it happens.
+def counting_age(value):
+    box = {"n": 0}
+    def f(org, name, sha):
+        box["n"] += 1
+        return value
+    return box, f
+
+# A HEALTHY PR pays nothing. Bugbot present, every required context present.
+box, fake = counting_age(999.0)
+install(FakeProtection(["build"]), [pr(number=10, contexts=["build"])])
+bp.head_age_minutes = fake
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not findings and not errors and box["n"] == 0,
+       "a healthy PR costs ZERO age lookups",
+       f"lookups={box['n']} findings={[f['cause'] for f in findings]} — one uncached "
+       "call per healthy PR, fleet-wide, on the credential #2036 measured exhausted")
+
+# A PR failing BOTH checks pays exactly one. This is saadqbal's half: it was two.
+box, fake = counting_age(999.0)
+install(FakeProtection(["build"]), [pr(number=11, contexts=[], bugbot=False)])
+bp.head_age_minutes = fake
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(box["n"] == 1 and {f["cause"] for f in findings} == {"bugbot-absent", "never-reported"},
+       "a PR missing BOTH a review and a required check pays ONE lookup, not two",
+       f"lookups={box['n']} findings={[f['cause'] for f in findings]}")
+
+# An UNDATEABLE candidate is an error, not a silent skip. This is the polarity
+# Bugbot flagged: it used to fold into `young` and vanish, so a candidate that
+# looks wrong and cannot be judged produced nothing at all.
+box, fake = counting_age(None)
+install(FakeProtection(["build"]), [pr(number=12, contexts=[], bugbot=False)])
+bp.head_age_minutes = fake
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not findings and len(errors) == 1 and "NOT audited" in errors[0] and "#12" in errors[0],
+       "an undateable candidate is an UNKNOWN error, not a silent young-skip",
+       f"findings={[f['cause'] for f in findings]} errors={errors}")
+
+# And a genuinely young candidate is still skipped silently -- that one IS correct,
+# and without this the fix above could have turned every young PR into an error.
+box, fake = counting_age(5.0)
+install(FakeProtection(["build"]), [pr(number=13, contexts=[], bugbot=False)])
+bp.head_age_minutes = fake
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not findings and not errors,
+       "a genuinely YOUNG candidate is still skipped silently, with no error",
+       f"findings={[f['cause'] for f in findings]} errors={errors} — 'has not reported "
+       "yet' is not a finding and must not become one")
+
+
 # --- a rollup at the page size is UNKNOWN, never a finding -----------------
 # `gh` asks for `contexts(first: 100)` and does not say when it truncated, so a
 # context dropped by pagination looks exactly like a context that never ran. That
@@ -364,7 +421,8 @@ try:
     age = bp.head_age_minutes("o", "r", "sha")
     record(age is None,
            "an unreadable check-suites read is undateable (None), not the commit date",
-           f"age={age!r} — a 502 here must read as young, never brick a 7-day-old commit")
+           f"age={age!r} — a 502 must not let a force-pushed 7-day-old commit read as "
+           "old; the CALLER now turns this None into an UNKNOWN error, not a young skip")
 finally:
     bp.CD.gh_json = _real_json
 
