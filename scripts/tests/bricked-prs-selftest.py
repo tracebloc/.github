@@ -337,6 +337,25 @@ record(not errors and {f["cause"] for f in findings} == {"bugbot-absent", "never
        "one context under the page size is audited normally",
        f"findings={[f['cause'] for f in findings]} errors={errors}")
 
+# A HEALTHY PR AT THE CAP IS NOT A REFUSAL (saadqbal, #282, second round).
+# Truncation only ever REMOVES names, so `unreviewed`/`missing` can be falsely
+# true and never falsely false: a PR that looks healthy on the partial list would
+# look healthy on the full one. Refusing it made a guard fire on the innocent case
+# -- and the cost was the whole run, because `main()` returns 2 on any error BEFORE
+# `return 1 if findings`, so one big healthy PR demoted every real finding in the
+# fleet to a second-class exit code.
+#
+# The fixture is at the cap AND complete: Bugbot present, `build` present.
+healthy_big = pr(number=99,
+                 contexts=[f"filler-{i}" for i in range(bp.ROLLUP_CONTEXT_CAP - 2)] + ["build"])
+install(FakeProtection(["build"]), [healthy_big])
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not findings and not errors,
+       "a HEALTHY PR at the page size is silent, not an error",
+       f"findings={[f['cause'] for f in findings]} errors={errors} — "
+       f"rollup is {len(healthy_big['statusCheckRollup'])} contexts, at the cap, "
+       "and complete; there is nothing pagination could have hidden")
+
 record(bp.rollup_truncated({"statusCheckRollup": [{"name": "x"}]}) is False
        and bp.rollup_truncated({"statusCheckRollup": []}) is False,
        "a small rollup is not truncated",

@@ -292,19 +292,6 @@ def audit_repo(org: str, name: str, roles: "dict[str, str]") -> "tuple[list, lis
             if pr.get("isDraft"):
                 continue
 
-            # REFUSE RATHER THAN GUESS (saadqbal, #282). Every conclusion below is
-            # drawn from `present_contexts`, so a truncated rollup poisons both of
-            # them -- and it poisons them SILENTLY, producing a confident UNREVIEWED
-            # on a PR that was reviewed. An error keeps it visible and out of the
-            # findings table, which is the same treatment an unreadable branch gets.
-            if rollup_truncated(pr):
-                errors.append(
-                    f"{name}/{branch}#{pr.get('number')}: "
-                    f"{len(pr.get('statusCheckRollup') or [])} rollup contexts at or "
-                    f"over the {ROLLUP_CONTEXT_CAP} page size, so the context list may "
-                    "be partial -- this PR was NOT audited"
-                )
-                continue
 
             # DECIDE WHAT LOOKS WRONG FIRST, DATE THE HEAD AFTER.
             #
@@ -330,6 +317,41 @@ def audit_repo(org: str, name: str, roles: "dict[str, str]") -> "tuple[list, lis
                           and BUGBOT_CONTEXT not in present_contexts(pr))
             missing = sorted(required - present_contexts(pr)) if required else []
             if not unreviewed and not missing:
+                continue
+
+            # REFUSE RATHER THAN GUESS -- BUT ONLY ABOUT AN ABSENCE (saadqbal, twice).
+            #
+            # `gh` pages the rollup at ROLLUP_CONTEXT_CAP and says nothing when it
+            # truncates, so a context lost to pagination is indistinguishable from
+            # one that never ran. Both conclusions above are drawn from
+            # `present_contexts`, so a truncated list can poison them.
+            #
+            # IT CAN ONLY POISON THEM IN ONE DIRECTION, which is what fixes the
+            # placement. Truncation only ever REMOVES names, so `unreviewed` and
+            # `missing` can be falsely TRUE and never falsely false. A PR that
+            # already looks healthy on the partial list would look healthy on the
+            # full one too -- there is nothing to be unsure about, and refusing it
+            # was a guard firing on the innocent case.
+            #
+            # AND THE COST OF THAT WAS THE WHOLE RUN, not one row. `main()` returns
+            # 2 when `errors` is non-empty, BEFORE `return 1 if findings` -- so a
+            # single healthy big-rollup PR anywhere in the fleet turned every run
+            # into "could not evaluate" and demoted the real findings to a
+            # second-class exit code, every four hours until someone raised the cap.
+            # That is the report-gets-ignored failure this file argues against,
+            # arriving through the guard meant to prevent it.
+            #
+            # Below the classification, so it refuses exactly when the ABSENCE is
+            # what is about to be reported -- and before the age lookup, so a PR it
+            # refuses costs no API call either.
+            if rollup_truncated(pr):
+                errors.append(
+                    f"{name}/{branch}#{pr.get('number')}: "
+                    f"{len(pr.get('statusCheckRollup') or [])} rollup contexts at or "
+                    f"over the {ROLLUP_CONTEXT_CAP} page size, so the "
+                    f"{'missing review' if unreviewed else 'missing context'} may be "
+                    "pagination rather than reality -- this PR was NOT audited"
+                )
                 continue
 
             age = head_age_minutes(org, name, pr.get("headRefOid") or "")
