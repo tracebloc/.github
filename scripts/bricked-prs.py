@@ -74,6 +74,42 @@ from pathlib import Path
 # nobody reads -- the failure mode of the always-red check one repo over.
 MIN_HEAD_AGE_MINUTES = 60
 
+# THE REVIEWER CAN GO MISSING THE SAME WAY A CHECK CAN (backend#2114).
+#
+# Cursor Bugbot's auto-trigger silently drops PRs. Measured 2026-08-17: five open
+# PRs across cli, release-train and .github carried no `Cursor Bugbot` check at all,
+# while PRs opened minutes before and hours after were reviewed normally. No
+# discriminator survived -- not diff size (a 1-file/66-line PR was reviewed, a
+# 1-file/29-line one was not), not file type, not repo, not time, not quota.
+# Posting `bugbot run` started a review within a minute and both came back clean, so
+# the reviews were not failing; they were never starting.
+#
+# This is the same shape as the required-check case above and belongs in the same
+# watcher for the same reason: the PR shows a full green check list, and nothing
+# distinguishes "Bugbot found nothing" from "Bugbot never ran". It was caught by a
+# human noticing a missing row.
+#
+# A `skipped` Bugbot check COUNTS AS PRESENT and is deliberately not a finding: it
+# ran and decided, which is a verdict. Only total absence is the silent drop.
+BUGBOT_CONTEXT = "Cursor Bugbot"
+# Bugbot does not review bot-authored PRs, and that is correct rather than a drop --
+# Dependabot's absence was the one legitimate case in the measurement.
+#
+# KEYED ON `is_bot`, NOT ON THE LOGIN (Bugbot, .github#282). The first version tested
+# `login.endswith("[bot]")`, which NEVER MATCHES: `gh pr list --json author` returns
+# `{"is_bot": true, "login": "app/dependabot"}` -- the `owner[bot]` form is what the
+# REST API and the web UI show, not what this command returns. So every Dependabot PR
+# without a Bugbot review would have been reported UNREVIEWED.
+#
+# Worse, the selftest fixtured `dependabot[bot]` -- the shape I assumed rather than the
+# shape I measured -- so the exemption test passed while the exemption could not fire.
+# A fixture invented instead of measured is a test that asserts its author's belief,
+# which is the failure this whole guard exists to catch, one level in.
+#
+# `is_bot` is in the same JSON payload already being fetched, so this costs nothing and
+# cannot drift the way a name-matching rule would.
+BOT_AUTHOR_FIELD = "is_bot"
+
 # `gh pr list` truncates at --limit and says nothing about it, so a repo with
 # more open PRs than this would be audited PARTIALLY and reported clean -- the
 # fail-open shape this watcher exists to remove, in the watcher itself. The cap
@@ -82,6 +118,22 @@ MIN_HEAD_AGE_MINUTES = 60
 # than raised, because a number nobody can justify is worse than a stated limit
 # that refuses.
 PR_LIST_LIMIT = 200
+
+# `gh pr list --json statusCheckRollup` asks GraphQL for `contexts(first: 100)` and
+# says nothing when a head has more than that -- the SAME silent-truncation shape as
+# PR_LIST_LIMIT above, one level in, and it fails in the direction this file is about:
+# a context dropped by pagination is indistinguishable from a context that never ran,
+# so a truncated rollup reports `Cursor Bugbot` absent on a PR Bugbot reviewed fine.
+#
+# NOT hypothetical the way the cap on PR_LIST_LIMIT is. Measured 2026-08-18:
+# client#746 carries 77 distinct contexts (81 check runs; the rollup is latest-per-
+# context, so the two numbers differing is correct and not truncation). 77 is 23 away.
+#
+# I could not construct a >100 head to observe the truncation, so this constant is
+# gh's page size and not something derived from a failing observation -- stated here
+# rather than dressed up, and the selftest exercises the guard on a synthetic rollup
+# so the branch is proven reachable even though the live input has not appeared yet.
+ROLLUP_CONTEXT_CAP = 100
 
 HERE = Path(__file__).resolve().parent
 
@@ -116,7 +168,7 @@ def open_prs(org: str, name: str, base: str) -> "list[dict]":
     raw = CD.gh([
         "pr", "list", "--repo", f"{org}/{name}", "--state", "open",
         "--base", base, "--limit", str(PR_LIST_LIMIT), "--json",
-        "number,isDraft,title,mergeStateStatus,reviewDecision,statusCheckRollup,url,headRefOid",
+        "number,isDraft,title,mergeStateStatus,reviewDecision,statusCheckRollup,url,headRefOid,author",
     ])
     try:
         prs = json.loads(raw)
@@ -189,6 +241,16 @@ def head_age_minutes(org: str, name: str, sha: str) -> "float | None":
     return (datetime.now(timezone.utc) - when).total_seconds() / 60.0
 
 
+def rollup_truncated(pr: dict) -> bool:
+    """True when this PR's rollup may be missing contexts to pagination.
+
+    `>=`, not `>`: at exactly the cap there is no way to tell a head with 100
+    contexts from a head with 140, and "cannot tell" is a finding here rather
+    than an assumption of the happier reading.
+    """
+    return len(pr.get("statusCheckRollup") or []) >= ROLLUP_CONTEXT_CAP
+
+
 def present_contexts(pr: dict) -> "set[str]":
     out = set()
     for entry in pr.get("statusCheckRollup") or []:
@@ -214,9 +276,12 @@ def audit_repo(org: str, name: str, roles: "dict[str, str]") -> "tuple[list, lis
             errors.append(f"{name}/{branch}: {prot.error}")
             continue
         required = set(prot.required_checks)
-        if not required:
-            continue
-
+        # NO early `continue` on an empty required set (saadqbal + Bugbot, #282).
+        # The reviewer check below does not depend on branch protection, and gating
+        # it here made a missing review STRUCTURALLY UNREPORTABLE on exactly the
+        # branches with the least protection -- the watcher going quiet where it is
+        # needed most, and saying nothing about having skipped them. The
+        # required-check block keeps its own `if required:` guard instead.
         try:
             prs = open_prs(org, name, branch)
         except CD.GhError as exc:
@@ -226,15 +291,108 @@ def audit_repo(org: str, name: str, roles: "dict[str, str]") -> "tuple[list, lis
         for pr in prs:
             if pr.get("isDraft"):
                 continue
-            missing = sorted(required - present_contexts(pr))
+
+
+            # DECIDE WHAT LOOKS WRONG FIRST, DATE THE HEAD AFTER.
+            #
+            # Two review findings pulled in opposite directions here and the order is
+            # what reconciles them. saadqbal (#282): calling `head_age_minutes` inside
+            # each check below cost TWO uncached API calls for a PR missing both a
+            # review and a required context. Hoisting it above both fixed that and
+            # broke the other half -- Bugbot (#282): every HEALTHY PR then paid a
+            # lookup whose answer nothing consumed, on the very shared credential
+            # backend#2036 exists because it was measured exhausted.
+            #
+            # Classifying before dating satisfies both without a cache: at most one
+            # lookup per PR, and none at all for a PR with nothing to report. It also
+            # restores this loop's agreement with `head_age_minutes`'s own docstring
+            # ("Called ONLY for a PR that already looks bricked"), which the hoist had
+            # quietly made false.
+            #
+            # THE REVIEWER IS ITS OWN CAUSE. Absence of Bugbot has a remedy -- post
+            # `bugbot run` -- that no other finding here would ever suggest, and it is
+            # reported even when every required check is present, because that is
+            # exactly the case that reads as a clean green PR (backend#2114).
+            unreviewed = (not (pr.get("author") or {}).get(BOT_AUTHOR_FIELD)
+                          and BUGBOT_CONTEXT not in present_contexts(pr))
+            missing = sorted(required - present_contexts(pr)) if required else []
+            if not unreviewed and not missing:
+                continue
+
+            # REFUSE RATHER THAN GUESS -- BUT ONLY ABOUT AN ABSENCE (saadqbal, twice).
+            #
+            # `gh` pages the rollup at ROLLUP_CONTEXT_CAP and says nothing when it
+            # truncates, so a context lost to pagination is indistinguishable from
+            # one that never ran. Both conclusions above are drawn from
+            # `present_contexts`, so a truncated list can poison them.
+            #
+            # IT CAN ONLY POISON THEM IN ONE DIRECTION, which is what fixes the
+            # placement. Truncation only ever REMOVES names, so `unreviewed` and
+            # `missing` can be falsely TRUE and never falsely false. A PR that
+            # already looks healthy on the partial list would look healthy on the
+            # full one too -- there is nothing to be unsure about, and refusing it
+            # was a guard firing on the innocent case.
+            #
+            # AND THE COST OF THAT WAS THE WHOLE RUN, not one row. `main()` returns
+            # 2 when `errors` is non-empty, BEFORE `return 1 if findings` -- so a
+            # single healthy big-rollup PR anywhere in the fleet turned every run
+            # into "could not evaluate" and demoted the real findings to a
+            # second-class exit code, every four hours until someone raised the cap.
+            # That is the report-gets-ignored failure this file argues against,
+            # arriving through the guard meant to prevent it.
+            #
+            # Below the classification, so it refuses exactly when the ABSENCE is
+            # what is about to be reported -- and before the age lookup, so a PR it
+            # refuses costs no API call either.
+            if rollup_truncated(pr):
+                errors.append(
+                    f"{name}/{branch}#{pr.get('number')}: "
+                    f"{len(pr.get('statusCheckRollup') or [])} rollup contexts at or "
+                    f"over the {ROLLUP_CONTEXT_CAP} page size, so the "
+                    f"{'missing review' if unreviewed else 'missing context'} may be "
+                    "pagination rather than reality -- this PR was NOT audited"
+                )
+                continue
+
+            age = head_age_minutes(org, name, pr.get("headRefOid") or "")
+
+            # AN UNDATEABLE HEAD IS UNKNOWN, NOT YOUNG (Bugbot, #282). This used to
+            # fold into `young` and drop the PR silently, which is the one shape this
+            # watcher exists to remove: a candidate that looks wrong, cannot be
+            # judged, and produces nothing at all. `head_age_minutes` returns None
+            # only when a read FAILED (an empty suite list falls back to the commit
+            # date), so this is a real API failure and not a quiet PR -- and if it is
+            # persistent, the finding never surfaces. Same treatment as a truncated
+            # rollup above: an error, visible, out of the findings table.
+            if age is None:
+                errors.append(
+                    f"{name}/{branch}#{pr.get('number')}: "
+                    f"{'no Bugbot review' if unreviewed else 'missing ' + ', '.join(missing)}"
+                    ", but its head could not be dated, so young-vs-bricked is UNKNOWN"
+                    " -- this PR was NOT audited"
+                )
+                continue
+
+            # A young head has not reported YET, which is not this watcher's finding.
+            if age < MIN_HEAD_AGE_MINUTES:
+                continue
+
+            if unreviewed:
+                findings.append({
+                    "cause": "bugbot-absent",
+                    "repo": name,
+                    "branch": branch,
+                    "role": role,
+                    "number": pr.get("number"),
+                    "url": pr.get("url"),
+                    "title": (pr.get("title") or "")[:70],
+                    "missing": [BUGBOT_CONTEXT],
+                    "mergeStateStatus": pr.get("mergeStateStatus"),
+                    "reviewDecision": pr.get("reviewDecision") or "REVIEW_REQUIRED",
+                    "headAgeMinutes": round(age),
+                })
+
             if missing:
-                # Young head -> "has not reported YET", which is not this
-                # watcher's finding. An unreadable age is treated as young: a
-                # false "bricked" is what makes the report ignorable, and the
-                # next run picks it up anyway.
-                age = head_age_minutes(org, name, pr.get("headRefOid") or "")
-                if age is None or age < MIN_HEAD_AGE_MINUTES:
-                    continue
                 findings.append({
                     # A conflict is a different diagnosis with a different fix,
                     # and conflating the two sends someone to edit branch
@@ -309,35 +467,47 @@ def main() -> int:
     if args.json:
         print(json.dumps({"findings": findings, "errors": errors}, indent=2))
     else:
+        # ONE LABEL PER CAUSE. `bugbot-absent` is NOT a bricked PR -- the PR can
+        # merge perfectly well; what is missing is the REVIEW. Rendering it as
+        # BRICKED would send the reader to branch protection for a problem fixed by
+        # one comment, which is the true-count-false-name defect this file already
+        # avoids for `conflicted` (backend#2114).
+        LABELS = {"conflicted": "CONFLICTED", "bugbot-absent": "UNREVIEWED"}
         for f in findings:
-            label = ("CONFLICTED" if f["cause"] == "conflicted" else "BRICKED")
-            print(f"{label} {f['repo']}#{f['number']} -> {f['branch']}")
+            print(f"{LABELS.get(f['cause'], 'BRICKED')} {f['repo']}#{f['number']} -> {f['branch']}")
             print(f"        missing: {', '.join(f['missing'])}")
             if f["cause"] == "conflicted":
                 print("        cause: merge conflict — no merge commit, so no "
                       "pull_request run. Rebase; do not touch protection.")
+            elif f["cause"] == "bugbot-absent":
+                print("        cause: Bugbot's auto-trigger dropped this PR — it was "
+                      "never reviewed, which reads identically to a clean review.")
+                print("        fix:   comment `bugbot run` on the PR.")
             print(f"        {f['reviewDecision']} / {f['mergeStateStatus']}  {f['url']}")
             print(f"        {f['title']}")
         for e in errors:
             print(f"COULD NOT AUDIT {e}")
         if not findings and not errors:
-            print(f"No PR is missing a required context ({len(names)} repos audited).")
+            print(f"No PR is missing a required context or a review "
+                  f"({len(names)} repos audited).")
 
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as fh:
             if findings:
-                fh.write("## Bricked PRs — a required check that never reported\n\n")
+                fh.write("## PRs a human would read as fine\n\n")
                 fh.write("| repo | PR | missing context(s) | cause | review | merge state |\n")
                 fh.write("|---|---|---|---|---|---|\n")
                 for f in findings:
-                    cause = ("merge conflict — rebase, do not touch protection"
-                             if f["cause"] == "conflicted" else "never reported")
+                    cause = {"conflicted": "merge conflict — rebase, do not touch protection",
+                             "bugbot-absent": "**never reviewed** — comment `bugbot run`",
+                             }.get(f["cause"], "never reported")
                     fh.write(f"| `{f['repo']}` | [#{f['number']}]({f['url']}) | "
                              f"`{'`, `'.join(f['missing'])}` | {cause} | "
                              f"{f['reviewDecision']} | {f['mergeStateStatus']} |\n")
-                fh.write("\nEach is approved-or-approvable with **nothing red to point at**, "
-                         "and cannot merge until the context reports or stops being required.\n")
+                fh.write("\nEach shows **nothing red to point at**. A bricked PR cannot merge "
+                         "until the context reports or stops being required; an unreviewed one "
+                         "merges perfectly well, which is the worse of the two.\n")
             if errors:
                 fh.write("\n## Could not audit\n\n")
                 for e in errors:
