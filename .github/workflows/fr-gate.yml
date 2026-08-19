@@ -99,6 +99,29 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
+      # Authenticates as the tracebloc-release-train App (backend#2036) instead of a
+      # human's PAT. `owner:` yields an ORG-scoped installation token, which this gate
+      # needs: it reads the org PROJECT, and a repo-scoped token cannot.
+      #
+      # READ-ONLY, and that is the whole reason this gate could move. It reads
+      # `commits/{sha}/pulls`, `compare/{base}...{head}` and the ProjectV2 graphql --
+      # every one covered by permissions the App already holds. It never writes a
+      # card, a label or a comment; the gate's only output is its own conclusion.
+      #
+      # Gated behind the same `if:` as the steps that use it, so a PR this gate skips
+      # (not promoting, or `skip-fr-gate`) mints nothing.
+      #
+      # NO FALLBACK TO THE PAT: a fallback would let a broken App path keep working
+      # silently, and this gate blocking wrongly is far better than it passing wrongly.
+      - name: Mint an installation token
+        id: app-token
+        if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Discover items in this promotion
         id: items
         if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
@@ -106,7 +129,7 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REPO_FULL: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -266,7 +289,7 @@ jobs:
       - name: Verify each item is in required Status
         if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG: ${{ inputs.org }}
           PROJECT_NUMBER: ${{ inputs.project-number }}
           REPO_FULL: ${{ github.repository }}
@@ -471,9 +494,10 @@ jobs:
               echo "::error::FR gate FAILED. Status unreadable:$UNREADABLE"
               echo ""
               echo "The board could not be queried after 5 attempts. This is an"
-              echo "infrastructure failure, not a review failure — check that"
-              echo "PROJECTS_KANBAN_TOKEN is present and unexpired, and that no"
-              echo "repo-level secret of the same name is shadowing the org one."
+              echo "infrastructure failure, not a review failure — this gate"
+              echo "authenticates as the tracebloc-release-train App, so check the"
+              echo "installation still covers this repo and still holds the"
+              echo "organization Projects permission (backend#2036)."
             fi
             if [ -n "${UNATTRIB// /}" ]; then
               echo "::error::FR gate FAILED. Commits with no attributable PR:$UNATTRIB"
