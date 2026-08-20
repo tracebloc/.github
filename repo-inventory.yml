@@ -1095,10 +1095,18 @@ repos:
     copies:
       add-to-kanban.yml:
         divergent: >-
-          release-train's copy adds a header explaining why the repo is exempt from riding the
-          train. The comment is wanted, and it is now the ONLY difference: the action pin was
-          the other half of this entry until backend#1816 made v2.0.0 - which release-train and
-          cli already ran - the fleet norm. Divergent for the header alone.
+          release-train's copy differs from the canonical one in TWO comment blocks, and in
+          nothing else. Both are wanted. (1) A header explaining why the repo is exempt from
+          riding the train (RFC-BACKEND-1405 D1). (2) A note that the fleet's Dependabot
+          paragraph does not apply here - this repo has no dependabot.yml, no dependency
+          manifests and has never had a Dependabot PR (checked 2026-08-18) - so repeating it
+          would send whoever debugs a missing card after a secret scope that is not in play.
+          THE CLAIM IS CHECKABLE, and it was not before: strip every comment and blank line
+          from release-train's copy and from the canonical one and they are byte-identical.
+          That was false until release-train#93, which added the least-privilege scoping this
+          copy was missing - a second, undocumented difference that the previous wording
+          ("the header alone") actively denied. The action pin was the other half of this
+          entry until backend#1816 made v2.0.0 the fleet norm.
       stale-backlog.yml:
         exempt: >-
           release-train has add-to-kanban.yml but no stale-backlog.yml. Auto-closing backlog

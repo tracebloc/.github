@@ -94,7 +94,8 @@ help:
 	@echo "  setup       preflight the tools check needs; installs the pre-push hook"
 	@echo "  install-hooks  (re)install the git pre-push hook that runs 'make check'"
 	@echo
-	@echo "  lint            ruff + shellcheck + house-rules + action-pins + actionlint"
+	@echo "  lint            ruff + shellcheck + house-rules + action-pins +"
+	@echo "                  mint-scope + actionlint"
 	@echo "  selftests       all $(words $(SELFTEST_FILES)) gate selftests (+ the coverage assertion)"
 	@echo "  credential-scan gitleaks over the whole history, as code-quality.yml runs it"
 	@echo "  audit           caller-drift.py against the live org — needs a token"
@@ -125,7 +126,7 @@ check-all: check credential-scan
 # ---- lint --------------------------------------------------------
 
 .PHONY: lint
-lint: ruff shellcheck house-rules action-pins actionlint
+lint: ruff shellcheck house-rules action-pins mint-scope actionlint
 
 # ruff: code-quality.yml's `ruff` job in all-files mode. This repo has no ruff
 # config, so the workflow falls back to --isolated --select <ruff-select>; that
@@ -194,6 +195,19 @@ house-rules:
 # SOFT_FAIL=false because that is what this repo's caller passes
 # (action-pins-soft-fail: false) — findings are red here, not advisory.
 .PHONY: action-pins
+# mint-scope: no App-token mint may carry the App's FULL installation grant
+# (backend#2157). In `lint` rather than `selftests` because it is a property of the
+# workflows in this repo, not of a script -- same tier as action-pins, which asks a
+# structurally identical question about the same files.
+.PHONY: selftest-mint-scope
+selftest-mint-scope: guard-pyyaml
+	$(PYTHON) scripts/tests/mint-scope-selftest.py
+
+.PHONY: mint-scope
+mint-scope: guard-pyyaml
+	$(PYTHON) scripts/mint-scope.py
+
+
 action-pins:
 	@set -e; \
 	 wf=.github/workflows/code-quality.yml; \
@@ -251,7 +265,8 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 # it into `make check` and brings it under the coverage guard.
 SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-standards-sync \
                     selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns \
-                    selftest-kanban-deploy-state selftest-git-reap
+                    selftest-kanban-deploy-state selftest-git-reap \
+                    selftest-mint-scope
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
