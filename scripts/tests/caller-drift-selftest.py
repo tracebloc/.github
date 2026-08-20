@@ -17,6 +17,7 @@ import base64
 import copy
 import importlib.util
 import inspect
+import inspect as _inspect
 import json
 import re
 import pathlib
@@ -444,7 +445,6 @@ def _good(args):
 #
 # Asserted against the KEYS THE PRODUCER WRITES, so it fails if `list_active_repos`
 # starts or stops setting one, rather than agreeing with a list written here.
-import inspect as _inspect
 _src = _inspect.getsource(guard.list_active_repos)
 _written = set(re.findall(r'"(\w+)":\s', _src))
 record(_written == {"visibility", "default_branch"},
@@ -471,8 +471,8 @@ record("release_train" not in _written,
 # and the assertion failed on the correct code while every mutation "passed". An
 # extractor that cannot find the thing reports the same as a defect.
 _main_lines = _inspect.getsource(guard.main).splitlines()
-_i = next((i for i, l in enumerate(_main_lines) if "read_repo(" in l), None)
-_call = " ".join(l.strip() for l in _main_lines[_i:_i + 3]) if _i is not None else ""
+_i = next((i for i, line in enumerate(_main_lines) if "read_repo(" in line), None)
+_call = " ".join(x.strip() for x in _main_lines[_i:_i + 3]) if _i is not None else ""
 record(bool(_call) and "entry" in _call and "release_train" in _call,
        "main() derives read_repo's on_train from the INVENTORY entry",
        (_call[:150] if _call else "no read_repo call found")
