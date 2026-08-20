@@ -250,6 +250,7 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 # selftest target means adding it here, which is the single edit that both wires
 # it into `make check` and brings it under the coverage guard.
 SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-standards-sync \
+	selftest-stale-backlog \
                     selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns \
                     selftest-kanban-deploy-state selftest-git-reap
 
@@ -329,6 +330,12 @@ selftest-version-bump-gate: guard-pyyaml
 .PHONY: selftest-bricked-prs
 selftest-bricked-prs: guard-pyyaml
 	$(PYTHON) scripts/tests/bricked-prs-selftest.py
+
+# NO guard-pyyaml: the sweep parses no YAML. Asserted rather than assumed -- the
+# selftest imports the script and would fail on a missing module, and the reusable
+# workflow runs this exact target with no pip step (backend#1979).
+selftest-stale-backlog:
+	$(PYTHON) scripts/tests/stale-backlog-selftest.py
 
 # NO guard-pyyaml, and that is asserted rather than assumed: kanban-columns.yml
 # runs this with no pip step, and it was measured to pass with the yaml module
