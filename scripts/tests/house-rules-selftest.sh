@@ -79,19 +79,44 @@ fixture() {  # $1 = name · $2 = body -> writes it into the throwaway repo and
   printf '%s' "$1"
 }
 
-# $1 desc · $2 body · $3 expected finding count · $4 expected rule id ("" = any)
+# THE EXPECTED RULE SET, not a count and not "somewhere in the output" (Bugbot,
+# .github#291). The first version of this helper took a count as $3, computed `n`,
+# and NEVER COMPARED THEM -- a parameter that reads as an assertion and is dead. So
+# a non-zero case only checked rc=1 plus "the named rule appears", and extra rules
+# passed silently.
+#
+# Bugbot's example is the one that mattered: the scoped-pragma case `ignore=curl-tls`
+# stayed green even if the scoping were a NO-OP, because `curl-timeout` fires either
+# way and the test only asked whether `curl-timeout` appeared. The case existed to
+# prove `ignore=` narrows to one rule and could not have failed if it didn't.
+#
+# A SET is strictly more informative than a count and kills the dead parameter: the
+# expected value is now the exact comma-separated rule ids, `-` for none. Extra
+# findings fail, missing findings fail, and the wrong rule fails.
+#
+# Parsed from `[rule-id]` occurrences, never from the summary line -- the old grep
+# alternation included the word `house-rules`, which matches the summary itself, so
+# `n` was not even a finding count.
+#
+# $1 desc · $2 body · $3 expected rule set ("-" = clean, else "a" or "a,b")
 expect() {
-  local desc="$1" body="$2" want="$3" rule="${4:-}" f n
+  local desc="$1" body="$2" want="$3" f got
   f=$(fixture "t$$.sh" "$body")
   run_on "$f"
-  n=$(printf '%s\n' "$OUT" | grep -cE 'house-rules|curl-tls|curl-timeout|helm-timeout|pipefail' || true)
-  if [ "$want" = 0 ]; then
-    if [ "$RC" = 0 ]; then record 0 "$desc" ""; else record 1 "$desc" "rc=$RC out=$OUT"; fi
+  # `grep -oE`, not `sed -n s/.../\1/p`: BSD sed has no `\|` alternation, so the
+  # first version matched nothing and every firing case reported "-". Portability is
+  # this script's whole design constraint, and the suite has to honour it too.
+  got=$(printf '%s\n' "$OUT" | grep -oE '\[(curl-tls|curl-timeout|helm-timeout|pipefail|no-print)\]' \
+        | tr -d '[]' | sort -u | paste -sd, - )
+  [ -n "$got" ] || got="-"
+  if [ "$want" = "-" ]; then
+    if [ "$RC" = 0 ] && [ "$got" = "-" ]; then record 0 "$desc" ""
+    else record 1 "$desc" "rc=$RC rules=[$got] want clean; out=$OUT"; fi
     return
   fi
-  if [ "$RC" != 1 ]; then record 1 "$desc" "rc=$RC (want 1) out=$OUT"; return; fi
-  if [ -n "$rule" ] && ! printf '%s' "$OUT" | grep -q "$rule"; then
-    record 1 "$desc" "fired, but not \`$rule\`: $OUT"; return
+  if [ "$RC" != 1 ]; then record 1 "$desc" "rc=$RC (want 1) rules=[$got]"; return; fi
+  if [ "$got" != "$want" ]; then
+    record 1 "$desc" "rules=[$got] want [$want]"; return
   fi
   record 0 "$desc" ""
 }
@@ -103,69 +128,61 @@ expect() {
 # rather than the rule.
 
 # --- curl-tls --------------------------------------------------------------
-expect "curl-tls fires on curl with no TLS floor" \
+# BOTH rules, sorted -- a bare `curl "$url"` has neither a TLS floor nor a time
+# bound, so it violates two. This case claimed only `curl-tls` and passed anyway
+# under the old "appears somewhere" helper: my own expectation was looser than it
+# read, which is the same defect one level out from the one Bugbot found.
+expect "a bare curl fires BOTH curl-tls and curl-timeout" \
 '#!/bin/bash
 set -euo pipefail
-curl -fsSL "$url" -o out' 1 curl-tls
-
+curl -fsSL "$url" -o out' curl-timeout,curl-tls
 expect "curl-tls is silent with --tlsv1.2" \
 '#!/bin/bash
 set -euo pipefail
-curl -fsSL --tlsv1.2 --max-time 30 "$url" -o out' 0
-
+curl -fsSL --tlsv1.2 --max-time 30 "$url" -o out' -
 expect "curl-tls accepts --tlsv1.3 too" \
 '#!/bin/bash
 set -euo pipefail
-curl -fsSL --tlsv1.3 --max-time 30 "$url" -o out' 0
-
+curl -fsSL --tlsv1.3 --max-time 30 "$url" -o out' -
 # --- curl-timeout ----------------------------------------------------------
 expect "curl-timeout fires with TLS but no time bound" \
 '#!/bin/bash
 set -euo pipefail
-curl -fsSL --tlsv1.2 "$url" -o out' 1 curl-timeout
-
+curl -fsSL --tlsv1.2 "$url" -o out' curl-timeout
 expect "curl-timeout is satisfied by --connect-timeout" \
 '#!/bin/bash
 set -euo pipefail
-curl -fsSL --tlsv1.2 --connect-timeout 5 "$url" -o out' 0
-
+curl -fsSL --tlsv1.2 --connect-timeout 5 "$url" -o out' -
 expect "curl-timeout is satisfied by -m" \
 '#!/bin/bash
 set -euo pipefail
-curl -fsSL --tlsv1.2 -m 10 "$url" -o out' 0
-
+curl -fsSL --tlsv1.2 -m 10 "$url" -o out' -
 # --- helm-timeout ----------------------------------------------------------
 expect "helm-timeout fires on --wait with no --timeout" \
 '#!/bin/bash
 set -euo pipefail
-helm upgrade --install rel chart --wait' 1 helm-timeout
-
+helm upgrade --install rel chart --wait' helm-timeout
 expect "helm-timeout is silent with --timeout" \
 '#!/bin/bash
 set -euo pipefail
-helm upgrade --install rel chart --wait --timeout 5m' 0
-
+helm upgrade --install rel chart --wait --timeout 5m' -
 expect "helm without --wait is not a timeout finding" \
 '#!/bin/bash
 set -euo pipefail
-helm upgrade --install rel chart' 0
-
+helm upgrade --install rel chart' -
 # --- pipefail --------------------------------------------------------------
 expect "pipefail fires on a risky producer in a pipeline" \
 '#!/bin/bash
 set -eu
-curl -fsSL --tlsv1.2 -m 5 "$url" | bash' 1 pipefail
-
+curl -fsSL --tlsv1.2 -m 5 "$url" | bash' pipefail
 expect "pipefail is silent once set -o pipefail is present" \
 '#!/bin/bash
 set -euo pipefail
-curl -fsSL --tlsv1.2 -m 5 "$url" | bash' 0
-
+curl -fsSL --tlsv1.2 -m 5 "$url" | bash' -
 expect "pipefail accepts the split form set -eu -o pipefail" \
 '#!/bin/bash
 set -eu -o pipefail
-curl -fsSL --tlsv1.2 -m 5 "$url" | bash' 0
-
+curl -fsSL --tlsv1.2 -m 5 "$url" | bash' -
 # ---- the two gaps the mutation run found ---------------------------------
 # Neither of these had a case, and both are DOCUMENTED behaviours -- which is the
 # exact shape backend#1788 is about: a precision claim in prose that nothing
@@ -178,13 +195,11 @@ curl -fsSL --tlsv1.2 -m 5 "$url" | bash' 0
 expect "curl-tls still fires on a DOWNGRADED --tlsv1.0" \
 '#!/bin/bash
 set -euo pipefail
-curl -fsSL --tlsv1.0 --max-time 30 "$url" -o out' 1 curl-tls
-
+curl -fsSL --tlsv1.0 --max-time 30 "$url" -o out' curl-tls
 expect "curl-tls still fires on --tlsv1.1" \
 '#!/bin/bash
 set -euo pipefail
-curl -fsSL --tlsv1.1 --max-time 30 "$url" -o out' 1 curl-tls
-
+curl -fsSL --tlsv1.1 --max-time 30 "$url" -o out' curl-tls
 # THE PIPEFAIL DETECTOR READS THE MASKED LINE, NOT THE RAW ONE, and house-rules.sh
 # says why in a comment: reading raw let `echo "set -o pipefail"` inside a STRING
 # mark the whole file safe and suppress every real finding. That is a bug that was
@@ -205,14 +220,12 @@ expect "a quoted \"set -o pipefail\" does NOT mark the file safe" \
 '#!/bin/bash
 set -eu
 echo "please set -o pipefail here"
-curl -fsSL --tlsv1.2 -m 5 "$url" | bash' 1 pipefail
-
+curl -fsSL --tlsv1.2 -m 5 "$url" | bash' pipefail
 expect "...nor does one in a variable assignment" \
 '#!/bin/bash
 set -eu
 MSG="run set -o pipefail first"
-curl -fsSL --tlsv1.2 -m 5 "$url" | bash' 1 pipefail
-
+curl -fsSL --tlsv1.2 -m 5 "$url" | bash' pipefail
 # ==================================================== the lexer's own claims
 # The header makes six precision promises. Each is a documented reason the rules
 # do NOT fire, and each is therefore a way the checker could start crying wolf
@@ -222,75 +235,64 @@ expect "a tool named only in a COMMENT is not a finding" \
 '#!/bin/bash
 set -euo pipefail
 # curl -fsSL "$url" would need --tlsv1.2 and --max-time here
-echo ok' 0
-
+echo ok' -
 expect "a tool inside a HEREDOC BODY is data, not code" \
 '#!/bin/bash
 set -euo pipefail
 cat <<EOF
 curl -fsSL http://example.com
-EOF' 0
-
+EOF' -
 expect "a quoted heredoc tag is still skipped" \
 "#!/bin/bash
 set -euo pipefail
 cat <<'EOF'
 curl -fsSL http://example.com
-EOF" 0
+EOF" -
 
 expect "a tool name in ARGUMENT position is not a command" \
 '#!/bin/bash
 set -euo pipefail
 command -v curl >/dev/null || exit 1
-echo "using curlimages/curl as the image"' 0
-
+echo "using curlimages/curl as the image"' -
 expect "a \`-continuation is ONE logical command" \
 '#!/bin/bash
 set -euo pipefail
 curl -fsSL --tlsv1.2 \
   --max-time 30 \
-  "$url" -o out' 0
-
+  "$url" -o out' -
 expect "curl inside \$( ) IS seen, even within double quotes" \
 '#!/bin/bash
 set -euo pipefail
 x="$(curl -fsSL "$url" | awk "{print}")"
-echo "$x"' 1 curl-tls
-
+echo "$x"' curl-timeout,curl-tls
 expect "a flag-holding variable satisfies the rule" \
 '#!/bin/bash
 set -euo pipefail
 readonly CURL_SECURE="--tlsv1.2 --max-time 30"
-curl -fsSL $CURL_SECURE "$url" -o out' 0
-
+curl -fsSL $CURL_SECURE "$url" -o out' -
 # ======================================================= documented stand-downs
 expect "curl --version is ignored" \
 '#!/bin/bash
 set -euo pipefail
-curl --version' 0
-
+curl --version' -
 expect "a POSIX-sh script is exempt from pipefail" \
 '#!/bin/sh
 set -eu
-curl -fsSL --tlsv1.2 -m 5 "$url" | bash' 0
-
+curl -fsSL --tlsv1.2 -m 5 "$url" | bash' -
 # ============================================================ the pragmas
 expect "a bare ignore pragma silences the line" \
 '#!/bin/bash
 set -euo pipefail
-curl -fsSL "$url" -o out   # house-rules: ignore' 0
-
+curl -fsSL "$url" -o out   # house-rules: ignore' -
 expect "a SCOPED pragma silences only the named rule" \
 '#!/bin/bash
 set -euo pipefail
-curl -fsSL "$url" -o out   # house-rules: ignore=curl-tls' 1 curl-timeout
-
+curl -fsSL "$url" -o out   # house-rules: ignore=curl-tls' curl-timeout
 expect "a pragma on the line ABOVE also applies" \
 '#!/bin/bash
 set -euo pipefail
 # house-rules: ignore
-curl -fsSL "$url" -o out' 0
-
+curl -fsSL "$url" -o out' -
 # ================================================== the repo-wide stand-downs
 # Reachable only because the fixtures live in a real git repo (see the note at
 # the top). Both were prose until now.

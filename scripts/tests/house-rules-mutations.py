@@ -68,6 +68,17 @@ MUTATIONS = [
     ("pipefail reads the RAW line, so a quoted string marks a file safe",
      "if (lmask ~ /(^|[[:space:];])set[[:space:]]+",
      "if (lraw ~ /(^|[[:space:];])set[[:space:]]+"),
+
+    # --- the suppression pragmas stop being precise ------------------------
+    # `ignore=a,b` degrading to a bare `ignore` is the mutation Bugbot's finding on
+    # .github#291 implies: under the first version of the suite's `expect` helper --
+    # which asked "does this rule appear somewhere" instead of "which rules fired" --
+    # the scoped-pragma case passed with the scoping disabled, because the OTHER rule
+    # fired either way. The case existed to prove `ignore=` narrows to one rule and
+    # could not have failed if it didn't. It reddens now.
+    ("a scoped `ignore=` degrades to silencing every rule on the line",
+     "if (match(line_txt, /house-rules:[[:space:]]*ignore=[A-Za-z0-9_,.-]+/)) {",
+     "if (0) {"),
 ]
 
 
