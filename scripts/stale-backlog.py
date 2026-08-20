@@ -58,6 +58,14 @@ ITEM_PAGE = 10
 # everything look like Backlog, and either way mass-closing is the wrong response.
 MAX_ACTIONS = 40
 
+# The status a truncated read reports, distinct from None. None means "no card / no
+# Status", which is ordinary and expected; TRUNCATED means "we could not tell", which
+# is a defect in the read. Collapsing them would make a query regression -- every
+# label list cut, every issue skipped -- indistinguishable from an empty backlog
+# (Bugbot, #288). A sentinel object rather than a string, so it can never equal
+# ELIGIBLE_STATUS or any column somebody adds.
+TRUNCATED = object()
+
 STALE_COMMENT = (
     "This issue has had no activity for 6 weeks and is in `Backlog`.\n\n"
     "If it is still relevant, leave a comment with current context or assign "
@@ -203,8 +211,11 @@ def decide(issue, project_number, now):
     if truncated(label_conn, LABEL_PAGE):
         n = len((label_conn or {}).get("nodes") or [])
         t = (label_conn or {}).get("totalCount")
+        # TRUNCATED, not merely None. The caller counts these separately and
+        # `--strict` fails on them: a skip nobody counts is a clean-looking sweep
+        # (Bugbot, #288). See the note above the counters in main().
         return None, (f"label list truncated ({n} of {t}) -- cannot rule out an "
-                      "exempt label"), status
+                      "exempt label"), TRUNCATED
 
     if labels & EXEMPT_LABELS:
         return None, f"exempt label ({', '.join(sorted(labels & EXEMPT_LABELS))})", status
@@ -267,10 +278,18 @@ def main():
               "Nothing was staled or closed.")
         return 2
 
-    due, skipped, unknown = [], [], 0
+    # THREE COUNTERS, because "skipped" was hiding a defect inside a normal outcome
+    # (Bugbot, #288). A truncated label read is not the same event as an issue that
+    # simply is not in Backlog: the first means the sweep COULD NOT TELL. Before this,
+    # a query that stopped asking for `totalCount` skipped every issue, printed
+    # `0 due` and exited 0 -- the same signal as a genuinely empty backlog, on an
+    # unattended weekly cron.
+    due, skipped, unknown, cut = [], [], 0, 0
     for issue in issues:
         action, reason, status = decide(issue, a.project, now)
-        if status is None:
+        if status is TRUNCATED:
+            cut += 1
+        elif status is None:
             unknown += 1
         if action:
             due.append((issue, action, reason))
@@ -278,7 +297,16 @@ def main():
             skipped.append((issue, reason))
 
     print(f"{a.repo}: {len(issues)} open issue(s), {len(due)} due, {len(skipped)} skipped"
-          f"{f', {unknown} with no readable Status' if unknown else ''}")
+          f"{f', {unknown} with no readable Status' if unknown else ''}"
+          f"{f', {cut} with a TRUNCATED label read' if cut else ''}")
+
+    # LOUD EVEN WITHOUT --strict, because this one is not an environment problem the
+    # operator can shrug at: it means the query and this script disagree. Every issue
+    # cut is an issue whose `keep-open` we could not rule out.
+    if cut:
+        print(f"::warning::{cut} issue(s) had a truncated label read and were skipped. "
+              f"Raise LABEL_PAGE (currently {LABEL_PAGE}) or check that ISSUES_Q still "
+              "requests `totalCount` -- without it every label list reads as cut.")
 
     if len(due) > MAX_ACTIONS:
         print(f"::error::{len(due)} issues are due, over the MAX_ACTIONS={MAX_ACTIONS} "
@@ -297,6 +325,14 @@ def main():
     if failed:
         print(f"::error::{failed} action(s) failed. Re-run once the cause is fixed.")
         return 1
+    # `cut` FAILS --strict TOO. It was outside the strict test entirely, so the one
+    # mode that exists to make an incomplete sweep visible could not see the most
+    # complete way for a sweep to be incomplete.
+    if cut and a.strict:
+        print(f"::error::--strict: {cut} issue(s) had a truncated label read, so an "
+              "exempt label could not be ruled out. They were skipped, which is safe, "
+              "but the sweep did not establish eligibility for them.")
+        return 2
     if unknown and a.strict:
         print(f"::error::--strict: {unknown} issue(s) had no readable board Status, so "
               "their eligibility is UNKNOWN. They were skipped, which is safe, but the "

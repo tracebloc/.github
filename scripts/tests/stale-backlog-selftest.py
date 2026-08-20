@@ -138,6 +138,85 @@ record(sb.MAX_ACTIONS > 0 and sb.ELIGIBLE_STATUS == "Backlog"
        "the constants are the ones the workflow documents",
        f"MAX_ACTIONS={sb.MAX_ACTIONS} status={sb.ELIGIBLE_STATUS!r} exempt={sb.EXEMPT_LABELS}")
 
+# --- a truncated read is COUNTED, not folded into "skipped" ---------------------
+# decide() must report truncation as its own status so main() can count it. Folding it
+# into None -- "no card", an ordinary outcome -- is what let a query regression print
+# `0 due` and exit 0 on an unattended cron.
+act, why, st = sb.decide(issue(days_idle=100, labels=[f"l{i}" for i in range(40)],
+                              label_total=41), 2, NOW)
+record(st is sb.TRUNCATED, "a truncated read reports status TRUNCATED, not None",
+       f"got {st!r} — None means 'no card', which is normal; this is a failed read")
+record(sb.TRUNCATED is not None,
+       "TRUNCATED is a distinct sentinel, not None or a string",
+       f"{sb.TRUNCATED!r} — a string could collide with a real column name")
+
+# An ordinary no-card issue must NOT be counted as truncated, or the new counter
+# fires on every repo with an unfiled issue and the signal is worthless.
+act, why, st = sb.decide(issue(days_idle=100, no_card=True), 2, NOW)
+record(st is None, "an ordinary no-card issue is None, not TRUNCATED", f"got {st!r}")
+
+# --- main() ACTUALLY DRIVEN, because two mutations lived where no case looked -----
+# The cases above call decide() directly. Mutations that stopped incrementing the
+# `cut` counter, or removed truncation from `--strict`, left every one of them green
+# -- and the whole point of this finding was that a skip nobody counts reads as a
+# clean sweep. The gap was in main(), so main() is what gets driven.
+#
+# Behavioural, not a source assertion: fetch_issues and apply are the only network
+# seams, so stubbing them is enough to run the real argument parsing, the real
+# counters and the real exit codes.
+def run_main(issues, argv):
+    import contextlib
+    import io
+    real_fetch, real_apply = sb.fetch_issues, sb.apply
+    sb.fetch_issues = lambda owner, name: issues
+    sb.apply = lambda repo, num, action, dry: (True, "")
+    old = sys.argv
+    sys.argv = ["stale-backlog.py", *argv]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = sb.main()
+    finally:
+        sb.fetch_issues, sb.apply, sys.argv = real_fetch, real_apply, old
+    return rc, buf.getvalue()
+
+_cut = issue(days_idle=100, labels=[f"l{i}" for i in range(40)], label_total=41)
+
+rc, out = run_main([_cut], ["--repo", "o/r", "--strict"])
+record(rc == 2, "--strict FAILS when a label read was truncated", f"rc={rc}")
+record("TRUNCATED label read" in out, "...and the summary counts it separately",
+       out.strip().splitlines()[0] if out.strip() else "(no output)")
+
+rc, out = run_main([_cut], ["--repo", "o/r"])
+record(rc == 0 and "::warning::" in out,
+       "without --strict it still WARNS rather than passing silently",
+       "a truncated sweep printing `0 due` and exiting 0 is the finding itself")
+
+# And the counter must not fire on an ordinary sweep, or the signal is noise.
+rc, out = run_main([issue(days_idle=100)], ["--repo", "o/r", "--strict"])
+record(rc == 0 and "TRUNCATED" not in out,
+       "a clean sweep reports no truncation and passes --strict", f"rc={rc}")
+
+# --- the LIVE QUERY must actually ask for totalCount (Bugbot, #288) -------------
+# The cases below build their own payloads, so they say nothing about whether
+# ISSUES_Q requests the field they all supply. Drop `totalCount` from the live query
+# and every fixture stays green while production treats EVERY label list as cut and
+# sweeps nothing. That is the same restate-instead-of-derive shape as the meta
+# fixture on .github#289, in the other direction: the test was richer than the query.
+#
+# Asserted against the query TEXT, which is the producer, not against a copy here.
+record("totalCount" in sb.ISSUES_Q,
+       "ISSUES_Q asks for totalCount at all",
+       "without it `truncated()` reports True for every issue and nothing is swept")
+_lab = sb.ISSUES_Q[sb.ISSUES_Q.index("labels("):]
+record("totalCount" in _lab[:_lab.index("}")],
+       "...on the LABELS connection specifically",
+       _lab[:_lab.index("}") + 1])
+_it = sb.ISSUES_Q[sb.ISSUES_Q.index("projectItems("):]
+record("totalCount" in _it[:60],
+       "...and on the projectItems connection",
+       _it[:60])
+
 # --- truncation is fail-open on the destructive path (Bugbot, #288) -----------
 # A `keep-open` label past the page would read as ABSENT and the issue would be
 # closed. Unlike an unreadable Status -- which lands on "not Backlog" and skips
