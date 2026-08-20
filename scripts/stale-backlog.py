@@ -255,6 +255,39 @@ def apply(repo, number, action, dry_run):
         return False, exc.detail
 
 
+def ensure_label(repo, dry_run):
+    """Make sure STALE_LABEL exists on `repo`. Returns (ok, detail).
+
+    `actions/stale` CREATED this label; `gh issue edit --add-label` does not -- it
+    fails when the label is undefined on the repo (Bugbot, #288). Measured across the
+    org on 2026-08-20: only 11 of 19 repos have it, and the eight without include
+    `.github` itself, where this reusable lives. So without this the warn step would
+    have failed on the first repo it ran in, gone red, and left every issue outside
+    the 14-day close window -- a sweep that can never progress past its first stage.
+    The label exists in the other eleven only because `actions/stale` happened to
+    create it there.
+
+    Idempotent by asking first rather than by `--force`: `--force` rewrites the colour
+    and description on every weekly run, so eleven repos would get a no-op edit
+    forever to spare eight a one-line create.
+    """
+    probe = subprocess.run(
+        ["gh", "api", f"repos/{repo}/labels/{STALE_LABEL}", "--jq", ".name"],
+        capture_output=True, text=True)
+    if probe.returncode == 0:
+        return True, "exists"
+    if dry_run:
+        return True, f"would create `{STALE_LABEL}` (dry run)"
+    made = subprocess.run(
+        ["gh", "label", "create", STALE_LABEL, "--repo", repo,
+         "--description", "No activity for 6 weeks while in Backlog (stale-backlog.yml)",
+         "--color", "ededed"],
+        capture_output=True, text=True)
+    if made.returncode != 0:
+        return False, (made.stderr or "").strip()[:200] or "gh label create failed"
+    return True, f"created `{STALE_LABEL}`"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -313,6 +346,18 @@ def main():
               "ceiling. That is a bug in the eligibility rule or a board outage that "
               "made everything read as Backlog, not real drift. Refusing to act.")
         return 2
+
+    # THE LABEL HAS TO EXIST BEFORE THE FIRST WARN, and only if a warn is actually
+    # due -- a close-only run needs nothing created, and a repo with nothing due
+    # should not acquire a label it never uses.
+    if any(action == "stale" for _, action, _ in due):
+        ok, detail = ensure_label(a.repo, a.dry_run)
+        print(f"  label: {detail}")
+        if not ok:
+            print(f"::error::cannot add `{STALE_LABEL}` on {a.repo}: {detail}. "
+                  "Refusing to warn: every `gh issue edit --add-label` would fail, "
+                  "the run would go red, and no issue would enter the close window.")
+            return 2
 
     failed = 0
     for issue, action, reason in due:

@@ -164,12 +164,27 @@ record(st is None, "an ordinary no-card issue is None, not TRUNCATED", f"got {st
 # Behavioural, not a source assertion: fetch_issues and apply are the only network
 # seams, so stubbing them is enough to run the real argument parsing, the real
 # counters and the real exit codes.
-def run_main(issues, argv):
+def run_main(issues, argv, label=(True, "exists"), calls=None):
+    """Drive main() with every network seam stubbed.
+
+    `ensure_label` IS ONE OF THOSE SEAMS, and forgetting it was caught by this suite
+    rather than by review: the clean-sweep case started returning 2 because
+    ensure_label ran a real `gh` against the fixture repo `o/r`. A stub list that is
+    one short is a test measuring the machine it runs on.
+
+    `calls` collects the label probes so a case can assert one did NOT happen.
+    """
     import contextlib
     import io
-    real_fetch, real_apply = sb.fetch_issues, sb.apply
+    real_fetch, real_apply, real_label = sb.fetch_issues, sb.apply, sb.ensure_label
+
+    def _label(repo, dry):
+        if calls is not None:
+            calls.append((repo, dry))
+        return label
     sb.fetch_issues = lambda owner, name: issues
     sb.apply = lambda repo, num, action, dry: (True, "")
+    sb.ensure_label = _label
     old = sys.argv
     sys.argv = ["stale-backlog.py", *argv]
     buf = io.StringIO()
@@ -177,7 +192,8 @@ def run_main(issues, argv):
         with contextlib.redirect_stdout(buf):
             rc = sb.main()
     finally:
-        sb.fetch_issues, sb.apply, sys.argv = real_fetch, real_apply, old
+        sb.fetch_issues, sb.apply, sb.ensure_label = real_fetch, real_apply, real_label
+        sys.argv = old
     return rc, buf.getvalue()
 
 _cut = issue(days_idle=100, labels=[f"l{i}" for i in range(40)], label_total=41)
@@ -196,6 +212,77 @@ record(rc == 0 and "::warning::" in out,
 rc, out = run_main([issue(days_idle=100)], ["--repo", "o/r", "--strict"])
 record(rc == 0 and "TRUNCATED" not in out,
        "a clean sweep reports no truncation and passes --strict", f"rc={rc}")
+
+# --- ensure_label ITSELF, not just its call site ---------------------------------
+# The cases below stub `ensure_label`, so they pin WHEN it is called and nothing about
+# what it does. A mutation making it report success on a failed `gh label create` left
+# all 49 green -- the same function-versus-wiring split that bit .github#289 and the
+# `cut` counter earlier on this PR, now in the third place. So the real function runs
+# here, with `subprocess.run` stubbed instead.
+class _Proc:
+    def __init__(self, rc, err=""):
+        self.returncode, self.stderr, self.stdout = rc, err, ""
+
+
+def _drive_ensure(probe_rc, create_rc, create_err="", dry=False):
+    """Run the real ensure_label with both `gh` calls faked. Returns (result, argv)."""
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+        if cmd[:2] == ["gh", "api"]:
+            return _Proc(probe_rc)
+        return _Proc(create_rc, create_err)
+    real = sb.subprocess.run
+    sb.subprocess.run = fake_run
+    try:
+        return sb.ensure_label("o/r", dry), seen
+    finally:
+        sb.subprocess.run = real
+
+(ok, detail), seen = _drive_ensure(probe_rc=0, create_rc=0)
+record(ok and detail == "exists" and len(seen) == 1,
+       "an existing label is detected and nothing is created",
+       f"{detail!r}, {len(seen)} gh call(s) — eleven of nineteen repos are this case")
+
+(ok, detail), seen = _drive_ensure(probe_rc=1, create_rc=0)
+record(ok and "created" in detail and len(seen) == 2,
+       "a missing label is created", f"{detail!r}, {len(seen)} gh call(s)")
+
+(ok, detail), seen = _drive_ensure(probe_rc=1, create_rc=1, create_err="HTTP 403 forbidden")
+record(ok is False and "403" in detail,
+       "a FAILED create reports False and carries the reason",
+       f"{(ok, detail)!r} — reporting True here is a warn loop that fails per issue")
+
+(ok, detail), seen = _drive_ensure(probe_rc=1, create_rc=0, dry=True)
+record(ok and "dry run" in detail and len(seen) == 1,
+       "--dry-run does not create the label",
+       f"{detail!r}, {len(seen)} gh call(s) — a dry run must change nothing")
+
+# --- the `stale` label must exist before the first warn (Bugbot, #288) ----------
+# `actions/stale` created this label; `gh issue edit --add-label` does not -- it fails
+# on a label the repo has never defined. Measured across the org 2026-08-20: only
+# 11 of 19 repos have it, and the eight without include `.github`, where this reusable
+# lives. So the warn step would have failed on the first repo it ran in.
+_warn = issue(days_idle=100)          # 100d idle, no stale label yet -> warn is due
+_close = issue(days_idle=20, labels=["stale"])   # already warned -> close is due
+
+rc, out = run_main([_warn], ["--repo", "o/r"], label=(False, "no permission"))
+record(rc == 2 and "Refusing to warn" in out,
+       "a label that cannot be created REFUSES the warn instead of failing per-issue",
+       f"rc={rc} — per-issue failures would redden the run and warn nobody")
+
+_calls = []
+rc, out = run_main([_close], ["--repo", "o/r"], calls=_calls)
+record(rc == 0 and _calls == [],
+       "a close-only run does not touch the label at all",
+       f"calls={_calls} — a repo with nothing to warn should not acquire the label")
+
+_calls = []
+rc, out = run_main([_warn], ["--repo", "o/r"], calls=_calls)
+record(rc == 0 and len(_calls) == 1,
+       "a warn-due run ensures the label exactly once",
+       f"calls={_calls} — once per run, not once per issue")
 
 # --- the LIVE QUERY must actually ask for totalCount (Bugbot, #288) -------------
 # The cases below build their own payloads, so they say nothing about whether
