@@ -73,6 +73,28 @@ jobs:
       # `owner:` makes the token ORG-scoped; a repo-scoped one cannot read the
       # project at all, and this sweep would then skip every issue as UNKNOWN —
       # silent and safe, but wrong.
+      #
+      # SCOPED FROM THE START (backend#2157), derived from what the sweep actually
+      # calls rather than from what the App happens to hold:
+      #
+      #   issues: write               `issue edit --add-label`, `issue comment`,
+      #                              `issue close` (stale-backlog.py:188-192)
+      #   organization-projects: read  ISSUES_Q reads `projectItems .. Status`; the
+      #                              sweep never writes a board field
+      #
+      # No `pull-requests` — this workflow does not touch PRs, by design
+      # (backend#1408: it sweeps issues only). No `contents` — the App token is used
+      # ONLY as `GH_TOKEN` for the sweep; the `.github` checkout below uses the
+      # workflow token and `persist-credentials: false`.
+      #
+      # `repositories:` NARROWS THE ISSUE WRITES to the caller's own repo, which is
+      # exactly the sweep's scope: `--repo "${{ github.repository }}"`. Without it a
+      # destructive, unattended sweep would hold issue-close rights on all 19 repos
+      # while only ever closing in one.
+      #
+      # ORG PROJECTS IS UNAFFECTED BY REPO SCOPING -- measured, not assumed:
+      # backend#2181's verification run (32255581084) wrote the org project with
+      # `repositories:` set. That was the load-bearing unknown and it is settled.
       - name: Mint an installation token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -80,6 +102,9 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-issues: write
+          permission-organization-projects: read
 
       # The script comes from .github, not the caller: one copy of the rule.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
