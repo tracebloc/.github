@@ -51,10 +51,33 @@ HR=${HR:-scripts/house-rules.sh}
 # see the table. Recorded because the wrong conclusion was one commit away, and
 # because it means any future case about repo-wide state has to live in here.
 WORK=$(mktemp -d) || exit 2
-trap 'rm -rf "$WORK"' EXIT
+# THE TRAP HAS TO CLEAN THE CHECKOUT TOO, not just $WORK (Bugbot, .github#291). The
+# adversarial control below writes a deliberate `curl` violation INTO THIS REPO and
+# `git add`s it, because `--all` enumerates with `git ls-files` and cannot see an
+# untracked file. An interrupt between the add and the cleanup would leave
+# `.hr-control.sh` staged -- and that file is itself a house-rules hit, so the next
+# `make check` would fail on leftover test state and point at the wrong thing.
+CONTROL=scripts/tests/.hr-control.sh
+cleanup() {
+  rm -rf "$WORK"
+  git rm -q -f --cached "$CONTROL" >/dev/null 2>&1 || true
+  rm -f "$CONTROL"
+}
+trap cleanup EXIT INT TERM
 HR_ABS=$(cd "$(dirname "$HR")" && pwd)/$(basename "$HR")
 ( cd "$WORK" && git init -q . && git config user.email t@t && git config user.name t ) || exit 2
 
+# HERE-STRINGS, NEVER `printf … | grep -q` (Bugbot, .github#291). `grep -q` exits on
+# its first match and SIGPIPEs the writer; under `set -o pipefail` the PIPELINE can
+# then take status 141, and the negated form (`! … | grep -q`) reads 141 as "absent"
+# -- so a `disable:` directive that did nothing would record a PASS.
+#
+# Honest about reach: `printf` of a short string usually completes before `grep`
+# leaves, so 141 is unlikely here rather than impossible -- the same measurement
+# release-train's fr-evidence.sh records (SIGPIPE needs the writer alive, which for a
+# fetch-write-exit process means output past the 64K pipe buffer). It is changed
+# anyway because a here-string is simply the smaller construction: no pipe, so no
+# pipefail interaction for the next reader to re-derive.
 PASS=0; FAIL=0
 record() {  # $1 ok(0/1) · $2 name · $3 detail
   if [ "$1" = 0 ]; then
@@ -313,7 +336,7 @@ record "$RC" "a SOURCED library is exempt from pipefail" "rc=$RC out=$OUT"
 printf '#!/bin/bash\nset -eu\ncurl -fsSL --tlsv1.2 -m 5 "$u" | bash\n' > "$WORK/lonely.sh"
 ( cd "$WORK" && git add lonely.sh >/dev/null 2>&1 )
 run_on "lonely.sh"
-if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q pipefail; then
+if [ "$RC" = 1 ] && grep -q pipefail <<<"$OUT"; then
   record 0 "an UNSOURCED library is not exempt" ""
 else
   record 1 "an UNSOURCED library is not exempt" "rc=$RC out=$OUT"
@@ -334,7 +357,7 @@ printf '%s\n' "$BAD" > "$WORK/c.sh"; ( cd "$WORK" && git add c.sh >/dev/null 2>&
 
 cfg 'disable: curl-tls'
 run_cfg c.sh
-if [ "$RC" = 1 ] && ! printf '%s' "$OUT" | grep -q curl-tls; then
+if [ "$RC" = 1 ] && ! grep -q curl-tls <<<"$OUT"; then
   record 0 "\`disable:\` turns off exactly the named rule" ""
 else record 1 "\`disable:\` turns off exactly the named rule" "rc=$RC out=$OUT"; fi
 
@@ -352,7 +375,7 @@ cfg 'wrapper: spin_cmd'
 printf '#!/bin/bash\nset -euo pipefail\nspin_cmd curl -fsSL "$url"\n' > "$WORK/wr.sh"
 ( cd "$WORK" && git add wr.sh >/dev/null 2>&1 )
 run_cfg wr.sh
-if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q curl-tls; then
+if [ "$RC" = 1 ] && grep -q curl-tls <<<"$OUT"; then
   record 0 "\`wrapper:\` puts the wrapped tool back in command position" ""
 else record 1 "\`wrapper:\` puts the wrapped tool back in command position" "rc=$RC out=$OUT"; fi
 
@@ -360,7 +383,7 @@ cfg 'rule: no-print | *.py | ^[[:space:]]*print\( | use the logger, not print()'
 printf 'def f():\n    print("x")\n' > "$WORK/p.py"
 ( cd "$WORK" && git add p.py >/dev/null 2>&1 )
 run_cfg p.py
-if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q no-print; then
+if [ "$RC" = 1 ] && grep -q no-print <<<"$OUT"; then
   record 0 "a custom \`rule:\` matches a language the script knows nothing about" ""
 else record 1 "a custom \`rule:\` matches a language the script knows nothing about" "rc=$RC out=$OUT"; fi
 
@@ -380,7 +403,7 @@ else record 1 "a custom \`rule:\` matches a language the script knows nothing ab
 # It is pinned so that if it ever CHANGES, the change is deliberate -- and if CI
 # ever starts passing explicit paths, this case is where the exposure shows up.
 OUT=$( cd "$WORK" && sh "$HR_ABS" --config /dev/null nosuchfile.sh 2>&1 ); RC=$?
-if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q "no shell files"; then
+if [ "$RC" = 0 ] && grep -q "no shell files" <<<"$OUT"; then
   record 0 "a named missing path is 'no shell files' + rc 0 (CI-unreachable)" ""
 else record 1 "a named missing path is 'no shell files' + rc 0 (CI-unreachable)" "rc=$RC out=$OUT"; fi
 
@@ -398,7 +421,7 @@ BASE_REF=$( cd "$BASEDIR" && git rev-parse HEAD )
   printf '#!/bin/bash\nset -eu\ncurl -fsSL "$u" | bash\n' > b.sh
   git add b.sh && git commit -q -m "delete a.sh, add a bad b.sh" ) >/dev/null 2>&1
 OUT=$( cd "$BASEDIR" && sh "$HR_ABS" --base "$BASE_REF" --config /dev/null 2>&1 ); RC=$?
-if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q curl-tls; then
+if [ "$RC" = 1 ] && grep -q curl-tls <<<"$OUT"; then
   record 0 "--base over a diff with a DELETED file still checks the survivors" ""
 else
   record 1 "--base over a diff with a DELETED file still checks the survivors" "rc=$RC out=$OUT"
@@ -409,7 +432,7 @@ record "$([ "$RC" = 2 ] && echo 0 || echo 1)" \
   "an unknown flag exits 2 (usage), not 0" "rc=$RC out=$OUT"
 
 OUT=$( cd "$WORK" && sh "$HR_ABS" --config /dev/null --soft-fail c.sh 2>&1 ); RC=$?
-if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q curl-tls; then
+if [ "$RC" = 0 ] && grep -q curl-tls <<<"$OUT"; then
   record 0 "--soft-fail reports the finding and still exits 0" ""
 else record 1 "--soft-fail reports the finding and still exits 0" "rc=$RC out=$OUT"; fi
 
@@ -432,12 +455,13 @@ record "$RC" "ZERO findings over this repo's own prose-dense scripts" "rc=$RC ou
 # `git add`ed, because `--all` enumerates with `git ls-files` -- TRACKED files only
 # (house-rules.sh:252). An untracked control is invisible, so the first version of
 # this case "passed" the clean assertion and failed the control for the wrong reason.
-printf '#!/bin/bash\nset -eu\ncurl -fsSL "$u" | bash\n' > scripts/tests/.hr-control.sh
-git add -f scripts/tests/.hr-control.sh >/dev/null 2>&1
+printf '#!/bin/bash\nset -eu\ncurl -fsSL "$u" | bash\n' > "$CONTROL"
+git add -f "$CONTROL" >/dev/null 2>&1
 OUT2=$( sh "$HR" --all --config /dev/null 2>&1 ); RC2=$?
-git rm -q -f --cached scripts/tests/.hr-control.sh >/dev/null 2>&1
-rm -f scripts/tests/.hr-control.sh
-if [ "$RC2" = 1 ] && printf '%s' "$OUT2" | grep -q curl-tls; then
+# Removed here for the normal path AND by the EXIT trap for every other path.
+git rm -q -f --cached "$CONTROL" >/dev/null 2>&1
+rm -f "$CONTROL"
+if [ "$RC2" = 1 ] && grep -q curl-tls <<<"$OUT2"; then
   record 0 "...and a violation injected into that corpus IS caught" \
     "so the clean result above is a clean corpus, not a dead matcher"
 else
