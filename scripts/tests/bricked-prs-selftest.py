@@ -64,7 +64,7 @@ def install(protection, prs, age=999.0):
 
 
 def pr(number=1, draft=False, contexts=(), state="CLEAN", review="APPROVED",
-       author="a-human", bugbot=True):
+       author="a-human", is_bot=False, bugbot=True):
     """A NORMAL PR carries a Cursor Bugbot check, so the default fixture has one.
 
     Otherwise every case written for the required-check logic would also trip the
@@ -79,7 +79,12 @@ def pr(number=1, draft=False, contexts=(), state="CLEAN", review="APPROVED",
         "number": number, "isDraft": draft, "title": "t", "url": "u",
         "headRefOid": "deadbeef", "mergeStateStatus": state,
         "reviewDecision": review,
-        "author": {"login": author},
+        # THE SHAPE `gh pr list --json author` ACTUALLY RETURNS, measured rather
+        # than assumed: `{"is_bot": true, "login": "app/dependabot"}`. The first
+        # version of this fixture used `dependabot[bot]`, which is the REST/UI form
+        # and never appears here -- so the exemption test passed while the exemption
+        # could not fire (Bugbot, .github#282).
+        "author": {"login": author, "is_bot": is_bot},
         "statusCheckRollup": rollup,
     }
 
@@ -125,6 +130,23 @@ record(not f, "a legacy status context counts as present",
        "the rollup carries check runs as `name` and statuses as `context`; "
        f"reading only one under-reports every legacy check (findings={f})")
 
+# A branch with ZERO required checks must STILL surface a missing review
+# (saadqbal + Bugbot, #282). The reviewer check does not depend on branch
+# protection, and gating it on `required` made the watcher silent on exactly the
+# branches with the least protection. Case 8 above did not catch this because the
+# default fixture now carries a Bugbot row.
+install(FakeProtection(set()), [pr(contexts=[], bugbot=False)])
+f, e = bp.audit_repo("o", "r", ROLES)
+record(len(f) == 1 and f[0]["cause"] == "bugbot-absent",
+       "a branch with NO required checks still reports a missing review",
+       f"findings={f}")
+
+# And it still reports nothing when the review IS there — the zero-required branch
+# must not become noisy in the other direction.
+install(FakeProtection(set()), [pr(contexts=[])])
+f, e = bp.audit_repo("o", "r", ROLES)
+record(not f, "a zero-required branch with a review present is quiet", f"findings={f}")
+
 # --- the REVIEWER can go missing too (backend#2114) -------------------------
 # Measured 2026-08-17: Bugbot's auto-trigger dropped five open PRs across three
 # repos while reviewing others opened minutes before and hours after. The PR shows
@@ -156,9 +178,26 @@ record(not f, "a PR carrying a Bugbot check is not reported", f"findings={f}")
 # Bots are exempt, and that is measured rather than assumed: dependabot[bot] was
 # the one legitimately-absent case in the sample. Keyed on GitHub's `[bot]` suffix,
 # not a hand-kept list of names that would go stale.
-install(FakeProtection({"gate"}), [pr(contexts=["gate"], bugbot=False, author="dependabot[bot]")])
+install(FakeProtection({"gate"}), [pr(contexts=["gate"], bugbot=False,
+                                      author="app/dependabot", is_bot=True)])
 f, e = bp.audit_repo("o", "r", ROLES)
 record(not f, "a bot-authored PR with no Bugbot is NOT a finding", f"findings={f}")
+
+# The login form is NOT what exempts, and asserting that is the point: a PR whose
+# login merely LOOKS bot-ish but is not flagged `is_bot` must still be reported,
+# or the rule drifts back to name-matching.
+install(FakeProtection({"gate"}), [pr(contexts=["gate"], bugbot=False,
+                                      author="dependabot[bot]", is_bot=False)])
+f, e = bp.audit_repo("o", "r", ROLES)
+record(len(f) == 1 and f[0]["cause"] == "bugbot-absent",
+       "a bot-LOOKING login that is not flagged is_bot IS still reported",
+       f"findings={f}")
+
+# And the real shape exempts even when the login carries no bot marker at all.
+install(FakeProtection({"gate"}), [pr(contexts=["gate"], bugbot=False,
+                                      author="some-app", is_bot=True)])
+f, e = bp.audit_repo("o", "r", ROLES)
+record(not f, "is_bot alone exempts, whatever the login looks like", f"findings={f}")
 
 # Same young-head rule as the required-check case: a review that has not started
 # yet is not a drop.
@@ -174,8 +213,13 @@ _src = pathlib.Path(bp.__file__).read_text()
 record('"bugbot-absent": "UNREVIEWED"' in _src,
        "an absent review renders as UNREVIEWED, not BRICKED",
        "a missing review and a missing check need different labels")
-record('bugbot run' in _src,
-       "the report names the remedy (`bugbot run`), which no other cause suggests",
+# ASSERT THE RENDERED LINE, not the bare phrase (saadqbal, #282). `bugbot run`
+# also appears in this module's comments, so `'bugbot run' in _src` matched whether
+# or not the remedy was ever PRINTED -- deleting the print left the suite green.
+# My mutation missed it too, because it replaced every occurrence including the
+# comments, so it failed for the wrong reason and read as coverage.
+record('fix:   comment `bugbot run` on the PR.' in _src,
+       "the report PRINTS the remedy (`bugbot run`), which no other cause suggests",
        "a finding whose fix is unstated gets triaged as noise")
 
 # 6. FAIL CLOSED. An unreadable branch is not a clean branch.
@@ -206,6 +250,118 @@ record(not f and not e, "a branch requiring nothing produces no findings", f"fin
 
 # 9. An unreadable PR list is an error, not an empty list.
 bp.CD.read_protection = lambda org, name, branch: FakeProtection({"gate"})
+# --- the age lookup is paid by CANDIDATES ONLY ------------------------------
+# saadqbal (#282) wanted one lookup instead of two; Bugbot (#282) wanted none on a
+# healthy PR. Both are the same requirement read from opposite ends, and neither is
+# observable from a finding count -- so these assert the CALL COUNT directly.
+#
+# `install()` replaces head_age_minutes wholesale, so the counter wraps it here
+# rather than hiding inside the helper: a test that cannot see the call cannot
+# assert anything about when it happens.
+def counting_age(value):
+    box = {"n": 0}
+    def f(org, name, sha):
+        box["n"] += 1
+        return value
+    return box, f
+
+# A HEALTHY PR pays nothing. Bugbot present, every required context present.
+box, fake = counting_age(999.0)
+install(FakeProtection(["build"]), [pr(number=10, contexts=["build"])])
+bp.head_age_minutes = fake
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not findings and not errors and box["n"] == 0,
+       "a healthy PR costs ZERO age lookups",
+       f"lookups={box['n']} findings={[f['cause'] for f in findings]} — one uncached "
+       "call per healthy PR, fleet-wide, on the credential #2036 measured exhausted")
+
+# A PR failing BOTH checks pays exactly one. This is saadqbal's half: it was two.
+box, fake = counting_age(999.0)
+install(FakeProtection(["build"]), [pr(number=11, contexts=[], bugbot=False)])
+bp.head_age_minutes = fake
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(box["n"] == 1 and {f["cause"] for f in findings} == {"bugbot-absent", "never-reported"},
+       "a PR missing BOTH a review and a required check pays ONE lookup, not two",
+       f"lookups={box['n']} findings={[f['cause'] for f in findings]}")
+
+# An UNDATEABLE candidate is an error, not a silent skip. This is the polarity
+# Bugbot flagged: it used to fold into `young` and vanish, so a candidate that
+# looks wrong and cannot be judged produced nothing at all.
+box, fake = counting_age(None)
+install(FakeProtection(["build"]), [pr(number=12, contexts=[], bugbot=False)])
+bp.head_age_minutes = fake
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not findings and len(errors) == 1 and "NOT audited" in errors[0] and "#12" in errors[0],
+       "an undateable candidate is an UNKNOWN error, not a silent young-skip",
+       f"findings={[f['cause'] for f in findings]} errors={errors}")
+
+# And a genuinely young candidate is still skipped silently -- that one IS correct,
+# and without this the fix above could have turned every young PR into an error.
+box, fake = counting_age(5.0)
+install(FakeProtection(["build"]), [pr(number=13, contexts=[], bugbot=False)])
+bp.head_age_minutes = fake
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not findings and not errors,
+       "a genuinely YOUNG candidate is still skipped silently, with no error",
+       f"findings={[f['cause'] for f in findings]} errors={errors} — 'has not reported "
+       "yet' is not a finding and must not become one")
+
+
+# --- a rollup at the page size is UNKNOWN, never a finding -----------------
+# `gh` asks for `contexts(first: 100)` and does not say when it truncated, so a
+# context dropped by pagination looks exactly like a context that never ran. That
+# is fail-open in the one direction this whole file exists to close.
+#
+# The fixture is built so that WITHOUT the guard it yields two findings -- no
+# Bugbot and the required check missing -- and both are confident and wrong. So a
+# green result here cannot come from the scenario being harmless.
+big = pr(number=90, contexts=[f"filler-{i}" for i in range(bp.ROLLUP_CONTEXT_CAP)],
+         bugbot=False)
+install(FakeProtection(["build"]), [big])
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not findings and len(errors) == 1,
+       "a rollup at the page size produces an ERROR and no findings",
+       f"findings={[f['cause'] for f in findings]} errors={errors} — "
+       "without the guard this is bugbot-absent + never-reported, both false")
+record(errors and "NOT audited" in errors[0] and "#90" in errors[0],
+       "the error names the PR and says it was not audited",
+       f"errors={errors} — a silent skip is the same fail-open with better manners")
+
+# One under the cap is a NORMAL audit. Without this the guard could be `>= 0` and
+# the test above would still pass; this is what makes the boundary mean something.
+small = pr(number=91, contexts=[f"filler-{i}" for i in range(bp.ROLLUP_CONTEXT_CAP - 2)],
+           bugbot=False)
+install(FakeProtection(["build"]), [small])
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not errors and {f["cause"] for f in findings} == {"bugbot-absent", "never-reported"},
+       "one context under the page size is audited normally",
+       f"findings={[f['cause'] for f in findings]} errors={errors}")
+
+# A HEALTHY PR AT THE CAP IS NOT A REFUSAL (saadqbal, #282, second round).
+# Truncation only ever REMOVES names, so `unreviewed`/`missing` can be falsely
+# true and never falsely false: a PR that looks healthy on the partial list would
+# look healthy on the full one. Refusing it made a guard fire on the innocent case
+# -- and the cost was the whole run, because `main()` returns 2 on any error BEFORE
+# `return 1 if findings`, so one big healthy PR demoted every real finding in the
+# fleet to a second-class exit code.
+#
+# The fixture is at the cap AND complete: Bugbot present, `build` present.
+healthy_big = pr(number=99,
+                 contexts=[f"filler-{i}" for i in range(bp.ROLLUP_CONTEXT_CAP - 2)] + ["build"])
+install(FakeProtection(["build"]), [healthy_big])
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not findings and not errors,
+       "a HEALTHY PR at the page size is silent, not an error",
+       f"findings={[f['cause'] for f in findings]} errors={errors} — "
+       f"rollup is {len(healthy_big['statusCheckRollup'])} contexts, at the cap, "
+       "and complete; there is nothing pagination could have hidden")
+
+record(bp.rollup_truncated({"statusCheckRollup": [{"name": "x"}]}) is False
+       and bp.rollup_truncated({"statusCheckRollup": []}) is False,
+       "a small rollup is not truncated",
+       "the polarity, asserted directly rather than only through audit_repo")
+
+
 def _boom(org, name, base):
     raise bp.CD.GhError(None, "pr list exploded")
 bp.open_prs = _boom
@@ -284,7 +440,8 @@ try:
     age = bp.head_age_minutes("o", "r", "sha")
     record(age is None,
            "an unreadable check-suites read is undateable (None), not the commit date",
-           f"age={age!r} — a 502 here must read as young, never brick a 7-day-old commit")
+           f"age={age!r} — a 502 must not let a force-pushed 7-day-old commit read as "
+           "old; the CALLER now turns this None into an UNKNOWN error, not a young skip")
 finally:
     bp.CD.gh_json = _real_json
 
