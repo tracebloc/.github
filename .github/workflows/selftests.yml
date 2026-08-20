@@ -75,8 +75,25 @@ jobs:
       # the same rule. A new context would sit unrequired until someone armed it,
       # which is how a guard ends up advisory.
       #
-      # BOTH HALVES RUN, and they answer different questions: the suite proves the
-      # rule CATCHES (13 fixture cases, 8 mutations), this proves the fleet COMPLIES.
-      # Passing one while failing the other is possible in both directions.
+      # BOTH HALVES RUN, and they answer different questions: the fixture suite proves
+      # the rule CATCHES, this proves the fleet COMPLIES. Passing one while failing
+      # the other is possible in both directions. (No case count here on purpose --
+      # `mint-scope` prints its own, and a tally in prose is what backend#1729 is
+      # cited for.)
       - name: mint-scope (the real workflows, not fixtures)
         run: make mint-scope
+
+      # THE MUTATION TIER, in the SAME already-required context (backend#1788).
+      #
+      # `house-rules` is a required status check on develop, staging AND prod across
+      # 16 repos, and until #291 nothing tested it at all. The selftest above says the
+      # matcher works; this says the selftest would NOTICE if it stopped -- and it
+      # earned that distinction on its first run, catching two cases that passed the
+      # whole suite while the rule they described was broken.
+      #
+      # SAME REASONING AS THE STEP ABOVE, arrived at independently in two PRs: a new
+      # context sits unrequired until somebody arms it. Measured at ~58s (each
+      # mutation re-runs the ~3s suite), which is affordable on a runner and is why
+      # `make check` only resolves the anchors.
+      - name: mutation-check house-rules
+        run: make mutation-house-rules

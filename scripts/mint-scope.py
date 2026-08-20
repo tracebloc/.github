@@ -40,9 +40,17 @@ so finding none means the matcher broke, not that the fleet got clean.
 
 EXEMPTIONS ARE TEMPORARY, AND STALENESS IS A FINDING
 ----------------------------------------------------
-The 13 reusables that already carry a full grant are exempted by name with a
-reason, so this lands GREEN rather than as a red gate nobody can merge past (the
-rule that keeps a tier credible). But an exemption for a workflow that no longer
+The reusables that already carry a full grant are exempted BY NAME with a reason,
+so this lands GREEN rather than as a red gate nobody can merge past (the rule that
+keeps a tier credible).
+
+NO TALLY IN THIS PROSE, and the first draft had one -- it said 13 in two places
+while `EXEMPT` held 12 (saadqbal, #287). The 13 was the mint STEP count the audit
+reports; 12 of those steps are unscoped and one is already scoped, so the two are
+different populations and one of them drifts the moment a row is burnt down. A
+hardcoded tally sitting directly above the list it counts is the exact pattern
+backend#1729 is cited for, in the file that cites it. The run prints the number
+from `len(_exempt())`; that is the only place it should exist. But an exemption for a workflow that no longer
 needs one is ALSO reported -- otherwise the list becomes permanent, and a
 re-introduced full-grant mint hides behind a row that was written for a different
 reason years earlier.
@@ -80,7 +88,7 @@ SCOPE_PREFIX = "permission-"
 # yet. Burn this down; do not grow it. A row here that is no longer needed is
 # reported as a finding (see `stale_exemptions`).
 #
-# These 13 are the pre-existing state this guard was written to stop growing, not
+# These rows are the pre-existing state this guard was written to stop growing, not
 # to fix in one commit: `fr-gate` is a required check on every promotion branch in
 # the fleet, and three of the others read branch protection, where a narrower token
 # is known to return LESS data rather than an error (the reason `caller-drift`
