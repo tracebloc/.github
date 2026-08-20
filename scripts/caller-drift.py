@@ -1588,6 +1588,55 @@ def _actor(entry: dict) -> str:
     return kind if ident is None else f"{kind}:{ident}"
 
 
+def caller_read_failures(merged: int, *typed: int) -> int:
+    """How many of the merged unreadable records are caller/copy failures.
+
+    `merged` is the length of the single merged `unreadable` list; `typed` is the
+    length of every bucket that is NOT a caller/copy failure -- protection,
+    rulesets, listing gaps, and whatever comes next. Caller failures are whatever
+    is left, because they are the only class with no bucket of its own.
+
+    A FUNCTION rather than an inline subtraction, and variadic rather than fixed,
+    for one reason: the subtraction was written out twice and adding a fourth
+    bucket meant remembering to edit both. It wasn't remembered, so App-installation
+    coverage holes were reported as caller/copy read failures -- a true count under
+    a false name, which is the exact defect the decomposition was introduced to fix
+    (Bugbot, #238, then #278). Passing buckets positionally means a new one is
+    either passed here or visibly absent at the call site.
+
+    Never negative: a caller that double-counts a bucket would otherwise produce a
+    negative headline count, which reads as nonsense rather than as the wiring bug
+    it is. Clamped, and the clamp is asserted.
+    """
+    return max(merged - sum(typed), 0)
+
+
+def coverage(audited: "list[str]", unreadable: "list[str]") -> int:
+    """How many audited repos actually produced a verdict.
+
+    `audited` is the intersection of the org listing and the inventory; each entry
+    in `unreadable` is prefixed `"<repo>: "`. The result drives a die() that
+    discards the entire report, so the arithmetic has ONE precondition: every name
+    in `unreadable` must also be in `audited`. Subtracting a name that was never in
+    the total under-counts coverage, and a large enough under-count aborts a run
+    that had plenty of verdicts.
+
+    Extracted so the rule is callable rather than inline (backend#1729 rule 9): the
+    selftest and the mutation both go through this function, so breaking it here
+    reddens the test instead of the test agreeing with its own copy of the sum.
+
+    It is deliberately TOLERANT of a stray name rather than trusting the caller:
+    only names present in `audited` count against it. The precondition is the
+    caller's to keep -- protection, ruleset and listing failures each have their own
+    bucket and merge in after this is computed -- but honouring it here as well
+    means a future fourth bucket wired to the wrong list cannot silently abort every
+    run (Bugbot, #278, where listing gaps from `inventory - active` did exactly
+    that).
+    """
+    seen = {line.split(":", 1)[0] for line in unreadable}
+    return len(audited) - len(seen & set(audited))
+
+
 class RepoRuleset:
     """One ruleset, reduced to the properties the inventory asserts."""
 
@@ -1608,6 +1657,20 @@ class RepoRuleset:
                 methods = params.get("allowed_merge_methods")
                 if isinstance(methods, list):
                     self.merge_methods = sorted(m for m in methods if isinstance(m, str))
+        # ABSENT IS NOT EMPTY. GitHub returns `bypass_actors` only to a caller with
+        # WRITE access to the ruleset ("to prevent leaking sensitive information");
+        # for anyone else the field is simply not in the 200. `.get(...) or []`
+        # collapses that into an empty allowlist, which is a real value the policy
+        # asserts -- `promotion_merge_commit_only` expects exactly `[]`, so the
+        # assertion MATCHES without the field ever having been read. Fail-open on
+        # the allowlist this audit exists to enforce, on all 32 promotion branches
+        # (Bugbot, #278). The tag rulesets fail the other way and go falsely red.
+        #
+        # Recording presence separately is what lets read_rulesets() refuse. Do not
+        # fold this back into a `or []`: under the org-admin PAT the field was
+        # always present, so this whole distinction was unreachable until
+        # backend#2036 moved the audit onto a least-privilege App identity.
+        self.bypass_present = isinstance(raw.get("bypass_actors"), list)
         self.bypass = sorted(
             _actor(a) for a in (raw.get("bypass_actors") or []) if isinstance(a, dict)
         )
@@ -1647,7 +1710,22 @@ def read_rulesets(org: str, name: str) -> "tuple[list[RepoRuleset], str | None]"
             return ([], f"ruleset {row['id']} unreadable ({exc.detail})")
         if not isinstance(full, dict):
             return ([], f"ruleset {row['id']} did not return an object")
-        out.append(RepoRuleset(full))
+        parsed = RepoRuleset(full)
+        # A 200 that OMITS bypass_actors is an incomplete read, not an empty
+        # allowlist -- see RepoRuleset.bypass_present. Refuse here rather than in
+        # each comparison, so no downstream assertion can be made against a field
+        # that was never returned. This is the same rule the docstring above states
+        # for the cheaper endpoints, applied to the case where the RIGHT endpoint
+        # answers 200 and still withholds the field.
+        if not parsed.bypass_present:
+            return (
+                [],
+                f"ruleset {row['id']} ({parsed.name!r}) returned no `bypass_actors`: "
+                "GitHub returns that field only to a caller with WRITE access to the "
+                "ruleset, so the allowlist could not be read. Treating it as empty "
+                "would silently satisfy any policy expecting an empty allowlist.",
+            )
+        out.append(parsed)
     return (out, None)
 
 
@@ -1868,6 +1946,7 @@ def decide_exit(
     caller_unreadable: int,
     protection_unreadable: int,
     ruleset_unreadable: int,
+    listing_unreadable: int,
     remediation_failures: int,
     remediated: int,
 ) -> "tuple[int, str]":
@@ -1901,7 +1980,12 @@ def decide_exit(
       1  findings remain un-remediated
       2  could not evaluate, or could not remediate -- state is UNKNOWN
     """
-    unreadable = caller_unreadable + protection_unreadable + ruleset_unreadable
+    unreadable = (
+        caller_unreadable
+        + protection_unreadable
+        + ruleset_unreadable
+        + listing_unreadable
+    )
     if unreadable:
         parts = []
         if caller_unreadable:
@@ -1913,6 +1997,18 @@ def decide_exit(
             )
         if ruleset_unreadable:
             parts.append(f"{ruleset_unreadable} ruleset read(s) failed - ruleset state UNKNOWN")
+        # Its OWN clause, for the reason the other three have theirs (Bugbot, #238
+        # and again #278): a declared repo missing from the org listing is neither a
+        # caller-read failure nor a control-plane failure, and announcing it as one
+        # sends the reader to the wrong fix. This one's fix is a token-visibility
+        # change, which no other clause would ever suggest. Named by role rather
+        # than by credential -- this script has already outlived one migration, and
+        # naming the App here was wrong within the same PR that added it.
+        if listing_unreadable:
+            parts.append(
+                f"{listing_unreadable} declared repo(s) missing from the org listing - "
+                "fleet coverage UNKNOWN"
+            )
         return 2, "; ".join(parts) + "."
     if remediation_failures:
         # Exit 2, not 1: with --create-prs the drift findings were expected (they are
@@ -1998,6 +2094,18 @@ def main() -> int:
     # as branch protection failing, and vice versa (Bugbot, .github#212).
     protection_unreadable: "list[str]" = []
     ruleset_unreadable: "list[str]" = []
+    # A THIRD bucket, for the same reason as the two above (Bugbot, #278). The
+    # stale-inventory probe below records repos that are DECLARED but absent from
+    # the org listing. Those names are in `inventory - active`, so they are NOT in
+    # `audited` -- and `evaluated` is computed as
+    # `len(audited) - len(names in unreadable)`, an arithmetic that assumes every
+    # unreadable name is an audited one. Putting listing gaps in the shared bucket
+    # subtracts names that were never in the total, under-counting coverage; once
+    # gaps outnumber covered repos, `evaluated <= 0` trips the die() and discards
+    # the whole report as if every audited repo were unreadable. That is exactly
+    # the partial-installation case the probe exists to describe, so it would abort
+    # precisely when it is most needed.
+    listing_unreadable: "list[str]" = []
 
     untracked = sorted(set(active) - set(inventory["repos"]))
     for name in untracked:
@@ -2005,12 +2113,62 @@ def main() -> int:
             f"{name}: active in {org} but absent from repo-inventory.yml. A new repo "
             "arrives with no callers and nothing required of it; add an entry."
         )
+    # A DECLARED REPO MISSING FROM THE LISTING IS NOT PROOF IT LEFT THE ORG
+    # (Bugbot, #278). The listing is only ever as wide as the token's visibility.
+    # With a token that sees the whole org, `inventory - active` could only mean
+    # archived/renamed/deleted, and telling the operator to remove the entry was
+    # sound advice. With any narrower credential the same set also holds repos that
+    # were simply never read -- and following the old advice would delete a
+    # legitimate entry and permanently shrink the audited fleet.
+    #
+    # DELIBERATELY CREDENTIAL-AGNOSTIC. An earlier version of these messages named
+    # the App installation, written while this audit was being migrated to it. It
+    # then stayed on PROJECTS_KANBAN_TOKEN (see caller-drift.yml), so every message
+    # sent the reader to widen a credential this audit never mints -- a real failure
+    # under the wrong fix, which is the class this PR keeps closing (Bugbot, #278).
+    # Describe the SYMPTOM and name the token by its role, so the text stays true
+    # whichever credential the workflow supplies.
+    #
+    # Probe each one instead of guessing, and only call it drift when the repo is
+    # readable AND actually inactive:
+    #
+    #   readable, archived/fork  -> genuine drift, same finding as before
+    #   readable, active         -> the LISTING was incomplete, not the repo gone
+    #   unreadable               -> cannot tell; out of the token's scope or absent
+    #
+    # The last two are read failures, so they suppress an all-clear rather than
+    # manufacturing a finding. Same rule merge-settings-drift now applies to its own
+    # listing; this is the sibling case that commit should have covered too.
     stale = sorted(set(inventory["repos"]) - set(active))
     for name in stale:
-        findings.append(
-            f"{name}: in repo-inventory.yml but not an active repo in {org} "
-            "(archived, forked, renamed or deleted). Remove or correct the entry."
-        )
+        try:
+            meta = gh_json(["api", f"repos/{org}/{name}"])
+        except GhError as exc:
+            listing_unreadable.append(
+                f"{name}: declared in repo-inventory.yml, absent from the org listing, "
+                f"and unreadable ({exc.detail}). Cannot distinguish 'left the org' from "
+                "'outside this audit token's scope' - widen the token's repo visibility "
+                "or remove the entry, but do not assume which."
+            )
+            continue
+        if not isinstance(meta, dict):
+            listing_unreadable.append(
+                f"{name}: declared in repo-inventory.yml, absent from the org listing, "
+                "and its repo read did not return an object."
+            )
+            continue
+        if meta.get("archived") or meta.get("fork"):
+            state = "archived" if meta.get("archived") else "a fork"
+            findings.append(
+                f"{name}: in repo-inventory.yml but {state} in {org}, so it is not an "
+                "active repo. Remove or correct the entry."
+            )
+        else:
+            listing_unreadable.append(
+                f"{name}: declared in repo-inventory.yml and READABLE AND ACTIVE, but "
+                "absent from the org listing - so the listing is incomplete, not the "
+                "repo gone. Check this audit's token can see every declared repo."
+            )
 
     audited = sorted(set(active) & set(inventory["repos"]))
     if not audited:
@@ -2207,8 +2365,8 @@ def main() -> int:
         _m["rulesets_unread"] = len(ruleset_unreadable) - _rmark
         matrix[name] = _m
 
-    # Computed from repo-read failures ONLY, before the two lists are merged.
-    evaluated = len(audited) - len({line.split(":", 1)[0] for line in unreadable})
+    # Computed from repo-read failures ONLY, before the other lists are merged.
+    evaluated = coverage(audited, unreadable)
     if evaluated <= 0:
         die(
             f"all {len(audited)} inventoried repos were unreadable: "
@@ -2218,6 +2376,21 @@ def main() -> int:
     # without ever being able to trigger the abort above.
     unreadable.extend(protection_unreadable)
     unreadable.extend(ruleset_unreadable)
+    # Listing gaps merge here too, so they are REPORTED and still fail the run
+    # without having been able to distort `evaluated` above.
+    unreadable.extend(listing_unreadable)
+
+    # Derived ONCE and passed to both consumers (the step outputs and decide_exit).
+    # It was written out twice as an inline subtraction, and adding a fourth bucket
+    # then meant remembering to edit both -- which is how `listing_unreadable`
+    # silently landed in the caller/copy count (Bugbot, #278). One expression, so a
+    # fifth bucket cannot be half-wired.
+    caller_unreadable_count = caller_read_failures(
+        len(unreadable),
+        len(protection_unreadable),
+        len(ruleset_unreadable),
+        len(listing_unreadable),
+    )
 
     report = [
         # Not "…drift": this block is now also the body of the standing conformance
@@ -2376,12 +2549,20 @@ def main() -> int:
                 # true count under a false name, pointing at the wrong problem.
                 # Same reason `remediation_failures` got its own output above.
                 # (Bugbot, #238.)
+                #
+                # EVERY non-caller bucket must be subtracted here. `listing_unreadable`
+                # is the fourth and was missed when it was added, so App-installation
+                # coverage holes were counted as caller/copy read failures -- the same
+                # true-count-false-name defect this decomposition exists to prevent,
+                # reintroduced by a new bucket rather than by this line changing
+                # (Bugbot, #278).
                 handle.write(
                     "caller_unreadable="
-                    f"{len(unreadable) - len(protection_unreadable) - len(ruleset_unreadable)}\n"
+                    f"{caller_unreadable_count}\n"
                 )
                 handle.write(f"protection_unreadable={len(protection_unreadable)}\n")
                 handle.write(f"ruleset_unreadable={len(ruleset_unreadable)}\n")
+                handle.write(f"listing_unreadable={len(listing_unreadable)}\n")
                 # Its own output, because exit 2 now has two very different
                 # causes. Every exit-2 message describes UNREAD repos; a failed
                 # --create-prs would otherwise be headlined on the conformance
@@ -2398,11 +2579,10 @@ def main() -> int:
 
     code, reason = decide_exit(
         findings=len(findings),
-        caller_unreadable=(
-            len(unreadable) - len(protection_unreadable) - len(ruleset_unreadable)
-        ),
+        caller_unreadable=caller_unreadable_count,
         protection_unreadable=len(protection_unreadable),
         ruleset_unreadable=len(ruleset_unreadable),
+        listing_unreadable=len(listing_unreadable),
         remediation_failures=len(remediation_failures),
         remediated=remediated,
     )

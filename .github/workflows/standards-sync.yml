@@ -23,10 +23,15 @@
 # offline selftest, which asserts the splice logic and its fail-closed paths.
 #
 # TOKEN: report-only needs org-wide read. create-prs needs Contents: RW +
-# Pull requests: RW on the target repos. If PROJECTS_KANBAN_TOKEN lacks
-# contents-write, mint a fine-grained STANDARDS_SYNC_TOKEN (active repos only)
-# and swap it in below — the script fails closed (exit 2) on the first refused
-# write, so a short-scoped token cannot produce a silent partial rollout.
+# Pull requests: RW on the target repos. Both are satisfied by the
+# tracebloc-release-train App installation, which this workflow now mints an
+# ORG-scoped token from (backend#2036) — it carries contents:write and
+# pull_requests:write. The former plan here was to mint a separate fine-grained
+# STANDARDS_SYNC_TOKEN if PROJECTS_KANBAN_TOKEN turned out to lack
+# contents-write; that is moot, and a second fleet-wide credential is the thing
+# backend#2036 exists to stop. The script still fails closed (exit 2) on the
+# first refused write, so a short-scoped token cannot produce a silent partial
+# rollout.
 #
 # All interpolations reach shell through `env:` and are read as quoted
 # variables, never spliced into a command line. No event-controlled text
@@ -102,13 +107,32 @@ jobs:
         # its exit_code output stays empty, and the final step fails on that.
         run: python -m pip install --quiet --disable-pip-version-check 'pyyaml==6.0.2'
 
+      # Authenticates as the tracebloc-release-train App (backend#2036) instead of
+      # one human's PAT. `owner:` yields an ORG-scoped installation token; a
+      # repo-scoped one cannot read the fleet. The App carries `contents: write`,
+      # which is what `create-prs` mode needs to open the per-repo sync PRs. No
+      # fallback to the PAT: a fallback would let a broken App path keep working
+      # silently.
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Check the sync token is present
+        # KEPT, and pointed at the minted token. A failed mint fails its own step,
+        # but the condition this guards is an EMPTY token reaching the audit --
+        # which is the fail-open direction: every repo read fails and the audit
+        # reports nothing as if it were something. Unchanged by where the token
+        # comes from, so the assertion stays.
         env:
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::PROJECTS_KANBAN_TOKEN is empty. Without it every repo read" \
+            echo "::error::The installation token is empty. Without it every repo read" \
                  "fails and the audit would report nothing as if it were something." >&2
             exit 1
           fi
@@ -116,7 +140,7 @@ jobs:
       - name: Compare every active repo's CLAUDE.md block against the canon
         id: audit
         env:
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CREATE_PRS: ${{ github.event_name == 'workflow_dispatch' && inputs.create-prs == true }}
         run: |
           set -uo pipefail
@@ -140,7 +164,7 @@ jobs:
         # comments nobody reads train everyone to ignore the issue).
         if: always() && steps.audit.outputs.exit_code != '0'
         env:
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CODE: ${{ steps.audit.outputs.exit_code }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |

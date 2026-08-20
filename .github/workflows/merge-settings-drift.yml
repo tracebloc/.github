@@ -42,10 +42,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # Authenticates as the tracebloc-release-train App (backend#2036) instead of
+      # one human's PAT. `owner:` yields an ORG-scoped installation token. This
+      # workflow only READS merge settings and comments on the tracking issue -- the
+      # `gh api -X PATCH` lines in its report are text it PRINTS for a human to run,
+      # not calls it makes, so no repo-administration permission is needed or asked
+      # for. No fallback to the PAT: a fallback would let a broken App path keep
+      # working silently.
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      # Needed for repo-inventory.yml, which the listing is cross-checked against
+      # below. The sibling audits (caller-drift, standards-sync) check out for the
+      # same reason; this one did not, because until backend#2036 it ran as an
+      # org-member PAT whose listing was the whole org by construction.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Same pin and version as caller-drift/standards-sync. setup-python rather
+      # than the system interpreter because a bare `pip install` on the runner
+      # hits PEP 668 (externally-managed-environment).
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet --disable-pip-version-check 'pyyaml==6.0.2'
+
       - name: Check every active repo's merge settings
         id: audit
         env:
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG: tracebloc
         run: |
           set -euo pipefail
@@ -66,6 +94,43 @@ jobs:
             exit 1
           fi
           echo "Checked $count active repos."
+
+          # A NON-EMPTY LISTING IS NOT A COMPLETE ONE (Bugbot, #278). The zero-repo
+          # guard above was sufficient while this ran as an org-member PAT, whose
+          # listing was the whole org by construction. An App installation token
+          # sees only the repos the installation covers, so narrowing the
+          # installation -- or adding a repo to the org and not to the App --
+          # silently shrinks the audited set while every remaining repo passes and
+          # the job exits green. That is the exact fail-open this audit exists to
+          # refuse, reintroduced by the credential change rather than by any logic
+          # here.
+          #
+          # So compare the listing against the DECLARED set. repo-inventory.yml is
+          # the contract for which repos exist; any repo it declares that the
+          # listing did not return means the listing is incomplete, not that the
+          # repo is compliant. Derive from the declaration, never from a
+          # hand-maintained second list.
+          #
+          # A declared repo can also legitimately vanish from the listing by being
+          # archived (the filter above drops archives). That is still a finding
+          # here: an archived repo carrying an inventory entry is drift someone
+          # should look at, and refusing is cheaper than guessing which case it is.
+          python3 - "$REPOS" <<'PY'
+          import sys, yaml
+          listed = {l.strip() for l in open(sys.argv[1]) if l.strip()}
+          declared = set(yaml.safe_load(open('repo-inventory.yml'))['repos'])
+          absent = sorted(declared - listed)
+          if absent:
+              print(
+                  "::error::the org listing is missing %d repo(s) declared in "
+                  "repo-inventory.yml: %s. A partial listing is an incomplete READ, "
+                  "not evidence those repos comply - check the App installation "
+                  "covers every repo, or that none was archived." % (len(absent), ", ".join(absent)),
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          print("Listing covers all %d declared repos." % len(declared))
+          PY
 
           drift=""       # rebase-merge enabled
           unmergeable="" # neither merge-commit nor squash
@@ -158,7 +223,7 @@ jobs:
         # backend#1344: five silent failures nobody read).
         if: steps.audit.outputs.drift != '' || steps.audit.outputs.unmergeable != '' || steps.audit.outputs.nodelete != '' || steps.audit.outputs.failed != ''
         env:
-          GH_TOKEN: ${{ secrets.PROJECTS_KANBAN_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           DRIFT: ${{ steps.audit.outputs.drift }}
           UNMERGEABLE: ${{ steps.audit.outputs.unmergeable }}
           NODELETE: ${{ steps.audit.outputs.nodelete }}
