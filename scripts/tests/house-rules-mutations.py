@@ -79,6 +79,17 @@ MUTATIONS = [
     ("a scoped `ignore=` degrades to silencing every rule on the line",
      "if (match(line_txt, /house-rules:[[:space:]]*ignore=[A-Za-z0-9_,.-]+/)) {",
      "if (0) {"),
+
+    # --- a config directive is silently ignored ---------------------------
+    # `timeout-wrapper:` is the one whose case was VACUOUS until .github#291: a
+    # compliant curl behind the wrapper exits 0 whether the directive is honoured
+    # (curl is a command, timeout waived) or ignored (curl is a bare argument). The
+    # fixture now drops the TLS flag, which splits the two -- honoured gives
+    # rules=[curl-tls], ignored gives none -- so dropping the directive on the floor
+    # reddens.
+    ("the `timeout-wrapper:` directive is parsed and thrown away",
+     'timeout-wrapper) CFG_TWRAPPERS="$CFG_TWRAPPERS $val" ;;',
+     'timeout-wrapper) : ;;'),
 ]
 
 

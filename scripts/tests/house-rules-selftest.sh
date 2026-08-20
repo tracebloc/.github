@@ -365,11 +365,36 @@ cfg 'exclude: c.sh'
 run_cfg c.sh
 record "$RC" "\`exclude:\` skips the path" "rc=$RC out=$OUT"
 
+# THE FIXTURE HAS TO DISTINGUISH HONOURED FROM IGNORED (Bugbot, .github#291), and
+# the first one could not. It used a COMPLIANT curl (`--tlsv1.2`) behind the wrapper
+# and recorded success from a clean exit:
+#
+#   directive honoured -> `guard` is a wrapper, so curl is in COMMAND position, and
+#                         the *-timeout rules stand down            -> clean, rc 0
+#   directive IGNORED  -> `guard` is not a wrapper, so curl is in ARGUMENT position
+#                         and is not a command at all              -> clean, rc 0
+#
+# Identical outcome. A no-op `timeout-wrapper:` was indistinguishable from a working
+# one, so the pin could not fail -- the vacuous-pin shape, in the case written to
+# prove the directive works.
+#
+# Dropping `--tlsv1.2` splits them, because `timeout-wrapper:` stands down only the
+# *-timeout rules and leaves curl-tls live. Measured both ways:
+#
+#   with the directive     rc=1 rules=[curl-tls]     curl IS a command; timeout waived
+#   without the directive  rc=0 rules=[-]            curl is just an argument
 cfg 'timeout-wrapper: guard'
-printf '#!/bin/bash\nset -euo pipefail\nguard curl -fsSL --tlsv1.2 "$url"\n' > "$WORK/tw.sh"
+printf '#!/bin/bash\nset -euo pipefail\nguard curl -fsSL "$url"\n' > "$WORK/tw.sh"
 ( cd "$WORK" && git add tw.sh >/dev/null 2>&1 )
 run_cfg tw.sh
-record "$RC" "\`timeout-wrapper:\` stands the *-timeout rules down" "rc=$RC out=$OUT"
+TWR=$(printf '%s\n' "$OUT" | grep -oE '\[(curl-tls|curl-timeout|helm-timeout|pipefail)\]' \
+      | tr -d '[]' | sort -u | paste -sd, - )
+if [ "$RC" = 1 ] && [ "$TWR" = "curl-tls" ]; then
+  record 0 "\`timeout-wrapper:\` waives the TIMEOUT rules and only those" ""
+else
+  record 1 "\`timeout-wrapper:\` waives the TIMEOUT rules and only those" \
+    "rc=$RC rules=[${TWR:--}] want rc=1 rules=[curl-tls]"
+fi
 
 cfg 'wrapper: spin_cmd'
 printf '#!/bin/bash\nset -euo pipefail\nspin_cmd curl -fsSL "$url"\n' > "$WORK/wr.sh"
