@@ -46,6 +46,13 @@ ELIGIBLE_STATUS = "Backlog"
 DAYS_TO_STALE = 42   # 6 weeks of silence -> warning
 DAYS_TO_CLOSE = 14   # +2 weeks after the warning -> close
 PAGE = 100
+# The label and card pages. Both are TRUNCATION-CHECKED rather than assumed
+# sufficient (Bugbot, #288): a `keep-open` label beyond the page would read as
+# ABSENT, and this script's one destructive act is closing an issue -- so a
+# truncated read must skip, never proceed. `totalCount` is requested for exactly
+# that comparison; without it the query cannot tell a short list from a cut one.
+LABEL_PAGE = 40
+ITEM_PAGE = 10
 # A run that would touch more than this is refused rather than executed: the only
 # way to reach it is a bug in the eligibility rule or a board outage that made
 # everything look like Backlog, and either way mass-closing is the wrong response.
@@ -84,8 +91,8 @@ query($owner:String!,$name:String!,$cursor:String){
       pageInfo{hasNextPage endCursor}
       nodes{
         number title updatedAt
-        labels(first:40){nodes{name}}
-        projectItems(first:10){nodes{
+        labels(first:%d){totalCount nodes{name}}
+        projectItems(first:%d){totalCount nodes{
           project{number}
           fieldValueByName(name:"Status"){
             ... on ProjectV2ItemFieldSingleSelectValue{name}
@@ -94,7 +101,7 @@ query($owner:String!,$name:String!,$cursor:String){
       }
     }
   }
-}""" % PAGE
+}""" % (PAGE, LABEL_PAGE, ITEM_PAGE)
 
 
 def fetch_issues(owner, name):
@@ -119,6 +126,27 @@ def fetch_issues(owner, name):
         cursor = page["pageInfo"]["endCursor"]
 
 
+def truncated(conn, page):
+    """True when a GraphQL connection returned fewer nodes than it has.
+
+    `totalCount > len(nodes)` is the only honest test. Comparing len(nodes) to the
+    page size alone would call a list of exactly `page` items truncated, and would
+    miss nothing -- but it also cannot distinguish "exactly full" from "cut", and
+    this script skips on truncation, so a false positive is a silently unswept
+    issue. Both numbers are asked for; both are used.
+    """
+    if not isinstance(conn, dict):
+        return True  # an unreadable connection is not a short one
+    nodes = conn.get("nodes")
+    total = conn.get("totalCount")
+    if not isinstance(nodes, list) or not isinstance(total, int):
+        # NO totalCount MEANS NO ANSWER. If the query stops asking for it, this
+        # returns True and every issue is skipped -- loudly useless rather than
+        # quietly closing things on a partial label list.
+        return True
+    return total > len(nodes)
+
+
 def status_of(issue, project_number):
     """The issue's Status on the given project, or None if it cannot be established.
 
@@ -127,13 +155,22 @@ def status_of(issue, project_number):
     caller must not distinguish them -- treating "no card" as more actionable than
     "unreadable" is how a board outage becomes a closing spree.
     """
-    for item in ((issue.get("projectItems") or {}).get("nodes") or []):
+    conn = issue.get("projectItems")
+    for item in ((conn or {}).get("nodes") or []):
         if not isinstance(item, dict):
             continue
         if ((item.get("project") or {}).get("number")) != project_number:
             continue
         val = (item.get("fieldValueByName") or {}).get("name")
         return val if isinstance(val, str) and val else None
+    # NO CARD FOUND -- but was the list complete? A truncated card page means the
+    # target project's card may exist beyond it, so "no card" is not established.
+    # This already lands on None and therefore on a SKIP, so unlike the label case
+    # it was never destructive; it is checked so the two connections are handled by
+    # the same rule rather than one by accident (Bugbot, #288).
+    if truncated(conn, ITEM_PAGE):
+        return None
+    return None
     return None
 
 
@@ -153,9 +190,21 @@ def decide(issue, project_number, now):
     version did match on the reason text, which couples a counter to prose that
     exists to be reworded -- the same defect this repo keeps finding in guards.
     """
-    labels = {n.get("name") for n in ((issue.get("labels") or {}).get("nodes") or [])
+    label_conn = issue.get("labels")
+    labels = {n.get("name") for n in ((label_conn or {}).get("nodes") or [])
               if isinstance(n, dict)}
     status = status_of(issue, project_number)
+
+    # TRUNCATION IS FAIL-OPEN ON THE DESTRUCTIVE PATH, so it is checked FIRST
+    # (Bugbot, #288). An exempt label past the page reads as absent, and the
+    # consequence is closing an issue somebody labelled `keep-open`. Unlike an
+    # unreadable Status -- which lands on "not Backlog" and skips anyway -- this one
+    # would have proceeded.
+    if truncated(label_conn, LABEL_PAGE):
+        n = len((label_conn or {}).get("nodes") or [])
+        t = (label_conn or {}).get("totalCount")
+        return None, (f"label list truncated ({n} of {t}) -- cannot rule out an "
+                      "exempt label"), status
 
     if labels & EXEMPT_LABELS:
         return None, f"exempt label ({', '.join(sorted(labels & EXEMPT_LABELS))})", status

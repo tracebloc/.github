@@ -42,17 +42,37 @@ def record(cond, name, detail=""):
 
 
 def issue(days_idle=100, status="Backlog", labels=(), project=2, number=1,
-          updated=None, no_card=False):
+          updated=None, no_card=False, label_total=None, item_total=None,
+          drop_label_total=False):
+    """One issue, in the shape ISSUES_Q returns.
+
+    `totalCount` IS PART OF THAT SHAPE and defaults to the node count, i.e. "not
+    truncated" (Bugbot, #288). `label_total` / `item_total` override it to construct
+    a truncated read; `drop_label_total` omits the field entirely, which is what the
+    payload looks like if the query stops asking -- and must read as UNKNOWN rather
+    than as a complete list.
+
+    Adding `totalCount` here reddened exactly two cases -- the two that WARN and
+    CLOSE -- while every skip case stayed green. That is the shape of the fix: the
+    only paths truncation blocks are the ones that write.
+    """
     items = [] if no_card else [{
         "project": {"number": project},
         "fieldValueByName": ({"name": status} if status is not None else None),
     }]
     stamp = updated if updated is not None else \
         (NOW - timedelta(days=days_idle)).isoformat().replace("+00:00", "Z")
+    label_nodes = [{"name": n} for n in labels]
+    label_conn = {"nodes": label_nodes}
+    if not drop_label_total:
+        label_conn["totalCount"] = (label_total if label_total is not None
+                                    else len(label_nodes))
     return {
         "number": number, "title": "t", "updatedAt": stamp,
-        "labels": {"nodes": [{"name": n} for n in labels]},
-        "projectItems": {"nodes": items},
+        "labels": label_conn,
+        "projectItems": {"nodes": items,
+                         "totalCount": (item_total if item_total is not None
+                                        else len(items))},
     }
 
 
@@ -117,6 +137,53 @@ record(sb.MAX_ACTIONS > 0 and sb.ELIGIBLE_STATUS == "Backlog"
        and sb.EXEMPT_LABELS == {"keep-open", "blocked"},
        "the constants are the ones the workflow documents",
        f"MAX_ACTIONS={sb.MAX_ACTIONS} status={sb.ELIGIBLE_STATUS!r} exempt={sb.EXEMPT_LABELS}")
+
+# --- truncation is fail-open on the destructive path (Bugbot, #288) -----------
+# A `keep-open` label past the page would read as ABSENT and the issue would be
+# closed. Unlike an unreadable Status -- which lands on "not Backlog" and skips
+# anyway -- this one PROCEEDED. So it is checked before the exempt test and refuses.
+act, why, st = sb.decide(issue(days_idle=100, labels=[f"l{i}" for i in range(40)],
+                              label_total=41), 2, NOW)
+record(act is None, "a truncated label list is skipped, not warned", f"got {act!r}")
+record("truncated" in why, "...and the reason names the truncation", why)
+
+# Exactly-full is NOT truncated. Without this the guard could be `len(nodes) >=
+# page` and skip every issue with a full label page -- silently unswept, which is
+# the opposite failure and just as invisible.
+act, why, st = sb.decide(issue(days_idle=100, labels=[f"l{i}" for i in range(40)],
+                              label_total=40), 2, NOW)
+# `stale`, named specifically rather than `is not None`: an assertion that any
+# action came back would pass on a CLOSE, which is a different and worse outcome
+# for a first-warning issue.
+record(act == "stale", "a label list that is exactly full is NOT truncated", f"got {act!r} — {why}")
+
+# NO totalCount AT ALL means no answer. If the query stops asking, every issue must
+# skip -- loudly useless rather than quietly closing things on a partial list.
+act, why, st = sb.decide(issue(days_idle=100, drop_label_total=True), 2, NOW)
+record(act is None, "a label connection with no totalCount is UNKNOWN, not complete", f"got {act!r}")
+
+# THE ORDER OF THE TWO SKIP TESTS IS ABOUT THE REASON, NOT THE ACTION, and this is
+# the case that makes it testable. A mutation that OR'd them together left every
+# other assertion green -- both paths skip -- while an `keep-open` issue would then
+# be reported as "label list truncated". The action is right and the log lies about
+# why, which is the shape that sends someone to fix the wrong thing.
+#
+# So the exempt reason is asserted specifically, not merely that something skipped.
+act, why, st = sb.decide(issue(days_idle=100, labels=["keep-open"]), 2, NOW)
+# `startswith`, NOT `in`. The truncation message contains the words "exempt label"
+# ("cannot rule out an exempt label"), so `"exempt label" in why` passes on the
+# WRONG reason -- the substring collision that made this assertion inert on its
+# first attempt, and the same shape as an earlier inert check in this repo.
+record(act is None and why.startswith("exempt label") and "truncated" not in why,
+       "an exempt issue is skipped FOR BEING EXEMPT, not for anything else",
+       f"got {act!r} — {why!r}")
+
+# The card page fails SAFE -- no card lands on "not Backlog" -- but it is checked by
+# the same rule rather than by accident.
+act, why, st = sb.decide(issue(days_idle=100, no_card=True, item_total=3), 2, NOW)
+record(act is None and st is None,
+       "a truncated card page yields no status, so nothing is done", f"got {act!r}/{st!r}")
+
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)
