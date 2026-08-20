@@ -1159,11 +1159,6 @@ repos:
           copy was missing - a second, undocumented difference that the previous wording
           ("the header alone") actively denied. The action pin was the other half of this
           entry until backend#1816 made v2.0.0 the fleet norm.
-      stale-backlog.yml:
-        exempt: >-
-          release-train has add-to-kanban.yml but no stale-backlog.yml. Auto-closing backlog
-          items in the repo that drives promotions is a deliberate omission - stale-backlog.yml
-          is column-blind and would close live pipeline work (backend#1408 P3).
     quality_files:
       CLAUDE.md: required
       ".cursor/BUGBOT.md": required
