@@ -59,3 +59,18 @@ jobs:
         run: python -m pip install --quiet 'pyyaml==6.0.2'
       - name: make selftests
         run: make selftests
+
+      # THE MUTATION TIER, in the SAME already-required context (backend#1788).
+      #
+      # `house-rules` is a required status check on develop, staging AND prod across
+      # 16 repos, and until now nothing tested it at all. The selftest above says the
+      # matcher works; this says the selftest would NOTICE if it stopped -- and it
+      # earned that distinction on its first run, catching two cases that passed the
+      # whole suite while the rule they described was broken.
+      #
+      # HERE RATHER THAN A NEW CONTEXT, for the reason the mint-scope guard is: a new
+      # context sits unrequired until somebody arms it, which is how a tier ends up
+      # advisory. Measured at ~58s (each mutation re-runs the ~3s suite), which is
+      # affordable on a runner and is why `make check` only resolves the anchors.
+      - name: mutation-check house-rules
+        run: make mutation-house-rules

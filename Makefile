@@ -25,6 +25,10 @@
 #   bricked-prs-selftest.yml  -> `selftest-bricked-prs`
 #   kanban-columns.yml        -> `selftest-kanban-columns`
 #   kanban-deploy-state-selftest.yml -> `selftest-kanban-deploy-state`
+#   selftests.yml             -> `selftest-house-rules` (backend#1788), which is
+#     in the REQUIRED `selftests` context. The MUTATION tier is separate: the fast
+#     `--dry` anchor resolve rides `lint`; the full run is in `check-all` and in
+#     selftests.yml's own step, because 58s is too long for the pre-push tier.
 #
 # When one of those workflows changes, change the matching line here. Adding a
 # NEW selftest needs no edit to this list to be CAUGHT — `selftests-cover`
@@ -119,13 +123,13 @@ check: lint selftests
 # PROJECTS_KANBAN_TOKEN and reach out to the live org. Those are not
 # pre-push checks under any definition; `audit` below runs one on demand.
 .PHONY: check-all
-check-all: check credential-scan
+check-all: check credential-scan mutation-house-rules
 	@echo "==> check-all: green"
 
 # ---- lint --------------------------------------------------------
 
 .PHONY: lint
-lint: ruff shellcheck house-rules action-pins actionlint
+lint: ruff shellcheck house-rules action-pins actionlint mutation-house-rules-dry
 
 # ruff: code-quality.yml's `ruff` job in all-files mode. This repo has no ruff
 # config, so the workflow falls back to --isolated --select <ruff-select>; that
@@ -244,6 +248,18 @@ actionlint: guard-actionlint guard-shellcheck
 # is derived is the COVERAGE ASSERTION, not the invocation.
 SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-selftest.sh))
 
+# A SECOND FAMILY, added rather than folded in (backend#1788). A mutation runner is
+# not a selftest: it re-runs one, so putting it in `selftests` would nest the fast
+# tier inside itself and cost ~58s instead of ~3s. But it must still be RUN BY
+# SOMETHING, or it rots exactly like an unwired selftest -- so it gets its own
+# wildcard and its own coverage assertion below, keyed on the targets that run it.
+#
+# The naming check above now admits `*-mutations.py` for the same reason it admits
+# `*-selftest.*`: a file under scripts/tests/ that matches no wildcard is invisible,
+# and an invisible file makes the coverage assertion pass vacuously.
+MUTATION_FILES := $(sort $(wildcard scripts/tests/*-mutations.py))
+MUTATION_TARGETS := mutation-house-rules
+
 .PHONY: selftests
 # The targets that actually RUN a selftest. Named once: `selftests` depends on
 # them, and `selftests-cover` asks make what these would execute. Adding a
@@ -251,7 +267,8 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 # it into `make check` and brings it under the coverage guard.
 SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-standards-sync \
                     selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns \
-                    selftest-kanban-deploy-state selftest-git-reap
+                    selftest-kanban-deploy-state selftest-git-reap \
+                    selftest-house-rules
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -281,14 +298,24 @@ selftests-cover:
 	  [ -e "$$path" ] || continue; \
 	  case "$$path" in \
 	    *-selftest.py|*-selftest.sh) ;; \
-	    *) echo "$$path does not match '*-selftest.{py,sh}', so the selftest wildcard cannot see it."; \
-	       echo "  Rename it, or teach SELFTEST_FILES about the new convention — do NOT"; \
+	    *-mutations.py) ;; \
+	    *) echo "$$path does not match '*-selftest.{py,sh}' or '*-mutations.py', so no wildcard can see it."; \
+	       echo "  Rename it, or teach the wildcards about the new convention — do NOT"; \
 	       echo "  leave it unmatched: assertion 2 below would then pass without covering it."; \
 	       fail=1 ;; \
 	  esac; \
 	done; \
 	cmds="$$(make --dry-run --no-print-directory $(SELFTEST_TARGETS) 2>/dev/null)"; \
 	[ -n "$$cmds" ] || { echo "could not ask make what $(SELFTEST_TARGETS) would run — refusing to report coverage"; exit 1; }; \
+	mcmds="$$(make --dry-run --no-print-directory $(MUTATION_TARGETS) 2>/dev/null)"; \
+	[ -n "$$mcmds" ] || { echo "could not ask make what $(MUTATION_TARGETS) would run — refusing to report coverage"; exit 1; }; \
+	for f in $(MUTATION_FILES); do \
+	  printf '%s\n' "$$mcmds" | grep -qF -- "$$f" || { \
+	    echo "$$f is not run by any mutation target in this Makefile."; \
+	    echo "  A mutation runner nobody runs is the same dead weight as an unwired"; \
+	    echo "  selftest, with the extra cost that it LOOKS like the tier exists."; \
+	    fail=1; }; \
+	done; \
 	for f in $(SELFTEST_FILES); do \
 	  printf '%s\n' "$$cmds" | grep -qF -- "$$f" || { \
 	    echo "$$f is not run by any target in this Makefile."; \
@@ -298,7 +325,7 @@ selftests-cover:
 	    fail=1; }; \
 	done; \
 	[ "$$fail" = 0 ] || exit 1; \
-	echo "selftests-cover: all $(words $(SELFTEST_FILES)) selftests are wired to a target"
+	echo "selftests-cover: all $(words $(SELFTEST_FILES)) selftests and $(words $(MUTATION_FILES)) mutation runner(s) are wired to a target"
 
 .PHONY: selftest-caller-drift
 selftest-caller-drift: guard-pyyaml
@@ -345,6 +372,23 @@ selftest-kanban-deploy-state: guard-pyyaml
 # token nor a network — but it DOES need a committer identity, which a bare CI
 # runner lacks. git-reap-selftest.yml configures one; a developer machine
 # already has it, so nothing is set here.
+.PHONY: selftest-house-rules
+selftest-house-rules:
+	bash scripts/tests/house-rules-selftest.sh
+
+# The mutation tier for house-rules (backend#1788). NOT in `selftests`: each mutation
+# re-runs the whole suite, so the full pass is ~58s against the suite's own ~2.8s.
+# `--dry` resolves every anchor in milliseconds and is what belongs in the fast tier --
+# it catches the way this job actually breaks (a refactor moving a line an anchor
+# matched on) without proving the cases still catch. Measured 2026-08-20.
+.PHONY: mutation-house-rules
+mutation-house-rules:
+	$(PYTHON) scripts/tests/house-rules-mutations.py
+
+.PHONY: mutation-house-rules-dry
+mutation-house-rules-dry:
+	$(PYTHON) scripts/tests/house-rules-mutations.py --dry
+
 .PHONY: selftest-git-reap
 selftest-git-reap:
 	bash scripts/tests/git-reap-selftest.sh
