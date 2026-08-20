@@ -386,6 +386,7 @@ selftest-stale-backlog:
 .PHONY: selftest-kanban-columns
 selftest-kanban-columns:
 	$(PYTHON) scripts/tests/kanban-columns-selftest.py
+	$(PYTHON) scripts/tests/branch-status-map-selftest.py
 
 .PHONY: selftest-kanban-deploy-state
 selftest-kanban-deploy-state: guard-pyyaml

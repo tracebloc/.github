@@ -32,6 +32,15 @@ jobs:
   route:
     runs-on: ubuntu-latest
     steps:
+      # The mapping comes from .github, not from a copy in this file: one
+      # definition of branch -> Status (backend#2243).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tracebloc/.github
+          ref: main
+          path: .kanban-map
+          persist-credentials: false
+
       # Authenticates as the tracebloc-release-train App (backend#2036) instead of
       # one human's PAT. Needs both grants: `organization_projects: write` for the
       # card, `issues: write` for the sibling-merge label and the closure comment.
@@ -82,10 +91,14 @@ jobs:
           SIBLING="false"
           if [ "$EVENT_NAME" = "pull_request" ]; then
             if [ "$PR_MERGED" = "true" ]; then
+              # ONE SHARED MAPPING (backend#2243) -- and this site is why the fix
+              # is a shared script rather than a second `yq` read: this workflow
+              # never checks the caller out, so the per-repo `.kanban.yml` override
+              # it was silently ignoring has to be FETCHED, not read off disk.
+              STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
+                         "$BASE_REF" "$REPO_FULL" | jq -r '.status')
               case "$BASE_REF" in
-                main|master) STATUS="Prod" ;;
-                staging)     STATUS="FR on staging" ;;
-                develop)     STATUS="On dev" ;;
+                main|master|staging|develop) : ;;
                 *)
                   # A PR merged into a SIBLING feature branch deploys nothing by
                   # itself — its content travels onward inside the parent PR
@@ -167,10 +180,11 @@ jobs:
               if [ "$CLOSER_TYPE" = "UNREADABLE" ]; then
                 : # decided above: no change
               elif [ "$CLOSER_TYPE" = "PullRequest" ]; then
+                # Same shared mapping as the pull_request arm above.
+                STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
+                           "$CLOSING_PR_BASE" "$REPO_FULL" | jq -r '.status')
                 case "$CLOSING_PR_BASE" in
-                  main|master) STATUS="Prod" ;;
-                  staging)     STATUS="FR on staging" ;;
-                  develop)     STATUS="On dev" ;;
+                  main|master|staging|develop) : ;;
                   # Unrecognised base: mirror the pull_request branch's default so
                   # the issue and its PR agree.
                   *)           STATUS="On dev" ;;

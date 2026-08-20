@@ -46,12 +46,30 @@ WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 # UNQUOTED) and `fr-pass-comment.yml` (writes `NEXT="Ready for prod"`) -- so
 # three column names were invisible to a guard built to make exactly that
 # impossible (Bugbot, .github#243).
+# `advance-deploy-env.yml` and `kanban-closure-router.yml` are NO LONGER HERE, and
+# that is not an omission: backend#2243 moved the branch -> Status mapping out of
+# both and into `branch_status_map.py`, so their literals are gone from the YAML.
+# Those names are now checked by IMPORTING the mapping (see `declared_names`), which
+# is strictly stronger than scraping a shell `case` with a regex -- it reads the
+# actual data structure instead of a rendering of it.
+#
+# Any workflow still writing a Status literal of its own belongs here.
 WRITERS = (
-    "advance-deploy-env.yml",
-    "kanban-closure-router.yml",
     "set-pr-status.yml",
     "fr-pass-comment.yml",
 )
+
+
+def declared_names() -> "set[str]":
+    """Every Status the shared mapping can produce, read from the mapping itself.
+
+    Imported rather than pattern-matched: after backend#2243 this is where the
+    branch mapping lives, and a regex over the module's source would be the same
+    scrape-a-rendering mistake one layer along.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from branch_status_map import DEFAULT_MAP, ENV_FOR_STATUS  # noqa: PLC0415
+    return {s for s, _ in DEFAULT_MAP.values()} | set(ENV_FOR_STATUS)
 
 # The write idioms actually used. Quoted OR bare, because `echo "status_name=In
 # progress" >> "$GITHUB_OUTPUT"` has no inner quotes.
@@ -82,6 +100,13 @@ def written_names() -> "dict[str, set[str]]":
     if not found:
         sys.exit("error: no Status literals found at all — the pattern is stale, "
                  "which would make this check pass vacuously")
+
+    # THE SHARED MAPPING'S OWN VOCABULARY (backend#2243), folded in HERE rather than
+    # in main() so that a caller substituting `written_names` -- which the selftest
+    # does, to control the input against a fake board -- still controls the whole
+    # input. Folding it into main() silently widened what the selftest could not see.
+    for name in declared_names():
+        found.setdefault(name, set()).add("branch_status_map.py")
     return found
 
 
