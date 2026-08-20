@@ -1151,8 +1151,21 @@ class RepoRead:
 
 def read_repo(
     org: str, name: str, meta: dict, copies: "list[str]",
-    quality_files: "list[str]",
+    quality_files: "list[str]", on_train: bool,
 ) -> RepoRead:
+    """Read one repo's state on the branch it ships from.
+
+    `on_train` IS A PARAMETER, NOT A LOOKUP, and that is the fix rather than the
+    style (Bugbot, #289). It was read as `meta.get("release_train")`, and production
+    `meta` comes from `list_active_repos`, which returns ONLY `visibility` and
+    `default_branch`. So the flag was always None -> False, every repo was audited on
+    its default branch, and develop-first was silently deleted for the train repos it
+    exists for. The selftest passed because it CONSTRUCTED a meta carrying the flag --
+    a fixture asserting my assumption instead of the measured shape.
+
+    Required and positional so a caller that forgets it raises TypeError. Defaulting
+    it to False would reproduce the same bug with better manners.
+    """
     out = RepoRead(name)
 
     try:
@@ -1197,7 +1210,9 @@ def read_repo(
     # release-train/repos.yml. No per-repo `audit_ref` field and no exception list
     # for rfcs: a hand-maintained override would be a second place to be wrong, and
     # this rule changes exactly one repo's answer (measured across all 19).
-    on_train = bool(meta.get("release_train"))
+    #
+    # IT ARRIVES AS `on_train`, from the INVENTORY entry at the call site -- never
+    # from `meta`, which is the org listing and has no such field. See the docstring.
     if on_train and "develop" in branches:
         out.branch = "develop"
     elif meta.get("default_branch") in branches:
@@ -2219,7 +2234,12 @@ def main() -> int:
     for name in audited:
         entry = inventory["repos"][name]
         meta = active[name]
-        read = read_repo(org, name, meta, copies, quality_files)
+        # `entry` is the INVENTORY row, whose release_train is schema-required and
+        # cross-checked against release-train/repos.yml by load_release_train. `meta`
+        # is the org listing and carries no such field -- reading it from there is the
+        # bug Bugbot found on #289.
+        read = read_repo(org, name, meta, copies, quality_files,
+                         bool(entry.get("release_train")))
         if not read.ok:
             for problem in read.errors:
                 unreadable.append(f"{name}: {problem}")

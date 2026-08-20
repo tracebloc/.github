@@ -294,14 +294,18 @@ else:
 
 COPIES = ["add-to-kanban.yml", "stale-backlog.yml"]
 QFILES = ["CLAUDE.md", ".cursor/BUGBOT.md"]
-# THE FIXTURE REPO IS ON THE TRAIN, and that is now load-bearing rather than
-# incidental (backend#2214). `read_repo` audits `develop` for a train repo and the
-# DEFAULT branch for one the train does not promote, so a fixture without
-# `release_train` would silently exercise the non-train path while every case here
-# is written about develop-first. `META_OFF_TRAIN` below is the other side.
-META = {"visibility": "private", "default_branch": "main", "release_train": True}
-META_OFF_TRAIN = {"visibility": "private", "default_branch": "main",
-                  "release_train": False}
+# THE FIXTURE META IS THE SHAPE `list_active_repos` RETURNS, and nothing more
+# (Bugbot, #289). It deliberately does NOT carry `release_train`: an earlier version
+# of this fixture did, `read_repo` read the flag from `meta`, and every case passed
+# while production -- where `meta` is the org listing and has no such field -- audited
+# every repo on its default branch. A fixture richer than the real payload is a test
+# asserting its author's assumption.
+#
+# Train membership now arrives as read_repo's `on_train` ARGUMENT, from the inventory
+# entry. The two META dicts differ only in `default_branch` expectations; which side
+# of the train a case is on is stated at the call, where a reader can see it.
+META = {"visibility": "private", "default_branch": "main"}
+META_OFF_TRAIN = {"visibility": "private", "default_branch": "main"}
 TREE_ONE = json.dumps({
     "truncated": False,
     "tree": [{"type": "blob",
@@ -323,7 +327,7 @@ def blob(body: bytes) -> str:
 def expect_unreadable(name: str, handler, needle: str) -> None:
     """A failed read must produce an UNREADABLE record, never 'no caller found'."""
     stub(handler)
-    read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+    read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
     ok = (not read.ok) and any(needle in err for err in read.errors)
     record(ok, name, str(read.errors))
 
@@ -431,6 +435,49 @@ def _good(args):
         b"    secrets: inherit\n")
 
 
+# --- the meta the resolver is HANDED is the org listing, and nothing more --------
+# This is the case that would have caught #289's High. `list_active_repos` builds
+# meta from `gh repo list --json name,isArchived,isFork,visibility,defaultBranchRef`,
+# so the only keys are `visibility` and `default_branch`. Any code reading train
+# membership out of `meta` is reading None -- and the earlier fixture hid that by
+# carrying a key production never sets.
+#
+# Asserted against the KEYS THE PRODUCER WRITES, so it fails if `list_active_repos`
+# starts or stops setting one, rather than agreeing with a list written here.
+import inspect as _inspect
+_src = _inspect.getsource(guard.list_active_repos)
+_written = set(re.findall(r'"(\w+)":\s', _src))
+record(_written == {"visibility", "default_branch"},
+       "list_active_repos writes exactly visibility + default_branch",
+       f"writes {sorted(_written)} — anything reading `release_train` from meta gets None")
+record("release_train" not in _written,
+       "...so train membership CANNOT come from meta",
+       "it arrives as read_repo's on_train argument, from the inventory entry")
+
+# --- the WIRING, because the two cases below cannot see it ----------------------
+# The behavioural cases call `read_repo` directly, so they pin the resolver and say
+# nothing about what `main()` passes it. Mutations that hardcode that argument to
+# True or False left all 196 green -- and the #289 bug WAS the wiring, not the
+# resolver, so leaving it unpinned would repeat the exact miss.
+#
+# This is a SOURCE assertion and weaker than behavioural, stated plainly rather than
+# dressed up: driving `main()` needs the whole org listing, the inventory and the
+# train file stubbed together, which is a harness this suite does not have. What it
+# does assert is that the argument is derived from the INVENTORY entry -- so a
+# constant, or a return to `meta`, reddens.
+# LINE-BASED, not a paren-matching regex. The first attempt used
+# `read_repo\((?:[^()]|\([^()]*\))*\)`, which allows ONE level of nesting -- and the
+# real call has two (`bool(entry.get(...))`) across two lines, so it matched nothing
+# and the assertion failed on the correct code while every mutation "passed". An
+# extractor that cannot find the thing reports the same as a defect.
+_main_lines = _inspect.getsource(guard.main).splitlines()
+_i = next((i for i, l in enumerate(_main_lines) if "read_repo(" in l), None)
+_call = " ".join(l.strip() for l in _main_lines[_i:_i + 3]) if _i is not None else ""
+record(bool(_call) and "entry" in _call and "release_train" in _call,
+       "main() derives read_repo's on_train from the INVENTORY entry",
+       (_call[:150] if _call else "no read_repo call found")
+       + " — a constant here is the #289 bug with better manners")
+
 # ---------------------------------------- which branch gets audited (backend#2214)
 #
 # Plain develop-first read `develop` wherever that branch existed. For a repo the
@@ -456,20 +503,20 @@ def _branch_probe(box):
 
 box = []
 stub(_branch_probe(box))
-guard.read_repo("acme", "repo", META, COPIES, QFILES)
+guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
 record(any("trees/develop" in u for u in box),
        "a TRAIN repo is audited on develop even when it defaults to main",
        f"requested {box!r}")
 
 box = []
 stub(_branch_probe(box))
-guard.read_repo("acme", "repo", META_OFF_TRAIN, COPIES, QFILES)
+guard.read_repo("acme", "repo", META_OFF_TRAIN, COPIES, QFILES, False)
 record(any("trees/main" in u for u in box) and not any("trees/develop" in u for u in box),
        "a NON-TRAIN repo is audited on its default branch, not a stray develop",
        f"requested {box!r} — this is the rfcs case; develop here lags and nobody merges to it")
 
 stub(_good)
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
 record(
     read.ok
     and read.branch == "develop"
@@ -493,7 +540,7 @@ def _decoys(args):
 
 
 stub(_decoys)
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
 record(read.ok and read.callers == {},
        "a commented-out `uses:` and one inside a run script are NOT callers",
        f"callers={read.callers}")
@@ -510,7 +557,7 @@ def _unpinned(args):
 
 
 stub(_unpinned)
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
 record(read.ok and read.callers.get("fr-gate.yml") == [("fr-gate-caller.yml", "v1.2.3", {})],
        "a caller on an unexpected ref is captured with its ref, for the pin check",
        f"callers={read.callers}")
@@ -533,7 +580,7 @@ def _soft_fail_true(args):
 
 
 stub(_soft_fail_true)
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
 record(
     read.ok
     and read.callers.get("fr-gate.yml") == [("fr-gate-caller.yml", "main", {"soft-fail": True})],
@@ -551,7 +598,7 @@ def _copy_sha(args):
 
 
 stub(_copy_sha)
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
 record(read.ok and read.copies.get("add-to-kanban.yml") == "deadbeef",
        "a copy is recorded by blob sha so content can be compared",
        f"copies={read.copies}")
@@ -586,7 +633,7 @@ def _stub_qf_tree(payload):
 
 _stub_qf_tree(_qf_tree(_qf_entry("CLAUDE.md", size=5901),
                        _qf_entry(".cursor/BUGBOT.md", size=4193)))
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
 record(read.ok
        and read.quality_files.get("CLAUDE.md", {}).get("size") == 5901
        and read.quality_files.get(".cursor/BUGBOT.md", {}).get("mode") == "100644",
@@ -595,7 +642,7 @@ record(read.ok
 
 # Absence from a SUCCESSFUL read is the only legitimate way to conclude "absent".
 _stub_qf_tree(_qf_tree(_qf_entry("README.md")))
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
 record(read.ok and read.quality_files == {},
        "quality files: absent from a fully-read tree is recorded as absent",
        f"quality_files={read.quality_files}")
@@ -604,7 +651,7 @@ record(read.ok and read.quality_files == {},
 # knowledge. read_repo must fail the whole row rather than let the family conclude
 # the file is missing -- exit 2, never a finding and never an all-clear.
 _stub_qf_tree(_qf_tree(_qf_entry("README.md"), truncated=True))
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
 record(not read.ok and any("truncated" in e for e in read.errors),
        "quality files: a TRUNCATED tree is unreadable, never 'the file is absent'",
        f"ok={read.ok} errors={read.errors}")
@@ -612,7 +659,7 @@ record(not read.ok and any("truncated" in e for e in read.errors),
 # A blob whose size the API did not report cannot be told from an empty file.
 # Guessing either way is the guard deciding a fact it does not have.
 _stub_qf_tree(_qf_tree(_qf_entry("CLAUDE.md", with_size=False)))
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
 record(not read.ok and any("no size" in e for e in read.errors),
        "quality files: a blob with no reported size is unreadable, not 'empty'",
        f"ok={read.ok} errors={read.errors}")
