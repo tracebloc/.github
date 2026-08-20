@@ -59,3 +59,24 @@ jobs:
         run: python -m pip install --quiet 'pyyaml==6.0.2'
       - name: make selftests
         run: make selftests
+
+      # THE PRODUCTION AUDIT, in a REQUIRED context (Bugbot, #287).
+      #
+      # `mint-scope` was wired only into `make lint`, which CI does not run -- so a
+      # new unscoped `create-github-app-token` mint could merge while `selftests`
+      # stayed green, because `selftests` runs the FIXTURE suite and never the real
+      # audit. A guard in a non-required job is advice, and this one was not even in
+      # a job. That is the exact failure mode CLAUDE.md's own rule 2 names, shipped
+      # in the PR that added the guard.
+      #
+      # HERE RATHER THAN A NEW JOB, on purpose: `selftests` is ALREADY a required
+      # context on develop/staging/main, so this arms the gate with no
+      # branch-protection edit -- and never landing a red gate is the other half of
+      # the same rule. A new context would sit unrequired until someone armed it,
+      # which is how a guard ends up advisory.
+      #
+      # BOTH HALVES RUN, and they answer different questions: the suite proves the
+      # rule CATCHES (13 fixture cases, 8 mutations), this proves the fleet COMPLIES.
+      # Passing one while failing the other is possible in both directions.
+      - name: mint-scope (the real workflows, not fixtures)
+        run: make mint-scope

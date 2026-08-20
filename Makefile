@@ -25,6 +25,10 @@
 #   bricked-prs-selftest.yml  -> `selftest-bricked-prs`
 #   kanban-columns.yml        -> `selftest-kanban-columns`
 #   kanban-deploy-state-selftest.yml -> `selftest-kanban-deploy-state`
+#   selftests.yml             -> `selftests` AND `mint-scope`
+#     (the `selftests` required context runs BOTH: the fixture suite proves the
+#      rule catches, `mint-scope` proves the real workflows comply. They can
+#      disagree in either direction, so neither substitutes for the other.)
 #
 # When one of those workflows changes, change the matching line here. Adding a
 # NEW selftest needs no edit to this list to be CAUGHT — `selftests-cover`
