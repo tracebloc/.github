@@ -66,7 +66,7 @@ MINIMAL = {
     "schema_version": 2,
     "org": "acme",
     "pinned_ref": "main",
-    "audit_branch": "develop-first",
+    "audit_branch": "develop-first-on-train",
     "source_repo": "hub",
     "reusables": ["a.yml"],
     "copies": ["c.yml"],
@@ -140,7 +140,7 @@ expect_schema_failure("missing pinned_ref rejected", _drop("pinned_ref"))
 expect_schema_failure("missing repos rejected", _drop("repos"))
 expect_schema_failure("wrong schema_version rejected",
                       lambda d: d.update({"schema_version": 99}))
-expect_schema_failure("audit_branch other than develop-first rejected",
+expect_schema_failure("audit_branch other than develop-first-on-train rejected",
                       lambda d: d.update({"audit_branch": "default"}))
 expect_schema_failure("empty reusables rejected",
                       lambda d: d.update({"reusables": []}))
@@ -294,7 +294,14 @@ else:
 
 COPIES = ["add-to-kanban.yml", "stale-backlog.yml"]
 QFILES = ["CLAUDE.md", ".cursor/BUGBOT.md"]
-META = {"visibility": "private", "default_branch": "main"}
+# THE FIXTURE REPO IS ON THE TRAIN, and that is now load-bearing rather than
+# incidental (backend#2214). `read_repo` audits `develop` for a train repo and the
+# DEFAULT branch for one the train does not promote, so a fixture without
+# `release_train` would silently exercise the non-train path while every case here
+# is written about develop-first. `META_OFF_TRAIN` below is the other side.
+META = {"visibility": "private", "default_branch": "main", "release_train": True}
+META_OFF_TRAIN = {"visibility": "private", "default_branch": "main",
+                  "release_train": False}
 TREE_ONE = json.dumps({
     "truncated": False,
     "tree": [{"type": "blob",
@@ -409,7 +416,12 @@ def _good(args):
         return "main\ndevelop\n"
     if _tree(args):
         if "trees/develop" not in args[1]:
-            raise AssertionError(f"not develop-first: {args[1]}")
+            # NOT `raise`. This positive control asserts the train repo is audited on
+            # develop, and a hard raise here ABORTS THE WHOLE SUITE -- so a mutation
+            # that changes the resolver reported "CRASH" and hid every other case it
+            # would also have broken. Returning an empty tree makes the control fail
+            # cleanly and lets the rest of the run report (backend#2214).
+            return json.dumps({"truncated": False, "tree": []})
         return TREE_ONE
     return blob(
         b"name: FR gate\n"
@@ -418,6 +430,43 @@ def _good(args):
         b"    uses: tracebloc/.github/.github/workflows/fr-gate.yml@main\n"
         b"    secrets: inherit\n")
 
+
+# ---------------------------------------- which branch gets audited (backend#2214)
+#
+# Plain develop-first read `develop` wherever that branch existed. For a repo the
+# train does NOT promote there is no promotion pipeline, so its DEFAULT branch is
+# where it ships -- and preferring a stray `develop` audits a branch nobody merges
+# to. `rfcs` is the live case: default `main`, a lagging `develop`, and the audit
+# reported drift against a change correctly landed on `main`.
+#
+# BOTH DIRECTIONS ARE PINNED. One case alone cannot fail: assert only the train side
+# and the non-train path is untested; assert only the non-train side and a resolver
+# that always uses the default branch passes. Each of these reddens a different
+# mutation.
+def _branch_probe(box):
+    """A handler that records which ref the tree was requested for."""
+    def h(args):
+        if _branches(args):
+            return "main\ndevelop\n"
+        if _tree(args):
+            box.append(args[1])
+            return TREE_ONE
+        return blob(b"name: x\non:\n  push:\njobs:\n  j:\n    uses: a/b/.github/workflows/c.yml@main\n")
+    return h
+
+box = []
+stub(_branch_probe(box))
+guard.read_repo("acme", "repo", META, COPIES, QFILES)
+record(any("trees/develop" in u for u in box),
+       "a TRAIN repo is audited on develop even when it defaults to main",
+       f"requested {box!r}")
+
+box = []
+stub(_branch_probe(box))
+guard.read_repo("acme", "repo", META_OFF_TRAIN, COPIES, QFILES)
+record(any("trees/main" in u for u in box) and not any("trees/develop" in u for u in box),
+       "a NON-TRAIN repo is audited on its default branch, not a stray develop",
+       f"requested {box!r} — this is the rfcs case; develop here lags and nobody merges to it")
 
 stub(_good)
 read = guard.read_repo("acme", "repo", META, COPIES, QFILES)

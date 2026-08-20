@@ -22,9 +22,15 @@ DESIGN RULES, all of them learned from bugs in this repo:
     read, so a commented-out example line (code-quality.yml:60) is not a caller
     and a local copy that merely shares a name is not either.
 
-3.  DEVELOP-FIRST. Twelve of twenty repos default to main/master while work lands
-    on develop. Enumerating on the default branch under-reports anything in
-    flight; that error produced three wrong counts in this epic.
+3.  THE BRANCH A REPO SHIPS FROM. For a TRAIN repo that is develop: they default
+    to main/master while work lands on develop, and enumerating on the default
+    branch under-reports anything in flight (that error produced three wrong
+    counts in this epic). For a NON-TRAIN repo there is no promotion pipeline, so
+    the default branch is where it ships -- and preferring a `develop` that
+    happens to exist audits a branch nobody merges to. Plain develop-first did the
+    latter to `rfcs` and reported drift against a correctly-landed change
+    (backend#2214); it agreed by coincidence until the first real change, because
+    both refs held the same blob.
 
 4.  A MISSING INVENTORY KEY IS A FAILURE, NOT A DEFAULT. Schema validation runs
     before any network call, and every repo must carry an entry for every
@@ -135,7 +141,7 @@ REGULAR_FILE_MODES = ("100644", "100755")
 # silently reports client as missing its trust root.
 RULESET_KINDS = ("promotion_merge_commit_only", "tag_trust_root")
 SUPPORTED_SCHEMA = 2
-SUPPORTED_AUDIT_BRANCH = "develop-first"
+SUPPORTED_AUDIT_BRANCH = "develop-first-on-train"
 
 # ------------------------------------------------------------------- protection
 #
@@ -1168,8 +1174,31 @@ def read_repo(
         return out
     out.branches = branches
 
-    # develop-first, per the inventory's audit_branch policy.
-    if "develop" in branches:
+    # THE BRANCH A REPO SHIPS FROM, per the inventory's audit_branch policy.
+    #
+    # `develop-first-on-train` rather than plain develop-first, and the distinction
+    # is a bug fix rather than a refinement (backend#2214). Develop-first exists
+    # because TRAIN repos default to main/master while work lands on develop, so a
+    # default-branch audit under-reports anything in flight. A NON-TRAIN repo has no
+    # promotion pipeline: its default branch IS where it ships from, and preferring a
+    # `develop` that happens to exist there audits a branch nobody merges to.
+    #
+    # `rfcs` is the case that exposed it: default `main`, a `develop` that lags, and
+    # backend#2157 landed on `main` where the repo actually ships. The audit read
+    # `develop` and reported drift against a change that was correctly in place.
+    #
+    # IT AGREED BY COINCIDENCE FOR MONTHS. Both refs held the same blob because
+    # nothing had ever changed that file, so a wrong ref and a right ref were
+    # indistinguishable -- the shape backend#1729 catalogued, arriving in the
+    # resolver rather than in a check.
+    #
+    # DERIVED, NOT LISTED. The discriminator is `release_train`, which the inventory
+    # already carries and which `load_release_train` already verifies against
+    # release-train/repos.yml. No per-repo `audit_ref` field and no exception list
+    # for rfcs: a hand-maintained override would be a second place to be wrong, and
+    # this rule changes exactly one repo's answer (measured across all 19).
+    on_train = bool(meta.get("release_train"))
+    if on_train and "develop" in branches:
         out.branch = "develop"
     elif meta.get("default_branch") in branches:
         out.branch = meta["default_branch"]
