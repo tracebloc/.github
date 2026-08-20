@@ -63,7 +63,10 @@
 # MEASURED, DEVELOP-FIRST, 2026-08-03: 110 caller references across 17 repos, all
 # pinned @main. Twelve of the twenty repos default to main/master while work lands
 # on develop, so a default-branch enumeration under-reports anything in flight.
-# `audit_branch: develop-first` below is that correction, encoded.
+# `audit_branch: develop-first-on-train` below is that correction, encoded -- and the
+# `-on-train` half is the backend#2214 fix: develop-first is right for a repo the
+# TRAIN promotes and wrong for one that ships from its default branch, which is how
+# `rfcs` came to be audited on a `develop` nobody merges to.
 
 schema_version: 2
 org: tracebloc
@@ -71,10 +74,16 @@ org: tracebloc
 # Every caller must pin this ref. Any other ref is drift.
 pinned_ref: main
 
-# Which branch the guard reads. `develop-first` = `develop` where that branch
-# exists, else the repo's default branch. Anything else is rejected by the guard
-# rather than silently treated as the default branch.
-audit_branch: develop-first
+# Which branch the guard reads, per repo. `develop-first-on-train` = `develop` for a
+# repo the TRAIN promotes (where that branch exists), and the repo's DEFAULT branch
+# for one it does not. Anything else is rejected by the guard rather than silently
+# treated as the default branch.
+#
+# The `release_train` flag on each repo below is the discriminator, so there is no
+# second list to keep in step -- and `load_release_train` already verifies that flag
+# against release-train/repos.yml, so the ref this guard reads is derived from a
+# fact it independently checks.
+audit_branch: develop-first-on-train
 
 # The repo that hosts the reusables and the canonical copies. Its `copies` entries
 # are checked for presence only - comparing its audit branch against the checkout
