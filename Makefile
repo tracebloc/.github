@@ -25,10 +25,12 @@
 #   bricked-prs-selftest.yml  -> `selftest-bricked-prs`
 #   kanban-columns.yml        -> `selftest-kanban-columns`
 #   kanban-deploy-state-selftest.yml -> `selftest-kanban-deploy-state`
-#   selftests.yml             -> `selftest-house-rules` (backend#1788), which is
-#     in the REQUIRED `selftests` context. The MUTATION tier is separate: the fast
-#     `--dry` anchor resolve rides `lint`; the full run is in `check-all` and in
-#     selftests.yml's own step, because 58s is too long for the pre-push tier.
+#   selftests.yml             -> `selftests`, `mint-scope` AND `selftest-house-rules`
+#     (the `selftests` required context runs all three. `selftests` + the fixture
+#      suites prove the rules CATCH; `mint-scope` proves the real workflows COMPLY.
+#      They disagree in either direction, so neither substitutes for the other.
+#      house-rules' MUTATION tier is separate again: the fast `--dry` anchor resolve
+#      rides `lint`, the full 58s run is in `check-all` and in selftests.yml.)
 #
 # When one of those workflows changes, change the matching line here. Adding a
 # NEW selftest needs no edit to this list to be CAUGHT — `selftests-cover`
@@ -98,7 +100,8 @@ help:
 	@echo "  setup       preflight the tools check needs; installs the pre-push hook"
 	@echo "  install-hooks  (re)install the git pre-push hook that runs 'make check'"
 	@echo
-	@echo "  lint            ruff + shellcheck + house-rules + action-pins + actionlint"
+	@echo "  lint            ruff + shellcheck + house-rules + action-pins +"
+	@echo "                  mint-scope + actionlint"
 	@echo "  selftests       all $(words $(SELFTEST_FILES)) gate selftests (+ the coverage assertion)"
 	@echo "  credential-scan gitleaks over the whole history, as code-quality.yml runs it"
 	@echo "  audit           caller-drift.py against the live org — needs a token"
@@ -129,7 +132,7 @@ check-all: check credential-scan mutation-house-rules
 # ---- lint --------------------------------------------------------
 
 .PHONY: lint
-lint: ruff shellcheck house-rules action-pins actionlint mutation-house-rules-dry
+lint: ruff shellcheck house-rules action-pins mint-scope actionlint mutation-house-rules-dry
 
 # ruff: code-quality.yml's `ruff` job in all-files mode. This repo has no ruff
 # config, so the workflow falls back to --isolated --select <ruff-select>; that
@@ -198,6 +201,19 @@ house-rules:
 # SOFT_FAIL=false because that is what this repo's caller passes
 # (action-pins-soft-fail: false) — findings are red here, not advisory.
 .PHONY: action-pins
+# mint-scope: no App-token mint may carry the App's FULL installation grant
+# (backend#2157). In `lint` rather than `selftests` because it is a property of the
+# workflows in this repo, not of a script -- same tier as action-pins, which asks a
+# structurally identical question about the same files.
+.PHONY: selftest-mint-scope
+selftest-mint-scope: guard-pyyaml
+	$(PYTHON) scripts/tests/mint-scope-selftest.py
+
+.PHONY: mint-scope
+mint-scope: guard-pyyaml
+	$(PYTHON) scripts/mint-scope.py
+
+
 action-pins:
 	@set -e; \
 	 wf=.github/workflows/code-quality.yml; \
@@ -269,7 +285,7 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
 	selftest-stale-backlog \
                     selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns \
                     selftest-kanban-deploy-state selftest-git-reap \
-                    selftest-house-rules
+                    selftest-mint-scope selftest-house-rules
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
