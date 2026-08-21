@@ -61,10 +61,34 @@ WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 # while this check went green. `advance-deploy-env.yml` is out because it now writes
 # NO literal at all, which is checkable: `grep -oE 'STATUS(_NAME)?="[A-Za-z ()]+"'`
 # over it returns nothing.
+# `advance-deploy-env.yml` IS BACK (saadqbal on .github#295), and its removal was the
+# SECOND wrong one on this PR -- the router was the first. The reasoning was that
+# `WRITERS` is a write-side name and this file's thirteen Status literals live in
+# `rank()`, which CONSUMES a Status rather than emitting one. Technically defensible,
+# and wrong about what the check is for: an unknown Status returns "" from `rank()`,
+# the guard falls through to strict equality, and the card then BLOCKS every prod
+# promotion carrying it. A read-side name that does not resolve breaks at least as
+# loudly as a write-side one.
+#
+# Two hand-removals, two errors, is why `unlisted_namers()` below exists: the tuple
+# is now checked rather than trusted.
 WRITERS = (
+    "advance-deploy-env.yml",
     "kanban-closure-router.yml",
     "set-pr-status.yml",
     "fr-pass-comment.yml",
+    # FOUND BY `unlisted_namers()` ON ITS FIRST RUN, which is the argument for the
+    # guard existing. Neither writes a Status -- `kanban-archive.yml:104` SELECTS the
+    # three terminal columns (`Prod`/`Cancelled`/`Done`) to archive, and
+    # `wip-limit-check.yml:47` defaults its column input to `Code review` -- and
+    # neither name was being checked against the board. A rename would have left the
+    # archiver silently archiving nothing and the WIP check counting an empty column,
+    # both of which look exactly like a quiet board.
+    #
+    # `WRITERS` is now really "workflows that NAME a column"; the name is kept
+    # because the paths-filter assertion and the idiom cross-check both key on it.
+    "kanban-archive.yml",
+    "wip-limit-check.yml",
 )
 
 
@@ -150,6 +174,50 @@ def cross_check(found: "dict[str, set[str]]", options: "set[str]") -> "list[str]
     return sorted(set(stale))
 
 
+def unlisted_namers(options: "set[str]", where: "Path | None" = None) -> "list[str]":
+    """Workflows that NAME a board column but are not in `WRITERS`.
+
+    TWO HAND-REMOVALS FROM `WRITERS` ON ONE PR WERE BOTH WRONG (saadqbal,
+    .github#295): the closure router (six literals) and advance-deploy-env
+    (thirteen, in `rank()`). Each removal was argued from "this file does not
+    WRITE a Status", and each took real names outside a check whose stated purpose
+    is that every Status name a workflow uses exists on the board. A curated tuple
+    that has been wrong twice in one PR is not a tuple to trust -- so it is derived
+    against now, and a file naming a column while absent from `WRITERS` is a
+    finding rather than a judgement call.
+
+    CODE LINES ONLY. Comments discuss column names constantly -- including the two
+    comments explaining the removals this function exists because of -- and a
+    raw-text scan would flag every one of them. That is the same trap e2e#176 hit.
+
+    EXEMPT names its exceptions with reasons, and a stale exemption is reported by
+    the caller for the same reason mint-scope.py reports its own.
+    """
+    exempt = {
+        # `harness`-free rank tables that mirror fr-gate's ordering. They are read
+        # -side AND their names are asserted by fr-gate's own selftest, so listing
+        # them here would double-report the same fact.
+        "fr-gate.yml": "its rank table is covered by the fr-gate selftest",
+        "kanban-reconcile.yml": "its DEST names come from branch_status_map.py, "
+                               "whose vocabulary is imported above",
+    }
+    out: "list[str]" = []
+    for path in sorted((where or WORKFLOWS).glob("*.yml")):
+        if path.name in WRITERS or path.name in exempt:
+            continue
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            bare = line.strip()
+            if not bare or bare.startswith("#"):
+                continue
+            for name in options:
+                # Quoted, whole-value: `"On dev")` in a case arm, `="Prod"`. Bare
+                # substring matching would hit prose inside a longer string.
+                if f'"{name}"' in line:
+                    out.append(f"{path.name}:{i} names {name!r} but is not in WRITERS")
+                    break
+    return sorted(set(out))
+
+
 def board_options() -> "set[str]":
     query = (
         'query{node(id:"%s"){... on ProjectV2{field(name:"Status")'
@@ -175,6 +243,16 @@ def board_options() -> "set[str]":
 
 def main() -> int:
     written, options = written_names(), board_options()
+
+    unlisted = unlisted_namers(options)
+    if unlisted:
+        print("ERROR: a workflow names a board column but is not in WRITERS, so "
+              "its names are not checked against the board — the shape that took "
+              "six literals (the router) and thirteen (advance-deploy-env) outside "
+              "this check on .github#295:")
+        for row in unlisted:
+            print(f"  {row}")
+        return 1
 
     stale = cross_check(written, options)
     if stale:
