@@ -21,6 +21,14 @@
 #    - `producer | head||die` — the mirror, on the head arm, which was left
 #      behind when the boundary was fixed for grep only.
 #
+#  ASSERTIONS USE HERE-STRINGS, never `printf … | grep -q`. This suite runs
+#  under `set -uo pipefail`, so on a large enough $OUT the `grep -q` closes
+#  early, the producer takes SIGPIPE, and the pipeline returns 141 -- a real
+#  match reads as ABSENT and the assertion then passes or fails for the wrong
+#  reason. That is precisely the hazard this file exists to prove, and its own
+#  first version committed it in eight assertions (Bugbot, .github#300).
+#  `house-rules-selftest.sh` already uses here-strings for the same reason.
+#
 #  Run:  bash scripts/tests/pipefail-early-close-selftest.sh
 # =============================================================================
 set -uo pipefail
@@ -163,7 +171,7 @@ echo "== state does not leak between files =====================================
 scan_hazardous a-bad.sh '  x="$(ls /tmp | head -1)"'
 printf '#!/usr/bin/env bash\nset -uo pipefail\n  x="$(ls /tmp | head -1)"\n' > "$WORK/b-good.sh"
 OUT=$(awk -f "$SCANNER_ABS" "$WORK/a-bad.sh" "$WORK/b-good.sh")
-if printf '%s' "$OUT" | grep -q 'a-bad.sh' && ! printf '%s' "$OUT" | grep -q 'b-good.sh'; then
+if grep -q 'a-bad.sh' <<<"$OUT" && ! grep -q 'b-good.sh' <<<"$OUT"; then
   record 0 "a clean file after a dirty one stays clean" ""
 else
   record 1 "a clean file after a dirty one stays clean" "$OUT"
@@ -183,7 +191,7 @@ mk_repo() {  # $1 = repo dir ; $2 = the sourcer's set-line
 }
 mk_repo "$WORK/inh" "set -euo pipefail"
 OUT=$(PIPEFAIL_ROOT="$WORK/inh" bash "$GATE_ABS"); RC=$?
-if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q 'worker.sh'; then
+if [ "$RC" = 1 ] && grep -q 'worker.sh' <<<"$OUT"; then
   record 0 "a lib sourced by a hazardous script IS flagged (inheritance)" ""
 else
   record 1 "a lib sourced by a hazardous script IS flagged (inheritance)" "rc=$RC out=$OUT"
@@ -201,7 +209,7 @@ printf 'source "${LIB_DIR}/leaf.sh"\n' > "$WORK/deep/scripts/lib/mid.sh"
 printf 'work() {\n  producer | head -1\n}\n' > "$WORK/deep/scripts/lib/leaf.sh"
 ( cd "$WORK/deep" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
 OUT=$(PIPEFAIL_ROOT="$WORK/deep" bash "$GATE_ABS"); RC=$?
-if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q 'leaf.sh'; then
+if [ "$RC" = 1 ] && grep -q 'leaf.sh' <<<"$OUT"; then
   record 0 "...and TRANSITIVELY, two levels down (the fixpoint, not one pass)" ""
 else
   record 1 "...and TRANSITIVELY, two levels down (the fixpoint, not one pass)" "rc=$RC out=$OUT"
@@ -222,7 +230,7 @@ while IFS= read -r srcline; do
   [ -n "$srcline" ] || continue
   rm -rf "$WORK/srcspell"; mk_repo_src "$WORK/srcspell" "$srcline"
   OUT=$(PIPEFAIL_ROOT="$WORK/srcspell" bash "$GATE_ABS"); RC=$?
-  if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q 'worker.sh'; then
+  if [ "$RC" = 1 ] && grep -q 'worker.sh' <<<"$OUT"; then
     record 0 "...inherited through: $srcline" ""
   else
     record 1 "...inherited through: $srcline" "rc=$RC out=$OUT"
@@ -245,7 +253,7 @@ printf '#!/usr/bin/env bash\nset -euo pipefail\nsource "${LIB_DIR}/worker.sh"\n'
 printf 'work() {\n  producer | head -1\n}\n' > "$WORK/spaced/my scripts/lib/worker.sh"
 ( cd "$WORK/spaced" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
 OUT=$(PIPEFAIL_ROOT="$WORK/spaced" bash "$GATE_ABS"); RC=$?
-if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q 'worker.sh'; then
+if [ "$RC" = 1 ] && grep -q 'worker.sh' <<<"$OUT"; then
   record 0 "a hazardous file under a path WITH A SPACE still propagates" ""
 else
   record 1 "a hazardous file under a path WITH A SPACE still propagates" "rc=$RC out=$OUT"
@@ -275,7 +283,7 @@ fi
 for spelling in 'set -eu -o pipefail' 'set -e -o pipefail' 'set -o errexit -o pipefail'; do
   rm -rf "$WORK/spell"; mk_repo "$WORK/spell" "$spelling"
   OUT=$(PIPEFAIL_ROOT="$WORK/spell" bash "$GATE_ABS"); RC=$?
-  if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q 'worker.sh'; then
+  if [ "$RC" = 1 ] && grep -q 'worker.sh' <<<"$OUT"; then
     record 0 "...inherited through the split form: $spelling" ""
   else
     record 1 "...inherited through the split form: $spelling" "rc=$RC out=$OUT"
@@ -302,7 +310,7 @@ printf '#!/bin/bash\nset -euo pipefail\nx=$(ls | head -1)\n' > "$WORK/derive/bui
 chmod +x "$WORK/derive/build"
 ( cd "$WORK/derive" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
 OUT=$(PIPEFAIL_ROOT="$WORK/derive" bash "$GATE_ABS"); RC=$?
-if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q 'build'; then
+if [ "$RC" = 1 ] && grep -q 'build' <<<"$OUT"; then
   record 0 "an extensionless file is classified by its shebang" ""
 else
   record 1 "an extensionless file is classified by its shebang" "rc=$RC out=$OUT"
