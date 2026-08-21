@@ -149,6 +149,24 @@ scan_raw realplus.sh '#!/usr/bin/env bash\nset -euo pipefail\nset +e\n  x="$(ls 
 if spares; then record 0 "but a REAL 'set +e' still disarms it" ""; else record 1 "but a REAL 'set +e' still disarms it" "$OUT"; fi
 
 echo
+echo "== a `set` line carries code too =============================================="
+# The dispatch `next`ed after apply_set, so the rest of the PHYSICAL line was
+# never judged (Asad, .github#300). Third `next`-shaped miss on this file.
+scan_raw setsame.sh '#!/usr/bin/env bash\nset -euo pipefail; producer | head -1\n'
+if flags; then record 0 "a hazard on the SAME line as 'set -euo pipefail' is flagged" ""; else record 1 "a hazard on the SAME line as 'set -euo pipefail' is flagged" "no finding"; fi
+# And the bigger version found while fixing it: `pipefail;` tokenised with the
+# semicolon attached, so the `-o` handler never matched and p_on stayed 0 for
+# the WHOLE FILE — every hazard in it skipped, not just the one on that line.
+scan_raw setsemi.sh '#!/usr/bin/env bash\nset -euo pipefail; cd /tmp\necho a\nproducer | head -1\n'
+if flags; then record 0 "'set -euo pipefail; cmd' still enables pipefail for the file" ""; else record 1 "'set -euo pipefail; cmd' still enables pipefail for the file" "no finding"; fi
+# The discriminations: falling through must not lose the DISABLING forms, which
+# is the whole reason the state machine is positional.
+scan_raw setoff1.sh '#!/usr/bin/env bash\nset -euo pipefail\nset +e; producer | head -1\n'
+if spares; then record 0 "...and 'set +e; cmd' on one line still disarms" ""; else record 1 "...and 'set +e; cmd' on one line still disarms" "$OUT"; fi
+scan_raw setoff2.sh '#!/usr/bin/env bash\nset -euo pipefail\nset +o pipefail; producer | head -1\n'
+if spares; then record 0 "...as does 'set +o pipefail; cmd'" ""; else record 1 "...as does 'set +o pipefail; cmd'" "$OUT"; fi
+
+echo
 echo "== one-line functions are scanned, not skipped ================================"
 scan_raw oneline.sh '#!/usr/bin/env bash\nset -euo pipefail\nfirst() { producer | head -1; }\n'
 if flags; then record 0 "a one-line function body is scanned" ""; else record 1 "a one-line function body is scanned" "no finding"; fi

@@ -64,8 +64,8 @@ MUTATIONS = [
 
     # --- option state is positional --------------------------------------
     ("apply_set reads the RAW line, so a set-line comment disarms the options", AWK,
-     '  line = strip_trailing_comment(line)\n  n = split(line, a, /[[:space:]]+/)',
-     '  n = split(line, a, /[[:space:]]+/)'),
+     '  line = strip_trailing_comment(line)',
+     '  # strip removed'),
     ("the `|| true` spare is unanchored again, covering the whole segment", AWK,
      '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)[[:space:])\\"\']*[[:space:]]*$/) continue',
      '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)/) continue'),
@@ -78,6 +78,11 @@ MUTATIONS = [
     ("the comment strip is a blunt regex, cutting a '#' inside a string", AWK,
      '      if (i == 1 || substr(s, i - 1, 1) ~ /[[:space:]]/) return substr(s, 1, i - 1)',
      '      return substr(s, 1, i - 1)'),
+    ("the set-line dispatch `next`s again, skipping code on the same line", AWK,
+     '  if (line ~ /^[[:space:]]*set[[:space:]]/) apply_set(line)',
+     '  if (line ~ /^[[:space:]]*set[[:space:]]/) { apply_set(line); next }'),
+    ("apply_set does not split on ';', so `pipefail;` never registers", AWK,
+     '  n = split(line, a, /[[:space:];]+/)', '  n = split(line, a, /[[:space:]]+/)'),
     ("errexit is assumed on everywhere", AWK, 'if (!(e_on && p_on)) next', 'if (!(p_on)) next'),
     ("pipefail is assumed on everywhere", AWK, 'if (!(e_on && p_on)) next', 'if (!(e_on)) next'),
 

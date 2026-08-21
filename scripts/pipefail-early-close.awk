@@ -102,7 +102,11 @@ function apply_set(line,   n, a, i, tok, sign, flags) {
   # line is inside a positional argument (`set -- "a#b"`), and the loop below
   # ignores any token not starting with `-` or `+`.
   line = strip_trailing_comment(line)
-  n = split(line, a, /[[:space:]]+/)
+  # SPLIT ON `;` AS WELL AS WHITESPACE. `set -euo pipefail; cd /tmp` tokenised
+  # as `pipefail;`, which never equals `pipefail`, so the `-o` handler missed it
+  # and the file ran with p_on=0 -- every hazard in it skipped, not just the one
+  # on that line. Found while fixing the fall-through above (Asad, .github#300).
+  n = split(line, a, /[[:space:];]+/)
   for (i = 1; i <= n; i++) {
     if (a[i] == "set") break
   }
@@ -170,7 +174,18 @@ FNR == 1 {
   }
   if (line ~ /^\}/ && in_fn) { e_on = save_e; p_on = save_p; in_fn = 0; next }
 
-  if (line ~ /^[[:space:]]*set[[:space:]]/) { apply_set(line); next }
+  # APPLY THE OPTIONS AND FALL THROUGH -- do not `next`. An unconditional `next`
+  # here meant the rest of the PHYSICAL LINE was never judged:
+  #     set -euo pipefail; producer | head -1
+  # enabled both options and then skipped its own hazard. Fail-open on the
+  # gate's core dispatch (Asad, .github#300), and the third `next`-shaped miss
+  # on this file after the one-liner and multi-line function openers.
+  #
+  # Falling through is safe *because* of the segmentation below: `set -euo
+  # pipefail` becomes its own segment, carries no pipe, and cannot produce a
+  # false positive. And `set +e; producer | head -1` still spares correctly,
+  # because e_on is already 0 by the time the second segment is judged.
+  if (line ~ /^[[:space:]]*set[[:space:]]/) apply_set(line)
 
   if (line ~ /#[[:space:]]*pipefail-guard:[[:space:]]*allow/) next
   # (No separate full-line-comment skip. `strip_trailing_comment` reduces a
