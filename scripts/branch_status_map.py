@@ -91,10 +91,22 @@ def read_override(repo: str, ref: str = "HEAD") -> dict:
     closing PR's base), which persists after a merge -- so passing it is safe even
     though a merged head may be gone.
 
-    An unreadable or absent file is an EMPTY override, not an error: the file is
-    optional by design and no repo has one. A malformed one is also empty, and says
-    so on stderr -- silently applying half a parsed map would be worse than
-    ignoring it.
+    EXACTLY ONE OUTCOME IS AN EMPTY OVERRIDE: a 404. The file is optional by design
+    and no repo has one, so "absent" has to be ordinary. Every other way this can go
+    wrong REFUSES, loudly, with a reason:
+
+        404 ................................ empty override, no message
+        any other fetch failure ............ refuse (403, 5xx, rate limit)
+        `yq` not installed ................. refuse
+        the file does not parse ............ refuse
+        `branch_status_map` is not a map ... refuse
+
+    That last row was the odd one out, and saadqbal made the argument better than
+    Bugbot did (.github#295): this docstring used to claim "a malformed one is also
+    empty, and SAYS SO on stderr", which was true of a parse failure and FALSE of a
+    map that parses fine and is a list -- no message, no exit code, `{}` returned. A
+    documented contract that one path quietly breaks is worse than an undocumented
+    one, because the next reader trusts it. Now the table above is the code.
     """
     args = ["gh", "api", f"repos/{repo}/contents/.kanban.yml",
             "-H", "Accept: application/vnd.github.raw"]
@@ -150,7 +162,16 @@ def read_override(repo: str, ref: str = "HEAD") -> dict:
         sys.stderr.write(f"::error::.kanban.yml in {repo} did not parse ({exc}); "
                          "refusing rather than applying part of it\n")
         raise SystemExit(1) from None
-    return doc if isinstance(doc, dict) else {}
+    # REFUSE, DO NOT IGNORE. A `branch_status_map` that parses and is a list, a
+    # string or a number is a MISTYPED override in a file somebody wrote on purpose --
+    # the one shape where "treat it as absent" is certainly wrong.
+    if not isinstance(doc, dict):
+        sys.stderr.write(
+            f"::error::.kanban.yml in {repo} has a `branch_status_map` that is "
+            f"{type(doc).__name__}, not a mapping; refusing rather than ignoring "
+            "a file that was fetched and parsed\n")
+        raise SystemExit(1)
+    return doc
 
 
 def main(argv: list[str]) -> int:

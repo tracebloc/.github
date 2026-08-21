@@ -154,6 +154,28 @@ try:
             ok(f"refuses on {err.split('(')[0].strip()}")
         except Exception as exc:                                  # noqa: BLE001
             bad(f"wrong failure for {err}: {type(exc).__name__}")
+    # A `branch_status_map` THAT PARSES BUT IS NOT A MAP refuses too. This was the
+    # one arm that returned {} silently while the docstring claimed it announced
+    # itself -- so the FIVE outcomes are now asserted as a set, not one at a time,
+    # because the defect was an inconsistency BETWEEN them (saadqbal on .github#295).
+    class _Ok:
+        def __init__(self, out):
+            self.stdout = out
+
+    for body, kind in (("[1, 2]", "list"), ('"a string"', "str"), ("7", "int")):
+        _m.subprocess.run = lambda *a, **k: _Ok(body)
+        try:
+            got = _m.read_override("o/r")
+            bad(f"a {kind} branch_status_map was accepted as empty: {got!r}")
+        except SystemExit:
+            ok(f"refuses a branch_status_map that is a {kind}")
+        except Exception as exc:                                  # noqa: BLE001
+            bad(f"wrong failure for a {kind}: {type(exc).__name__}")
+
+    # ... and a real mapping still comes back, so the guard is not "refuse anything".
+    _m.subprocess.run = lambda *a, **k: _Ok('{"develop": "Done"}')
+    eq("a real mapping is returned unchanged",
+       _m.read_override("o/r"), {"develop": "Done"})
 finally:
     _m.subprocess.run = _real
 
