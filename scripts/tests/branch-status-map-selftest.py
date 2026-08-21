@@ -88,6 +88,34 @@ eq("the guard ignores a no-branch policy floor",
 eq("the guard ignores a bare holding-state assignment",
    bool(pat.search('                  STATUS="On dev"')), False)
 
+# --- `--no-override` answers without consulting anything -------------------
+# The router needs a safe fallback: publishing NO Status leaves the built-in
+# "Item closed" automation to set `Cancelled` and archive shipped work
+# (.github#157), which is strictly worse than ignoring an override for one run.
+# So the policy lives in the caller and this flag is how it asks (Bugbot, .github#295).
+import subprocess as _sub  # noqa: E402
+
+_MAP = str(pathlib.Path(__file__).resolve().parent.parent / "branch_status_map.py")
+for _b, _want in (("develop", "On dev"), ("main", "Prod"), ("staging", "FR on staging")):
+    _r = _sub.run([sys.executable, _MAP, _b, "--no-override"],
+                  capture_output=True, text=True)
+    eq(f"--no-override answers {_b} from DEFAULT_MAP", _r.returncode, 0)
+    eq(f"--no-override gives {_b} its default Status", _want in _r.stdout, True)
+
+# IT MUST NOT TOUCH THE NETWORK -- that is the whole point of the fallback. `gh` is
+# removed from PATH, so any fetch attempt fails and the flag is proven to skip it.
+_r = _sub.run([sys.executable, _MAP, "develop", "owner/repo", "develop",
+               "--no-override"],
+              capture_output=True, text=True, env={"PATH": "/nonexistent"})
+eq("--no-override consults nothing even when a repo and ref are given",
+   (_r.returncode, "On dev" in _r.stdout), (0, True))
+
+# ... and WITHOUT the flag, the same call with no `gh` refuses rather than
+# defaulting -- so the flag is doing the work, not a silent fallback.
+_r = _sub.run([sys.executable, _MAP, "develop", "owner/repo", "develop"],
+              capture_output=True, text=True, env={"PATH": "/nonexistent"})
+eq("without the flag, an unreachable override refuses", _r.returncode != 0, True)
+
 # --- every caller must pass the REF, not rely on the repo default ----------
 # Defaulting to the API's HEAD reads the repo's DEFAULT branch, so an override present
 # on `develop` but not yet on `main` was ignored by both writers -- and
@@ -99,18 +127,35 @@ for _f, _n in (("advance-deploy-env.yml", 1),
                ("kanban-closure-router.yml", 2),
                ("kanban-reconcile.yml", 1)):
     _txt = (_WF / _f).read_text()
-    _calls = [ln for ln in _txt.splitlines()
-              if "branch_status_map.py" in ln and "python3" in ln]
-    eq(f"{_f}: every mapper call site found", len(_calls), _n)
+    _lines = _txt.splitlines()
+    _calls = []
+    for _i, _ln in enumerate(_lines):
+        if "branch_status_map.py" not in _ln or "python3" not in _ln:
+            continue
+        # A call's arguments can continue onto the next line.
+        _stmt = " ".join(_lines[_i:_i + 2])
+        # `--no-override` CALLS ARE A DIFFERENT SHAPE and are excluded on purpose: by
+        # definition they consult no `.kanban.yml`, so demanding a ref of them would
+        # be demanding the opposite of what they are for. Counting them was this
+        # assertion's own first failure when the router gained its fallback.
+        if "--no-override" in _stmt:
+            continue
+        _calls.append(_stmt)
+    eq(f"{_f}: every override-consulting call site found", len(_calls), _n)
     # The ref is the 3rd positional. A call with only branch+repo silently reads the
     # default branch, which is the finding.
-    for _c in _calls:
-        # the line continues onto the next for the router; join the statement
-        _i = _txt.splitlines().index(_c)
-        _stmt = " ".join(_txt.splitlines()[_i:_i + 2])
+    for _stmt in _calls:
         _args = _stmt.split("branch_status_map.py", 1)[1]
         eq(f"{_f}: the call passes a ref, not just branch+repo",
            _args.count('"$') >= 3, True)
+
+# AND THE FALLBACK CALLS EXIST WHERE THEY MUST. The router is the caller that cannot
+# afford to publish nothing, so both of its arms need one.
+_router = (_WF / "kanban-closure-router.yml").read_text()
+eq("the router has a --no-override fallback in both arms",
+   _router.count("--no-override"), 2)
+eq("reconcile has NO fallback -- it skips the item instead",
+   "--no-override" in (_WF / "kanban-reconcile.yml").read_text(), False)
 
 # --- read_override: absent vs unfetchable are different answers ------------
 # The whole point of this module is that an override gets applied. A fetch failure

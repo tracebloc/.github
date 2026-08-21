@@ -95,8 +95,25 @@ jobs:
               # is a shared script rather than a second `yq` read: this workflow
               # never checks the caller out, so the per-repo `.kanban.yml` override
               # it was silently ignoring has to be FETCHED, not read off disk.
-              STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
-                         "$BASE_REF" "$REPO_FULL" "$BASE_REF" | jq -r '.status')
+              # A REFUSED OVERRIDE MUST NOT COST THE WRITE (Bugbot, .github#295).
+              # `read_override` refuses on an unreadable `.kanban.yml`, and a bare
+              # command substitution under `set -euo pipefail` then exits this step
+              # before any Status is published -- so the update step's non-empty
+              # guard skips and the project's built-in "Item closed" automation sets
+              # `Cancelled`, archiving shipped-via-parent work (.github#157). That is
+              # the no-write path this file already documents, reached by a new door,
+              # and it fires exactly when the first repo adopts the override this
+              # change exists to unblock.
+              #
+              # So: fall back to the DEFAULT mapping and say so. Ignoring an override
+              # for one run is recoverable; letting a card be Cancelled is not.
+              if ! STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
+                              "$BASE_REF" "$REPO_FULL" "$BASE_REF" 2>/dev/null \
+                              | jq -r '.status'); then
+                echo "::warning::the .kanban.yml override for $REPO_FULL could not be read; using the DEFAULT mapping for $BASE_REF. Publishing no Status at all would let the built-in Item-closed automation set Cancelled (.github#157)."
+                STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
+                           "$BASE_REF" --no-override | jq -r '.status')
+              fi
               # KEYED ON WHETHER THE MAPPER ANSWERED, not on a list of branch names
               # (Bugbot, .github#295). A `case` over the four stock branches
               # overwrote ANY other result with the floor below -- so a
@@ -185,8 +202,14 @@ jobs:
                 : # decided above: no change
               elif [ "$CLOSER_TYPE" = "PullRequest" ]; then
                 # Same shared mapping as the pull_request arm above.
-                STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
-                           "$CLOSING_PR_BASE" "$REPO_FULL" "$CLOSING_PR_BASE" | jq -r '.status')
+                # Same fallback as the pull_request arm, and for the same reason.
+                if ! STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
+                                "$CLOSING_PR_BASE" "$REPO_FULL" "$CLOSING_PR_BASE" \
+                                2>/dev/null | jq -r '.status'); then
+                  echo "::warning::the .kanban.yml override for $REPO_FULL could not be read; using the DEFAULT mapping for $CLOSING_PR_BASE."
+                  STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
+                             "$CLOSING_PR_BASE" --no-override | jq -r '.status')
+                fi
                 # Same as the pull_request arm: the mapper's answer wins, and the
                 # floor applies only when it had none.
                 if [ -z "$STATUS" ]; then

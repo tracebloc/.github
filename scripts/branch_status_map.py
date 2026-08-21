@@ -175,13 +175,35 @@ def read_override(repo: str, ref: str = "HEAD") -> dict:
 
 
 def main(argv: list[str]) -> int:
+    """CLI. `--no-override` answers from `DEFAULT_MAP` alone, consulting nothing.
+
+    THE POLICY ON AN UNREADABLE OVERRIDE BELONGS TO THE CALLER, because the cost of
+    not writing differs per caller and this module cannot know it (Bugbot,
+    .github#295):
+
+      kanban-reconcile  SKIPS the item. It is a backstop that fixes MISSES, so
+                        writing a guessed column would overrule a router that
+                        already got it right.
+      kanban-closure-router  writes the DEFAULT. Publishing nothing leaves the
+                        project's built-in "Item closed" automation to set
+                        `Cancelled` and archive shipped-via-parent work
+                        (.github#157) -- strictly worse than ignoring an override
+                        for one run.
+
+    So `read_override` still refuses, and `--no-override` is how a caller asks for
+    the answer it can safely fall back to. Neither caller gets a silent default.
+    """
     if len(argv) < 2:
-        sys.stderr.write("usage: branch_status_map.py <branch> [owner/repo] [ref]\n")
+        sys.stderr.write("usage: branch_status_map.py <branch> [owner/repo] [ref]\n"
+                         "       branch_status_map.py <branch> --no-override\n")
         return 2
     branch = argv[1]
-    repo = argv[2] if len(argv) > 2 else os.environ.get("GITHUB_REPOSITORY", "")
-    ref = argv[3] if len(argv) > 3 else "HEAD"
-    override = read_override(repo, ref) if repo else {}
+    if "--no-override" in argv[2:]:
+        override: dict = {}
+    else:
+        repo = argv[2] if len(argv) > 2 else os.environ.get("GITHUB_REPOSITORY", "")
+        ref = argv[3] if len(argv) > 3 else "HEAD"
+        override = read_override(repo, ref) if repo else {}
     status, env = resolve(branch, override)
     if override.get(branch):
         sys.stderr.write(f"::notice::.kanban.yml overrides {branch} -> {status}\n")
