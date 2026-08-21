@@ -74,8 +74,11 @@ MUTATIONS = [
     # --- the WRAPPER's half ----------------------------------------------
     ("the inheritance fixpoint is skipped, so libs read as safe", SH,
      '  [ "$added" -eq 0 ] && break', '  break'),
+    ("the seed anchors the option to the FIRST cluster, losing `set -eu -o pipefail`", SH,
+     "'^[[:space:]]*set[[:space:]].*-[a-zA-Z]*o[[:space:]]+pipefail'",
+     "'^[[:space:]]*set[[:space:]]+-[a-zA-Z]*o?[[:space:]]+pipefail'"),
     ("the seed ignores the SIGN, so `set +o pipefail` reads as hazardous", SH,
-     "grep -qE '^[[:space:]]*set[[:space:]]+-[a-zA-Z]*o?[[:space:]]+pipefail|^[[:space:]]*set[[:space:]]+-[a-zA-Z]*o[[:space:]]*$' \"$f\" 2>/dev/null",
+     "grep -qE '^[[:space:]]*set[[:space:]].*-[a-zA-Z]*o[[:space:]]+pipefail' \"$f\" 2>/dev/null",
      "grep -qE 'pipefail' \"$f\" 2>/dev/null"),
     ("the file list is extension-only, losing shebang-classified files", SH,
      """      *) head -n 1 "$f" 2>/dev/null \\

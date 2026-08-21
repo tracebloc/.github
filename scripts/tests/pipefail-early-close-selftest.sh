@@ -207,6 +207,22 @@ else
   record 1 "...and TRANSITIVELY, two levels down (the fixpoint, not one pass)" "rc=$RC out=$OUT"
 fi
 
+# THE SOURCER'S SPELLING MUST NOT MATTER. `set -eu -o pipefail` is an ordinary
+# way to write it, and the seed used to require the option to be the FIRST
+# cluster after `set` — so a split-form script's libraries were never marked
+# inherited (Bugbot, .github#300). The awk got the direct file right either
+# way, which is exactly why this needs a wrapper-level case: the bug was
+# invisible to a scanner-level test.
+for spelling in 'set -eu -o pipefail' 'set -e -o pipefail' 'set -o errexit -o pipefail'; do
+  rm -rf "$WORK/spell"; mk_repo "$WORK/spell" "$spelling"
+  OUT=$(PIPEFAIL_ROOT="$WORK/spell" bash "$GATE_ABS"); RC=$?
+  if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q 'worker.sh'; then
+    record 0 "...inherited through the split form: $spelling" ""
+  else
+    record 1 "...inherited through the split form: $spelling" "rc=$RC out=$OUT"
+  fi
+done
+
 # The SIGN of the sourcer's options is what decides it — the mirror case, and
 # the one that proves the tests above are not just "any lib is flagged".
 mk_repo "$WORK/inhoff" "set -eu

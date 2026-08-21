@@ -99,13 +99,22 @@ fi
 haz=""
 for f in "${files[@]}"; do
   [ -f "$f" ] || continue
-  grep -qE '^[[:space:]]*set[[:space:]]+(-[a-zA-Z]*e[a-zA-Z]*([[:space:]]|$)|-o[[:space:]]+errexit)' "$f" 2>/dev/null || continue
-  # The SIGN matters: `^set .*pipefail` also matches `set +o pipefail`, so a
-  # file that explicitly turns pipefail OFF would be seeded as hazardous.
-  # Mirror the sign check the errexit seed above does.
-  grep -qE '^[[:space:]]*set[[:space:]]+-[a-zA-Z]*o?[[:space:]]+pipefail|^[[:space:]]*set[[:space:]]+-[a-zA-Z]*o[[:space:]]*$' "$f" 2>/dev/null \
-    || grep -qE '^[[:space:]]*set[[:space:]]+-[a-zA-Z]*o[[:space:]]+pipefail' "$f" 2>/dev/null \
-    || continue
+  # THE FLAG NEED NOT BE THE FIRST CLUSTER AFTER `set`. `set -eu -o pipefail`
+  # and `set -e -o pipefail` are ordinary spellings -- house-rules.sh already
+  # treats the split form as first-class -- and anchoring the option directly
+  # after `set[[:space:]]+` missed all of them (Bugbot, .github#300). The awk
+  # still got the DIRECT file right from its own state machine, so the damage
+  # was confined to the half this wrapper exists for: a split-form script's
+  # sourced libraries were never marked inherited. Measured across the fleet at
+  # the time: no repo used the split form, so nothing was being under-reported
+  # in practice -- but "no instance today" is not a property.
+  #
+  # `.*` before the cluster is what allows it anywhere on the line.
+  grep -qE '^[[:space:]]*set[[:space:]].*(-[a-zA-Z]*e[a-zA-Z]*([[:space:]]|$)|-o[[:space:]]+errexit)' "$f" 2>/dev/null || continue
+  # The SIGN still matters: `.*pipefail` alone would also match
+  # `set +o pipefail`, seeding a file that explicitly turns pipefail OFF. The
+  # `-` is required, so `+o` cannot satisfy it.
+  grep -qE '^[[:space:]]*set[[:space:]].*-[a-zA-Z]*o[[:space:]]+pipefail' "$f" 2>/dev/null || continue
   haz="$haz $f"
 done
 
