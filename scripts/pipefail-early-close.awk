@@ -60,6 +60,33 @@
 # Usage:  awk -v hazardous="<paths>" -f pipefail-early-close.awk FILE...
 # Output: one `path:line: code` per offender.
 
+# Strip a TRAILING comment, quote-aware.
+#
+# A regex cannot do this. `sub(/[[:space:]]*#.*$/, ...)` also cuts a `#` that
+# lives inside a string, and `x="a # b"; producer | head -1` then loses its real
+# hazard -- trading two false positives for a false negative, which is the wrong
+# direction. So: walk the line, track single/double quote state, and cut only at
+# a `#` that is OUTSIDE quotes and preceded by whitespace (or starts the line).
+#
+# Needed because the segment/hazard path ran on the RAW line, so
+#   producer | head -1 || true   # explains why
+# no longer looked end-anchored and was reported, and prose in a trailing
+# comment could read as a pipe (Bugbot, .github#300). `apply_set` already
+# stripped; this path did not -- the same asymmetry, third occurrence.
+function strip_trailing_comment(s,   i, ch, inq, ind, n) {
+  inq = 0; ind = 0
+  n = length(s)
+  for (i = 1; i <= n; i++) {
+    ch = substr(s, i, 1)
+    if (ch == "\"" && inq == 0)      { ind = 1 - ind }
+    else if (ch == "'" && ind == 0)  { inq = 1 - inq }
+    else if (ch == "#" && inq == 0 && ind == 0) {
+      if (i == 1 || substr(s, i - 1, 1) ~ /[[:space:]]/) return substr(s, 1, i - 1)
+    }
+  }
+  return s
+}
+
 function apply_set(line,   n, a, i, tok, sign, flags) {
   # STRIP THE TRAILING COMMENT FIRST. This ran on the RAW line, so whitespace
   # splitting turned comment tokens into real option updates:
@@ -74,7 +101,7 @@ function apply_set(line,   n, a, i, tok, sign, flags) {
   # detection only. Unconditional is safe: the only legitimate `#` on a `set`
   # line is inside a positional argument (`set -- "a#b"`), and the loop below
   # ignores any token not starting with `-` or `+`.
-  sub(/[[:space:]]*#.*$/, "", line)
+  line = strip_trailing_comment(line)
   n = split(line, a, /[[:space:]]+/)
   for (i = 1; i <= n; i++) {
     if (a[i] == "set") break
@@ -146,7 +173,11 @@ FNR == 1 {
   if (line ~ /^[[:space:]]*set[[:space:]]/) { apply_set(line); next }
 
   if (line ~ /#[[:space:]]*pipefail-guard:[[:space:]]*allow/) next
-  if (line ~ /^[[:space:]]*#/) next
+  # (No separate full-line-comment skip. `strip_trailing_comment` reduces a
+  # whole-line comment to the empty string, so the segment scan below finds
+  # nothing -- the old `^[[:space:]]*#` guard became redundant the moment that
+  # helper was introduced, and its mutation SURVIVED, which is how dead code
+  # announces itself. Removed rather than annotated.)
 
   if (!(e_on && p_on)) next
 
@@ -181,7 +212,8 @@ FNR == 1 {
   # flagged if IT contains the hazard. `;` happened to be caught already --
   # the old terminator class did not admit it -- so the live half of this was
   # the `&&` form.
-  nseg = split(line, seg, /;|&&/)
+  code = strip_trailing_comment(line)
+  nseg = split(code, seg, /;|&&/)
   for (si = 1; si <= nseg; si++) {
     segtext = seg[si]
 

@@ -241,6 +241,33 @@ case_spare segparen.sh "and the parenthesised form stays spared" \
   '  ( producer | head -1 || true )'
 
 echo
+echo "== trailing comments, quote-aware ============================================="
+# The segment/hazard path ran on the RAW line, so a trailing comment broke the
+# end-anchored spare and prose could read as a pipe (Bugbot, .github#300).
+case_spare cmtspare.sh "a trailing comment does not break the '|| true' anchor" \
+  '  producer | head -1 || true   # explains why'
+case_spare cmtprose.sh "prose in a TRAILING comment is not a pipe" \
+  '  do_thing   # NOT producer | head -1, see above'
+# THE DISCRIMINATION, and the reason the strip is quote-aware rather than a
+# regex: `sub(/[[:space:]]*#.*$/, ...)` would also cut a `#` living inside a
+# string and lose the real hazard after it — trading two false positives for a
+# false NEGATIVE, the wrong direction.
+case_flag cmtinstr.sh "a '#' inside a double-quoted string does not hide a hazard" \
+  '  x="a # b"; producer | head -1'
+case_flag cmtinstr2.sh "nor inside a single-quoted one" \
+  "  x='a # b'; producer | grep -q z"
+case_spare cmtmarker.sh "and the allow marker still opts a line out" \
+  '  producer | head -1   # pipefail-guard: allow'
+# A `#` NOT preceded by whitespace is not a comment. Without that condition the
+# strip would cut at the `#` in `x=a#b` and lose the hazard after it.
+case_flag cmtnospace.sh "a '#' with no preceding space is not a comment" \
+  '  x=a#b; producer | head -1'
+# And a whole-line comment still yields nothing — via the strip now, not via a
+# separate guard, which the mutation showed had become redundant.
+case_spare cmtwhole.sh "a whole-line comment is still not the hazard" \
+  '  # NOT producer | head -1'
+
+echo
 echo "== state does not leak between files =========================================="
 scan_hazardous a-bad.sh '  x="$(ls /tmp | head -1)"'
 printf '#!/usr/bin/env bash\nset -uo pipefail\n  x="$(ls /tmp | head -1)"\n' > "$WORK/b-good.sh"

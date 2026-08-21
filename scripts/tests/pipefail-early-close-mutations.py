@@ -59,14 +59,12 @@ MUTATIONS = [
      '/\\|&?[[:space:]]*head(', '/\\|[[:space:]]*head('),
 
     # --- the sparing rules ------------------------------------------------
-    ("comments are scanned as code", AWK,
-     'if (line ~ /^[[:space:]]*#/) next', 'if (0) next'),
     ("the allow marker stops opting a line out", AWK,
      'if (line ~ /#[[:space:]]*pipefail-guard:[[:space:]]*allow/) next', 'if (0) next'),
 
     # --- option state is positional --------------------------------------
     ("apply_set reads the RAW line, so a set-line comment disarms the options", AWK,
-     '  sub(/[[:space:]]*#.*$/, "", line)\n  n = split(line, a, /[[:space:]]+/)',
+     '  line = strip_trailing_comment(line)\n  n = split(line, a, /[[:space:]]+/)',
      '  n = split(line, a, /[[:space:]]+/)'),
     ("the `|| true` spare is unanchored again, covering the whole segment", AWK,
      '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)[[:space:])\\"\']*[[:space:]]*$/) continue',
@@ -74,6 +72,12 @@ MUTATIONS = [
     ("the multi-line function opener `next`s again, skipping its own body", AWK,
      '      save_e = e_on; save_p = p_on; in_fn = 1\n    }',
      '      save_e = e_on; save_p = p_on; in_fn = 1; next\n    }'),
+    ("the segment path reads the RAW line, so a trailing comment breaks the anchor", AWK,
+     '  code = strip_trailing_comment(line)\n  nseg = split(code, seg, /;|&&/)',
+     '  nseg = split(line, seg, /;|&&/)'),
+    ("the comment strip is a blunt regex, cutting a '#' inside a string", AWK,
+     '      if (i == 1 || substr(s, i - 1, 1) ~ /[[:space:]]/) return substr(s, 1, i - 1)',
+     '      return substr(s, 1, i - 1)'),
     ("errexit is assumed on everywhere", AWK, 'if (!(e_on && p_on)) next', 'if (!(p_on)) next'),
     ("pipefail is assumed on everywhere", AWK, 'if (!(e_on && p_on)) next', 'if (!(e_on)) next'),
 
