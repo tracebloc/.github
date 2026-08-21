@@ -277,6 +277,15 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 MUTATION_FILES := $(sort $(wildcard scripts/tests/*-mutations.py))
 MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close
 
+# The whole mutation tier, by NAME OF THE LIST. CI runs this rather than any
+# individual target: `selftests.yml` used to say `make mutation-house-rules`,
+# so adding a second runner wired it into `selftests-cover` (which asks make
+# what MUTATION_TARGETS would run) while CI never executed it -- covered on
+# paper, unrun in fact (Bugbot, .github#300). Deriving from the list means the
+# next runner is picked up by adding one word above, and cannot be half-wired.
+.PHONY: mutations
+mutations: $(MUTATION_TARGETS)
+
 .PHONY: selftests
 # The targets that actually RUN a selftest. Named once: `selftests` depends on
 # them, and `selftests-cover` asks make what these would execute. Adding a
@@ -343,8 +352,19 @@ selftests-cover:
 	    echo "  and list it under 'selftests'."; \
 	    fail=1; }; \
 	done; \
+	wf=.github/workflows/selftests.yml; \
+	[ -r "$$wf" ] || { echo "$$wf is unreadable — refusing to report that CI runs these"; exit 1; }; \
+	for t in selftests mutations; do \
+	  grep -qE "^[[:space:]]*run:[[:space:]]*make[[:space:]]+$$t([[:space:]]|$$)" "$$wf" || { \
+	    echo "$$wf does not run 'make $$t'."; \
+	    echo "  Being wired to a Makefile target is only half of it: the tier also has to"; \
+	    echo "  EXECUTE in CI. mutation-pipefail-early-close was covered by this guard and"; \
+	    echo "  never run, because the workflow named one member of MUTATION_TARGETS"; \
+	    echo "  instead of the list (Bugbot, .github#300). Covered on paper, unrun in fact."; \
+	    fail=1; }; \
+	done; \
 	[ "$$fail" = 0 ] || exit 1; \
-	echo "selftests-cover: all $(words $(SELFTEST_FILES)) selftests and $(words $(MUTATION_FILES)) mutation runner(s) are wired to a target"
+	echo "selftests-cover: all $(words $(SELFTEST_FILES)) selftests and $(words $(MUTATION_FILES)) mutation runner(s) are wired to a target, and CI runs both tiers"
 
 .PHONY: selftest-caller-drift
 selftest-caller-drift: guard-pyyaml

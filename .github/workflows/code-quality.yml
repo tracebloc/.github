@@ -635,23 +635,30 @@ jobs:
           cat /tmp/early-close.out
           cat /tmp/early-close.err >&2 || true
 
-          # rc 2 is "cannot tell" and is ALWAYS fatal, soft-fail or not. A gate
-          # that could not read the tree has not reported a clean tree, and
-          # letting soft-fail swallow that is how a gate becomes decoration
+          # ONLY 0 AND 1 ARE VERDICTS. 0 = clean, 1 = findings; anything else is
+          # the gate failing to run -- rc 2 (cannot tell), 126/127 (not
+          # executable / not found), a signal death. Those are ALWAYS fatal,
+          # soft-fail or not: a gate that could not check has not passed, and
+          # letting soft-fail swallow it is how a gate becomes decoration
           # (backend#1729 rule 3).
-          if [ "$RC" = 2 ]; then
-            echo "::error title=pipefail early-close::the gate could not read this tree — refusing to report clean"
+          #
+          # Whitelisting the verdicts rather than blacklisting rc=2 is the
+          # load-bearing part. The first version tested `[ "$RC" = 2 ]`, so a
+          # missing or non-executable script exited 127, fell through to the
+          # soft-fail branch, and reported green (Bugbot, .github#300).
+          if [ "$RC" != 0 ] && [ "$RC" != 1 ]; then
+            echo "::error title=pipefail early-close::the gate exited $RC — it did not run to a verdict, so this is not a pass"
             {
               echo "### pipefail early-close"
               echo ""
-              echo "**Could not read the tree.** This is a hard failure regardless of \`soft-fail\`:"
-              echo "a gate that could not check has not passed."
+              echo "**The gate exited \`$RC\`** — not a verdict (0 = clean, 1 = findings)."
+              echo "Hard failure regardless of \`soft-fail\`: a gate that could not check has not passed."
               echo ""
               echo '```'
               head -20 /tmp/early-close.err
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            exit 2
+            exit "$RC"
           fi
 
           if [ "$SOFT_FAIL" = "true" ]; then LEVEL=warning; else LEVEL=error; fi

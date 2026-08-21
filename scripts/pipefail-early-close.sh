@@ -130,7 +130,19 @@ EOF
   [ "$added" -eq 0 ] && break
 done
 
+# CAPTURE THE SCANNER'S OWN STATUS, not just its output. This file runs under
+# `set -uo pipefail` WITHOUT errexit -- deliberately, so it can classify and
+# report rather than die -- which means a failing `awk` here does not stop the
+# script. Testing only `[ -n "$out" ]` therefore read an awk that CRASHED as a
+# clean tree and exited 0: the exact fail-open this gate's rc=2 exists to
+# prevent, in the gate itself (Bugbot, .github#300). Reproduced by corrupting
+# the awk program: rc was 0 before this change, 2 after.
 out=$(awk -v hazardous="$haz " -f "$AWK_PROG" "${files[@]}")
+awk_rc=$?
+if [ "$awk_rc" -ne 0 ]; then
+  echo "pipefail-early-close: the scanner exited $awk_rc — refusing to report clean" >&2
+  exit 2
+fi
 if [ -n "$out" ]; then
   printf '%s\n' "$out"
   exit 1

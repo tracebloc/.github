@@ -265,6 +265,24 @@ else
   record 1 "a repo with no shell files is a clean 0" "rc=$RC out=$OUT"
 fi
 
+# A CRASHING SCANNER IS NOT A CLEAN TREE. The wrapper runs without errexit, so
+# a failing `awk` does not stop it; testing only "was the output empty" read a
+# crash as clean and exited 0 (Bugbot, .github#300). This drives the real gate
+# with a corrupted scanner via SCANNER-path override.
+cp "$SCANNER_ABS" "$WORK/broken.awk"
+printf 'this is not valid awk {{{\n' > "$WORK/broken.awk"
+mkdir -p "$WORK/crash/scripts"
+cp "$GATE_ABS" "$WORK/crash/scripts/pipefail-early-close.sh"
+cp "$WORK/broken.awk" "$WORK/crash/scripts/pipefail-early-close.awk"
+printf '#!/usr/bin/env bash\nset -euo pipefail\nx=$(ls | head -1)\n' > "$WORK/crash/run.sh"
+( cd "$WORK/crash" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+OUT=$(PIPEFAIL_ROOT="$WORK/crash" bash "$WORK/crash/scripts/pipefail-early-close.sh" 2>&1); RC=$?
+if [ "$RC" = 2 ]; then
+  record 0 "a scanner that CRASHES is exit 2, never a clean tree" ""
+else
+  record 1 "a scanner that CRASHES is exit 2, never a clean tree" "rc=$RC out=$OUT"
+fi
+
 echo
 echo "== the gate reports on THIS repo =============================================="
 OUT=$(bash "$GATE_ABS"); RC=$?
