@@ -89,6 +89,10 @@ jobs:
           STATUS=""
 
           SIBLING="false"
+          # SET WHEN THE OVERRIDE COULD NOT BE READ (saadqbal on .github#295). Drives
+          # the same visibility mechanism as SIBLING: a card the weekly pass must
+          # disposition, marked so a human can see why.
+          UNREADABLE_OVERRIDE="false"
           if [ "$EVENT_NAME" = "pull_request" ]; then
             if [ "$PR_MERGED" = "true" ]; then
               # ONE SHARED MAPPING (backend#2243) -- and this site is why the fix
@@ -110,9 +114,22 @@ jobs:
               if ! STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
                               "$BASE_REF" "$REPO_FULL" "$BASE_REF" 2>/dev/null \
                               | jq -r '.status'); then
-                echo "::warning::the .kanban.yml override for $REPO_FULL could not be read; using the DEFAULT mapping for $BASE_REF. Publishing no Status at all would let the built-in Item-closed automation set Cancelled (.github#157)."
-                STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
-                           "$BASE_REF" --no-override | jq -r '.status')
+                # THE HOLDING STATE, NOT THE DEFAULT MAPPING (saadqbal on
+                # .github#295, correcting my own first fix). Writing the default
+                # would be "silently apply the mapping we could not confirm" -- it
+                # claims a promotion happened on a read that failed. The holding
+                # state claims nothing: it is an explicit WE COULD NOT TELL, exactly
+                # what the sibling arm below writes for its own reason.
+                #
+                # And it must be a WRITE rather than an exit, because the built-in
+                # "Item closed" automation acts on the close INDEPENDENTLY of this
+                # workflow. A loud red run does not protect the card; the automation
+                # still wins the race and sets `Cancelled`. So "refuse rather than
+                # guess" has to be expressed AS A WRITE here -- refusing by doing
+                # nothing delegates the decision to something that decides wrongly.
+                echo "::warning::the .kanban.yml override for $REPO_FULL could not be read, so the Status for $BASE_REF is UNKNOWN. Writing the non-terminal holding state and labelling the card for the weekly pass -- publishing nothing would let the built-in Item-closed automation set Cancelled (.github#157)."
+                STATUS="On dev"
+                UNREADABLE_OVERRIDE="true"
               fi
               # KEYED ON WHETHER THE MAPPER ANSWERED, not on a list of branch names
               # (Bugbot, .github#295). A `case` over the four stock branches
@@ -206,9 +223,10 @@ jobs:
                 if ! STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
                                 "$CLOSING_PR_BASE" "$REPO_FULL" "$CLOSING_PR_BASE" \
                                 2>/dev/null | jq -r '.status'); then
-                  echo "::warning::the .kanban.yml override for $REPO_FULL could not be read; using the DEFAULT mapping for $CLOSING_PR_BASE."
-                  STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
-                             "$CLOSING_PR_BASE" --no-override | jq -r '.status')
+                  # Same holding state, same reason as the pull_request arm.
+                  echo "::warning::the .kanban.yml override for $REPO_FULL could not be read, so the Status for $CLOSING_PR_BASE is UNKNOWN. Writing the holding state and labelling for the weekly pass."
+                  STATUS="On dev"
+                  UNREADABLE_OVERRIDE="true"
                 fi
                 # Same as the pull_request arm: the mapper's answer wins, and the
                 # floor applies only when it had none.
@@ -239,9 +257,14 @@ jobs:
             echo "Unexpected event '$EVENT_NAME' — skipping"
           fi
 
-          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
-          echo "sibling=$SIBLING" >> "$GITHUB_OUTPUT"
-          echo "Routing decision: status=${STATUS:-(unchanged)} sibling=$SIBLING"
+          # Grouped: three consecutive individual redirects trip SC2129, and
+          # actionlint is a required check here.
+          {
+            echo "status=$STATUS"
+            echo "sibling=$SIBLING"
+            echo "unreadable_override=$UNREADABLE_OVERRIDE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Routing decision: status=${STATUS:-(unchanged)} sibling=$SIBLING unreadable-override=$UNREADABLE_OVERRIDE"
 
       # Visibility for backend#1437 mechanism 1. Runs AFTER the Status update
       # so a label failure can never suppress the column write - with the label
@@ -435,6 +458,21 @@ jobs:
             }' -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$STATUS_FIELD" -f o="$STATUS_OPT" > /dev/null
 
           echo "→ #$NUMBER → Status=$STATUS_NAME"
+      - name: Label a card whose override could not be read
+        if: steps.target.outputs.unreadable_override == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO_FULL: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          # Same write rule as the sibling label below: a swallowed failure means the
+          # card silently loses the only marker saying its Status is a placeholder.
+          if ! gh api "repos/$REPO_FULL/labels/override-unreadable" >/dev/null 2>&1; then
+            gh api "repos/$REPO_FULL/labels" -f name=override-unreadable -f color=d4c5f9 -f description="Status is a holding state: .kanban.yml could not be read at close (backend#2243)" >/dev/null
+          fi
+          gh api -X POST "repos/$REPO_FULL/issues/$NUMBER/labels" -f "labels[]=override-unreadable" >/dev/null
+
       - name: Label sibling-merged PR
         if: steps.target.outputs.sibling == 'true'
         env:

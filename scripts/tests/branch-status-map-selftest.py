@@ -149,13 +149,34 @@ for _f, _n in (("advance-deploy-env.yml", 1),
         eq(f"{_f}: the call passes a ref, not just branch+repo",
            _args.count('"$') >= 3, True)
 
-# AND THE FALLBACK CALLS EXIST WHERE THEY MUST. The router is the caller that cannot
-# afford to publish nothing, so both of its arms need one.
+# THE THREE CONSUMERS' NO-WRITE PATHS, pinned as a set -- because saadqbal's point
+# on .github#295 is that "refuse rather than guess" assumes doing nothing is safe,
+# and that assumption is false at a decision point whose default is supplied by
+# ANOTHER system. Each caller's answer is different for a stated reason, so each is
+# asserted rather than one standing in for all three.
 _router = (_WF / "kanban-closure-router.yml").read_text()
-eq("the router has a --no-override fallback in both arms",
-   _router.count("--no-override"), 2)
-eq("reconcile has NO fallback -- it skips the item instead",
-   "--no-override" in (_WF / "kanban-reconcile.yml").read_text(), False)
+_recon = (_WF / "kanban-reconcile.yml").read_text()
+_adv = (_WF / "advance-deploy-env.yml").read_text()
+
+# ROUTER: writes the non-terminal HOLDING STATE, not the default mapping, and
+# labels the card. Writing the default would claim a promotion happened on a read
+# that failed; writing nothing lets the built-in Item-closed automation set
+# `Cancelled`, and it acts on the close independently of this workflow.
+eq("the router writes the holding state on an unreadable override",
+   _router.count('UNREADABLE_OVERRIDE="true"'), 2)
+eq("the router does NOT fall back to the default mapping",
+   "--no-override" in _router, False)
+eq("the router labels the card for the weekly pass",
+   "override-unreadable" in _router, True)
+
+# RECONCILE: skips the item. It fixes MISSES, so a guessed column would overrule a
+# router that already got it right -- and nothing else acts on its silence.
+eq("reconcile skips rather than writing anything",
+   "leaving it alone rather than guessing a column" in _recon, True)
+
+# ADVANCE-DEPLOY-ENV: no fallback at all. A push has no competing automation, so a
+# failed run is a failed run and the card keeps whatever it had.
+eq("advance-deploy-env has no fallback path", "--no-override" in _adv, False)
 
 # --- read_override: absent vs unfetchable are different answers ------------
 # The whole point of this module is that an override gets applied. A fetch failure
