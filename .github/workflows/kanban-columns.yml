@@ -24,7 +24,16 @@ on:
       - ".github/workflows/kanban-closure-router.yml"
       - ".github/workflows/set-pr-status.yml"
       - ".github/workflows/fr-pass-comment.yml"
+      # Added with their WRITERS entries (.github#295): a PR touching a file whose
+      # column names this check verifies must RUN the check, or the names are only
+      # ever checked by the daily cron.
+      - ".github/workflows/kanban-archive.yml"
+      - ".github/workflows/wip-limit-check.yml"
       - ".github/workflows/kanban-columns.yml"
+      # The mapping is an INPUT to the check now (backend#2243), so a PR that only
+      # touches it must run this (Bugbot, .github#295) -- otherwise a new Status can
+      # merge and go unchecked until the daily cron.
+      - "scripts/branch_status_map.py"
       - "scripts/kanban-columns-check.py"
       - "scripts/tests/kanban-columns-selftest.py"
   schedule:
