@@ -126,14 +126,13 @@ check: lint selftests
 # PROJECTS_KANBAN_TOKEN and reach out to the live org. Those are not
 # pre-push checks under any definition; `audit` below runs one on demand.
 .PHONY: check-all
-check-all: check credential-scan mutation-house-rules
+check-all: check credential-scan mutations
 	@echo "==> check-all: green"
 
 # ---- lint --------------------------------------------------------
 
 .PHONY: lint
-lint: ruff shellcheck house-rules action-pins mint-scope actionlint mutation-house-rules-dry \
-      mutation-pipefail-early-close-dry
+lint: ruff shellcheck house-rules action-pins mint-scope actionlint mutations-dry
 
 # ruff: code-quality.yml's `ruff` job in all-files mode. This repo has no ruff
 # config, so the workflow falls back to --isolated --select <ruff-select>; that
@@ -277,14 +276,23 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 MUTATION_FILES := $(sort $(wildcard scripts/tests/*-mutations.py))
 MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close
 
-# The whole mutation tier, by NAME OF THE LIST. CI runs this rather than any
-# individual target: `selftests.yml` used to say `make mutation-house-rules`,
-# so adding a second runner wired it into `selftests-cover` (which asks make
-# what MUTATION_TARGETS would run) while CI never executed it -- covered on
-# paper, unrun in fact (Bugbot, .github#300). Deriving from the list means the
-# next runner is picked up by adding one word above, and cannot be half-wired.
-.PHONY: mutations
+# THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
+# `check-all`, `lint` -- depends on one of these two rather than on any
+# individual runner.
+#
+# Twice in one PR a target named ONE MEMBER of the list and so silently skipped
+# the second runner: `selftests.yml` ran `make mutation-house-rules`, and then
+# `check-all`/`lint` were left doing the same after CI was fixed (Bugbot,
+# .github#300, twice). That is the paired-construct shape -- change one half of
+# something that must move together and the other half is now a bug. Naming the
+# list is what makes adding the next runner a ONE-WORD edit to MUTATION_TARGETS
+# that cannot be half-wired.
+#
+# The dry list is DERIVED from the real one, not written beside it: a
+# hand-maintained second list is the same drift one level down.
+.PHONY: mutations mutations-dry
 mutations: $(MUTATION_TARGETS)
+mutations-dry: $(addsuffix -dry,$(MUTATION_TARGETS))
 
 .PHONY: selftests
 # The targets that actually RUN a selftest. Named once: `selftests` depends on
@@ -354,6 +362,13 @@ selftests-cover:
 	done; \
 	wf=.github/workflows/selftests.yml; \
 	[ -r "$$wf" ] || { echo "$$wf is unreadable — refusing to report that CI runs these"; exit 1; }; \
+	for m in $(MUTATION_TARGETS); do \
+	  grep -qE "^(check-all|lint):.*[[:space:]]$$m(-dry)?([[:space:]]|$$)" Makefile && { \
+	    echo "check-all/lint names the individual runner '$$m' instead of 'mutations'/'mutations-dry'."; \
+	    echo "  Naming one member of MUTATION_TARGETS is how the second runner gets skipped"; \
+	    echo "  silently — it happened twice in .github#300. Depend on the list."; \
+	    fail=1; }; \
+	done; \
 	for t in selftests mutations; do \
 	  grep -qE "^[[:space:]]*run:[[:space:]]*make[[:space:]]+$$t([[:space:]]|$$)" "$$wf" || { \
 	    echo "$$wf does not run 'make $$t'."; \
