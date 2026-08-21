@@ -663,8 +663,7 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      advance-deploy-env.yml:
-        exempt: *advance_deploy_env_caller_missing
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml:
         exempt: *code_quality_caller_missing
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -1134,8 +1133,7 @@ repos:
         exempt: >-
           release-train drives the train and is exempt from riding it (RFC-BACKEND-1405 D1), so
           it has no staging branch and no staging -> prod hop. Structural.
-      fr-pass-comment.yml:
-        exempt: *fr_pass_comment_caller_missing
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
