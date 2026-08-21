@@ -168,6 +168,14 @@ case_spare span.sh    "a plain '| grep' does not borrow a later '|| grep -q'" \
   '  producer | grep needle && cmd || grep -q x <<<"$y"'
 case_spare spanm.sh   "nor a later '|| grep -m1'" \
   '  producer | grep needle && cmd || grep -m1 x <<<"$y"'
+# The same span WITHIN ONE SEGMENT — no `&&`, no `;`. Splitting the line on those
+# subsumed the two cases above, so the \001 boundary in the grep classes stopped
+# being exercised by them and their mutations came back UNCAUGHT. These are what
+# pin it now.
+case_spare span1seg.sh  "a plain '| grep' does not borrow a later '|| grep -q' in ONE segment" \
+  '  producer | grep needle || grep -q x <<<"$y"'
+case_spare span1segm.sh "nor a '|| grep -m1' in one segment" \
+  '  producer | grep needle || grep -m1 x <<<"$y"'
 # The discriminations that keep the five above from being satisfied by a scanner
 # that simply never fires on a line containing `||`.
 case_flag mixed.sh    "but a REAL pipe on a line that also contains '||' still fires" \
@@ -179,6 +187,30 @@ case_flag spanreal.sh "and a real '| grep -q' on the spanning shape still fires"
   '  producer | grep -q needle && cmd || fallback'
 case_spare gluedtrue.sh "while 'head||true' stays spared" '  producer | head||true'
 case_spare gluedcolon.sh "and 'head|| :' likewise"       '  producer | head|| :'
+
+# A DISCARDED STATUS COVERS ITS OWN PIPELINE ONLY. `|| true` used to spare the
+# WHOLE line, so a live hazard sharing the line was skipped (Bugbot,
+# .github#300). Segments are judged separately now.
+case_flag segamp.sh  "'foo || true && producer | grep -q x' — the 2nd pipeline is live" \
+  '  foo || true && producer | grep -q x'
+case_flag segsemi.sh "'foo || true; producer | head -1' likewise" \
+  '  foo || true; producer | head -1'
+# The discriminations: the real `|| true` idiom must STILL be spared, in both
+# the bare and the command-substitution form, or the two above would just mean
+# "the spare stopped working".
+case_spare segspare.sh "and a segment that DOES end in '|| true' is still spared" \
+  '  producer | head -1 || true'
+case_spare segsubst.sh "including the command-substitution form" \
+  '  ver="$(tool --version | head -1 || true)"'
+case_spare segboth.sh "both segments spared when both discard their status" \
+  '  a | head -1 || true && b | grep -q x || :'
+# THE SPARE IS ANCHORED TO THE END OF THE SEGMENT, and this is what pins that.
+# A `|| true` buried mid-segment discards the status of the command it follows,
+# not of the pipeline that comes after it: here the `grep -q` status is live.
+# An unanchored spare would match the `|| true` inside the substitution and skip
+# the line — which is what the old whole-line rule did.
+case_flag segmid.sh "'|| true' inside a substitution does not spare a live pipe after it" \
+  '  printf %s "$(get || true)" | grep -q needle'
 
 echo
 echo "== state does not leak between files =========================================="

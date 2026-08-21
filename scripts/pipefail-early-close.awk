@@ -141,10 +141,6 @@ FNR == 1 {
   if (line ~ /#[[:space:]]*pipefail-guard:[[:space:]]*allow/) next
   if (line ~ /^[[:space:]]*#/) next
 
-  # Already neutralised: the pipeline's status is discarded, so errexit cannot
-  # act on the 141.
-  if (line ~ /\|\|[[:space:]]*(true|:)([[:space:]]|$|\))/) next
-
   if (!(e_on && p_on)) next
 
   # `||` IS NOT A PIPE, and must be neutralised before the hazard test below.
@@ -169,7 +165,24 @@ FNR == 1 {
   # survive. Adding \001 to the class is the fix, and it is the ONLY fix here:
   # shrinking the stand-in to one character was tried, and its mutation survived,
   # so it changed nothing and was reverted.
-  probe = line
+  # A DISCARDED STATUS NEUTRALISES ITS OWN PIPELINE, NOT THE WHOLE LINE. The
+  # `|| true` spare used to match anywhere on the line and `next` out of it, so
+  #     foo || true && producer | grep -q x
+  # was skipped entirely even though the second pipeline's status is very much
+  # live (Bugbot, .github#300). The line is therefore split on `;` and `&&` and
+  # each segment judged on its own: spared only if IT ends in `|| true` / `|| :`,
+  # flagged if IT contains the hazard. `;` happened to be caught already --
+  # the old terminator class did not admit it -- so the live half of this was
+  # the `&&` form.
+  nseg = split(line, seg, /;|&&/)
+  for (si = 1; si <= nseg; si++) {
+    segtext = seg[si]
+
+    # Spared: this segment's own status is discarded. The trailing class admits
+    # the command-substitution form, `x="$(cmd | head -1 || true)"`.
+    if (segtext ~ /\|\|[[:space:]]*(true|:)[[:space:])\"']*[[:space:]]*$/) continue
+
+  probe = segtext
   gsub(/\|\|/, "\001\001", probe)
 
   # The hazard: a pipe into a reader that closes early.
@@ -193,7 +206,9 @@ FNR == 1 {
   if (probe ~ /\|&?[[:space:]]*head([[:space:]]|$|[)"'\''`;|&\001])/ \
       || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*q/ \
       || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/) {
-    sub(/^[[:space:]]+/, "", line)
-    print curfile ":" FNR ": " line
+      sub(/^[[:space:]]+/, "", line)
+      print curfile ":" FNR ": " line
+      break
+    }
   }
 }

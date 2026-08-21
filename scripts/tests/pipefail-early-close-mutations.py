@@ -59,9 +59,6 @@ MUTATIONS = [
      '/\\|&?[[:space:]]*head(', '/\\|[[:space:]]*head('),
 
     # --- the sparing rules ------------------------------------------------
-    ("`|| true` no longer discards the status", AWK,
-     'if (line ~ /\\|\\|[[:space:]]*(true|:)([[:space:]]|$|\\))/) next',
-     'if (0) next'),
     ("comments are scanned as code", AWK,
      'if (line ~ /^[[:space:]]*#/) next', 'if (0) next'),
     ("the allow marker stops opting a line out", AWK,
@@ -71,6 +68,9 @@ MUTATIONS = [
     ("apply_set reads the RAW line, so a set-line comment disarms the options", AWK,
      '  sub(/[[:space:]]*#.*$/, "", line)\n  n = split(line, a, /[[:space:]]+/)',
      '  n = split(line, a, /[[:space:]]+/)'),
+    ("the `|| true` spare is unanchored again, covering the whole segment", AWK,
+     '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)[[:space:])\\"\']*[[:space:]]*$/) continue',
+     '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)/) continue'),
     ("errexit is assumed on everywhere", AWK, 'if (!(e_on && p_on)) next', 'if (!(p_on)) next'),
     ("pipefail is assumed on everywhere", AWK, 'if (!(e_on && p_on)) next', 'if (!(e_on)) next'),
 
