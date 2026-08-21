@@ -80,9 +80,16 @@ def resolve(branch: str, override: dict | None = None) -> tuple[str, str]:
 def read_override(repo: str, ref: str = "HEAD") -> dict:
     """`branch_status_map` from the repo's `.kanban.yml`, via the API.
 
-    FETCHED, NOT READ OFF DISK, because the router never checks the repo out -- and
-    a closed PR's branch may be gone by the time this runs, so the default ref is
-    the repo's own default branch rather than the merged head.
+    FETCHED, NOT READ OFF DISK, because the router never checks the repo out.
+
+    THE REF MATTERS, AND EVERY CALLER PASSES IT (Bugbot, .github#295). Defaulting to
+    the API's `HEAD` reads the repo's DEFAULT branch, so an override present on
+    `develop` but not yet on `main` was silently ignored by both writers until it
+    reached the default -- and `advance-deploy-env` previously read `.kanban.yml` off
+    the checked-out PUSHED branch, so this was a regression, not a new limitation.
+    Every branch these callers map is a BASE branch (`develop`/`staging`/`main`, or a
+    closing PR's base), which persists after a merge -- so passing it is safe even
+    though a merged head may be gone.
 
     An unreadable or absent file is an EMPTY override, not an error: the file is
     optional by design and no repo has one. A malformed one is also empty, and says

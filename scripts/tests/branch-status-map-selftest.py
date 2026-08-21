@@ -88,6 +88,30 @@ eq("the guard ignores a no-branch policy floor",
 eq("the guard ignores a bare holding-state assignment",
    bool(pat.search('                  STATUS="On dev"')), False)
 
+# --- every caller must pass the REF, not rely on the repo default ----------
+# Defaulting to the API's HEAD reads the repo's DEFAULT branch, so an override present
+# on `develop` but not yet on `main` was ignored by both writers -- and
+# advance-deploy-env previously read `.kanban.yml` off the checked-out PUSHED branch,
+# so it was a regression (Bugbot, .github#295). Asserted by reading the call sites,
+# because the failure is a MISSING argument and no unit call can show that.
+_WF = pathlib.Path(__file__).resolve().parent.parent.parent / ".github" / "workflows"
+for _f, _n in (("advance-deploy-env.yml", 1),
+               ("kanban-closure-router.yml", 2),
+               ("kanban-reconcile.yml", 1)):
+    _txt = (_WF / _f).read_text()
+    _calls = [ln for ln in _txt.splitlines()
+              if "branch_status_map.py" in ln and "python3" in ln]
+    eq(f"{_f}: every mapper call site found", len(_calls), _n)
+    # The ref is the 3rd positional. A call with only branch+repo silently reads the
+    # default branch, which is the finding.
+    for _c in _calls:
+        # the line continues onto the next for the router; join the statement
+        _i = _txt.splitlines().index(_c)
+        _stmt = " ".join(_txt.splitlines()[_i:_i + 2])
+        _args = _stmt.split("branch_status_map.py", 1)[1]
+        eq(f"{_f}: the call passes a ref, not just branch+repo",
+           _args.count('"$') >= 3, True)
+
 # --- read_override: absent vs unfetchable are different answers ------------
 # The whole point of this module is that an override gets applied. A fetch failure
 # that returns {} is indistinguishable from "no .kanban.yml", so a present override

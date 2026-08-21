@@ -96,7 +96,7 @@ jobs:
               # never checks the caller out, so the per-repo `.kanban.yml` override
               # it was silently ignoring has to be FETCHED, not read off disk.
               STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
-                         "$BASE_REF" "$REPO_FULL" | jq -r '.status')
+                         "$BASE_REF" "$REPO_FULL" "$BASE_REF" | jq -r '.status')
               # KEYED ON WHETHER THE MAPPER ANSWERED, not on a list of branch names
               # (Bugbot, .github#295). A `case` over the four stock branches
               # overwrote ANY other result with the floor below -- so a
@@ -186,7 +186,7 @@ jobs:
               elif [ "$CLOSER_TYPE" = "PullRequest" ]; then
                 # Same shared mapping as the pull_request arm above.
                 STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
-                           "$CLOSING_PR_BASE" "$REPO_FULL" | jq -r '.status')
+                           "$CLOSING_PR_BASE" "$REPO_FULL" "$CLOSING_PR_BASE" | jq -r '.status')
                 # Same as the pull_request arm: the mapper's answer wins, and the
                 # floor applies only when it had none.
                 if [ -z "$STATUS" ]; then

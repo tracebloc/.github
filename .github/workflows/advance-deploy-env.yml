@@ -80,7 +80,9 @@ jobs:
         # the router held two more copies that ignored the override entirely -- so
         # with a `.kanban.yml` present the two workflows wrote DIFFERENT statuses
         # for the same merge and run ordering decided which stuck.
-        run: python3 .kanban-map/scripts/branch_status_map.py "$BRANCH" "$GITHUB_REPOSITORY"
+        # Third argument is the REF to read `.kanban.yml` from, which is the branch
+        # being mapped -- not the repo default (Bugbot, .github#295).
+        run: python3 .kanban-map/scripts/branch_status_map.py "$BRANCH" "$GITHUB_REPOSITORY" "$BRANCH"
 
       - name: Skip if branch not tracked
         if: steps.env.outputs.env == ''
