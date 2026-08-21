@@ -63,6 +63,16 @@ jobs:
       DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
       MAX_MOVES: 100
     steps:
+      # CHECKED OUT BECAUSE THIS JOB NOW RUNS A SCRIPT (Bugbot, .github#295). My
+      # note said "branch_status_map.py is local: this job only ever runs in
+      # tracebloc/.github" -- true of the REPOSITORY and false of the WORKSPACE. A
+      # hosted runner starts empty, so the stage-derivation step would have failed on
+      # a missing file and taken the weekly backstop down mid-sweep. `persist-
+      # credentials: false` because nothing here pushes.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       # Authenticates as the tracebloc-release-train App (backend#2036) instead of
       # one human's PAT -- the credential this sweep shares with fifteen other
       # workflows and with its owner's own shell. Needs both grants:

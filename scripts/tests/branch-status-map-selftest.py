@@ -88,5 +88,50 @@ eq("the guard ignores a no-branch policy floor",
 eq("the guard ignores a bare holding-state assignment",
    bool(pat.search('                  STATUS="On dev"')), False)
 
+# --- read_override: absent vs unfetchable are different answers ------------
+# The whole point of this module is that an override gets applied. A fetch failure
+# that returns {} is indistinguishable from "no .kanban.yml", so a present override
+# behind a 403/5xx/rate-limit was silently ignored -- the defect this module exists to
+# close, reached by a different door (Bugbot, .github#295).
+import subprocess as _sp  # noqa: E402
+
+
+class _Res:
+    def __init__(self, out=""):
+        self.stdout = out
+
+
+def _stub(err, rc=1):
+    def run(args, **kw):
+        raise _sp.CalledProcessError(rc, args, output="", stderr=err)
+    return run
+
+
+import branch_status_map as _m  # noqa: E402
+
+_real = _sp.run
+try:
+    # 404 is the ONLY failure meaning "no override".
+    _m.subprocess.run = _stub("gh: Not Found (HTTP 404)")
+    eq("a 404 is an empty override, not an error", _m.read_override("o/r"), {})
+
+    # Everything else REFUSES. `SystemExit` is the specific failure asserted, not a
+    # bare "it raised" -- a different exception would mean a different path.
+    for err in ("gh: Forbidden (HTTP 403)", "gh: Bad gateway (HTTP 502)",
+                "API rate limit exceeded"):
+        # Set the stub BEFORE the call. Setting it after left the first iteration
+        # running against the 404 stub from the case above, so the 403 case reported
+        # a false failure -- the test's own off-by-one, caught by the test.
+        _m.subprocess.run = _stub(err)
+        try:
+            _m.read_override("o/r")
+            bad(f"an unfetchable override was accepted as empty: {err}")
+        except SystemExit:
+            ok(f"refuses on {err.split('(')[0].strip()}")
+        except Exception as exc:                                  # noqa: BLE001
+            bad(f"wrong failure for {err}: {type(exc).__name__}")
+finally:
+    _m.subprocess.run = _real
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

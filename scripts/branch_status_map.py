@@ -93,10 +93,29 @@ def read_override(repo: str, ref: str = "HEAD") -> dict:
             "-H", "Accept: application/vnd.github.raw"]
     if ref and ref != "HEAD":
         args[2] += f"?ref={ref}"
+    # ABSENT AND UNFETCHABLE ARE DIFFERENT ANSWERS (Bugbot, .github#295). The first
+    # version caught every `gh api` failure and returned an empty map -- identical to
+    # "no `.kanban.yml`". So a present override behind a 403, a 5xx or a rate limit was
+    # silently ignored and both writers applied the defaults: the exact override-ignore
+    # defect this change exists to close, reached by a different door. The parse and
+    # missing-`yq` paths already refused; this one did not.
+    #
+    # 404 is the ONLY failure that means "no override". Matched on the message the way
+    # promote-repo.sh does it, because `gh` exits non-zero for both.
     try:
         raw = subprocess.run(args, capture_output=True, text=True, check=True).stdout
-    except (subprocess.CalledProcessError, OSError):
-        return {}
+    except subprocess.CalledProcessError as exc:
+        err = (exc.stderr or "")
+        if "Not Found" in err or "404" in err:
+            return {}
+        sys.stderr.write(f"::error::.kanban.yml in {repo} could not be fetched "
+                         f"({err.strip()[:200]}). Refusing rather than applying the "
+                         "default mapping to a repo that may have an override.\n")
+        raise SystemExit(1) from None
+    except OSError as exc:
+        sys.stderr.write(f"::error::could not run `gh` to read .kanban.yml in {repo} "
+                         f"({exc}). Refusing rather than guessing.\n")
+        raise SystemExit(1) from None
     if not raw.strip():
         return {}
     # PARSED BY `yq`, NOT PyYAML (Bugbot, .github#295). The first version imported
