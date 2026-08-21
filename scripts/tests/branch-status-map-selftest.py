@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """Cases for the one branch -> Status mapping (backend#2243)."""
+import contextlib
+import io
 import pathlib
 import re
 import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-from branch_status_map import DEFAULT_MAP, ENV_FOR_STATUS, resolve  # noqa: E402
+from branch_status_map import (  # noqa: E402
+    DEFAULT_MAP,
+    ENV_FOR_STATUS,
+    UNKNOWN_STATUS_MARKER,
+    resolve,
+)
 
 P, F = 0, 0
 def ok(m):
@@ -44,14 +51,115 @@ eq("an override moves Deploy environment with it",
 eq("an override for ANOTHER branch does not leak",
    resolve("develop", {"staging": "Prod"}), ("On dev", "dev"))
 
-# An override naming a Status this file does not know keeps the DEFAULT env rather
-# than inventing one: the Status is the operator's call, the env is derived, and
-# deriving it from an unknown is a guess.
-eq("an unknown Status keeps the default env",
-   resolve("develop", {"develop": "Some New Column"}), ("Some New Column", "dev"))
+eq("an override works on a branch DEFAULT_MAP does not declare",
+   resolve("release/1.0", {"release/1.0": "Prod"}), ("Prod", "prod"))
 eq("a non-string override is ignored", resolve("develop", {"develop": 7}), ("On dev", "dev"))
 eq("an empty override value is ignored", resolve("develop", {"develop": ""}), ("On dev", "dev"))
 eq("no override behaves as the default", resolve("main", None), ("Prod", "prod"))
+
+# --- an override may only name a Status the mapping DECLARES (backend#2324) ---
+#
+# `resolve` used to return the override's Status verbatim. An unknown BRANCH was
+# refused and an unknown STATUS was not, and that asymmetry is what made a typo
+# destructive: the name reaches `kanban-closure-router.yml`, resolves to no option
+# id, and the update step aborts WITHOUT WRITING -- at which point the project's
+# built-in "Item closed" automation sets `Cancelled` and `kanban-archive.yml`
+# archives the card within a day. The operator sees it vanish.
+#
+# THE INPUT DOMAIN IS DERIVED FROM THE PRODUCER (rule 6). The accepted half is every
+# key `ENV_FOR_STATUS` declares -- all of it, not a sample -- so a column added to
+# the table is exercised with no edit here. The refused half is MUTATED from those
+# same keys, so a future column rename carries its own bad-name cases along with it
+# and cannot re-open this by leaving a hand-written string behind.
+
+
+def mutants(name):
+    """Ways a Status name gets written wrong in a hand-edited YAML file."""
+    return (name.lower(), name.upper(), name.replace(" ", ""),
+            name + " ", name[:-1], name + "s")
+
+
+# Retired column names, which is what an operator copying an older runbook actually
+# types. Kept as data rather than derived because history is not derivable -- but
+# FILTERED against the live table below, so re-adding one of these to
+# `ENV_FOR_STATUS` retires its case instead of reddening this file for no reason.
+RETIRED = ("Staging (human review)", "FR on dev", "Ready for staging", "Rework")
+
+
+def refusal(branch, want):
+    """(exit code, stderr) from resolving `want`, or None if it was NOT refused."""
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            got = resolve(branch, {branch: want})
+    except SystemExit as exc:
+        return exc.code, buf.getvalue()
+    bad(f"{want!r} was accepted as a Status: {got!r}")
+    return None
+
+
+# ACCEPTED: every declared Status, on every declared branch, and the environment
+# comes from the SAME dict the acceptance test reads -- so the two cannot disagree
+# the way a second `.get(want, default)` fallback allowed.
+for _st, _env in sorted(ENV_FOR_STATUS.items()):
+    for _br in sorted(DEFAULT_MAP):
+        # A refusal here escapes as SystemExit and would take the whole suite down
+        # mid-run, reporting the abort instead of the case. Caught so a guard that
+        # refuses EVERYTHING -- the opposite regression -- reads as one clean FAIL.
+        try:
+            eq(f"an override to {_st!r} is accepted on {_br}",
+               resolve(_br, {_br: _st}), (_st, _env))
+        except SystemExit:
+            bad(f"a DECLARED Status was refused: {_st!r} on {_br}")
+
+# REFUSED: everything else, and the cases are the declared names bent out of shape.
+_cases = [m for name in ENV_FOR_STATUS for m in mutants(name)] + list(RETIRED)
+# AN INERT CASE AND A WORKING GUARD LOOK IDENTICAL. A mutant that collides with a
+# real declared name would be silently testing acceptance, so assert the domain is
+# genuinely outside the table before asserting anything about it.
+_cases = [c for c in _cases if c not in ENV_FOR_STATUS]
+eq("the refusal cases are derived from every declared Status",
+   len(_cases) >= len(ENV_FOR_STATUS) * 4, True)
+for _bad in sorted(set(_cases)):
+    _r = refusal("develop", _bad)
+    if _r is None:
+        continue
+    _code, _err = _r
+    # THE SPECIFIC REFUSAL, NOT ANY EXIT (rule 10). `read_override` raises SystemExit
+    # for four other reasons; a case that cannot say WHICH one it got would go on
+    # passing while exercising a different path than its name describes.
+    eq(f"{_bad!r} is refused, and for the unknown-Status reason",
+       (_code, UNKNOWN_STATUS_MARKER in _err), (1, True))
+    # The message has to be actionable: the operator needs the branch, the value they
+    # wrote, and what they were allowed to write.
+    eq(f"the refusal for {_bad!r} names the branch, the value and the vocabulary",
+       ("`develop`" in _err and repr(_bad) in _err
+        and all(n in _err for n in ENV_FOR_STATUS)), True)
+
+# AND THE GUARD MUST NOT BE "REFUSE EVERYTHING" -- the accepted loop above is that
+# half, asserted here as one line so a future edit cannot delete it unnoticed.
+eq("the vocabulary is non-empty, so the accepted loop is not vacuous",
+   len(ENV_FOR_STATUS) > 0, True)
+
+# THE REFUSAL REACHES THE CALLERS AS A NON-ZERO EXIT, which is the whole mechanism:
+# all three consumers already handle that, and none of them handled a successful
+# answer carrying an impossible name. `read_override` is stubbed so this exercises
+# `main`'s own propagation rather than a fetch.
+import branch_status_map as _mod  # noqa: E402
+
+_orig_read = _mod.read_override
+try:
+    _mod.read_override = lambda repo, ref="HEAD": {"develop": "Pord"}
+    _buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(_buf), contextlib.redirect_stdout(io.StringIO()):
+            _rc = _mod.main(["branch_status_map.py", "develop", "o/r", "develop"])
+        bad(f"main() returned {_rc} instead of refusing an unknown Status")
+    except SystemExit as _exc:
+        eq("main() exits non-zero on an unknown Status, so `if ! STATUS=$(...)` fires",
+           (_exc.code, UNKNOWN_STATUS_MARKER in _buf.getvalue()), (1, True))
+finally:
+    _mod.read_override = _orig_read
 
 # NO WORKFLOW MAY HOLD A SECOND COPY. This is the finding the ticket was filed for --
 # three sites, two of which ignored the override -- so it is a machine check now
@@ -149,6 +257,20 @@ for _f, _n in (("advance-deploy-env.yml", 1),
         eq(f"{_f}: the call passes a ref, not just branch+repo",
            _args.count('"$') >= 3, True)
 
+# EVERY LABEL THIS ROUTER CREATES MUST FIT THE API (Bugbot, #302). GitHub caps a
+# label description at 100 characters and 422s over it -- and the create runs under
+# `set -euo pipefail`, so an over-long description aborts the step and the card is
+# parked with no marker at all: the holding state loses the one thing that makes it
+# visible to the weekly pass. Measured rather than eyeballed; the wording that
+# prompted this was 133.
+LABEL_DESCRIPTION_MAX = 100
+_descs = re.findall(r'-f description="([^"]*)"',
+                    (_WF / "kanban-closure-router.yml").read_text())
+eq("the router's label descriptions were located", len(_descs) >= 2, True)
+for _d in _descs:
+    eq(f"label description fits the API cap ({len(_d)} chars): {_d[:40]!r}...",
+       len(_d) <= LABEL_DESCRIPTION_MAX, True)
+
 # THE THREE CONSUMERS' NO-WRITE PATHS, pinned as a set -- because saadqbal's point
 # on .github#295 is that "refuse rather than guess" assumes doing nothing is safe,
 # and that assumption is false at a decision point whose default is supplied by
@@ -162,12 +284,28 @@ _adv = (_WF / "advance-deploy-env.yml").read_text()
 # labels the card. Writing the default would claim a promotion happened on a read
 # that failed; writing nothing lets the built-in Item-closed automation set
 # `Cancelled`, and it acts on the close independently of this workflow.
-eq("the router writes the holding state on an unreadable override",
-   _router.count('UNREADABLE_OVERRIDE="true"'), 2)
+eq("the router writes the holding state on an unusable override",
+   _router.count('UNUSABLE_OVERRIDE="true"'), 2)
 eq("the router does NOT fall back to the default mapping",
    "--no-override" in _router, False)
 eq("the router labels the card for the weekly pass",
-   "override-unreadable" in _router, True)
+   "override-unusable" in _router, True)
+# THE LABEL MUST NOT CLAIM A CAUSE IT CANNOT KNOW (backend#2324). Two different
+# failures reach this holding state now -- a `.kanban.yml` that cannot be read, and
+# one that reads fine and names a Status the mapping does not declare. A label
+# saying "unreadable" sends the operator looking for a fetch error that never
+# happened, in the file whose contents are the actual bug.
+# CODE LINES ONLY. The comments above the rename explain it and necessarily quote
+# the old name -- a raw-text scan would flag the very sentence saying it is gone,
+# which is the trap e2e#176 hit and this repo keeps re-hitting.
+_router_code = [ln for ln in _router.splitlines() if not ln.strip().startswith("#")]
+eq("the router no longer calls the holding state 'unreadable' in its CODE",
+   [ln.strip() for ln in _router_code
+    if "override-unreadable" in ln or "UNREADABLE_OVERRIDE" in ln], [])
+# ... and the scan can see the shape it is looking for, or it is decoration.
+eq("that scan would catch a reinstated 'unreadable' identifier",
+   bool([ln for ln in ['          UNREADABLE_OVERRIDE="true"']
+         if "UNREADABLE_OVERRIDE" in ln]), True)
 
 # RECONCILE: skips the item. It fixes MISSES, so a guessed column would overrule a
 # router that already got it right -- and nothing else acts on its silence.
@@ -177,6 +315,25 @@ eq("reconcile skips rather than writing anything",
 # ADVANCE-DEPLOY-ENV: no fallback at all. A push has no competing automation, so a
 # failed run is a failed run and the card keeps whatever it had.
 eq("advance-deploy-env has no fallback path", "--no-override" in _adv, False)
+
+# NO CALL SITE MAY DISCARD THE MAPPER'S STDERR (backend#2324). All three used to,
+# which cost nothing while the only refusal was "could not fetch" -- the router's
+# flag and reconcile's skip line said that much on their own. The unknown-Status
+# refusal is different: it names the branch, the bad value and the accepted
+# vocabulary, and that message is the ONLY thing that tells an operator which
+# `.kanban.yml` line to fix. Swallowed, the card is parked with no reason anywhere.
+for _f, _txt in (("kanban-closure-router.yml", _router),
+                 ("kanban-reconcile.yml", _recon),
+                 ("advance-deploy-env.yml", _adv)):
+    _lines = _txt.splitlines()
+    _sites = [" ".join(_lines[_i:_i + 3]) for _i, _ln in enumerate(_lines)
+              if "branch_status_map.py" in _ln and "python3" in _ln]
+    # Assert the sites were FOUND before asserting anything about them: zero sites
+    # scanned compares equal to zero sites offending.
+    eq(f"{_f}: mapper call sites located", len(_sites) > 0, True)
+    for _site in _sites:
+        eq(f"{_f}: the mapper's stderr is not discarded",
+           "2>/dev/null" in _site, False)
 
 # --- read_override: absent vs unfetchable are different answers ------------
 # The whole point of this module is that an override gets applied. A fetch failure

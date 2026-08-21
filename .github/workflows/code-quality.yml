@@ -17,6 +17,7 @@ name: Code quality
 #   shellcheck   shell lint (opt in with `shell: true`)
 #   gitleaks     credential scanning (on by default)
 #   house-rules  the org's own grep-level rules (on by default)
+#   early-close  the pipefail SIGPIPE gate (on by default, whole-tree)
 #   Separate jobs run independently, so a ruff failure never hides what
 #   shellcheck found. Steps inside one job would short-circuit; jobs do not.
 #
@@ -151,6 +152,12 @@ on:
         default: true
       house-rules:
         description: "Run the org house-rules checker."
+        type: boolean
+        default: true
+      early-close:
+        description: >-
+          Run the pipefail early-close gate. ON by default and whole-tree: it
+          costs one awk pass, and a repo with no shell files exits clean.
         type: boolean
         default: true
       action-pins:
@@ -555,6 +562,127 @@ jobs:
               echo ""
               echo '```'
               head -200 /tmp/shellcheck.out
+              echo '```'
+            fi
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$RC" != "0" ] && [ "$SOFT_FAIL" = "true" ]; then
+            echo "soft-fail is on — reporting only, not failing this job."
+            exit 0
+          fi
+          exit "$RC"
+
+  # ----------------------------------------------------- pipefail early-close ---
+  # `producer | head -n N` (or `| grep -q`, `| grep -m N`) under `set -e` AND
+  # `set -o pipefail` aborts its own caller once the producer outgrows the ~64KB
+  # pipe buffer: the reader closes, the producer takes SIGPIPE, the pipeline
+  # returns 141, errexit kills the script. SIZE-dependent, so it survives review
+  # — measured, 50 lines exit 0 and 20k exit 141. Two incidents in `client`
+  # (client#656, client#678) before the rule was encoded there, and arming it
+  # fleet-wide (backend#2264) meant converting 19 instances across six repos.
+  #
+  # WHOLE-TREE, NEVER DIFF-SCOPED, and here that is CORRECTNESS rather than the
+  # policy argument action-pins makes. Whether a line is hazardous depends on
+  # whether its FILE runs under both options — and a library that sets neither
+  # inherits them from whatever sources it. Scanning only changed files would
+  # resolve inheritance against a partial tree: edit `lib/foo.sh` without
+  # touching its sourcer and the gate would call it safe. The scan is one awk
+  # pass over the tracked shell files, so whole-tree costs nothing worth saving.
+  #
+  # NOT A LINE-GRAMMAR CHECK. Shell options are POSITIONAL (`set +e` opens a
+  # best-effort region and must stand the rule down), the long and short
+  # spellings both count, and one-line function bodies must be scanned rather
+  # than skipped. That is a state machine, which is why this is a script in
+  # `scripts/` with its own selftest and mutation harness rather than a grep
+  # rule inside house-rules.sh.
+  #
+  # The opt-out is `# pipefail-guard: allow` on the offending line, and the
+  # convention is to state WHY inline: `client`'s worked example is a
+  # `df -h | head -20` that runs under `set +e` and streams, where converting it
+  # would trade a non-existent abort for a real hang on a stalled NFS mount.
+  early-close:
+    name: pipefail early-close
+    if: ${{ inputs.early-close }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Check out the shared checker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tracebloc/.github
+          ref: ${{ inputs.quality-ref }}
+          path: .quality-tools
+          persist-credentials: false
+
+      - name: pipefail early-close
+        env:
+          SOFT_FAIL: ${{ inputs.soft-fail }}
+        run: |
+          set -uo pipefail
+          GATE=".quality-tools/scripts/pipefail-early-close.sh"
+          chmod +x "$GATE"
+
+          # PIPEFAIL_ROOT is the CALLER's checkout. The `.quality-tools` tree
+          # sits inside the workspace but outside the caller's git index, so
+          # `git ls-files` cannot reach it and the checker never lints itself.
+          RC=0
+          PIPEFAIL_ROOT="$GITHUB_WORKSPACE" bash "$GATE" > /tmp/early-close.out 2>/tmp/early-close.err || RC=$?
+          cat /tmp/early-close.out
+          cat /tmp/early-close.err >&2 || true
+
+          # ONLY 0 AND 1 ARE VERDICTS. 0 = clean, 1 = findings; anything else is
+          # the gate failing to run -- rc 2 (cannot tell), 126/127 (not
+          # executable / not found), a signal death. Those are ALWAYS fatal,
+          # soft-fail or not: a gate that could not check has not passed, and
+          # letting soft-fail swallow it is how a gate becomes decoration
+          # (backend#1729 rule 3).
+          #
+          # Whitelisting the verdicts rather than blacklisting rc=2 is the
+          # load-bearing part. The first version tested `[ "$RC" = 2 ]`, so a
+          # missing or non-executable script exited 127, fell through to the
+          # soft-fail branch, and reported green (Bugbot, .github#300).
+          if [ "$RC" != 0 ] && [ "$RC" != 1 ]; then
+            echo "::error title=pipefail early-close::the gate exited $RC — it did not run to a verdict, so this is not a pass"
+            {
+              echo "### pipefail early-close"
+              echo ""
+              echo "**The gate exited \`$RC\`** — not a verdict (0 = clean, 1 = findings)."
+              echo "Hard failure regardless of \`soft-fail\`: a gate that could not check has not passed."
+              echo ""
+              echo '```'
+              head -20 /tmp/early-close.err
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$RC"
+          fi
+
+          if [ "$SOFT_FAIL" = "true" ]; then LEVEL=warning; else LEVEL=error; fi
+          # Output is `path:line: code`.
+          awk -v lvl="$LEVEL" -F: '
+            /^[^:]+:[0-9]+: / {
+              msg=$0; sub(/^[^:]*:[0-9]+: /, "", msg)
+              printf "::%s file=%s,line=%s,title=pipefail early-close::pipes into an early-closing reader under errexit+pipefail; use a here-string or capture-then-slice: %s\n", lvl, $1, $2, msg
+            }' /tmp/early-close.out
+
+          COUNT=$(grep -cE "^[^:]+:[0-9]+: " /tmp/early-close.out || true)
+          {
+            echo "### pipefail early-close"
+            echo ""
+            if [ "$COUNT" = "0" ]; then
+              echo "No findings."
+            else
+              echo "**$COUNT finding(s).** Each pipes into a reader that closes before EOF"
+              echo "(\`head\`, \`grep -q\`, \`grep -m N\`) in a file running under errexit + pipefail."
+              echo "Use a here-string (\`head -25 <<<\"\$out\"\`) or capture-then-slice."
+              echo "If an instance is genuinely safe, mark the line \`# pipefail-guard: allow\` and say why."
+              echo ""
+              echo '```'
+              head -100 /tmp/early-close.out
               echo '```'
             fi
             echo ""

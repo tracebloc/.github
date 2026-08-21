@@ -95,5 +95,10 @@ jobs:
       # context sits unrequired until somebody arms it. Measured at ~58s (each
       # mutation re-runs the ~3s suite), which is affordable on a runner and is why
       # `make check` only resolves the anchors.
-      - name: mutation-check house-rules
-        run: make mutation-house-rules
+      # BY THE LIST, NOT BY ONE MEMBER OF IT. This step named
+      # `mutation-house-rules` directly, so when a second runner was added to
+      # MUTATION_TARGETS it satisfied `selftests-cover` -- which asks make what
+      # that list would run -- while never executing here. Covered on paper,
+      # unrun in fact (Bugbot, .github#300). `make mutations` is the list.
+      - name: mutation-check (every runner in MUTATION_TARGETS)
+        run: make mutations

@@ -586,22 +586,28 @@ jobs:
                           # `branch_status_map.py` is local: this job only ever runs in
                           # tracebloc/.github.
                           # SOFT-FAILS, BECAUSE THIS IS A SWEEP (Bugbot, .github#295).
-                          # `read_override` now REFUSES on an unreadable `.kanban.yml`
-                          # (403, 5xx, rate limit, bad YAML) -- correct for a single
-                          # card, wrong here: a bare command substitution under
-                          # `set -euo pipefail` would let ONE unreadable repo truncate
-                          # the whole weekly backstop mid-loop, while the sibling closer
-                          # lookups beside it already soft-fail.
+                          # `read_override` REFUSES on an unreadable `.kanban.yml`
+                          # (403, 5xx, rate limit, bad YAML) and `resolve` refuses on
+                          # one naming a Status the mapping does not declare
+                          # (backend#2324) -- correct for a single card, wrong here: a
+                          # bare command substitution under `set -euo pipefail` would
+                          # let ONE bad repo truncate the whole weekly backstop
+                          # mid-loop, while the sibling closer lookups beside it
+                          # already soft-fail.
                           #
                           # And it SKIPS rather than defaulting. Falling back to the
                           # default mapping would be the fail-open this PR removed,
                           # one layer out: the router already moved that card
                           # correctly, and this sweep exists to fix MISSES, not to
                           # overrule with a guess.
+                          #
+                          # STDERR IS KEPT (backend#2324). The skip line below says a
+                          # card was left alone; only the mapper's own message says
+                          # which repo's `.kanban.yml` to go and fix.
                           if ! DEST=$(python3 scripts/branch_status_map.py \
                                         "$CLOSER_BASE" "$ORG/$REPO" "$CLOSER_BASE" \
-                                        2>/dev/null | jq -r '.status'); then
-                            echo "  $REPO#$NUM: the branch->Status mapping could not be read (closer base '$CLOSER_BASE') - leaving it alone rather than guessing a column"
+                                        | jq -r '.status'); then
+                            echo "  $REPO#$NUM: the branch->Status mapping could not be resolved (closer base '$CLOSER_BASE'; see the error above) - leaving it alone rather than guessing a column"
                             continue
                           fi
                           # A Commit closer carries no base ref, and an unrecognised base
