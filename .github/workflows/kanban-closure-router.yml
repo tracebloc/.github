@@ -97,9 +97,14 @@ jobs:
               # it was silently ignoring has to be FETCHED, not read off disk.
               STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
                          "$BASE_REF" "$REPO_FULL" | jq -r '.status')
-              case "$BASE_REF" in
-                main|master|staging|develop) : ;;
-                *)
+              # KEYED ON WHETHER THE MAPPER ANSWERED, not on a list of branch names
+              # (Bugbot, .github#295). A `case` over the four stock branches
+              # overwrote ANY other result with the floor below -- so a
+              # `.kanban.yml` key for, say, `release/*` was computed and then
+              # discarded on the same run, including the `rfcs` override this
+              # change exists to unblock. The last branch-name list in this
+              # workflow is gone with it.
+              if [ -z "$STATUS" ]; then
                   # A PR merged into a SIBLING feature branch deploys nothing by
                   # itself — its content travels onward inside the parent PR
                   # (this fallthrough silently stranded 6 such cards;
@@ -112,8 +117,7 @@ jobs:
                   # holding state the weekly pass dispositions.
                   STATUS="On dev"
                   SIBLING="true"
-                  ;;
-              esac
+              fi
             else
               STATUS="Cancelled"
             fi
@@ -183,12 +187,13 @@ jobs:
                 # Same shared mapping as the pull_request arm above.
                 STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
                            "$CLOSING_PR_BASE" "$REPO_FULL" | jq -r '.status')
-                case "$CLOSING_PR_BASE" in
-                  main|master|staging|develop) : ;;
+                # Same as the pull_request arm: the mapper's answer wins, and the
+                # floor applies only when it had none.
+                if [ -z "$STATUS" ]; then
                   # Unrecognised base: mirror the pull_request branch's default so
                   # the issue and its PR agree.
-                  *)           STATUS="On dev" ;;
-                esac
+                  STATUS="On dev"
+                fi
               elif [ "$CLOSER_TYPE" = "Commit" ]; then
                 # Direct "Closes #N" push: a commit has no base ref. Start it at
                 # On dev; advance-deploy-env.yml / kanban-reconcile.yml promote it

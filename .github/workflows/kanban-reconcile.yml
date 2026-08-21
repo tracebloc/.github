@@ -562,18 +562,37 @@ jobs:
                           # broken by the job itself (Bugbot, .github#127).
                           #
                           # So do what the router failed to do: derive the stage from the
-                          # closer. The mapping is IDENTICAL to kanban-closure-router.yml's,
-                          # deliberately -- when the two disagree the faster one wins and the
-                          # slower one silently undoes it, which was Bugbot's third finding
-                          # on .github#126.
-                          case "$CLOSER_BASE" in
-                            main|master) OPT="$PROD_OPT";       DEST="Prod" ;;
-                            staging)     OPT="$FR_STAGING_OPT"; DEST="FR on staging" ;;
-                            develop)     OPT="$ON_DEV_OPT";     DEST="On dev" ;;
-                            # A Commit closer carries no base ref, and an unrecognised base
-                            # takes the router's same default: start at On dev and let a
-                            # later deploy signal promote it.
-                            *)           OPT="$ON_DEV_OPT";     DEST="On dev" ;;
+                          # closer -- THROUGH THE SAME MAPPING THE ROUTER USES
+                          # (Bugbot, .github#295). This used to be a hand-kept copy,
+                          # justified by "identical, deliberately -- when the two disagree
+                          # the faster one wins and the slower one silently undoes it"
+                          # (.github#126). backend#2243 made that justification unsafe: the
+                          # router now honours a per-repo `.kanban.yml`, so an identical
+                          # copy here is no longer identical, and this weekly sweep would
+                          # move an overridden card BACK onto a deploy column -- the slower
+                          # one silently undoing the faster one, exactly as predicted, via
+                          # the mechanism that comment was written to prevent.
+                          #
+                          # `branch_status_map.py` is local: this job only ever runs in
+                          # tracebloc/.github.
+                          DEST=$(python3 scripts/branch_status_map.py \
+                                   "$CLOSER_BASE" "$ORG/$REPO" | jq -r '.status')
+                          # A Commit closer carries no base ref, and an unrecognised base
+                          # takes the router's same default: start at On dev and let a
+                          # later deploy signal promote it.
+                          [ -n "$DEST" ] || DEST="On dev"
+                          # Status NAME -> the project's option id. NOT a second copy of
+                          # the branch mapping -- a different relation entirely, and the
+                          # only place these ids are known.
+                          case "$DEST" in
+                            "Prod")           OPT="$PROD_OPT" ;;
+                            "FR on staging")  OPT="$FR_STAGING_OPT" ;;
+                            "On dev")         OPT="$ON_DEV_OPT" ;;
+                            # An override naming a column this job has no option id for
+                            # cannot be written. Skip it rather than writing the wrong
+                            # column: the router already moved the card correctly, and
+                            # this sweep exists to fix MISSES, not to overrule.
+                            *) echo "  $REPO#$NUM: closer base '$CLOSER_BASE' maps to '$DEST', which this job has no option id for - leaving it alone" ; continue ;;
                           esac
                           printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$OPT" "$REPO#$NUM closed by $CLOSER (base=${CLOSER_BASE:-none}), router missed it ($COL -> $DEST)" "closed-issue-stage-derived" >> moves.tsv
                           ;;

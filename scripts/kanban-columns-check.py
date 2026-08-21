@@ -54,7 +54,15 @@ WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 # actual data structure instead of a rendering of it.
 #
 # Any workflow still writing a Status literal of its own belongs here.
+# `kanban-closure-router.yml` IS STILL HERE (Bugbot, .github#295). Only its BRANCH
+# MAPPING moved to `branch_status_map.py`; it still writes `Cancelled`, `Done` and
+# `On dev` directly, and `Cancelled`/`Done` are not in the imported mapping -- so
+# dropping it would have let those two writes name columns the board no longer has
+# while this check went green. `advance-deploy-env.yml` is out because it now writes
+# NO literal at all, which is checkable: `grep -oE 'STATUS(_NAME)?="[A-Za-z ()]+"'`
+# over it returns nothing.
 WRITERS = (
+    "kanban-closure-router.yml",
     "set-pr-status.yml",
     "fr-pass-comment.yml",
 )

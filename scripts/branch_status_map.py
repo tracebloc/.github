@@ -99,17 +99,32 @@ def read_override(repo: str, ref: str = "HEAD") -> dict:
         return {}
     if not raw.strip():
         return {}
+    # PARSED BY `yq`, NOT PyYAML (Bugbot, .github#295). The first version imported
+    # `yaml` lazily and treated ImportError exactly like a parse miss -- a warning and
+    # an empty override. Neither rewired workflow installs PyYAML, so on the runner a
+    # real `.kanban.yml` would have been silently ignored and both writers would have
+    # kept the defaults: the override this whole change exists to honour, failing open
+    # in the one environment that matters.
+    #
+    # `yq` is what `advance-deploy-env.yml` used before this refactor, so it is a
+    # dependency this path already had rather than a new one.
     try:
-        import yaml  # type: ignore
-        doc = yaml.safe_load(raw)
-    except Exception as exc:                                  # noqa: BLE001
-        sys.stderr.write(f"::warning::.kanban.yml in {repo} did not parse ({exc}); "
-                         "ignoring the override rather than applying part of it\n")
-        return {}
-    if not isinstance(doc, dict):
-        return {}
-    got = doc.get("branch_status_map")
-    return got if isinstance(got, dict) else {}
+        proc = subprocess.run(["yq", "-o=json", ".branch_status_map // {}"],
+                              input=raw, capture_output=True, text=True, check=True)
+        doc = json.loads(proc.stdout or "{}")
+    except FileNotFoundError:
+        # CANNOT TELL, LOUDLY. A present `.kanban.yml` and no parser is not "no
+        # override" -- it is an unread override, and quietly defaulting is how the
+        # first version failed. Refuse so somebody fixes the runner.
+        sys.stderr.write("::error::.kanban.yml is present but `yq` is not installed, "
+                         "so the override cannot be read. Refusing rather than "
+                         "silently applying the default mapping.\n")
+        raise SystemExit(1) from None
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"::error::.kanban.yml in {repo} did not parse ({exc}); "
+                         "refusing rather than applying part of it\n")
+        raise SystemExit(1) from None
+    return doc if isinstance(doc, dict) else {}
 
 
 def main(argv: list[str]) -> int:

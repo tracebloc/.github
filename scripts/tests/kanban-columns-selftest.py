@@ -8,6 +8,7 @@ paths are exercised rather than assumed.
 from __future__ import annotations
 
 import importlib.util
+import pathlib
 import re
 import io
 import contextlib
@@ -113,6 +114,17 @@ finally:
 # itself shipping with an incomplete WRITERS list: the guard is present, looks
 # green, and is not watching the thing it names.
 #
+# THE MAPPING FILE IS AN INPUT TOO (Bugbot, .github#295). The check imports
+# `branch_status_map.py`, so a PR touching only that file changes what this check
+# would say -- and it was not in `paths:`, so the check never ran on it. WRITERS does
+# not name it (it is not a workflow), which is exactly why it needed its own
+# assertion rather than being covered by the WRITERS-vs-paths one.
+wf = (pathlib.Path(__file__).resolve().parent.parent.parent
+      / ".github" / "workflows" / "kanban-columns.yml").read_text()
+check("the imported mapping file is in the workflow's paths: filter",
+      '"scripts/branch_status_map.py"' in wf,
+      "a mapping-only PR would skip the board-name check")
+
 # Derived from WRITERS rather than eyeballed, so the two cannot drift apart.
 _wf_text = (HERE.parent.parent / ".github" / "workflows" / "kanban-columns.yml").read_text()
 _paths_block = re.search(r"\n\s*paths:\s*\n((?:\s*-\s*'[^']*'|\s*-\s*\"[^\"]*\"\s*\n)+)", _wf_text)
