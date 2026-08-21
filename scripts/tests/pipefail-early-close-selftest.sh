@@ -232,7 +232,39 @@ source "${LIB_DIR}/worker.sh"
 source "worker.sh"
 source scripts/lib/worker.sh
 . "worker.sh"
+source "$(dirname "$0")/lib/worker.sh"
+source "${LIB_DIR}"/worker.sh
 SPELLINGS
+
+# A PATH WITH A SPACE must not silently drop out. `haz` was a space-separated
+# string iterated unquoted, so such a file split into two nonexistent paths,
+# failed `[ -f ]`, and was never marked hazardous — fail-open (Asad,
+# .github#300). No repo has one today; that is not a property.
+rm -rf "$WORK/spaced"; mkdir -p "$WORK/spaced/my scripts/lib"
+printf '#!/usr/bin/env bash\nset -euo pipefail\nsource "${LIB_DIR}/worker.sh"\n' > "$WORK/spaced/my scripts/caller.sh"
+printf 'work() {\n  producer | head -1\n}\n' > "$WORK/spaced/my scripts/lib/worker.sh"
+( cd "$WORK/spaced" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+OUT=$(PIPEFAIL_ROOT="$WORK/spaced" bash "$GATE_ABS"); RC=$?
+if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q 'worker.sh'; then
+  record 0 "a hazardous file under a path WITH A SPACE still propagates" ""
+else
+  record 1 "a hazardous file under a path WITH A SPACE still propagates" "rc=$RC out=$OUT"
+fi
+
+# A TRAILING COMMENT MUST NOT SEED. `.*` lets the option cluster sit anywhere on
+# the line, which also let a comment mentioning the flag satisfy the seed. Fail-
+# CLOSED, so never dangerous — fixed so the two halves of one rule agree, since
+# the awk already strips comments (Asad, .github#300).
+rm -rf "$WORK/cmt"; mkdir -p "$WORK/cmt/scripts/lib"
+printf '#!/usr/bin/env bash\nset -e   # we deliberately do NOT use -o pipefail here\nsource "${LIB_DIR}/worker.sh"\n' > "$WORK/cmt/scripts/caller.sh"
+printf 'work() {\n  producer | head -1\n}\n' > "$WORK/cmt/scripts/lib/worker.sh"
+( cd "$WORK/cmt" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+OUT=$(PIPEFAIL_ROOT="$WORK/cmt" bash "$GATE_ABS"); RC=$?
+if [ "$RC" = 0 ]; then
+  record 0 "a comment naming the flag does not seed the file" ""
+else
+  record 1 "a comment naming the flag does not seed the file" "rc=$RC out=$OUT"
+fi
 
 # THE SOURCER'S SPELLING MUST NOT MATTER. `set -eu -o pipefail` is an ordinary
 # way to write it, and the seed used to require the option to be the FIRST

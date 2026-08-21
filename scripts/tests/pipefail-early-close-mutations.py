@@ -72,16 +72,20 @@ MUTATIONS = [
     ("pipefail is assumed on everywhere", AWK, 'if (!(e_on && p_on)) next', 'if (!(e_on)) next'),
 
     # --- the WRAPPER's half ----------------------------------------------
-    ("the extractor leaves the quote on a basename-only `source \"worker.sh\"`", SH,
-     "s|.*/||; s|^.*[[:space:]]||; s|^\"||", "s|.*/||; s|^.*[[:space:]]||"),
+    ("the extractor stops stripping quotes, so a quoted target never matches", SH,
+     '  sed -E \'s/#.*$//; s/["\'"\'"\']//g\' "$1" 2>/dev/null \\',
+     '  sed -E \'s/#.*$//\' "$1" 2>/dev/null \\'),
+    ("the seed anchors the option to the FIRST cluster, losing `set -eu -o pipefail`", SH,
+     '  grep -qE \'\\-[a-zA-Z]*o[[:space:]]+pipefail\' <<<"$setlines" || continue',
+     '  grep -qE \'^[[:space:]]*set[[:space:]]+-[a-zA-Z]*o[[:space:]]+pipefail\' <<<"$setlines" || continue'),
+    ("the seed ignores the SIGN, so `set +o pipefail` reads as hazardous", SH,
+     '  grep -qE \'\\-[a-zA-Z]*o[[:space:]]+pipefail\' <<<"$setlines" || continue',
+     '  grep -qE \'pipefail\' <<<"$setlines" || continue'),
+    ("the seed no longer strips trailing comments", SH,
+     "setlines=$(sed -E 's/#.*$//' \"$f\" 2>/dev/null | grep -E '^[[:space:]]*set[[:space:]]')",
+     "setlines=$(grep -E '^[[:space:]]*set[[:space:]]' \"$f\" 2>/dev/null)"),
     ("the inheritance fixpoint is skipped, so libs read as safe", SH,
      '  [ "$added" -eq 0 ] && break', '  break'),
-    ("the seed anchors the option to the FIRST cluster, losing `set -eu -o pipefail`", SH,
-     "'^[[:space:]]*set[[:space:]].*-[a-zA-Z]*o[[:space:]]+pipefail'",
-     "'^[[:space:]]*set[[:space:]]+-[a-zA-Z]*o?[[:space:]]+pipefail'"),
-    ("the seed ignores the SIGN, so `set +o pipefail` reads as hazardous", SH,
-     "grep -qE '^[[:space:]]*set[[:space:]].*-[a-zA-Z]*o[[:space:]]+pipefail' \"$f\" 2>/dev/null",
-     "grep -qE 'pipefail' \"$f\" 2>/dev/null"),
     ("the file list is extension-only, losing shebang-classified files", SH,
      """      *) head -n 1 "$f" 2>/dev/null \\
            | grep -Eq '^#![[:space:]]*[^[:space:]]*(/|[[:space:]])(ba|da|k)?sh([[:space:]]|$)' \\

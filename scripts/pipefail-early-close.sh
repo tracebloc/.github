@@ -104,57 +104,76 @@ EOF
 fi
 
 # --- seed: files that enable BOTH options themselves ------------------------
-haz=""
+# COMMENTS ARE STRIPPED FIRST. `.*` lets the option cluster sit anywhere on the
+# line (so the split `set -eu -o pipefail` seeds), but it also let a TRAILING
+# COMMENT satisfy the test:
+#     set -e   # then -o pipefail elsewhere
+# That direction is fail-CLOSED -- a file gets scanned that need not be -- so it
+# was never dangerous. It is fixed anyway because the awk already strips
+# comments before deciding, and an asymmetry between the two halves of one rule
+# should be deliberate rather than incidental (Asad, .github#300). The mirror of
+# this in e2e-test-agent#184 ran the other way, where a trailing comment could
+# DISARM a flag check.
+#
+# `haz` IS AN ARRAY. As a space-separated string iterated unquoted, a path
+# containing a space split into two nonexistent paths, both failed `[ -f ]`, and
+# the file was silently never marked hazardous -- fail-open, in the half this
+# wrapper exists for. No repo has such a path today; that is not a property.
+#
+# EXPANDED AS `${haz[@]+"${haz[@]}"}`, NOT `"${haz[@]}"`. bash 3.2 -- still the
+# /bin/bash on every macOS -- treats an EMPTY array's `[@]` as unbound under
+# `set -u` and aborts. The runners are bash 5, where it is fine, so this would
+# have been green in CI and broken for every developer running the suite
+# locally. Caught only because the suite was run on macOS.
+haz=()
 for f in "${files[@]}"; do
   [ -f "$f" ] || continue
-  # THE FLAG NEED NOT BE THE FIRST CLUSTER AFTER `set`. `set -eu -o pipefail`
-  # and `set -e -o pipefail` are ordinary spellings -- house-rules.sh already
-  # treats the split form as first-class -- and anchoring the option directly
-  # after `set[[:space:]]+` missed all of them (Bugbot, .github#300). The awk
-  # still got the DIRECT file right from its own state machine, so the damage
-  # was confined to the half this wrapper exists for: a split-form script's
-  # sourced libraries were never marked inherited. Measured across the fleet at
-  # the time: no repo used the split form, so nothing was being under-reported
-  # in practice -- but "no instance today" is not a property.
-  #
-  # `.*` before the cluster is what allows it anywhere on the line.
-  grep -qE '^[[:space:]]*set[[:space:]].*(-[a-zA-Z]*e[a-zA-Z]*([[:space:]]|$)|-o[[:space:]]+errexit)' "$f" 2>/dev/null || continue
-  # The SIGN still matters: `.*pipefail` alone would also match
-  # `set +o pipefail`, seeding a file that explicitly turns pipefail OFF. The
-  # `-` is required, so `+o` cannot satisfy it.
-  grep -qE '^[[:space:]]*set[[:space:]].*-[a-zA-Z]*o[[:space:]]+pipefail' "$f" 2>/dev/null || continue
-  haz="$haz $f"
+  setlines=$(sed -E 's/#.*$//' "$f" 2>/dev/null | grep -E '^[[:space:]]*set[[:space:]]') || continue
+  grep -qE '(-[a-zA-Z]*e[a-zA-Z]*([[:space:]]|$)|-o[[:space:]]+errexit)' <<<"$setlines" || continue
+  # The SIGN is load-bearing: the `-` is required, so `set +o pipefail` cannot
+  # satisfy it.
+  grep -qE '\-[a-zA-Z]*o[[:space:]]+pipefail' <<<"$setlines" || continue
+  haz+=("$f")
 done
+
+# Basenames of every file this one sources.
+#
+# QUOTES ARE STRIPPED BEFORE EXTRACTION rather than tolerated inside the
+# pattern. The previous single regex handled `source "${LIB_DIR}/x.sh"` and
+# missed both `source "$(dirname "$0")/lib.sh"` and `source "${DIR}"/file.sh`,
+# because an embedded quote ended the match early -- the fail-OPEN direction, in
+# the half this wrapper exists for (Asad, .github#300). Strip the quotes, then
+# take any path-like token ending in .sh/.bash; `(` and `)` are excluded from
+# the token so a `$(dirname …)` prefix ends the token rather than swallowing it.
+sourced_basenames() {  # $1 = file
+  sed -E 's/#.*$//; s/["'"'"']//g' "$1" 2>/dev/null \
+    | grep -E '(^|[[:space:]])(source|\.)[[:space:]]' \
+    | grep -oE '[^[:space:];|&()]+\.(sh|bash)' \
+    | sed -E 's|.*/||' \
+    | sort -u
+}
 
 # --- close over `source` / `.` to a fixpoint --------------------------------
 # A file sourced BY a hazardous file runs under the caller's options.
 while :; do
   added=0
-  for f in $haz; do
+  for f in ${haz[@]+"${haz[@]}"}; do
     [ -f "$f" ] || continue
     while IFS= read -r base; do
       [ -n "$base" ] || continue
       for cand_f in "${files[@]}"; do
         [ "$(basename "$cand_f")" = "$base" ] || continue
-        case " $haz " in *" $cand_f "*) continue ;; esac
-        haz="$haz $cand_f"; added=1
+        seen=0
+        for h in ${haz[@]+"${haz[@]}"}; do [ "$h" = "$cand_f" ] && { seen=1; break; }; done
+        [ "$seen" = 1 ] && continue
+        haz+=("$cand_f"); added=1
       done
-    done <<EOF
-$(grep -hoE '(^|[[:space:]])(source|\.)[[:space:]]+"?[^"[:space:];|&]+\.(sh|bash)' "$f" 2>/dev/null \
-    | sed -E 's|.*/||; s|^.*[[:space:]]||; s|^"||' | sort -u)
-EOF
+    done < <(sourced_basenames "$f")
   done
   [ "$added" -eq 0 ] && break
 done
 
-# CAPTURE THE SCANNER'S OWN STATUS, not just its output. This file runs under
-# `set -uo pipefail` WITHOUT errexit -- deliberately, so it can classify and
-# report rather than die -- which means a failing `awk` here does not stop the
-# script. Testing only `[ -n "$out" ]` therefore read an awk that CRASHED as a
-# clean tree and exited 0: the exact fail-open this gate's rc=2 exists to
-# prevent, in the gate itself (Bugbot, .github#300). Reproduced by corrupting
-# the awk program: rc was 0 before this change, 2 after.
-out=$(awk -v hazardous="$haz " -f "$AWK_PROG" "${files[@]}")
+out=$(awk -v hazardous="${haz[*]+${haz[*]}} " -f "$AWK_PROG" "${files[@]}")
 awk_rc=$?
 if [ "$awk_rc" -ne 0 ]; then
   echo "pipefail-early-close: the scanner exited $awk_rc — refusing to report clean" >&2
