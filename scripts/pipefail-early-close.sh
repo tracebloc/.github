@@ -32,6 +32,14 @@
 #     mark a same-named file that is never actually sourced (a spurious finding
 #     someone can silence with the marker), never the reverse.
 #
+#     `s|^"||` is not redundant with `s|.*/||`. A BASENAME-ONLY quoted target,
+#     `source "worker.sh"`, has no slash for the first substitution to strip, so
+#     the opening quote survived into the comparison and the lib was never
+#     marked inherited. The path form only worked because `s|.*/||` removed the
+#     quote BY ACCIDENT along with the directory (Bugbot, .github#300). Four
+#     spellings are covered and asserted in the selftest: quoted-with-path,
+#     quoted-basename, bare, and `.` in place of `source`.
+#
 #  2. THE FILE LIST MUST BE DERIVED. A hand-kept list drifts; a private `find`
 #     missed `docker/k3s-cuda/build.sh` — which sets `set -euo pipefail` — and
 #     every `.bash` file. The classifier here (extension, else shebang) is
@@ -133,7 +141,7 @@ while :; do
       done
     done <<EOF
 $(grep -hoE '(^|[[:space:]])(source|\.)[[:space:]]+"?[^"[:space:];|&]+\.(sh|bash)' "$f" 2>/dev/null \
-    | sed -E 's|.*/||; s|^.*[[:space:]]||' | sort -u)
+    | sed -E 's|.*/||; s|^.*[[:space:]]||; s|^"||' | sort -u)
 EOF
   done
   [ "$added" -eq 0 ] && break

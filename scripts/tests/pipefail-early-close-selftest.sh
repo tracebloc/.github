@@ -207,6 +207,33 @@ else
   record 1 "...and TRANSITIVELY, two levels down (the fixpoint, not one pass)" "rc=$RC out=$OUT"
 fi
 
+# THE SOURCE LINE'S SPELLING MUST NOT MATTER EITHER. A basename-only quoted
+# target, `source "worker.sh"`, kept its opening quote through the extractor --
+# there is no slash for `s|.*/||` to strip, and the path form only worked
+# because that substitution removed the quote by accident (Bugbot, .github#300).
+mk_repo_src() {  # $1 = repo dir ; $2 = the literal source line
+  local r="$1" srcline="$2"
+  mkdir -p "$r/scripts/lib"
+  printf '#!/usr/bin/env bash\nset -euo pipefail\n%s\n' "$srcline" > "$r/scripts/caller.sh"
+  printf 'work() {\n  producer | head -1\n}\n' > "$r/scripts/lib/worker.sh"
+  ( cd "$r" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+}
+while IFS= read -r srcline; do
+  [ -n "$srcline" ] || continue
+  rm -rf "$WORK/srcspell"; mk_repo_src "$WORK/srcspell" "$srcline"
+  OUT=$(PIPEFAIL_ROOT="$WORK/srcspell" bash "$GATE_ABS"); RC=$?
+  if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q 'worker.sh'; then
+    record 0 "...inherited through: $srcline" ""
+  else
+    record 1 "...inherited through: $srcline" "rc=$RC out=$OUT"
+  fi
+done <<'SPELLINGS'
+source "${LIB_DIR}/worker.sh"
+source "worker.sh"
+source scripts/lib/worker.sh
+. "worker.sh"
+SPELLINGS
+
 # THE SOURCER'S SPELLING MUST NOT MATTER. `set -eu -o pipefail` is an ordinary
 # way to write it, and the seed used to require the option to be the FIRST
 # cluster after `set` — so a split-form script's libraries were never marked

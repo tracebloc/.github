@@ -72,6 +72,8 @@ MUTATIONS = [
     ("pipefail is assumed on everywhere", AWK, 'if (!(e_on && p_on)) next', 'if (!(e_on)) next'),
 
     # --- the WRAPPER's half ----------------------------------------------
+    ("the extractor leaves the quote on a basename-only `source \"worker.sh\"`", SH,
+     "s|.*/||; s|^.*[[:space:]]||; s|^\"||", "s|.*/||; s|^.*[[:space:]]||"),
     ("the inheritance fixpoint is skipped, so libs read as safe", SH,
      '  [ "$added" -eq 0 ] && break', '  break'),
     ("the seed anchors the option to the FIRST cluster, losing `set -eu -o pipefail`", SH,
