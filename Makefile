@@ -132,7 +132,8 @@ check-all: check credential-scan mutation-house-rules
 # ---- lint --------------------------------------------------------
 
 .PHONY: lint
-lint: ruff shellcheck house-rules action-pins mint-scope actionlint mutation-house-rules-dry
+lint: ruff shellcheck house-rules action-pins mint-scope actionlint mutation-house-rules-dry \
+      mutation-pipefail-early-close-dry
 
 # ruff: code-quality.yml's `ruff` job in all-files mode. This repo has no ruff
 # config, so the workflow falls back to --isolated --select <ruff-select>; that
@@ -274,7 +275,7 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 # `*-selftest.*`: a file under scripts/tests/ that matches no wildcard is invisible,
 # and an invisible file makes the coverage assertion pass vacuously.
 MUTATION_FILES := $(sort $(wildcard scripts/tests/*-mutations.py))
-MUTATION_TARGETS := mutation-house-rules
+MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close
 
 .PHONY: selftests
 # The targets that actually RUN a selftest. Named once: `selftests` depends on
@@ -285,7 +286,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
 	selftest-stale-backlog \
                     selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns \
                     selftest-kanban-deploy-state selftest-git-reap \
-                    selftest-mint-scope selftest-house-rules
+                    selftest-mint-scope selftest-house-rules \
+                    selftest-pipefail-early-close
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -412,6 +414,21 @@ mutation-house-rules:
 .PHONY: mutation-house-rules-dry
 mutation-house-rules-dry:
 	$(PYTHON) scripts/tests/house-rules-mutations.py --dry
+
+# The early-close gate (backend#2264). Two files, because the rule genuinely
+# lives in two: the awk decides which LINES are offenders, the wrapper decides
+# which FILES run under errexit+pipefail (the inheritance fixpoint, the option
+# sign, the derived file list).
+.PHONY: selftest-pipefail-early-close
+selftest-pipefail-early-close:
+	bash scripts/tests/pipefail-early-close-selftest.sh
+
+.PHONY: mutation-pipefail-early-close mutation-pipefail-early-close-dry
+mutation-pipefail-early-close:
+	$(PYTHON) scripts/tests/pipefail-early-close-mutations.py
+
+mutation-pipefail-early-close-dry:
+	$(PYTHON) scripts/tests/pipefail-early-close-mutations.py --dry
 
 .PHONY: selftest-git-reap
 selftest-git-reap:
