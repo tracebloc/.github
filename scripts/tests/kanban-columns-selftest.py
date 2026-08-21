@@ -41,7 +41,9 @@ def run(written, options):
     mask the missing-name assertions these cases exist for. It has its own
     tests at the bottom of this file.
     """
-    kcc.written_names = lambda: written
+    # `written_names` takes `options` now: it also collects CASE-ARM names from
+    # WRITERS files, which is what put rank()'s twelve under the check.
+    kcc.written_names = lambda options: written
     kcc.board_options = lambda: options
     kcc.cross_check = lambda found, options: []
     # STUBBED FOR THE SAME REASON AS cross_check, and worth saying so: it also reads
@@ -49,6 +51,8 @@ def run(written, options):
     # them and short-circuits main() before the assertions here can run. It has its
     # own cases at the bottom of this file.
     kcc.unlisted_namers = lambda options, where=None: []
+    # Same reason as the two above: reads real files, would short-circuit main().
+    kcc.stale_exemptions = lambda options: []
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         code = kcc.main()
@@ -187,6 +191,63 @@ with _tf.TemporaryDirectory() as _d:
               "listing the namer clears the finding", "still reported")
     finally:
         kcc_fresh.WRITERS = _real_writers
+
+
+# --- case-arm names, and the stale-exemption check the docstring promised ----
+# Restoring a file to WRITERS did NOT put its `case` arm names under the board check:
+# `LITERAL` needs an `=` and a case arm has none, and WRITERS membership makes
+# `unlisted_namers` skip the file. All twelve of advance-deploy-env's rank() names
+# were invisible, three of them collected from nowhere at all (Bugbot, .github#295).
+with _tf.TemporaryDirectory() as _d2:
+    _p2 = pathlib.Path(_d2)
+    # BOTH shapes, because a real WRITERS file has both -- and the staleness guard
+    # inside written_names is keyed on the ASSIGNMENT pass, so a fixture with only
+    # case arms would (correctly) trip it.
+    (_p2 / "arms.yml").write_text(
+        '        STATUS="Prod"\n'
+        '            "Prod")  echo 10 ;;\n'
+        '            "Backlog") echo 1 ;;\n'
+        '        # "Cancelled" is only named in this comment\n')
+    _rw, _rwf = kcc_fresh.WRITERS, kcc_fresh.WORKFLOWS
+    try:
+        kcc_fresh.WRITERS = ("arms.yml",)
+        kcc_fresh.WORKFLOWS = _p2
+        _got = kcc_fresh.written_names({"Prod", "Backlog", "Cancelled"})
+        check("arms.yml" in _got.get("Prod", set()),
+              "a case-arm name IS attributed to its file now", repr(_got))
+        check("arms.yml" in _got.get("Backlog", set()),
+              "a second case-arm name is collected too", repr(_got))
+        check("Cancelled" not in _got,
+              "a name only in a COMMENT is still not collected", repr(_got))
+
+        # STALE EXEMPTIONS, which the docstring claimed the caller reported and
+        # nothing did. Three ways an exemption expires; each asserted separately
+        # because they are different facts.
+        kcc_fresh.EXEMPT_NAMERS = {"gone.yml": "reason"}
+        check(any("no longer exists" in r
+                  for r in kcc_fresh.stale_exemptions({"Prod"})),
+              "an exemption for a deleted file is stale",
+              repr(kcc_fresh.stale_exemptions({"Prod"})))
+        kcc_fresh.EXEMPT_NAMERS = {"arms.yml": "reason"}
+        kcc_fresh.WRITERS = ("arms.yml",)
+        check(any("now in WRITERS" in r
+                  for r in kcc_fresh.stale_exemptions({"Prod"})),
+              "an exemption for a file that joined WRITERS is stale",
+              repr(kcc_fresh.stale_exemptions({"Prod"})))
+        (_p2 / "quiet.yml").write_text("        run: echo hi\n")
+        kcc_fresh.EXEMPT_NAMERS = {"quiet.yml": "reason"}
+        kcc_fresh.WRITERS = ()
+        check(any("names no board column" in r
+                  for r in kcc_fresh.stale_exemptions({"Prod"})),
+              "an exemption for a file naming no column is stale",
+              repr(kcc_fresh.stale_exemptions({"Prod"})))
+        # ... and a LIVE exemption is not reported, or the check is a permanent red.
+        kcc_fresh.EXEMPT_NAMERS = {"arms.yml": "reason"}
+        check(kcc_fresh.stale_exemptions({"Prod"}) == [],
+              "a live exemption is left alone",
+              repr(kcc_fresh.stale_exemptions({"Prod"})))
+    finally:
+        kcc_fresh.WRITERS, kcc_fresh.WORKFLOWS = _rw, _rwf
 
 print(f"\npass={passed} fail={failed}")
 sys.exit(1 if failed else 0)

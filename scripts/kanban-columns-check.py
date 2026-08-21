@@ -118,8 +118,9 @@ LITERAL = re.compile(
 PROJECT_ID = "PVT_kwDOCSsgos4BTDWN"  # engineer kanban (org project #2)
 
 
-def written_names() -> "dict[str, set[str]]":
+def written_names(options: "set[str]") -> "dict[str, set[str]]":
     found: "dict[str, set[str]]" = {}
+    idiom_hits = 0
     for name in WRITERS:
         path = WORKFLOWS / name
         if not path.is_file():
@@ -129,7 +130,15 @@ def written_names() -> "dict[str, set[str]]":
             value = (quoted or bare).strip()
             if value:
                 found.setdefault(value, set()).add(name)
-    if not found:
+                idiom_hits += 1
+    # KEYED ON THE IDIOM PASS, NOT ON `found` (Bugbot, .github#295 -- caught while
+    # fixing that finding). This guard exists to say "the LITERAL pattern is stale".
+    # `found` now has THREE contributors -- the idiom pass, `declared_names()` and
+    # `names_in()` over WRITERS -- so testing `found` would let case-arm names alone
+    # satisfy it while LITERAL matched nothing: the guard disarmed by the very change
+    # that broadened the collection, which is exactly the vacuity it was written to
+    # prevent. Fixing one finding nearly created its twin.
+    if not idiom_hits:
         sys.exit("error: no Status literals found at all — the pattern is stale, "
                  "which would make this check pass vacuously")
 
@@ -139,6 +148,17 @@ def written_names() -> "dict[str, set[str]]":
     # input. Folding it into main() silently widened what the selftest could not see.
     for name in declared_names():
         found.setdefault(name, set()).add("branch_status_map.py")
+
+    # EVERY COLUMN NAME A WRITERS FILE MENTIONS, not only the assignment idioms
+    # (Bugbot, .github#295). Restoring advance-deploy-env.yml to WRITERS did NOT put
+    # `rank()`'s twelve names under this check: `LITERAL` matches `STATUS="..."` and a
+    # `case` arm has no `=`, and WRITERS membership also makes `unlisted_namers` skip
+    # the file. So all twelve stayed invisible -- and `Backlog`, `North Stars` and
+    # `Ready` were collected from NOWHERE AT ALL -- while the comment I had just
+    # written claimed they were covered. A claim no check enforces, one commit old.
+    for name in WRITERS:
+        for got in names_in(WORKFLOWS / name, options):
+            found.setdefault(got, set()).add(name)
     return found
 
 
@@ -174,6 +194,33 @@ def cross_check(found: "dict[str, set[str]]", options: "set[str]") -> "list[str]
     return sorted(set(stale))
 
 
+# Exemptions for `unlisted_namers`, at module level so `stale_exemptions` reads the
+# SAME copy -- two lists that must agree is the drift this file keeps finding.
+EXEMPT_NAMERS = {
+    "fr-gate.yml": "its rank table is covered by the fr-gate selftest",
+    "kanban-reconcile.yml": "its DEST names come from branch_status_map.py, whose "
+                           "vocabulary is imported above",
+}
+
+
+def names_in(path: "Path", options: "set[str]") -> "set[str]":
+    """Board column names quoted on a CODE line of `path`. One definition.
+
+    `written_names` and `unlisted_namers` both need "does this file name a column",
+    and holding it twice is how they would drift. Code lines only: comments discuss
+    column names constantly -- including the ones explaining why this exists.
+    """
+    found: "set[str]" = set()
+    for line in path.read_text().splitlines():
+        bare = line.strip()
+        if not bare or bare.startswith("#"):
+            continue
+        for name in options:
+            if f'"{name}"' in line:
+                found.add(name)
+    return found
+
+
 def unlisted_namers(options: "set[str]", where: "Path | None" = None) -> "list[str]":
     """Workflows that NAME a board column but are not in `WRITERS`.
 
@@ -193,29 +240,41 @@ def unlisted_namers(options: "set[str]", where: "Path | None" = None) -> "list[s
     EXEMPT names its exceptions with reasons, and a stale exemption is reported by
     the caller for the same reason mint-scope.py reports its own.
     """
-    exempt = {
-        # `harness`-free rank tables that mirror fr-gate's ordering. They are read
-        # -side AND their names are asserted by fr-gate's own selftest, so listing
-        # them here would double-report the same fact.
-        "fr-gate.yml": "its rank table is covered by the fr-gate selftest",
-        "kanban-reconcile.yml": "its DEST names come from branch_status_map.py, "
-                               "whose vocabulary is imported above",
-    }
     out: "list[str]" = []
     for path in sorted((where or WORKFLOWS).glob("*.yml")):
-        if path.name in WRITERS or path.name in exempt:
+        if path.name in WRITERS or path.name in EXEMPT_NAMERS:
             continue
-        for i, line in enumerate(path.read_text().splitlines(), 1):
-            bare = line.strip()
-            if not bare or bare.startswith("#"):
-                continue
-            for name in options:
-                # Quoted, whole-value: `"On dev")` in a case arm, `="Prod"`. Bare
-                # substring matching would hit prose inside a longer string.
-                if f'"{name}"' in line:
-                    out.append(f"{path.name}:{i} names {name!r} but is not in WRITERS")
-                    break
+        named = names_in(path, options)
+        if named:
+            out.append(f"{path.name} names {', '.join(sorted(named))} "
+                       "but is not in WRITERS")
     return sorted(set(out))
+
+
+def stale_exemptions(options: "set[str]") -> "list[str]":
+    """Exemptions whose reason has expired. The docstring promised this; nothing did.
+
+    `unlisted_namers` said stale entries "are reported by the caller for the same
+    reason mint-scope.py reports its own", and `main()` never diffed them (Bugbot,
+    .github#295). An exemption can outlive its reason while the check stays green --
+    the same shape as the migration anchor backend#1979 had to delete, and the same
+    shape as this file's own two wrong WRITERS removals.
+
+    An exemption is stale when the file is gone, when it names no column any more, or
+    when it has since joined WRITERS -- in each case the licence is unused.
+    """
+    out: "list[str]" = []
+    for name, why in sorted(EXEMPT_NAMERS.items()):
+        path = WORKFLOWS / name
+        if not path.is_file():
+            out.append(f"{name}: exempt ({why}) but the file no longer exists")
+        elif name in WRITERS:
+            out.append(f"{name}: exempt ({why}) but it is now in WRITERS, so the "
+                       "exemption grants nothing")
+        elif not names_in(path, options):
+            out.append(f"{name}: exempt ({why}) but it names no board column any "
+                       "more, so the exemption is unused")
+    return out
 
 
 def board_options() -> "set[str]":
@@ -242,7 +301,16 @@ def board_options() -> "set[str]":
 
 
 def main() -> int:
-    written, options = written_names(), board_options()
+    options = board_options()
+    written = written_names(options)
+
+    stale_ex = stale_exemptions(options)
+    if stale_ex:
+        print("ERROR: an exemption has outlived its reason, so it silently permits "
+              "whatever takes that file's place:")
+        for row in stale_ex:
+            print(f"  {row}")
+        return 1
 
     unlisted = unlisted_namers(options)
     if unlisted:
