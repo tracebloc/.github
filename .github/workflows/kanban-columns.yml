@@ -72,6 +72,16 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          # LEAST PRIVILEGE, DERIVED FROM WHAT THIS RUNS (backend#2157). The job is
+          # `kanban-columns-check.py`, which READS the project's field vocabulary and
+          # writes nothing anywhere -- so `organization-projects: read` is the whole
+          # requirement, and every other permission the App holds was surplus.
+          #
+          # `repositories:` narrows the repo-level half to this repo. It does not
+          # affect the board: `organization_projects` is an ORG permission, measured
+          # unaffected by repo scoping in backend#2181's run 32255581084.
+          repositories: ${{ github.event.repository.name }}
+          permission-organization-projects: read
       - name: Check
         env:
           # Reads the org project's Status field.
