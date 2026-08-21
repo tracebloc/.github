@@ -23,6 +23,11 @@ the yq read: the override has to be fetched, not assumed to be on disk.
 FAIL CLOSED ON AN UNKNOWN BRANCH. An unrecognised branch yields ("", "") and the
 callers skip, which is what both did before. A guessed Status on a branch nobody
 declared is a board write nobody asked for.
+
+AND FAIL CLOSED ON AN UNKNOWN STATUS (backend#2324). An override naming a column
+that is not in `ENV_FOR_STATUS` used to be passed through verbatim -- an unknown
+BRANCH was refused while an unknown STATUS was not, which is the asymmetry that
+made the first adopter's typo destructive rather than merely wrong. See `resolve`.
 """
 from __future__ import annotations
 
@@ -44,6 +49,21 @@ DEFAULT_MAP = {
 # Keeping this beside the default map rather than inside a caller is the point: an
 # override that sets Status without moving Deploy environment leaves the two board
 # fields contradicting each other, which is the shape backend#1277 was about.
+#
+# AND MEMBERSHIP HERE IS THE ACCEPT LIST (backend#2324). `resolve` used to return an
+# override's Status verbatim and fall back to the default env for a name it did not
+# know -- so a typo or a retired column name in the first adopter's `.kanban.yml`
+# travelled all the way to the board write, where it cannot resolve to an option id
+# and the write is abandoned. A closure that writes nothing is not a no-op: the
+# project's built-in "Item closed" automation decides instead, sets `Cancelled`, and
+# `kanban-archive.yml` archives it off the board within a day. The operator sees the
+# card vanish, with no error anywhere near the file they got wrong.
+#
+# One dict, two answers, and that is deliberate: the Status is accepted BECAUSE it
+# has a declared environment, so acceptance and environment cannot drift apart the
+# way two lists would. `kanban-columns-check.py` imports these keys and asserts every
+# one of them exists on the board, which is what keeps this from being a hand-written
+# restatement of the board's vocabulary.
 ENV_FOR_STATUS = {
     "On dev": "dev",
     "FR on staging": "staging",
@@ -61,12 +81,30 @@ ENV_FOR_STATUS = {
 }
 
 
+# The refusal's stable half, so a caller -- and the selftest -- can tell THIS refusal
+# apart from the ones `read_override` raises (see its table). A test that only
+# asserts "it raised SystemExit" passes on any of them (CLAUDE.md rule 10).
+UNKNOWN_STATUS_MARKER = "names a Status this mapping does not declare"
+
+
 def resolve(branch: str, override: dict | None = None) -> tuple[str, str]:
     """(Status, Deploy environment) for `branch`, honouring a `.kanban.yml` override.
 
-    An override naming a Status this file does not know keeps the DEFAULT
-    environment rather than inventing one -- the Status is the operator's call, the
-    environment is a derived fact, and deriving it from an unknown is a guess.
+    AN OVERRIDE MAY ONLY NAME A STATUS `ENV_FOR_STATUS` DECLARES (backend#2324).
+    Anything else REFUSES here, at the source, rather than travelling to the board
+    write that cannot land it.
+
+    The earlier version returned the name verbatim and kept the default environment
+    for one it did not know, reasoning -- carefully, and about the wrong half -- that
+    the environment is derived while the Status is the operator's call. The
+    environment was never the exposure. An unknown Status resolves to no option id,
+    so `kanban-closure-router.yml` aborts its update WITHOUT WRITING, and a closure
+    that writes nothing is handed to the project's built-in "Item closed" automation,
+    which sets `Cancelled` -- terminal, and archived off the board inside a day.
+
+    So this is the same case as an unreadable `.kanban.yml`, and it now gets the same
+    treatment: refuse, loudly, and let each caller apply its own no-write policy
+    (see `main`). It fell through that holding state into the destructive branch.
     """
     status, env = DEFAULT_MAP.get(branch, ("", ""))
     if not override:
@@ -74,7 +112,23 @@ def resolve(branch: str, override: dict | None = None) -> tuple[str, str]:
     want = override.get(branch)
     if not want or not isinstance(want, str):
         return status, env
-    return want, ENV_FOR_STATUS.get(want, env)
+    if want not in ENV_FOR_STATUS:
+        sys.stderr.write(
+            f"::error::.kanban.yml maps `{branch}` to {want!r}, which "
+            f"{UNKNOWN_STATUS_MARKER}. Refusing rather than passing it through: it "
+            "resolves to no Status option, the board write is then abandoned, and "
+            "the project's built-in Item-closed automation sets `Cancelled` and "
+            "archives the card (backend#2324). Declared Statuses are: "
+            + ", ".join(sorted(ENV_FOR_STATUS))
+            + ". Fix the name in .kanban.yml, or -- if the column exists on the "
+              "board and a merge to this branch really means it -- add it to "
+              "ENV_FOR_STATUS in scripts/branch_status_map.py with the Deploy "
+              "environment it implies.\n")
+        raise SystemExit(1)
+    # NOT `.get(want, env)`. The membership test above and this lookup read the SAME
+    # dict, so an accepted Status always carries its own environment and the two can
+    # never disagree -- which is what a second, looser fallback would have allowed.
+    return want, ENV_FOR_STATUS[want]
 
 
 def read_override(repo: str, ref: str = "HEAD") -> dict:
@@ -184,14 +238,22 @@ def main(argv: list[str]) -> int:
       kanban-reconcile  SKIPS the item. It is a backstop that fixes MISSES, so
                         writing a guessed column would overrule a router that
                         already got it right.
-      kanban-closure-router  writes the DEFAULT. Publishing nothing leaves the
-                        project's built-in "Item closed" automation to set
-                        `Cancelled` and archive shipped-via-parent work
-                        (.github#157) -- strictly worse than ignoring an override
-                        for one run.
+      kanban-closure-router  writes the non-terminal HOLDING STATE and labels the
+                        card. Publishing nothing leaves the project's built-in
+                        "Item closed" automation to set `Cancelled` and archive
+                        shipped-via-parent work (.github#157) -- strictly worse
+                        than parking the card for the weekly pass.
+      advance-deploy-env  nothing. A push has no competing automation, so a failed
+                        run is a failed run and the card keeps what it had.
 
-    So `read_override` still refuses, and `--no-override` is how a caller asks for
-    the answer it can safely fall back to. Neither caller gets a silent default.
+    THE SAME THREE POLICIES NOW COVER `resolve`'s REFUSAL TOO (backend#2324), and
+    that is the fix: an override whose Status does not exist reaches each caller as a
+    non-zero exit, which is the one thing all three already handle. It used to reach
+    them as a successful answer, so none of them handled it.
+
+    So `read_override` and `resolve` both refuse, and `--no-override` is how a caller
+    asks for the answer it can safely fall back to. Neither caller gets a silent
+    default.
     """
     if len(argv) < 2:
         sys.stderr.write("usage: branch_status_map.py <branch> [owner/repo] [ref]\n"

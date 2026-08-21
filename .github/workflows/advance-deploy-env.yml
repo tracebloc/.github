@@ -26,8 +26,17 @@ name: Advance deploy environment
 #     staging: Prod          # this repo's deploy ships staging-built artifacts
 #
 # The override merges with the default mapping. Anything you don't explicitly
-# remap stays on the default. Keys are branch names; values are Status column
-# names ("Prod", "FR on staging", "On dev").
+# remap stays on the default. Keys are branch names.
+#
+# VALUES MUST BE A STATUS `ENV_FOR_STATUS` DECLARES, in
+# tracebloc/.github's `scripts/branch_status_map.py` -- read the list there rather
+# than from a copy here. The three names this comment used to list were a copy, and
+# the table has five.
+# A value outside it is REFUSED (backend#2324): the mapper exits non-zero, this
+# workflow fails red and the card keeps whatever Status it had. It used to be
+# accepted and passed straight to the board write, where it resolves to no option
+# id -- and in the closure router that no-write let the project's built-in
+# "Item closed" automation set `Cancelled` and archive the card within a day.
 
 on:
   workflow_call:
