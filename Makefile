@@ -126,13 +126,13 @@ check: lint selftests
 # PROJECTS_KANBAN_TOKEN and reach out to the live org. Those are not
 # pre-push checks under any definition; `audit` below runs one on demand.
 .PHONY: check-all
-check-all: check credential-scan mutation-house-rules
+check-all: check credential-scan mutations
 	@echo "==> check-all: green"
 
 # ---- lint --------------------------------------------------------
 
 .PHONY: lint
-lint: ruff shellcheck house-rules action-pins mint-scope actionlint mutation-house-rules-dry
+lint: ruff shellcheck house-rules action-pins mint-scope actionlint mutations-dry
 
 # ruff: code-quality.yml's `ruff` job in all-files mode. This repo has no ruff
 # config, so the workflow falls back to --isolated --select <ruff-select>; that
@@ -274,7 +274,25 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 # `*-selftest.*`: a file under scripts/tests/ that matches no wildcard is invisible,
 # and an invisible file makes the coverage assertion pass vacuously.
 MUTATION_FILES := $(sort $(wildcard scripts/tests/*-mutations.py))
-MUTATION_TARGETS := mutation-house-rules
+MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close
+
+# THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
+# `check-all`, `lint` -- depends on one of these two rather than on any
+# individual runner.
+#
+# Twice in one PR a target named ONE MEMBER of the list and so silently skipped
+# the second runner: `selftests.yml` ran `make mutation-house-rules`, and then
+# `check-all`/`lint` were left doing the same after CI was fixed (Bugbot,
+# .github#300, twice). That is the paired-construct shape -- change one half of
+# something that must move together and the other half is now a bug. Naming the
+# list is what makes adding the next runner a ONE-WORD edit to MUTATION_TARGETS
+# that cannot be half-wired.
+#
+# The dry list is DERIVED from the real one, not written beside it: a
+# hand-maintained second list is the same drift one level down.
+.PHONY: mutations mutations-dry
+mutations: $(MUTATION_TARGETS)
+mutations-dry: $(addsuffix -dry,$(MUTATION_TARGETS))
 
 .PHONY: selftests
 # The targets that actually RUN a selftest. Named once: `selftests` depends on
@@ -285,7 +303,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
 	selftest-stale-backlog \
                     selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns \
                     selftest-kanban-deploy-state selftest-git-reap \
-                    selftest-mint-scope selftest-house-rules
+                    selftest-mint-scope selftest-house-rules \
+                    selftest-pipefail-early-close
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -341,8 +360,26 @@ selftests-cover:
 	    echo "  and list it under 'selftests'."; \
 	    fail=1; }; \
 	done; \
+	wf=.github/workflows/selftests.yml; \
+	[ -r "$$wf" ] || { echo "$$wf is unreadable — refusing to report that CI runs these"; exit 1; }; \
+	for m in $(MUTATION_TARGETS); do \
+	  grep -qE "^(check-all|lint):.*[[:space:]]$$m(-dry)?([[:space:]]|$$)" Makefile && { \
+	    echo "check-all/lint names the individual runner '$$m' instead of 'mutations'/'mutations-dry'."; \
+	    echo "  Naming one member of MUTATION_TARGETS is how the second runner gets skipped"; \
+	    echo "  silently — it happened twice in .github#300. Depend on the list."; \
+	    fail=1; }; \
+	done; \
+	for t in selftests mutations; do \
+	  grep -qE "^[[:space:]]*run:[[:space:]]*make[[:space:]]+$$t([[:space:]]|$$)" "$$wf" || { \
+	    echo "$$wf does not run 'make $$t'."; \
+	    echo "  Being wired to a Makefile target is only half of it: the tier also has to"; \
+	    echo "  EXECUTE in CI. mutation-pipefail-early-close was covered by this guard and"; \
+	    echo "  never run, because the workflow named one member of MUTATION_TARGETS"; \
+	    echo "  instead of the list (Bugbot, .github#300). Covered on paper, unrun in fact."; \
+	    fail=1; }; \
+	done; \
 	[ "$$fail" = 0 ] || exit 1; \
-	echo "selftests-cover: all $(words $(SELFTEST_FILES)) selftests and $(words $(MUTATION_FILES)) mutation runner(s) are wired to a target"
+	echo "selftests-cover: all $(words $(SELFTEST_FILES)) selftests and $(words $(MUTATION_FILES)) mutation runner(s) are wired to a target, and CI runs both tiers"
 
 .PHONY: selftest-caller-drift
 selftest-caller-drift: guard-pyyaml
@@ -412,6 +449,21 @@ mutation-house-rules:
 .PHONY: mutation-house-rules-dry
 mutation-house-rules-dry:
 	$(PYTHON) scripts/tests/house-rules-mutations.py --dry
+
+# The early-close gate (backend#2264). Two files, because the rule genuinely
+# lives in two: the awk decides which LINES are offenders, the wrapper decides
+# which FILES run under errexit+pipefail (the inheritance fixpoint, the option
+# sign, the derived file list).
+.PHONY: selftest-pipefail-early-close
+selftest-pipefail-early-close:
+	bash scripts/tests/pipefail-early-close-selftest.sh
+
+.PHONY: mutation-pipefail-early-close mutation-pipefail-early-close-dry
+mutation-pipefail-early-close:
+	$(PYTHON) scripts/tests/pipefail-early-close-mutations.py
+
+mutation-pipefail-early-close-dry:
+	$(PYTHON) scripts/tests/pipefail-early-close-mutations.py --dry
 
 .PHONY: selftest-git-reap
 selftest-git-reap:
