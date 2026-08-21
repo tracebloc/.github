@@ -211,6 +211,20 @@ case_spare segboth.sh "both segments spared when both discard their status" \
 # the line — which is what the old whole-line rule did.
 case_flag segmid.sh "'|| true' inside a substitution does not spare a live pipe after it" \
   '  printf %s "$(get || true)" | grep -q needle'
+# Asad's table (.github#300), verbatim: the whitespace before `;` used to decide
+# the verdict, so two lines doing the same thing disagreed. All four spellings
+# now read the same.
+case_flag segsp1.sh "'|| true ;' with a space before the semicolon" \
+  '  rm -f x || true ; producer | head -1'
+case_flag segsp2.sh "'|| : ;' likewise" \
+  '  rm -f x || : ; producer | head -1'
+# ...and the FALSE POSITIVE the simpler end-anchored regex would have cost.
+# Segment-wise evaluation is what avoids it, so it belongs in the suite as the
+# reason that approach was chosen over the cheaper one.
+case_spare segcost.sh "a spared pipeline followed by another command stays spared" \
+  '  producer | head -1 || true; echo done'
+case_spare segparen.sh "and the parenthesised form stays spared" \
+  '  ( producer | head -1 || true )'
 
 echo
 echo "== state does not leak between files =========================================="
