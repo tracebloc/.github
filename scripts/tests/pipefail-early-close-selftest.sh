@@ -134,6 +134,20 @@ if flags; then record 0 "the LONG spellings count (set -o errexit)" ""; else rec
 scan_raw longoff.sh '#!/usr/bin/env bash\nset -o errexit\nset -o pipefail\nset +o pipefail\n  x="$(ls /tmp | head -1)"\n'
 if spares; then record 0 "and the long form DISABLES too (set +o pipefail)" ""; else record 1 "and the long form DISABLES too" "$OUT"; fi
 
+# A TRAILING COMMENT ON THE `set` LINE MUST NOT CHANGE THE OPTIONS. `apply_set`
+# ran on the raw line, so splitting on whitespace turned comment tokens into
+# real option updates: `# note: +e would be bad` cleared errexit and every
+# hazard below went unreported. Fail-open and silent (Bugbot and Asad,
+# independently, .github#300).
+scan_raw cmtplus.sh '#!/usr/bin/env bash\nset -euo pipefail  # note: +e would be bad\n  x="$(ls /tmp | head -1)"\n'
+if flags; then record 0 "a '+e' inside a set-line comment does not disarm errexit" ""; else record 1 "a '+e' inside a set-line comment does not disarm errexit" "no finding"; fi
+scan_raw cmtpipe.sh '#!/usr/bin/env bash\nset -euo pipefail  # never +o pipefail here\n  x="$(ls /tmp | head -1)"\n'
+if flags; then record 0 "nor does '+o pipefail' in a set-line comment" ""; else record 1 "nor does '+o pipefail' in a set-line comment" "no finding"; fi
+# The discrimination: a REAL `set +e` after the line must still disarm, or the
+# two cases above would pass under a scanner that simply ignores every `+`.
+scan_raw realplus.sh '#!/usr/bin/env bash\nset -euo pipefail\nset +e\n  x="$(ls /tmp | head -1)"\n'
+if spares; then record 0 "but a REAL 'set +e' still disarms it" ""; else record 1 "but a REAL 'set +e' still disarms it" "$OUT"; fi
+
 echo
 echo "== one-line functions are scanned, not skipped ================================"
 scan_raw oneline.sh '#!/usr/bin/env bash\nset -euo pipefail\nfirst() { producer | head -1; }\n'

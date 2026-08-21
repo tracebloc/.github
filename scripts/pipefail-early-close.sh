@@ -109,11 +109,20 @@ fi
 # COMMENT satisfy the test:
 #     set -e   # then -o pipefail elsewhere
 # That direction is fail-CLOSED -- a file gets scanned that need not be -- so it
-# was never dangerous. It is fixed anyway because the awk already strips
-# comments before deciding, and an asymmetry between the two halves of one rule
-# should be deliberate rather than incidental (Asad, .github#300). The mirror of
-# this in e2e-test-agent#184 ran the other way, where a trailing comment could
-# DISARM a flag check.
+# was never dangerous. It is fixed anyway so that the two halves of one rule
+# agree (Asad, .github#300).
+#
+# AN EARLIER VERSION OF THIS COMMENT SAID "the awk already strips comments
+# before deciding". THAT WAS FALSE, and it was quoted back approvingly in
+# review before anyone checked it. The awk stripped comments only for
+# FUNCTION-BODY detection; `apply_set` ran on the raw line, so a `# … +e …`
+# comment disarmed errexit and silently skipped every hazard below it. Fixed in
+# the awk, in `apply_set`. Recorded because a comment asserting what ANOTHER
+# file does is a claim to verify, not to quote -- which is the whole subject of
+# this rule family.
+#
+# The mirror of this in e2e-test-agent#184 ran the same way: a trailing comment
+# DISARMING a flag check.
 #
 # `haz` IS AN ARRAY. As a space-separated string iterated unquoted, a path
 # containing a space split into two nonexistent paths, both failed `[ -f ]`, and

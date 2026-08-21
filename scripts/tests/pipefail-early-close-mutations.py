@@ -68,6 +68,9 @@ MUTATIONS = [
      'if (line ~ /#[[:space:]]*pipefail-guard:[[:space:]]*allow/) next', 'if (0) next'),
 
     # --- option state is positional --------------------------------------
+    ("apply_set reads the RAW line, so a set-line comment disarms the options", AWK,
+     '  sub(/[[:space:]]*#.*$/, "", line)\n  n = split(line, a, /[[:space:]]+/)',
+     '  n = split(line, a, /[[:space:]]+/)'),
     ("errexit is assumed on everywhere", AWK, 'if (!(e_on && p_on)) next', 'if (!(p_on)) next'),
     ("pipefail is assumed on everywhere", AWK, 'if (!(e_on && p_on)) next', 'if (!(e_on)) next'),
 

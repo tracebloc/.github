@@ -61,6 +61,20 @@
 # Output: one `path:line: code` per offender.
 
 function apply_set(line,   n, a, i, tok, sign, flags) {
+  # STRIP THE TRAILING COMMENT FIRST. This ran on the RAW line, so whitespace
+  # splitting turned comment tokens into real option updates:
+  #     set -euo pipefail  # note: +e would be bad
+  # cleared errexit, and every hazard below that line was then skipped.
+  # Fail-OPEN on the positional state machine, and silent (Bugbot and Asad,
+  # independently, .github#300).
+  #
+  # It lives HERE rather than at the dispatch because this is the function with
+  # the hole; the `^[[:space:]]*#` skip further down only handles comments that
+  # are the WHOLE line, and the `bare` strip above is for function-body
+  # detection only. Unconditional is safe: the only legitimate `#` on a `set`
+  # line is inside a positional argument (`set -- "a#b"`), and the loop below
+  # ignores any token not starting with `-` or `+`.
+  sub(/[[:space:]]*#.*$/, "", line)
   n = split(line, a, /[[:space:]]+/)
   for (i = 1; i <= n; i++) {
     if (a[i] == "set") break
