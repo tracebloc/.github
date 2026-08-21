@@ -16,11 +16,15 @@ maintained in sixteen byte-identical copies.
 
 THE RULE, and it is narrower than "not exempt"
 ----------------------------------------------
-An issue is eligible ONLY if its board Status is exactly `Backlog`. Everything else
--- any other column, no card at all, or a Status that could not be read -- is
-skipped. `Backlog` is an ALLOW-list of one, not a deny-list of the columns we thought
-of, because a column added next year would otherwise be eligible by default and
-nobody would find out until something was closed.
+An issue is eligible ONLY if its LIVE board Status is exactly `Backlog`. Everything
+else -- any other column, an ARCHIVED card, no card at all, or a Status that could not
+be read -- is skipped. `Backlog` is an ALLOW-list of one, not a deny-list of the
+columns we thought of, because a column added next year would otherwise be eligible by
+default and nobody would find out until something was closed.
+
+"LIVE" is a load-bearing word there and not a synonym for "present": archiving a card
+does not clear its Status, so an archived card can read `Backlog` indefinitely
+(Bugbot, #292). See `status_of`.
 
 FAIL CLOSED means SKIP here, not "act"
 --------------------------------------
@@ -101,6 +105,7 @@ query($owner:String!,$name:String!,$cursor:String){
         number title updatedAt
         labels(first:%d){totalCount nodes{name}}
         projectItems(first:%d){totalCount nodes{
+          isArchived
           project{number}
           fieldValueByName(name:"Status"){
             ... on ProjectV2ItemFieldSingleSelectValue{name}
@@ -156,12 +161,42 @@ def truncated(conn, page):
 
 
 def status_of(issue, project_number):
-    """The issue's Status on the given project, or None if it cannot be established.
+    """The issue's LIVE Status on the given project, or None if it cannot be established.
 
-    None is returned for: no card, a card with no Status value, and a Status whose
-    name is not a string. All three are UNKNOWN, and unknown is not Backlog. The
-    caller must not distinguish them -- treating "no card" as more actionable than
+    None is returned for: no card, an ARCHIVED card, a card with no Status value, and a
+    Status whose name is not a string. All four are UNKNOWN, and unknown is not Backlog.
+    The caller must not distinguish them -- treating "no card" as more actionable than
     "unreadable" is how a board outage becomes a closing spree.
+
+    ARCHIVED CARDS ARE NOT LIVE CARDS (Bugbot, #292)
+    -----------------------------------------------
+    `projectItems` INCLUDES ARCHIVED ITEMS -- `includeArchived` defaults to true, so
+    not asking is asking for them. And archiving a card DOES NOT CLEAR ITS STATUS
+    FIELD: `kanban-archive.yml` archives terminal items and leaves `Prod`/`Cancelled`
+    on them, and a card archived straight out of `Backlog` keeps reading `Backlog`
+    forever. So without this filter the sweep's allow-list-of-one matched cards that
+    had been deliberately taken OFF the board, and the consequence was not a wrong
+    log line: it was `issue close`. An issue whose card somebody archived is exactly
+    an issue nobody is watching, which is the worst possible place for a silent
+    auto-close, and the trigger condition is ordinary rather than exotic -- any bulk
+    board tidy-up creates a batch of archived-but-`Backlog` cards at once.
+
+    The sibling readers already had this right and this one was the outlier:
+    `kanban-archive.yml` selects `.isArchived == false` before acting, and
+    `advance-deploy-env.yml` skips archived items explicitly. `is not False` is that
+    same jq predicate in Python -- True, null, and a missing field all fail it, which
+    is the fail-closed direction: if the query stops asking for `isArchived`, every
+    card reads as un-established, every issue lands on None, and the sweep goes
+    loudly useless (main() counts those as "no readable Status" and `--strict` fails)
+    rather than quietly resuming the close.
+
+    `continue`, NOT `return None`, and the difference is load-bearing: an issue can
+    carry an archived card AND a live card on the same project, so bailing out on the
+    first archived one would hide the live card behind it and skip an issue that is
+    genuinely due. Scanning on also makes the multi-project case honest -- the
+    `project.number` test already picks the target board rather than "the first card",
+    but "the first card ON THE TARGET BOARD" is only the right one once the archived
+    ones are stepped over.
     """
     conn = issue.get("projectItems")
     for item in ((conn or {}).get("nodes") or []):
@@ -169,16 +204,17 @@ def status_of(issue, project_number):
             continue
         if ((item.get("project") or {}).get("number")) != project_number:
             continue
+        if item.get("isArchived") is not False:
+            continue
         val = (item.get("fieldValueByName") or {}).get("name")
         return val if isinstance(val, str) and val else None
-    # NO CARD FOUND -- but was the list complete? A truncated card page means the
+    # NO LIVE CARD FOUND -- but was the list complete? A truncated card page means the
     # target project's card may exist beyond it, so "no card" is not established.
     # This already lands on None and therefore on a SKIP, so unlike the label case
     # it was never destructive; it is checked so the two connections are handled by
     # the same rule rather than one by accident (Bugbot, #288).
     if truncated(conn, ITEM_PAGE):
         return None
-    return None
     return None
 
 

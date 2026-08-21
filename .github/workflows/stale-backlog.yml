@@ -15,11 +15,18 @@ name: Close stale backlog issues
 # byte-identical copies, which is why this was a 16-way copy that had to become a
 # reusable first. Fixing the copy model was the prerequisite, not the goal.
 #
-# The eligibility rule is an ALLOW-LIST OF ONE: exactly `Backlog`. Every other
-# column, an issue with no card, and a Status that could not be read are all
-# skipped. A column added next year is therefore safe by default — a deny-list of
-# the columns we happened to think of would make it eligible and nobody would find
-# out until something was closed.
+# The eligibility rule is an ALLOW-LIST OF ONE: exactly `Backlog`, on a card that is
+# not archived. Every other column, an archived card, an issue with no card, and a
+# Status that could not be read are all skipped. A column added next year is therefore
+# safe by default — a deny-list of the columns we happened to think of would make it
+# eligible and nobody would find out until something was closed.
+#
+# ARCHIVED CARDS KEEP THEIR STATUS, so "archived" had to become part of that rule
+# rather than being implied by it (Bugbot, .github#292). `kanban-archive.yml` archives
+# terminal items without clearing the field, and a card archived out of `Backlog` reads
+# `Backlog` forever — so the sweep matched work that had been deliberately taken off
+# the board, and closed it. `projectItems` returns archived items by default
+# (`includeArchived: true`), so the filter is explicit in ISSUES_Q and in `status_of`.
 #
 # FAIL CLOSED HERE MEANS SKIP, not act. Every other guard in this org fails closed
 # by refusing to report clean; this one is destructive, so an unreadable board must
