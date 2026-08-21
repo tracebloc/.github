@@ -51,9 +51,20 @@ scan_hazardous() {  # $1 = name ; $2.. = body lines
   { printf '#!/usr/bin/env bash\nset -euo pipefail\n'; printf '%s\n' "$@"; } > "$WORK/$name"
   OUT=$(awk -f "$SCANNER_ABS" "$WORK/$name")
 }
-# Same, but the caller supplies the whole file (including its `set` lines).
-scan_raw() {  # $1 = name ; $2 = full content
-  printf '%s' "$2" > "$WORK/$1"
+# Same, but the caller supplies the whole file including its `set` lines.
+#
+# THE FIXTURE IS A printf FORMAT, ON ONE LINE, and that is load-bearing rather
+# than a style choice. Written as a multi-line quoted string, a fixture's
+# `set -euo pipefail` sits at COLUMN 0 of *this* file -- and the scanner cannot
+# tell a quoted string from code (the documented limitation, client#777). It
+# therefore reads this suite as a script that enables errexit, and flags all
+# ~20 fixture pipes below as real findings. That is not hypothetical: it is
+# exactly how the first version of this file failed CI, and only in CI, because
+# `git ls-files` skips an untracked file and the suite was still untracked when
+# it passed locally. Keep fixtures on one line.
+scan_raw() {  # $1 = name ; $2 = printf FORMAT for the whole file
+  # shellcheck disable=SC2059  # $2 IS the format, by contract
+  printf "$2" > "$WORK/$1"
   OUT=$(awk -f "$SCANNER_ABS" "$WORK/$1")
 }
 flags()   { [ -n "$OUT" ]; }
@@ -96,62 +107,30 @@ case_spare allow.sh  "the '# pipefail-guard: allow' marker opts a line out" \
 
 echo
 echo "== BOTH options are required =================================================="
-scan_raw nopipe.sh '#!/usr/bin/env bash
-set -uo pipefail
-  x="$(ls /tmp | head -1)"
-'
+scan_raw nopipe.sh '#!/usr/bin/env bash\nset -uo pipefail\n  x="$(ls /tmp | head -1)"\n'
 if spares; then record 0 "pipefail without errexit is not the hazard" ""; else record 1 "pipefail without errexit is not the hazard" "$OUT"; fi
-scan_raw noeo.sh '#!/usr/bin/env bash
-set -eu
-  x="$(ls /tmp | head -1)"
-'
+scan_raw noeo.sh '#!/usr/bin/env bash\nset -eu\n  x="$(ls /tmp | head -1)"\n'
 if spares; then record 0 "errexit without pipefail is not the hazard" ""; else record 1 "errexit without pipefail is not the hazard" "$OUT"; fi
 
 echo
 echo "== options are POSITIONAL, not per-file ======================================="
-scan_raw infunc.sh '#!/usr/bin/env bash
-main() {
-  set -euo pipefail
-  x="$(ls /tmp | head -1)"
-}
-'
+scan_raw infunc.sh '#!/usr/bin/env bash\nmain() {\n  set -euo pipefail\n  x="$(ls /tmp | head -1)"\n}\n'
 if flags; then record 0 "options set inside a function are seen" ""; else record 1 "options set inside a function are seen" "no finding"; fi
 
-scan_raw plusE.sh '#!/usr/bin/env bash
-set -euo pipefail
-run() {
-  set +e
-  x="$(ls /tmp | head -1)"
-}
-'
+scan_raw plusE.sh '#!/usr/bin/env bash\nset -euo pipefail\nrun() {\n  set +e\n  x="$(ls /tmp | head -1)"\n}\n'
 if spares; then record 0 "a 'set +e' region is NOT flagged" ""; else record 1 "a 'set +e' region is NOT flagged" "$OUT"; fi
 
-scan_raw longform.sh '#!/usr/bin/env bash
-set -o errexit
-set -o pipefail
-  x="$(ls /tmp | head -1)"
-'
+scan_raw longform.sh '#!/usr/bin/env bash\nset -o errexit\nset -o pipefail\n  x="$(ls /tmp | head -1)"\n'
 if flags; then record 0 "the LONG spellings count (set -o errexit)" ""; else record 1 "the LONG spellings count (set -o errexit)" "no finding"; fi
 
-scan_raw longoff.sh '#!/usr/bin/env bash
-set -o errexit
-set -o pipefail
-set +o pipefail
-  x="$(ls /tmp | head -1)"
-'
+scan_raw longoff.sh '#!/usr/bin/env bash\nset -o errexit\nset -o pipefail\nset +o pipefail\n  x="$(ls /tmp | head -1)"\n'
 if spares; then record 0 "and the long form DISABLES too (set +o pipefail)" ""; else record 1 "and the long form DISABLES too" "$OUT"; fi
 
 echo
 echo "== one-line functions are scanned, not skipped ================================"
-scan_raw oneline.sh '#!/usr/bin/env bash
-set -euo pipefail
-first() { producer | head -1; }
-'
+scan_raw oneline.sh '#!/usr/bin/env bash\nset -euo pipefail\nfirst() { producer | head -1; }\n'
 if flags; then record 0 "a one-line function body is scanned" ""; else record 1 "a one-line function body is scanned" "no finding"; fi
-scan_raw onelinec.sh '#!/usr/bin/env bash
-set -euo pipefail
-first() { producer | head -1; }   # and with a trailing comment
-'
+scan_raw onelinec.sh '#!/usr/bin/env bash\nset -euo pipefail\nfirst() { producer | head -1; }   # and with a trailing comment\n'
 if flags; then record 0 "...even with a trailing comment" ""; else record 1 "...even with a trailing comment" "no finding"; fi
 
 echo
