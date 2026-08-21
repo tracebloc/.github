@@ -489,8 +489,13 @@ jobs:
           # `.kanban.yml` that read perfectly and named a column that does not exist.
           # No card has ever carried the old name -- no repo has a `.kanban.yml` --
           # so there is nothing to migrate.
+          #
+          # KEEP THE DESCRIPTION UNDER 100 CHARACTERS (Bugbot, #302). That is the
+          # label API's cap; over it the create 422s, `set -euo pipefail` aborts the
+          # step, and the parked card never gets the marker this holding state exists
+          # to leave. My first wording was 133. The selftest measures it now.
           if ! gh api "repos/$REPO_FULL/labels/override-unusable" >/dev/null 2>&1; then
-            gh api "repos/$REPO_FULL/labels" -f name=override-unusable -f color=d4c5f9 -f description="Status is a holding state: .kanban.yml could not be read, or names a Status the mapping does not declare (backend#2243, backend#2324)" >/dev/null
+            gh api "repos/$REPO_FULL/labels" -f name=override-unusable -f color=d4c5f9 -f description="Holding state: .kanban.yml unreadable, or names an undeclared Status (backend#2324)" >/dev/null
           fi
           gh api -X POST "repos/$REPO_FULL/issues/$NUMBER/labels" -f "labels[]=override-unusable" >/dev/null
 

@@ -257,6 +257,20 @@ for _f, _n in (("advance-deploy-env.yml", 1),
         eq(f"{_f}: the call passes a ref, not just branch+repo",
            _args.count('"$') >= 3, True)
 
+# EVERY LABEL THIS ROUTER CREATES MUST FIT THE API (Bugbot, #302). GitHub caps a
+# label description at 100 characters and 422s over it -- and the create runs under
+# `set -euo pipefail`, so an over-long description aborts the step and the card is
+# parked with no marker at all: the holding state loses the one thing that makes it
+# visible to the weekly pass. Measured rather than eyeballed; the wording that
+# prompted this was 133.
+LABEL_DESCRIPTION_MAX = 100
+_descs = re.findall(r'-f description="([^"]*)"',
+                    (_WF / "kanban-closure-router.yml").read_text())
+eq("the router's label descriptions were located", len(_descs) >= 2, True)
+for _d in _descs:
+    eq(f"label description fits the API cap ({len(_d)} chars): {_d[:40]!r}...",
+       len(_d) <= LABEL_DESCRIPTION_MAX, True)
+
 # THE THREE CONSUMERS' NO-WRITE PATHS, pinned as a set -- because saadqbal's point
 # on .github#295 is that "refuse rather than guess" assumes doing nothing is safe,
 # and that assumption is false at a decision point whose default is supplied by
