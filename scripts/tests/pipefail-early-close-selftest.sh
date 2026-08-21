@@ -154,6 +154,20 @@ scan_raw oneline.sh '#!/usr/bin/env bash\nset -euo pipefail\nfirst() { producer 
 if flags; then record 0 "a one-line function body is scanned" ""; else record 1 "a one-line function body is scanned" "no finding"; fi
 scan_raw onelinec.sh '#!/usr/bin/env bash\nset -euo pipefail\nfirst() { producer | head -1; }   # and with a trailing comment\n'
 if flags; then record 0 "...even with a trailing comment" ""; else record 1 "...even with a trailing comment" "no finding"; fi
+# A MULTI-LINE opener can carry code on the opener line itself. That branch
+# `next`ed after recording the scope, skipping its own hazard — the same defect
+# as the one-liner case above, one shape over (Bugbot, .github#300).
+scan_raw openerbody.sh '#!/usr/bin/env bash\nset -euo pipefail\nf() { producer | head -1\n  more_stuff\n}\n'
+if flags; then record 0 "a hazard ON a multi-line function opener is flagged" ""; else record 1 "a hazard ON a multi-line function opener is flagged" "no finding"; fi
+# The discrimination: falling through must not break function SCOPING, which is
+# the reason that branch exists at all. `set -e` inside the function must still
+# not leak past the closing brace.
+scan_raw openerscope.sh '#!/usr/bin/env bash\nset -uo pipefail\nf() {\n  set -e\n  a | head -1\n}\nb | head -1\n'
+if [ "$(printf '%s\n' "$OUT" | grep -c .)" = 1 ] && grep -q ':5:' <<<"$OUT"; then
+  record 0 "...and function scoping still ends at the closing brace" ""
+else
+  record 1 "...and function scoping still ends at the closing brace" "$OUT"
+fi
 
 echo
 echo "== the terminator class ======================================================="

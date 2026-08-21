@@ -131,7 +131,14 @@ FNR == 1 {
     bare = line
     sub(/[[:space:]]*#.*$/, "", bare)
     if (bare !~ /\}[[:space:]]*$/) {
-      save_e = e_on; save_p = p_on; in_fn = 1; next
+      # A MULTI-LINE OPENER CAN CARRY CODE, so record the scope and FALL THROUGH
+      # rather than `next`. `f() { producer | head -1` with the `}` further down
+      # matched here, failed the self-closing test, and skipped its own hazard --
+      # fail-open (Bugbot, .github#300). This is the SAME defect as the one-liner
+      # case documented above, one shape over: that fix removed an unconditional
+      # `next` and left a conditional one on the branch beside it. Changing half
+      # of a paired construct, again.
+      save_e = e_on; save_p = p_on; in_fn = 1
     }
   }
   if (line ~ /^\}/ && in_fn) { e_on = save_e; p_on = save_p; in_fn = 0; next }

@@ -71,6 +71,9 @@ MUTATIONS = [
     ("the `|| true` spare is unanchored again, covering the whole segment", AWK,
      '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)[[:space:])\\"\']*[[:space:]]*$/) continue',
      '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)/) continue'),
+    ("the multi-line function opener `next`s again, skipping its own body", AWK,
+     '      save_e = e_on; save_p = p_on; in_fn = 1\n    }',
+     '      save_e = e_on; save_p = p_on; in_fn = 1; next\n    }'),
     ("errexit is assumed on everywhere", AWK, 'if (!(e_on && p_on)) next', 'if (!(p_on)) next'),
     ("pipefail is assumed on everywhere", AWK, 'if (!(e_on && p_on)) next', 'if (!(e_on)) next'),
 
