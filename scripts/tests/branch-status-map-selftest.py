@@ -281,9 +281,18 @@ eq("the guard ignores a deploy Status in the sweep, which is correct and normal"
 # id for either, so "the job knows the id but cannot write it" is the real defect
 # shape, and it is the one this asserts.
 DEST_ARM = re.compile(r'^\s*"([^"]+)"\)\s*OPT=')
-# `opt Prod` / `opt 'Code review'` / `opt_either 'A' 'B'` -- both names, since
-# `opt_either` resolves whichever exists.
-OPT_ID = re.compile(r"""\$\(opt(?:_either)?\s+(.+?)\)""")
+# `$(opt Prod)` / `$(opt 'Code review')` / `$(opt_either 'A' 'B')` -- both names for
+# the last, since `opt_either` resolves whichever exists.
+#
+# SCANNED, NOT REGEXED, because a regex got this wrong in the obvious way (Bugbot,
+# .github#304, High). `\$\(opt(?:_either)?\s+(.+?)\)` stops at the FIRST `)`, and
+# the one argument list that matters contains one: `opt_either 'Staging (human
+# review)' 'FR on staging'`. So `FR on staging` was never collected, the invariant
+# below went green with its arm deleted, and the anchor assertion did not notice
+# because `Done` -- which has no parens -- was there. An under-collecting extractor
+# reporting a clean sweep of a subset is the exact shape `kanban-columns-check.py`'s
+# `cross_check` exists for, reproduced one file over.
+OPT_CALL = re.compile(r"\$\(opt(?:_either)?\s")
 
 
 def reconcile_dest_arms(text: str) -> "set[str]":
@@ -292,13 +301,42 @@ def reconcile_dest_arms(text: str) -> "set[str]":
             if not ln.strip().startswith("#") and (m := DEST_ARM.match(ln))}
 
 
+def _arglist(text: str, start: int) -> str:
+    """The text of a `$(...)` argument list beginning after `start`.
+
+    Depth-counted and quote-aware, so a `)` inside a quoted column name is part of
+    the name rather than the end of the call. Returns "" if the call is unterminated,
+    which the caller treats as a parse failure rather than as no arguments.
+    """
+    depth, i, quote = 1, start, ""
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:i]
+        elif ch == "\n":
+            return ""
+        i += 1
+    return ""
+
+
 def reconcile_option_ids(text: str) -> "set[str]":
     """The Status names reconcile resolves a project option id for."""
     out: "set[str]" = set()
-    for raw in OPT_ID.findall(text):
-        for tok in re.findall(r"'([^']+)'|\"([^\"]+)\"|(\S+)", raw):
-            name = next(t for t in tok if t)
-            out.add(name)
+    for m in OPT_CALL.finditer(text):
+        raw = _arglist(text, m.end())
+        for tok in re.findall(r"'([^']*)'|\"([^\"]*)\"|(\S+)", raw):
+            name = next((t for t in tok if t), "")
+            if name:
+                out.add(name)
     return out
 
 
@@ -316,8 +354,14 @@ _arms, _ids = reconcile_dest_arms(_rec), reconcile_option_ids(_rec)
 # the assertion below and look exactly like a clean tree.
 eq("reconcile's DEST arms parsed, with the anchor they must contain",
    ("Prod" in _arms, len(_arms) >= 3), (True, True))
-eq("reconcile's resolved option ids parsed, with the anchor they must contain",
-   ("Done" in _ids, len(_ids) >= 5), (True, True))
+# THE ANCHOR NAMES THE HARD CASE ON PURPOSE. `Done` alone satisfied the old, broken
+# extractor; `FR on staging` is reachable only through `opt_either`, whose argument
+# list is the one containing a `)`. An anchor that a broken parser can pass is not an
+# anchor (Bugbot, .github#304).
+eq("reconcile's resolved option ids parsed, including the one only `opt_either` "
+   "reaches, whose argument list contains a `)`",
+   ("Done" in _ids, "FR on staging" in _ids, "Staging (human review)" in _ids,
+    len(_ids) >= 8), (True, True, True, True))
 eq("every declared Status reconcile has an option id for has a DEST arm, so the "
    "weekly backstop cannot silently skip an overridden repo",
    armless(ENV_FOR_STATUS, _arms, _ids), [])
@@ -327,6 +371,10 @@ eq("the guard fires when an id exists and the arm does not",
    armless(ENV_FOR_STATUS, _arms - {"Done"}, _ids), ["Done"])
 eq("the guard stays silent when there is no id to write -- the deliberate case",
    armless(ENV_FOR_STATUS, _arms - {"Done"}, _ids - {"Done"}), [])
+# AND IT FIRES ON THE `opt_either` NAME TOO, which is the case the broken extractor
+# could not see: with only `Done` mutated, this whole guard was vacuous for it.
+eq("the guard fires for the id that only `opt_either` resolves",
+   armless(ENV_FOR_STATUS, _arms - {"FR on staging"}, _ids), ["FR on staging"])
 
 # --- `--no-override` answers without consulting anything -------------------
 # The router needs a safe fallback: publishing NO Status leaves the built-in
