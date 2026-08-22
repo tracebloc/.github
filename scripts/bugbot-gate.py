@@ -106,7 +106,10 @@ WHAT IS MATCHED, AND ON WHAT. Never on a display name where a machine-readable
 marker exists:
 
   * the check run  -> the producing App's slug (`cursor`), not the string
-    "Cursor Bugbot". A rename of the check does not blind this gate.
+    "Cursor Bugbot". A rename of the check does not blind this gate. When that
+    app publishes MORE than one check, the canonical name disambiguates and an
+    unresolvable tie is a refusal -- see BUGBOT_REVIEW_CHECK_NAME for why a
+    sibling check must never stand in for the review.
   * a finding      -> Bugbot's own `<!-- BUGBOT_BUG_ID: ... -->` marker in the
     thread's first comment. That is how Bugbot itself distinguishes a finding
     from any other comment it makes, so this cannot drift from what a finding is.
@@ -126,6 +129,27 @@ import time
 # on all 16 train repos. Matching the producer rather than the check's display
 # name is what makes a Bugbot rename harmless instead of silently fail-open.
 BUGBOT_APP_SLUG = "cursor"
+
+# THE DISAMBIGUATOR, NOT THE MATCHER, and the distinction is the whole point.
+#
+# The app slug alone identifies the PRODUCER, not the ROLE. If Cursor ever
+# publishes a SECOND check under the same app -- `Cursor Bugbot Autofix` is the
+# one Bugbot itself raised on .github#305 -- then "the first CheckRun from app
+# cursor" is a guess, and it could land on a completed Autofix run while the
+# REVIEW is still in progress. That would report a head as reviewed when nothing
+# had reviewed it, which is the one thing this gate exists to prevent.
+#
+# MEASURED BEFORE CHANGING ANYTHING (CLAUDE.md rule 8 -- verify the mechanism,
+# do not fix a path you have not shown is reachable): 120 check runs from app
+# slug `cursor` across 12 repos, every single one named exactly `Cursor Bugbot`.
+# No Autofix check has ever appeared in this org, so the path is UNREACHABLE
+# today. It is closed anyway because the fix is cheap and the failure is silent.
+#
+# Used only to TELL CANDIDATES APART, never to find them: with exactly one check
+# from the app, that one is the review whatever it is called -- so a rename
+# cannot blind this gate. With more than one, the canonical name picks the
+# review, and if none of them carries it the gate REFUSES rather than choosing.
+BUGBOT_REVIEW_CHECK_NAME = "Cursor Bugbot"
 
 # The bot that authors finding threads. Measured: `author.login == "cursor"`,
 # `__typename == "Bot"`.
@@ -345,13 +369,37 @@ def bugbot_check(pr):
     # A context lost to pagination is indistinguishable from Bugbot never having
     # run, which is the direction this gate must not guess in.
     nodes = require_complete("the head's check-context list", rollup.get("contexts"))
+    candidates = []
     for node in nodes:
         if node.get("__typename") != "CheckRun":
             continue
         slug = (((node.get("checkSuite") or {}).get("app") or {}) or {}).get("slug")
         if slug == BUGBOT_APP_SLUG:
-            return node
-    return None
+            candidates.append(node)
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        # One check from the app: that is the review, whatever it is named. This
+        # is what keeps a rename from blinding the gate.
+        return candidates[0]
+    # More than one. The app publishes several checks, so the name is the only
+    # thing that says which is the review -- see BUGBOT_REVIEW_CHECK_NAME.
+    named = [c for c in candidates if c.get("name") == BUGBOT_REVIEW_CHECK_NAME]
+    if len(named) == 1:
+        return named[0]
+    raise Unreadable(
+        "%d checks on this head come from app %r (%s) and %d of them is named "
+        "%r, so which one is the REVIEW cannot be determined. A sibling check "
+        "(an autofix run, say) must not stand in for the review. Teach this gate "
+        "the new name rather than letting it pick."
+        % (
+            len(candidates),
+            BUGBOT_APP_SLUG,
+            ", ".join(sorted(repr(c.get("name")) for c in candidates)),
+            len(named),
+            BUGBOT_REVIEW_CHECK_NAME,
+        )
+    )
 
 
 def severity_of(body):

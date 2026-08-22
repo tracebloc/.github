@@ -72,6 +72,17 @@ MUTATIONS = [
      '        slug = node.get("name")\n'
      '        if slug == "Cursor Bugbot":'),
 
+    # --- a sibling check must not stand in for the review (.github#305) ----
+    ("the first check from the app wins again, so Autofix can stand in",
+     "    if len(candidates) == 1:",
+     "    if len(candidates) >= 1:"),
+    ("an unresolvable tie is guessed instead of refused",
+     '    named = [c for c in candidates if c.get("name") == BUGBOT_REVIEW_CHECK_NAME]',
+     "    named = candidates[:1]"),
+    ("the disambiguating name is wrong, so the review is never identified",
+     'BUGBOT_REVIEW_CHECK_NAME = "Cursor Bugbot"',
+     'BUGBOT_REVIEW_CHECK_NAME = "Cursor Bugbot Autofix"'),
+
     # --- the one deliberate fail-open, pinned in both directions ----------
     ("every PR is treated as a draft, so the gate never fires",
      '    if pr.get("isDraft"):',

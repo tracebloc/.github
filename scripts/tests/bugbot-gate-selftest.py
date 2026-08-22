@@ -220,6 +220,54 @@ not_draft["isDraft"] = False
 v = ev(not_draft, "high")
 check("the SAME PR not marked draft fails -- the exemption is not the whole gate", v == gate.FAIL)
 
+# A SIBLING CHECK FROM THE SAME APP MUST NOT STAND IN FOR THE REVIEW.
+# Bugbot raised this on .github#305: Cursor may publish `Cursor Bugbot Autofix`
+# under the same app slug, so "the first CheckRun from app cursor" is a guess. It
+# has never appeared in this org (measured: 120 runs from that app, all named
+# `Cursor Bugbot`), so these cases construct the input rather than observing it.
+autofix = check_run(name="Cursor Bugbot Autofix", status="COMPLETED", conclusion="SUCCESS")
+
+# The exact scenario in the finding: autofix DONE, review still running.
+v = ev(pr(contexts=[autofix, check_run(status="IN_PROGRESS", conclusion=None)]), "high")
+check(
+    "a completed Autofix does NOT satisfy the gate while the review is running",
+    v == gate.PENDING,
+    "got %r" % v,
+)
+# Order must not matter -- a scan that returned the first match would pass one of
+# these two and fail the other, so both are here.
+v = ev(pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None), autofix]), "high")
+check(
+    "...and the same holds with the two checks in the other order",
+    v == gate.PENDING,
+    "got %r" % v,
+)
+# With both terminal, the REVIEW is the one that counts: an open High must still
+# fail, which it cannot do if Autofix was picked instead.
+v = ev(
+    pr(contexts=[autofix, check_run()], threads=[thread(finding_body("High"))]),
+    "high",
+)
+check(
+    "with both terminal, the review is picked and its findings still gate",
+    v == gate.FAIL,
+    "got %r" % v,
+)
+v = ev(pr(contexts=[autofix, check_run()]), "high")
+check("a clean review alongside an Autofix run passes", v == gate.PASS, "got %r" % v)
+expect_unreadable(
+    "two checks from the app and NEITHER named as the review is refused, not guessed",
+    lambda: gate.evaluate(
+        pr(contexts=[autofix, check_run(name="Cursor Something Else")]), "high"
+    ),
+    because="cannot be determined",
+)
+expect_unreadable(
+    "two checks BOTH named as the review is also refused",
+    lambda: gate.evaluate(pr(contexts=[check_run(), check_run()]), "high"),
+    because="cannot be determined",
+)
+
 # --------------------------------------------------------------------------
 # 2. The conclusion is reported, never used. This is the whole of backend#2284:
 #    `neutral` must not fail on its own and `success` must not excuse a finding.
