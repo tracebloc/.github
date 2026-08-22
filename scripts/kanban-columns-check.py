@@ -89,6 +89,12 @@ WRITERS = (
     # because the paths-filter assertion and the idiom cross-check both key on it.
     "kanban-archive.yml",
     "wip-limit-check.yml",
+    # Writes `Ready` and reads `Backlog` to decide whether that write is forward
+    # (backend#2348). Both names are load-bearing in opposite directions: rename
+    # `Ready` and the write resolves no option id, rename `Backlog` and the
+    # workflow refuses every promotion -- so a board rename turns it into either
+    # a red run or a permanent no-op, which is exactly what this check is for.
+    "bug-to-ready.yml",
 )
 
 

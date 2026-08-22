@@ -111,6 +111,7 @@ reusables:
   - blocked-gate.yml
   - version-bump-gate.yml
   - stale-backlog.yml
+  - bug-to-ready.yml
 
 # Copies, not callers: these are duplicated into each repo, so the guard compares
 # content (git blob sha against the checked-out source) instead of looking for a
@@ -358,6 +359,20 @@ shared_reasons:
     the moment it is on - client#490 ("HOLD until v0.8.0 image") and client-runtime#192
     ("DO NOT MERGE") - which is the gate working as intended (backend#1752,
     data-ingestors#468).
+  bug_to_ready_rollout_pending: &bug_to_ready_rollout_pending >-
+    STAGED, NOT PARKED (backend#2348). bug-to-ready.yml lands with ZERO callers, deliberately
+    and for exactly one PR: the reusable plus its selftest so the PROMOTION DECISION can be
+    reviewed on its own -- that is the whole risk surface, because the way this workflow fails
+    is not "it does nothing", it is dragging a card that already reached In progress / On dev /
+    Prod backwards into Ready. The callers are four lines of YAML each and follow in the rollout
+    PR, which flips every one of these rows to `required`.
+    The two-step is forced by this file's own header: .github's caller state is read from its
+    audit branch over the API, so adding a caller and flipping its entry in one PR fails on a
+    caller that is not on the audit branch yet. .github IS IN THE WAVE LIKE EVERY OTHER REPO --
+    the same reasoning stale_backlog_migration_in_flight spells out, for the same reason.
+    If this anchor is still here once the rollout has merged, it has become the same finding as
+    wip_limit_check_has_no_callers: a reusable that shipped, was never wired up, and had a
+    written excuse for it. Treat it as a defect then, not a justification.
 
   no_staging_branch_no_hop_to_gate: &no_staging_branch_no_hop_to_gate >-
     fr-gate gates the staging -> prod hop. This repo has no `staging` branch, so there is no hop
@@ -562,6 +577,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -595,6 +612,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -627,6 +646,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -680,6 +701,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -711,6 +734,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -742,6 +767,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -775,6 +802,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -806,6 +835,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -837,6 +868,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -905,6 +938,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -952,6 +987,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1037,6 +1074,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1076,6 +1115,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1144,6 +1185,8 @@ repos:
         exempt: *blocked_gate_rollout_pending
       stale-backlog.yml:
         exempt: *stale_backlog_exemption_needs_redeciding
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml:
         divergent: >-
@@ -1227,6 +1270,8 @@ repos:
         exempt: *blocked_gate_rollout_pending
       stale-backlog.yml:
         exempt: *stale_backlog_not_a_backlog
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1264,6 +1309,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1297,6 +1344,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1328,6 +1377,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1366,6 +1417,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bug-to-ready.yml:
+        exempt: *bug_to_ready_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:

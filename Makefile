@@ -302,7 +302,7 @@ mutations-dry: $(addsuffix -dry,$(MUTATION_TARGETS))
 SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-standards-sync \
 	selftest-stale-backlog \
                     selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns \
-                    selftest-kanban-deploy-state selftest-git-reap \
+                    selftest-kanban-deploy-state selftest-bug-to-ready selftest-git-reap \
                     selftest-mint-scope selftest-house-rules \
                     selftest-pipefail-early-close
 
@@ -428,6 +428,16 @@ selftest-kanban-columns:
 .PHONY: selftest-kanban-deploy-state
 selftest-kanban-deploy-state: guard-pyyaml
 	$(PYTHON) scripts/tests/kanban-deploy-state-selftest.py
+
+# guard-pyyaml: it parses bug-to-ready.yml to pull the two decision regions out
+# of the workflow rather than holding a copy of them (backend#2348). NO CI
+# workflow of its own, deliberately — `selftests.yml` is already a REQUIRED
+# context that runs `make selftests`, so a new path-filtered workflow would add
+# an unrequired job and a filter to keep in step, which is the shape
+# selftests.yml's own header argues against.
+.PHONY: selftest-bug-to-ready
+selftest-bug-to-ready: guard-pyyaml
+	$(PYTHON) scripts/tests/bug-to-ready-selftest.py
 
 # Builds a throwaway repo per case and stubs `gh` on PATH, so it needs neither a
 # token nor a network — but it DOES need a committer identity, which a bare CI

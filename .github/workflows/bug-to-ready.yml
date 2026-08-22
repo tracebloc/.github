@@ -1,0 +1,347 @@
+name: Bug label lands the card in Ready
+
+# THE RULE THIS IMPLEMENTS, and nothing did (backend#2348).
+#
+#   "bugs get `work-type:bug` and go straight into `Ready` (defects skip
+#    refinement)"
+#
+# It is written in CLAUDE.md, in org-standards.md and in every repo's contributor
+# guidance, and it was enforced entirely by whoever remembered. `add-to-kanban.yml`
+# puts every new issue in `Backlog` and no workflow read the label afterwards.
+#
+# MEASURED 2026-08-22: seven bug-labelled tickets filed in one day -- backend#2324,
+# #2327, #2329, #2340, #2341, #2344 and frontend-app#871 -- and all seven landed in
+# `Backlog` and needed a hand-run `updateProjectV2ItemFieldValue`. A 100% miss rate
+# is the tell that nothing does it at all, rather than that people forget sometimes:
+# a rule people mostly follow produces a mixed record.
+#
+# WHY IT IS NOT TIDINESS. `Ready` is the queue engineers pull from and `Backlog` is
+# the refinement queue nobody pulls from -- that split is the whole point. A defect
+# filed correctly and labelled correctly was, by default, invisible to the people
+# meant to pick it up. The release train's deferral story rides on the same path: it
+# files a ticket for every Medium/Low it ships as "a record rather than a dismissal",
+# and those landed unread too.
+#
+# WHY A NEW REUSABLE RATHER THAN A LINE IN `add-to-kanban.yml`
+# -----------------------------------------------------------
+# `add-to-kanban.yml` is the org's ONLY per-repo COPY (`copies:` in
+# repo-inventory.yml, a list of exactly one), and `caller-drift.py` compares each
+# repo's copy against this repo's byte for byte. So an edit here is not an edit to
+# one file: it makes all eighteen other copies read DRIFTED on the next Monday
+# audit, and the documented way out is to merge every other repo BEFORE .github --
+# which is impossible for a change that has to be authored in .github first. A
+# reusable is resolved at run time from `@main`, so the same fix reaches the fleet
+# with no byte-comparison to satisfy and no ordering trap. See the PR body.
+#
+# It also keeps two concerns apart. `add-to-kanban.yml` answers "is this on the
+# board"; this answers "which column does the label imply". backend#1877 and
+# backend#2157 both have that file in their path, and a second concern welded into
+# it is a second concern they have to carry.
+
+on:
+  workflow_call:
+    inputs:
+      project-number:
+        type: number
+        default: 2
+      org:
+        type: string
+        default: tracebloc
+      # The label is an input because a repo could conceivably spell it
+      # differently; the two COLUMN names are not, because they are the rule
+      # rather than a setting. A repo that could configure `Ready` away would be
+      # a repo where this workflow reports success while doing nothing.
+      bug-label:
+        type: string
+        default: work-type:bug
+
+# The Bug template applies the label at creation, so `opened` and `labeled` can
+# both fire for the same issue seconds apart. Both runs would compute the same
+# write, so the race is harmless -- but serialising them keeps the run log honest
+# about what happened. NEVER cancel-in-progress: a cancelled run is a card that
+# silently stayed in Backlog, which is this ticket.
+concurrency:
+  group: bug-to-ready-${{ github.repository }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  bug-to-ready:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # NO GITHUB_TOKEN AT ALL, same reasoning as add-to-kanban.yml (#2181): every
+    # call below authenticates as the App, so the workflow token needs nothing,
+    # and an empty grant is the only version of that claim a reader can check.
+    permissions: {}
+    steps:
+      # ------------------------------------------------------------------
+      # Is this event a candidate at all? Answered BEFORE any credential is
+      # minted, so the overwhelmingly common no-op (any non-bug issue event)
+      # costs no token.
+      # ------------------------------------------------------------------
+      - name: Is this a bug-labelled issue?
+        id: candidate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          # PRESENT ONLY WHEN THE "ISSUE" IS A PULL REQUEST. `issues:` events
+          # never fire for PRs, so this is belt to the caller's braces -- but a
+          # reusable may be called from any trigger, and `issue_comment` DOES
+          # fire for both. Per the board's model an issue occupies
+          # Backlog/North Stars/Ready only; the flow columns are for PRs, so a
+          # PR reaching this logic would be a demotion waiting to happen.
+          IS_PULL_REQUEST: ${{ github.event.issue.pull_request != null }}
+          LABELS_JSON: ${{ toJSON(github.event.issue.labels) }}
+          BUG_LABEL: ${{ inputs.bug-label }}
+        run: |
+          set -euo pipefail
+          # selftest:candidate-start
+          # yes                     -> a bug-labelled issue; go on to the board
+          # no:<why>                -> legitimately nothing to do, green
+          # error:<why>             -> CANNOT TELL, which is a finding and not a
+          #                            pass (backend#1729 rule 3). A payload whose
+          #                            labels will not parse is exactly how this
+          #                            check would come to pass forever.
+          candidate_verdict() {
+            if [ "${EVENT_NAME:-}" != "issues" ]; then
+              echo "no:not-an-issues-event"; return
+            fi
+            if [ "${IS_PULL_REQUEST:-false}" = "true" ]; then
+              echo "no:pull-request"; return
+            fi
+            if [ -z "${BUG_LABEL:-}" ]; then
+              echo "error:no-label-configured"; return
+            fi
+            # Two jq calls' worth of care, not one. `jq -e 'any(...)'` folds "no
+            # match" and "unparseable" into the same non-zero exit, which is the
+            # fail-open this org keeps finding: a malformed payload would read as
+            # "not a bug" and the card would stay in Backlog behind a green check.
+            _n=$(printf '%s' "${LABELS_JSON:-}" \
+                 | jq -r --arg l "$BUG_LABEL" '[.[] | select(.name == $l)] | length') \
+              || { echo "error:labels-unreadable"; return; }
+            case "$_n" in
+              ''|*[!0-9]*) echo "error:labels-unreadable"; return ;;
+            esac
+            if [ "$_n" -eq 0 ]; then echo "no:label-absent"; return; fi
+            echo yes
+          }
+          VERDICT=$(candidate_verdict)
+          case "$VERDICT" in
+            error:*)
+              echo "::error::cannot tell whether this issue carries the bug label ($VERDICT)." \
+                   "Refusing to report success from a read this workflow did not understand."
+              exit 1 ;;
+            no:*)
+              echo "::notice::not a candidate ($VERDICT) — nothing to do" ;;
+          esac
+          # selftest:candidate-end
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+
+      # Board writes authenticate as the tracebloc-release-train App (backend#2036),
+      # never a human's PAT. `owner:` yields an ORG-scoped installation token; a
+      # repo-scoped one cannot write an org ProjectV2. No fallback: a fallback would
+      # let a broken App path keep looking like a working one.
+      - name: Mint an installation token
+        id: app-token
+        if: steps.candidate.outputs.verdict == 'yes'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          # LEAST PRIVILEGE, DERIVED FROM WHAT THE STEP BELOW RUNS (backend#2157).
+          # It resolves ONE issue node in the CALLING repo and reads+writes the org
+          # project's Status field. That is `issues: read` plus
+          # `organization-projects: write`, and nothing else the App holds.
+          #
+          # `repositories:` narrows the repo-level half to the caller. It does not
+          # narrow the board: `organization_projects` is an ORG permission, measured
+          # unaffected by repo scoping in backend#2181's run 32255581084. In a
+          # reusable this expands to the CALLING repository, which is the one whose
+          # issue is being resolved.
+          #
+          # Deliberately NOT a twelfth unscoped mint (backend#2157 is open about the
+          # eleven this repo already carries) -- `mint-scope.py` would refuse it, and
+          # this workflow is not on its EXEMPT list.
+          repositories: ${{ github.event.repository.name }}
+          permission-issues: read
+          permission-organization-projects: write
+
+      - name: Promote the card out of Backlog
+        if: steps.candidate.outputs.verdict == 'yes'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ORG: ${{ inputs.org }}
+          PROJECT_NUMBER: ${{ inputs.project-number }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          REPO_NAME="${REPO_FULL#*/}"
+
+          # THE RULE, WRITTEN ONCE. Every use below reads these two variables, so
+          # there is no second spelling of either column to drift.
+          FROM_STATUS="Backlog"
+          TO_STATUS="Ready"
+
+          # ONE QUERY for the board AND the card, deliberately. Two queries can
+          # disagree -- a column renamed between them makes the card's own Status a
+          # name the options list does not contain, and the monotonicity proof below
+          # is then being made against a board that no longer exists. `field(name:)`
+          # also avoids `fields(first: 50)`, whose truncation would silently hide the
+          # Status field on a wider project.
+          # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
+          QUERY='
+            query($org: String!, $repo: String!, $num: Int!, $pnum: Int!) {
+              organization(login: $org) {
+                projectV2(number: $pnum) {
+                  id
+                  field(name: "Status") {
+                    ... on ProjectV2SingleSelectField { id options { id name } }
+                  }
+                }
+              }
+              repository(owner: $org, name: $repo) {
+                issue(number: $num) {
+                  projectItems(first: 20) {
+                    nodes {
+                      id
+                      project { number }
+                      fieldValueByName(name: "Status") {
+                        ... on ProjectV2ItemFieldSingleSelectValue { name }
+                      }
+                    }
+                  }
+                }
+              }
+            }'
+
+          # Retry briefly: `add-to-kanban.yml` and this workflow both fire on
+          # `issues: opened`, so the card may not exist yet. Budget deliberately the
+          # SAME 5 x 5s as set-pr-status.yml -- widening it here would hide how often
+          # the race is lost, and that measurement is the point of failing closed.
+          RESP=""
+          ITEM_ID=""
+          for i in 1 2 3 4 5; do
+            RESP=$(gh api graphql -f query="$QUERY" -F org="$ORG" -F repo="$REPO_NAME" \
+                     -F num="$ISSUE_NUMBER" -F pnum="$PROJECT_NUMBER") || RESP=""
+            if [ -n "$RESP" ]; then
+              ITEM_ID=$(printf '%s' "$RESP" | jq -r --argjson n "$PROJECT_NUMBER" '
+                [.data.repository.issue.projectItems.nodes[]?
+                 | select(.project.number == $n)] | (first // {}) | .id // ""')
+            fi
+            if [ -n "$ITEM_ID" ]; then break; fi
+            echo "issue #$ISSUE_NUMBER not on project $PROJECT_NUMBER yet, waiting ($i/5)…"
+            sleep 5
+          done
+
+          # FAIL CLOSED, for the reason backend#2037 made set-pr-status.yml fail
+          # closed: a `::notice::` + exit 0 here leaves the card in Backlog behind a
+          # GREEN check, which is indistinguishable from the bug this workflow was
+          # written to remove.
+          if [ -z "$ITEM_ID" ]; then
+            echo "::error::issue $REPO_FULL#$ISSUE_NUMBER is not on project $PROJECT_NUMBER" \
+                 "after 5 retries (or the board could not be read). add-to-kanban should have" \
+                 "added it. Re-run this job once the card exists."
+            exit 1
+          fi
+
+          PROJECT_ID=$(printf '%s' "$RESP" | jq -r '.data.organization.projectV2.id // ""')
+          STATUS_FIELD=$(printf '%s' "$RESP" | jq -r '.data.organization.projectV2.field.id // ""')
+          CURRENT_COL=$(printf '%s' "$RESP" | jq -r --argjson n "$PROJECT_NUMBER" '
+            [.data.repository.issue.projectItems.nodes[]?
+             | select(.project.number == $n)] | (first // {})
+            | .fieldValueByName.name // ""')
+          if [ -z "$PROJECT_ID" ] || [ -z "$STATUS_FIELD" ]; then
+            echo "::error::project $PROJECT_NUMBER has no readable 'Status' single-select field." \
+                 "Refusing to guess a column id."
+            exit 1
+          fi
+
+          # Position on the board, asked OF the board. A hand-written rank table is a
+          # second copy of the column order that agrees with itself while disagreeing
+          # with reality (backend#1729 rule 1); the option list already comes back in
+          # pipeline order, which is what `kanban-closure-router.yml` relies on too.
+          col_index() {
+            printf '%s' "$RESP" | jq -r --arg s "$1" \
+              '[.data.organization.projectV2.field.options[].name] | index($s) // -1'
+          }
+
+          # selftest:gate-start
+          # MONOTONIC BY CONSTRUCTION, not by a list of columns to avoid.
+          #
+          #   promote  the card is in FROM_STATUS (or on the board with no Status at
+          #            all) -- the only two states from which moving to TO_STATUS is
+          #            forward.
+          #   hold     anywhere else. A bug labelled while the card is already at
+          #            `In progress`, `On dev` or `Prod` must NOT be dragged back to
+          #            `Ready`; the label can arrive at any point in a card's life and
+          #            usually arrives after triage has already moved it. This is the
+          #            common case and it is GREEN and logged.
+          #   noboard  the two anchors are missing, or TO_STATUS does not sit strictly
+          #            AFTER FROM_STATUS on the live board. That second half is the
+          #            monotonicity assertion itself: if someone drags the Status
+          #            options so `Ready` precedes `Backlog`, then this workflow's
+          #            "promotion" is a demotion, and it must refuse rather than
+          #            perform it. Existence was checked and ORDER was not in the
+          #            sibling classifier until backend#1994; that hole is not
+          #            reproduced here.
+          #   unknown  the card sits in a column the board did not report. Unreachable
+          #            from a single atomic read, which is why the read above is one
+          #            query -- kept so the `case` has no fall-through, and driven by
+          #            the selftest against a synthetic board.
+          promotion_verdict() {
+            _f=$(col_index "$FROM_STATUS"); _t=$(col_index "$TO_STATUS")
+            if [ "$_f" -lt 0 ] || [ "$_t" -lt 0 ] || [ "$_f" -ge "$_t" ]; then
+              echo noboard; return
+            fi
+            case "${1:-}" in
+              ""|"No status") echo promote; return ;;
+            esac
+            _c=$(col_index "$1")
+            if [ "$_c" -lt 0 ]; then echo unknown; return; fi
+            if [ "$_c" -eq "$_f" ]; then echo promote; else echo hold; fi
+          }
+
+          _v=$(promotion_verdict "${CURRENT_COL:-}")
+          case "$_v" in
+            noboard)
+              echo "::error::the board's '$FROM_STATUS' and '$TO_STATUS' columns are missing," \
+                   "or '$TO_STATUS' does not sit after '$FROM_STATUS' — a move between them" \
+                   "cannot be shown to be forward, so it will not be made."
+              exit 1 ;;
+            unknown)
+              # LOUD, unlike the sibling classifier's quiet `unknown` in
+              # kanban-closure-router.yml, and the difference is deliberate. There,
+              # declining is the conservative end state and the card is legitimately
+              # parked. Here it means the monotonicity proof could not be made from a
+              # read that should have been atomic -- "cannot tell", which is a finding.
+              echo "::error::card for #$ISSUE_NUMBER sits in '${CURRENT_COL}', which this" \
+                   "board does not list as a Status option. Refusing to move it."
+              exit 1 ;;
+            hold)
+              echo "::notice::#$ISSUE_NUMBER is at '${CURRENT_COL:-<none>}', not '$FROM_STATUS'" \
+                   "— leaving it there. Automation never moves a card backward."
+              exit 0 ;;
+          esac
+          # selftest:gate-end
+
+          TO_OPT=$(printf '%s' "$RESP" | jq -r --arg s "$TO_STATUS" \
+            '[.data.organization.projectV2.field.options[] | select(.name == $s) | .id]
+             | (first // "")')
+          if [ -z "$TO_OPT" ]; then
+            echo "::error::'$TO_STATUS' resolved no option id on project $PROJECT_NUMBER."
+            exit 1
+          fi
+
+          # `-f` for the option id, never `-F`: ProjectV2 option ids can be
+          # all-numeric and `-F` coerces an all-digit value to an integer, which the
+          # `$o: String!` variable then rejects.
+          # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
+          gh api graphql -f query='
+            mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $p, itemId: $i, fieldId: $f,
+                value: {singleSelectOptionId: $o}
+              }) { projectV2Item { id } }
+            }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -f o="$TO_OPT" > /dev/null
+
+          echo "→ $REPO_FULL#$ISSUE_NUMBER carries the bug label: '${CURRENT_COL:-<none>}' → '$TO_STATUS'"
