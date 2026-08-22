@@ -1,0 +1,165 @@
+name: Bugbot review gate
+
+# Reusable workflow. Makes Cursor Bugbot's review a GATE instead of advice
+# (tracebloc/backend#2284). `scripts/bugbot-gate.py` carries the measurements and
+# the reasoning; this file is the wiring, and only says what the script cannot.
+#
+# THE SHORT VERSION OF WHY THIS IS NOT "ADD `Cursor Bugbot` TO THE REQUIRED
+# CONTEXTS". Measured 2026-08-22: Bugbot emits `success` when clean and `neutral`
+# when it has findings, and never `failure`. That makes requiring the context a
+# dichotomy with two bad horns:
+#
+#   * if `neutral` SATISFIES a required context -- GitHub's documented behaviour
+#     -- requiring it gates nothing, because `failure` never occurs;
+#   * if it does NOT, requiring it permanently bricks every PR that ever received
+#     a finding, because Bugbot re-runs only on a push or an explicit
+#     `bugbot run`, so resolving a finding can never turn the check green again
+#     -- and a promotion PR may not be pushed to at all. client#786 and
+#     frontend-app#863 both merged to `main` on 2026-08-21 carrying exactly that
+#     state (`neutral` on the merged head, one resolved Medium beneath).
+#
+# So the verdict is REPORTED here and the decision is derived from the threads.
+#
+# ARMING THIS IS THREE STEPS, IN THIS ORDER, AND THE ORDER IS THE POINT.
+#
+#   1. this file reaches `main`. Every caller in this org pins
+#      `tracebloc/.github/...@main` (RFC-BACKEND-1405 Q3), so a caller added
+#      before the reusable is ON main references something main does not have and
+#      dies with a `startup_failure` -- a red check on the very PR introducing a
+#      gate. code-quality-caller.yml records the identical sequencing for its
+#      `action-pins` input: the job went to develop in #159 and was armed only
+#      once `main` carried it. That is why the PR adding THIS file adds no caller.
+#   2. a caller is added, starting with tracebloc/.github itself. The gate is
+#      ADVICE at this point, and saying so plainly is the whole of backend#2284.
+#   3. the `bugbot / review` context is added to branch protection, once step 2
+#      has been observed green on real PRs.
+#
+# Never the reverse. backend#1976's lesson is that a contract claiming a context
+# reality lacks is itself a finding; and a required context no workflow reports
+# leaves every PR waiting forever (client#665, pii-gate/pii-check). Arm while
+# green, then let the contract claim it.
+#
+# The TEST tier needs none of that and is armed from the start:
+# `scripts/tests/bugbot-gate-selftest.py` and `-mutations.py` both run inside
+# `selftests`, ALREADY a required context on develop/staging/main -- the same
+# trick selftests.yml uses to arm a guard with no branch-protection edit.
+#
+# NO `paths:` FILTER, and the caller must not add one. A required check that is
+# path-filtered never reports on a PR the filter skips, so the PR waits at
+# "Expected -- waiting for status" forever. This org has hit that twice
+# (client#665, pii-gate/pii-check); code-quality.yml's and selftests.yml's
+# headers both warn about it.
+#
+# WHAT A CALLER MUST TRIGGER ON: `pull_request` with at least
+# `[opened, reopened, synchronize, ready_for_review]`. `ready_for_review` is
+# load-bearing, not boilerplate -- this gate deliberately PASSES a draft (a draft
+# cannot merge, and Bugbot's behaviour on drafts is not this gate's business), so
+# leaving that type out means the exemption is never lifted and the gate is
+# permanently green on a PR that was opened as a draft.
+#
+# THE TRIGGER THIS WANTS AND CANNOT HAVE YET. Resolving a Bugbot thread is not a
+# `pull_request` event, so `pull_request_review_thread: [resolved]` is the right
+# trigger for the severity half of this gate. actionlint 1.7.12 -- a REQUIRED
+# check in tracebloc/.github, run with no config file and no `-ignore` on purpose
+# -- does not know that event name and rejects the workflow, so no caller can
+# carry it without landing a red required check. Measured against the pinned
+# binary: zero occurrences of `review_thread`.
+#
+# The consequence is written into the failure message rather than left to be
+# discovered: resolve the thread, then RE-RUN this check. Not "push a commit",
+# which is what a stale gate otherwise teaches. Adding the trigger when
+# actionlint learns the event is a follow-up on backend#2284.
+#
+# THIS JOB WAITS, on purpose. Its central claim is that Bugbot reviewed the
+# CURRENT head, which is false for the first minutes after every push -- so it
+# polls. Measured over 40 Bugbot runs: p50 164s, p90 332s, max 635s. The wait
+# runs concurrently with Bugbot's own work, so it adds latency only when Bugbot
+# is slower than usual. `timeout-minutes` is deliberately above the script's own
+# budget so the script reports WHY it gave up instead of the runner killing it
+# with no message.
+
+on:
+  workflow_call:
+    inputs:
+      min-severity:
+        description: >-
+          Lowest Bugbot severity that blocks when its thread is open: one of
+          low | medium | high | critical. Anything outside that list is refused,
+          not defaulted. `high` is the default because it is green across the
+          fleet today -- `required_conversation_resolution` already blocks any
+          open thread, so no mergeable PR carries an open finding of any
+          severity, and starting stricter would buy nothing while risking a red
+          gate on day one.
+        type: string
+        default: "high"
+      wait-seconds:
+        description: >-
+          How long to wait for Bugbot to deliver a terminal verdict on the head.
+          Default 900 is ~1.4x the slowest of 40 measured runs (635s).
+        type: number
+        default: 900
+      poll-seconds:
+        description: "Gap between polls while waiting for Bugbot."
+        type: number
+        default: 20
+      quality-ref:
+        description: >-
+          Ref of tracebloc/.github the checker is taken from. Callers pin this
+          workflow at `@main`, so `main` is the matching version. Override only
+          to test a change to the checker before it merges.
+        type: string
+        default: "main"
+
+# The CALLER must grant at least these three, or the run fails at startup with
+# no jobs -- a called workflow cannot hold more than its caller. `checks: read`
+# and `pull-requests: read` are both load-bearing: the first reads the head's
+# check runs, the second reads the review threads. `contents: read` is for the
+# checkout of the checker.
+permissions:
+  contents: read
+  checks: read
+  pull-requests: read
+
+jobs:
+  review:
+    name: review
+    runs-on: ubuntu-latest
+    # Above the script's own 900s budget on purpose: the script must be the thing
+    # that reports a timeout, with the measured latencies in the message. A
+    # runner-level kill produces no explanation at all.
+    timeout-minutes: 20
+    steps:
+      # Same shape as code-quality.yml and blocked-gate.yml: the checker lives
+      # here, not in the calling repo, so the reusable fetches it. `.github` is
+      # public, so this needs no token.
+      - name: Check out the shared checker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tracebloc/.github
+          ref: ${{ inputs.quality-ref }}
+          path: .bugbot-gate-tools
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # Nothing is pip-installed: the checker imports only the standard library
+      # and shells out to `gh`, which is preinstalled on the runner. Asserted
+      # rather than assumed -- the selftest imports the module and would fail on
+      # a missing import, and it runs with no pip step in `selftests.yml`.
+      - name: Bugbot review gate
+        env:
+          # `github.token`, not `secrets.inherit`: this needs only the scopes
+          # declared above, and inheriting would hand it every secret the caller
+          # holds for no gain (RFC-BACKEND-1405 Q5).
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MIN_SEVERITY: ${{ inputs.min-severity }}
+          WAIT_SECONDS: ${{ inputs.wait-seconds }}
+          POLL_SECONDS: ${{ inputs.poll-seconds }}
+        # No interpolation of any PR-controlled string into this shell: the
+        # checker reads everything it needs from the API itself, so a finding
+        # title or a branch name never transits a command line.
+        run: python3 .bugbot-gate-tools/scripts/bugbot-gate.py
