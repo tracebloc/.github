@@ -1168,7 +1168,21 @@ repos:
     release_train: false
     protection:
       develop:
-        exempt: *no_develop_branch_single_branch_repo
+        # WAS the `no_develop_branch_single_branch_repo` anchor, false here and
+        # measured so on 2026-08-22 (backend#2242): `rfcs` HAS a `develop`, and it
+        # takes merges -- #32, #33, #34, #35, #36 and #38 all merged into it, while
+        # #37, #39 and #40 went to `main`. That anchor is correct for `release-train`
+        # (no `develop` at all, 404) and wrong for this repo, so it was one anchor
+        # describing two different situations.
+        #
+        # The accurate anchor already existed. `develop` here exists, carries NO
+        # protection (classic 404, zero matching rules), and nothing promotes out of
+        # it -- which is `develop_unprotected_non_train` exactly, including its
+        # "UNREMEDIATED" framing. Note `no_develop_branch_single_branch_repo`'s own
+        # text says the guard cannot tell these two apart ("a `develop` created and
+        # left UNPROTECTED is not flagged"), so this correction is human-only work:
+        # no check was going to surface it.
+        exempt: *develop_unprotected_non_train
       staging:
         exempt: *no_staging_branch_not_on_train
       prod:
@@ -1202,10 +1216,33 @@ repos:
       # accurate. An exemption whose stated reason does not describe the caller is
       # worse than no exemption: it reads as decided when it is unexamined.
       advance-deploy-env.yml:
+        # The previous reason read: "this repo has no `develop` and no deploy stages
+        # -- it is `main`-only by decision (README: 'no artifact, no deploy stages'),
+        # so there is no dev stage for a card to advance INTO. Structural, not a gap."
+        # HALF of that was false and the half that was true did not support the
+        # conclusion. `rfcs` has a `develop` that receives merges (see the protection
+        # block above for the measurement), so "no `develop`" was wrong; and "no
+        # deploy stages" is true but is an argument about WHICH Status to write, not
+        # about whether a card should move at all. Cards were dying in `Code review`
+        # (backend#2242) precisely because this caller was absent.
+        #
+        # Restated as what it actually is -- STAGED, NOT STRUCTURAL. tracebloc/rfcs#41
+        # adds both board callers plus a `.kanban.yml` mapping `develop` and `main` to
+        # `Done`, so a merge here writes the terminal Status that "deploys nothing"
+        # actually implies rather than a deploy state it never reaches.
+        #
+        # FLIP THIS TO `required   # advance-deploy-env.yml` once rfcs#41 has reached
+        # rfcs' DEFAULT branch, which is `main` -- `audit_branch: develop-first-on-train`
+        # audits a non-train repo on its default branch, so flipping while the caller
+        # is only on `develop` (or not yet merged) reddens `caller-drift` and the
+        # `conformance-gate` required check. Land the caller first, flip the entry
+        # after. If this note outlives rfcs#41 reaching `main`, it has stopped being a
+        # sequencing note and become the written excuse that
+        # `stale_backlog_migration_in_flight` warns about; treat it as a defect then.
         exempt: >-
-          this repo has no `develop` and no deploy stages -- it is `main`-only by decision
-          (README: "no artifact, no deploy stages"), so there is no dev stage for a card to
-          advance INTO. Structural, not a gap.
+          STAGED (backend#2242, tracebloc/rfcs#41). The caller is not wired yet, so `exempt`
+          records the measured state; it is not a judgement that this repo should never
+          advance a card. See the note above for the flip condition and its ordering.
       code-quality.yml:
         exempt: *code_quality_caller_missing
       customer-priority-bump.yml:
@@ -1219,6 +1256,19 @@ repos:
           gap -- and distinct from `fr_pass_comment_caller_missing` (claude-skills), which DOES
           have the stage and lacks the valve.
       kanban-closure-router.yml:
+        # Same STAGED situation as `advance-deploy-env.yml` above, and the same flip
+        # condition -- rfcs#41 adds this caller too, as `kanban-closure-routing.yml`.
+        #
+        # ANCHOR BOOKKEEPING for whoever does the flip: measured 2026-08-22,
+        # `kanban_closure_router_caller_missing` is defined once and cited ONCE -- here.
+        # Flipping this entry to `required   # kanban-closure-routing.yml` leaves the
+        # anchor defined and uncited, i.e. dead prose, so DELETE THE DEFINITION in the
+        # same PR. Nothing will tell you: no check flags an orphaned YAML anchor
+        # (measured -- and `stale_exemptions()` in kanban-columns-check.py is a
+        # different mechanism entirely, about workflow files that name board columns,
+        # so it does not cover this file's anchors).
+        # `customer_priority_bump_caller_missing` is cited 3x and stays -- this repo's
+        # citation of it is NOT part of the flip.
         exempt: *kanban_closure_router_caller_missing
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
