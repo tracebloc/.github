@@ -57,6 +57,24 @@ def check(label, condition, detail=""):
         FAILURES.append("%s%s" % (label, (" -- " + detail) if detail else ""))
 
 
+def ev(pr_obj, min_severity):
+    """`evaluate`'s verdict, with any exception turned into a reportable value.
+
+    Every positive-path case below goes through here rather than calling
+    `evaluate` directly. Without it, a mutation that makes `evaluate` RAISE
+    where a PASS was expected takes the whole suite down before it prints
+    anything -- and the mutation harness correctly refuses to score a suite that
+    never reported as "caught", so a genuinely-detected mutation showed up as
+    UNCAUGHT. The bug was in the suite's robustness, not its coverage.
+    """
+    try:
+        return gate.evaluate(pr_obj, min_severity)[0]
+    except gate.Unreadable as exc:
+        return "REFUSED(%s)" % exc
+    except BaseException as exc:  # noqa: BLE001 - reported, never swallowed
+        return "CRASH(%s: %s)" % (type(exc).__name__, exc)
+
+
 def expect_unreadable(label, fn, because):
     """`fn` must raise Unreadable, AND for the stated reason.
 
@@ -149,33 +167,33 @@ def pr(contexts=None, threads=None, head=HEAD, ctx_total=None, thread_total=None
 # --------------------------------------------------------------------------
 # 1. The load-bearing claim: a terminal Bugbot verdict on THIS head.
 # --------------------------------------------------------------------------
-v, _ = gate.evaluate(pr(contexts=[check_run()]), "high")
+v = ev(pr(contexts=[check_run()]), "high")
 check("clean head with a terminal Bugbot run passes", v == gate.PASS, "got %r" % v)
 
-v, _ = gate.evaluate(pr(contexts=[]), "high")
+v = ev(pr(contexts=[]), "high")
 check("no checks at all on the head is PENDING, not PASS", v == gate.PENDING, "got %r" % v)
 
-v, _ = gate.evaluate(pr(contexts=[], rollup=False), "high")
+v = ev(pr(contexts=[], rollup=False), "high")
 check("a null rollup is PENDING, not PASS", v == gate.PENDING, "got %r" % v)
 
 other = check_run(slug="github-actions", name="Unit tests", conclusion="SUCCESS")
-v, _ = gate.evaluate(pr(contexts=[other]), "high")
+v = ev(pr(contexts=[other]), "high")
 check("a head full of OTHER green checks is still PENDING", v == gate.PENDING, "got %r" % v)
 
-v, _ = gate.evaluate(pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)]), "high")
+v = ev(pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)]), "high")
 check("a still-running Bugbot is PENDING, not PASS", v == gate.PENDING, "got %r" % v)
 
-v, _ = gate.evaluate(pr(contexts=[check_run(status="QUEUED", conclusion=None)]), "high")
+v = ev(pr(contexts=[check_run(status="QUEUED", conclusion=None)]), "high")
 check("a queued Bugbot is PENDING, not PASS", v == gate.PENDING, "got %r" % v)
 
 # The check is matched on the PRODUCING APP, not the display name -- so a
 # renamed check must still count. This is the assertion that would redden if
 # somebody swapped the app-slug match for a name match.
-v, _ = gate.evaluate(pr(contexts=[check_run(name="Bugbot (renamed upstream)")]), "high")
+v = ev(pr(contexts=[check_run(name="Bugbot (renamed upstream)")]), "high")
 check("a RENAMED Bugbot check still counts (matched on app slug)", v == gate.PASS, "got %r" % v)
 
 # ... and a same-named check from a DIFFERENT app must not.
-v, _ = gate.evaluate(pr(contexts=[check_run(slug="impostor", name="Cursor Bugbot")]), "high")
+v = ev(pr(contexts=[check_run(slug="impostor", name="Cursor Bugbot")]), "high")
 check(
     "a check named 'Cursor Bugbot' from another app does NOT satisfy the gate",
     v == gate.PENDING,
@@ -187,29 +205,29 @@ check(
 # it is the file's one deliberate fail-open.
 draft = pr(contexts=[])
 draft["isDraft"] = True
-v, _ = gate.evaluate(draft, "high")
+v = ev(draft, "high")
 check("a DRAFT with no Bugbot verdict passes (it cannot merge)", v == gate.PASS, "got %r" % v)
 
 draft_high = pr(contexts=[check_run()], threads=[thread(finding_body("High"))])
 draft_high["isDraft"] = True
-v, _ = gate.evaluate(draft_high, "high")
+v = ev(draft_high, "high")
 check("a DRAFT with an open High also passes -- the exemption is the draft flag", v == gate.PASS)
 
 # ... and the same PR, no longer a draft, must fail. Without this the draft
 # exemption would be indistinguishable from the gate never firing.
 not_draft = pr(contexts=[check_run()], threads=[thread(finding_body("High"))])
 not_draft["isDraft"] = False
-v, _ = gate.evaluate(not_draft, "high")
+v = ev(not_draft, "high")
 check("the SAME PR not marked draft fails -- the exemption is not the whole gate", v == gate.FAIL)
 
 # --------------------------------------------------------------------------
 # 2. The conclusion is reported, never used. This is the whole of backend#2284:
 #    `neutral` must not fail on its own and `success` must not excuse a finding.
 # --------------------------------------------------------------------------
-v, _ = gate.evaluate(pr(contexts=[check_run(conclusion="NEUTRAL")]), "high")
+v = ev(pr(contexts=[check_run(conclusion="NEUTRAL")]), "high")
 check("conclusion NEUTRAL with no findings PASSES (the verdict is not the gate)", v == gate.PASS)
 
-v, _ = gate.evaluate(
+v = ev(
     pr(contexts=[check_run(conclusion="SUCCESS")], threads=[thread(finding_body("High"))]),
     "high",
 )
@@ -222,33 +240,33 @@ check(
 # --------------------------------------------------------------------------
 # 3. Severity, and the threshold.
 # --------------------------------------------------------------------------
-v, _ = gate.evaluate(pr(contexts=[check_run()], threads=[thread(finding_body("High"))]), "high")
+v = ev(pr(contexts=[check_run()], threads=[thread(finding_body("High"))]), "high")
 check("an OPEN High fails at threshold high", v == gate.FAIL, "got %r" % v)
 
-v, _ = gate.evaluate(pr(contexts=[check_run()], threads=[thread(finding_body("Medium"))]), "high")
+v = ev(pr(contexts=[check_run()], threads=[thread(finding_body("Medium"))]), "high")
 check("an OPEN Medium passes at threshold high", v == gate.PASS, "got %r" % v)
 
-v, _ = gate.evaluate(pr(contexts=[check_run()], threads=[thread(finding_body("Medium"))]), "medium")
+v = ev(pr(contexts=[check_run()], threads=[thread(finding_body("Medium"))]), "medium")
 check("an OPEN Medium fails at threshold medium", v == gate.FAIL, "got %r" % v)
 
-v, _ = gate.evaluate(
+v = ev(
     pr(contexts=[check_run()], threads=[thread(finding_body("High"), resolved=True)]), "high"
 )
 check("a RESOLVED High passes -- resolve-and-ship is the sanctioned disposition", v == gate.PASS)
 
-v, _ = gate.evaluate(
+v = ev(
     pr(contexts=[check_run()], threads=[thread(finding_body("Critical"))]), "high"
 )
 check("an OPEN Critical fails at threshold high (rank is ordered, not equality)", v == gate.FAIL)
 
-v, _ = gate.evaluate(
+v = ev(
     pr(contexts=[check_run()], threads=[thread(finding_body("High"), outdated=True)]), "high"
 )
 check("an OPEN High that is OUTDATED still fails (outdated is not resolved)", v == gate.FAIL)
 
 # THE VOCABULARY, DERIVED FROM THE PRODUCER'S DECLARED SURFACE (rule 6).
 for name in gate.SEVERITY_RANK:
-    v, _ = gate.evaluate(
+    v = ev(
         pr(contexts=[check_run()], threads=[thread(finding_body(name.capitalize()))]),
         gate.SEVERITY_RANK[0],
     )
@@ -260,7 +278,7 @@ for name in gate.SEVERITY_RANK:
 for i, name in enumerate(gate.SEVERITY_RANK):
     below = gate.SEVERITY_RANK[i + 1 :]
     for higher in below:
-        v, _ = gate.evaluate(
+        v = ev(
             pr(contexts=[check_run()], threads=[thread(finding_body(name.capitalize()))]),
             higher,
         )
@@ -273,17 +291,17 @@ for i, name in enumerate(gate.SEVERITY_RANK):
 # --------------------------------------------------------------------------
 # 4. What is, and is not, a finding.
 # --------------------------------------------------------------------------
-v, _ = gate.evaluate(
+v = ev(
     pr(contexts=[check_run()], threads=[thread(finding_body("High"), login="LukasWodka")]), "high"
 )
 check("a HUMAN thread quoting a severity line is not a Bugbot finding", v == gate.PASS)
 
-v, _ = gate.evaluate(
+v = ev(
     pr(contexts=[check_run()], threads=[thread(finding_body("High", marker=False))]), "high"
 )
 check("a Bugbot comment WITHOUT the BUGBOT_BUG_ID marker is not a finding", v == gate.PASS)
 
-v, _ = gate.evaluate(pr(contexts=[check_run()], threads=[{"isResolved": False, "comments": {"nodes": []}}]), "high")
+v = ev(pr(contexts=[check_run()], threads=[{"isResolved": False, "comments": {"nodes": []}}]), "high")
 check("a thread with no comments is skipped, not crashed on", v == gate.PASS)
 
 # --------------------------------------------------------------------------
@@ -308,20 +326,52 @@ expect_unreadable(
     lambda: gate.evaluate(pr(contexts=[check_run()]), "showstopper"),
     because="is not one of",
 )
-expect_unreadable(
-    "a rollup at exactly the page cap is refused as possibly truncated",
-    lambda: gate.evaluate(pr(contexts=[check_run()], ctx_total=gate.PAGE_CAP), "high"),
-    because="check contexts",
+# AN EXACTLY-FULL PAGE IS COMPLETE, NOT TRUNCATED. The first version of this
+# gate refused it, copying bricked-prs.py's `>= cap` without noticing that file
+# has no `totalCount` to compare against (Bugbot, .github#305). Refusing a
+# complete page would brick any PR landing on exactly 100 contexts or threads,
+# so both directions are pinned here.
+full_contexts = [check_run(slug="filler-%d" % i, name="check %d" % i) for i in range(99)]
+full_contexts.append(check_run())
+v = ev(
+    pr(contexts=full_contexts, ctx_total=gate.PAGE_CAP), "high"
 )
+check(
+    "an exactly-full rollup page (totalCount == len(nodes) == cap) is COMPLETE",
+    v == gate.PASS,
+    "got %r" % v,
+)
+full_threads = [thread(finding_body("Medium"), resolved=True) for _ in range(gate.PAGE_CAP)]
+v = ev(
+    pr(contexts=[check_run()], threads=full_threads, thread_total=gate.PAGE_CAP), "high"
+)
+check(
+    "an exactly-full thread page is COMPLETE, not truncated",
+    v == gate.PASS,
+    "got %r" % v,
+)
+
+# ... and truncation is `totalCount > len(nodes)`, which has nothing to do with
+# the cap: a short page at ANY size is a cut page.
 expect_unreadable(
-    "a rollup ABOVE the page cap is refused",
+    "a rollup claiming more contexts than came back is refused",
     lambda: gate.evaluate(pr(contexts=[check_run()], ctx_total=gate.PAGE_CAP + 40), "high"),
-    because="check contexts",
+    because="the page is truncated",
 )
 expect_unreadable(
-    "a thread page at exactly the cap is refused as possibly truncated",
+    "a rollup truncated well BELOW the cap is still refused",
+    lambda: gate.evaluate(pr(contexts=[check_run()], ctx_total=5), "high"),
+    because="the page is truncated",
+)
+expect_unreadable(
+    "a thread page claiming more threads than came back is refused",
     lambda: gate.evaluate(pr(contexts=[check_run()], thread_total=gate.PAGE_CAP), "high"),
-    because="review threads",
+    because="the page is truncated",
+)
+expect_unreadable(
+    "a thread page truncated well BELOW the cap is still refused",
+    lambda: gate.evaluate(pr(contexts=[check_run()], thread_total=3), "high"),
+    because="the page is truncated",
 )
 expect_unreadable(
     "a rollup with no totalCount is refused (truncation cannot be ruled out)",
@@ -333,7 +383,7 @@ expect_unreadable(
         },
         "high",
     ),
-    because="rollup had no totalCount",
+    because="did not report totalCount",
 )
 expect_unreadable(
     "a threads block with no totalCount is refused",
@@ -345,7 +395,7 @@ expect_unreadable(
         },
         "high",
     ),
-    because="reviewThreads had no totalCount",
+    because="did not report totalCount",
 )
 expect_unreadable(
     "a PR reporting no commits is refused, not treated as having no findings",
@@ -369,7 +419,7 @@ expect_unreadable(
         pr(contexts=[check_run()], threads=[thread(finding_body("Medium"))], ctx_total=200),
         "high",
     ),
-    because="check contexts",
+    because="the page is truncated",
 )
 
 # --------------------------------------------------------------------------
@@ -418,6 +468,53 @@ expect_unreadable(
 ok_payload = json.dumps({"data": {"repository": {"pullRequest": pr(contexts=[check_run()])}}})
 got = gate.fetch("o", "n", 1, env={}, runner=runner_of(Proc(out=ok_payload)))
 check("a well-formed payload is returned", got.get("headRefOid") == HEAD)
+
+# --------------------------------------------------------------------------
+# 6b. The query must keep asking for totalCount, and PAGE_CAP must be derived.
+#     Without totalCount both truncation guards above are inert, so this is the
+#     check that keeps them honest -- and it reads the real QUERY, not a copy.
+# --------------------------------------------------------------------------
+check(
+    "the real QUERY asks every paged connection for totalCount",
+    gate.connections_missing_totalcount() == [],
+    "missing: %r" % (gate.connections_missing_totalcount(),),
+)
+check(
+    "PAGE_CAP is derived from the query's own `first:` size",
+    gate.PAGE_CAP == 100,
+    "got %r" % gate.PAGE_CAP,
+)
+# NEVER TEST A LIST AGAINST ITSELF (CLAUDE.md rule 9's corollary). The loop below
+# iterates `gate.PAGED_CONNECTIONS`, which is right for completeness -- a member
+# added later is exercised the day it is added -- but it is BLIND to a member
+# being REMOVED, because the domain it walks is the very thing under test. So the
+# two connections this gate depends on are also written down here as literals,
+# independently of the module. Dropping either from PAGED_CONNECTIONS now fails.
+for name in ("contexts", "reviewThreads"):
+    check(
+        "%r is declared a guarded paged connection" % name,
+        name in gate.PAGED_CONNECTIONS,
+        "PAGED_CONNECTIONS = %r" % (gate.PAGED_CONNECTIONS,),
+    )
+
+for name in gate.PAGED_CONNECTIONS:
+    stripped = gate.QUERY.replace(name + "(first: 100) {\n                totalCount", name + "(first: 100) {")
+    stripped = stripped.replace(name + "(first: 100) {\n        totalCount", name + "(first: 100) {")
+    check(
+        "dropping totalCount from %r is detected" % name,
+        name in gate.connections_missing_totalcount(stripped),
+        "detector said %r" % (gate.connections_missing_totalcount(stripped),),
+    )
+
+check(
+    "require_complete returns the nodes when the page is whole",
+    gate.require_complete("x", {"totalCount": 2, "nodes": [1, 2]}) == [1, 2],
+)
+expect_unreadable(
+    "require_complete refuses a non-connection",
+    lambda: gate.require_complete("x", None),
+    because="not a connection object",
+)
 
 # --------------------------------------------------------------------------
 # 7. severity_of, directly.

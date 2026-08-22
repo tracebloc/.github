@@ -106,24 +106,37 @@ MUTATIONS = [
     ("an unrecognised severity ranks as harmless instead of refusing",
      '    unknown = [f for f in found if f["severity"] not in SEVERITY_RANK]\n    if unknown:',
      '    unknown = [f for f in found if f["severity"] not in SEVERITY_RANK]\n    if False and unknown:'),
-    ("a truncated rollup is reported clean instead of refused",
-     '    if total >= PAGE_CAP:\n        raise Unreadable(\n            "head has %d check contexts',
-     '    if False and total >= PAGE_CAP:\n        raise Unreadable(\n            "head has %d check contexts'),
-    ("the rollup cap is `>` so exactly-100 contexts read as complete",
-     '    if total >= PAGE_CAP:\n        raise Unreadable(\n            "head has %d check contexts',
-     '    if total > PAGE_CAP:\n        raise Unreadable(\n            "head has %d check contexts'),
-    ("a truncated THREAD page is reported clean instead of refused",
-     '    if total >= PAGE_CAP:\n        raise Unreadable(\n            "PR has %d review threads',
-     '    if False and total >= PAGE_CAP:\n        raise Unreadable(\n            "PR has %d review threads'),
-    ("the thread cap is `>` so exactly-100 threads read as complete",
-     '    if total >= PAGE_CAP:\n        raise Unreadable(\n            "PR has %d review threads',
-     '    if total > PAGE_CAP:\n        raise Unreadable(\n            "PR has %d review threads'),
-    ("a missing rollup totalCount no longer rules truncation out",
-     '        raise Unreadable("rollup had no totalCount, so truncation cannot be ruled out")',
-     '        total = 0'),
-    ("a missing threads totalCount no longer rules truncation out",
-     '        raise Unreadable("reviewThreads had no totalCount, so truncation cannot be ruled out")',
-     '        total = 0'),
+    # --- truncation: ONE helper, both connections, and the bug Bugbot found --
+    ("the truncation test never fires, so a cut page reports clean",
+     '    if total > len(nodes):',
+     '    if False and total > len(nodes):'),
+    # This mutation reintroduces the EXACT defect Bugbot caught on .github#305:
+    # comparing against the cap instead of the node count, which refuses a
+    # COMPLETE page. It is here so that regression cannot come back quietly.
+    ("truncation compares against the CAP again, refusing an exactly-full page",
+     '    if total > len(nodes):',
+     '    if total >= PAGE_CAP:'),
+    ("a missing totalCount no longer rules truncation out",
+     """    if total is None:
+        raise Unreadable(
+            "%s did not report totalCount""",
+     """    if False and total is None:
+        raise Unreadable(
+            "%s did not report totalCount"""),
+    ("a non-connection is read as an empty one instead of refused",
+     '    if not isinstance(conn, dict):',
+     '    if False and not isinstance(conn, dict):'),
+    ("PAGE_CAP stops being derived and is hardcoded wrong",
+     r'PAGE_CAP = max([int(n) for n in re.findall(r"first:\s*(\d+)", QUERY)] or [0])',
+     'PAGE_CAP = 50'),
+
+    # --- the self-check that keeps the truncation guards honest -------------
+    ("the totalCount self-check never reports a blind connection",
+     '        if match is None or "totalCount" not in match.group(1):',
+     '        if False and (match is None or "totalCount" not in match.group(1)):'),
+    ("the self-check only looks at one connection, leaving the other unguarded",
+     'PAGED_CONNECTIONS = ("contexts", "reviewThreads")',
+     'PAGED_CONNECTIONS = ("contexts",)'),
     ("a PR with no commits is read as having nothing to check",
      '        raise Unreadable("PR reported no commits, so there is no head to check")',
      '        return None'),

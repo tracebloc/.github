@@ -84,9 +84,12 @@ these EXITS NONZERO rather than reporting clean:
   * a truncated rollup -- `contexts(first: 100)` says nothing when a head has
     more, the same silent-truncation shape `bricked-prs.py` names, and it fails
     in the direction that matters here: a lost context makes Bugbot look ABSENT
-    on a head it reviewed. `>=` the cap, not `>`, because at exactly 100 there
-    is no way to tell 100 from 140
-  * a truncated reviewThreads page, same reasoning
+    on a head it reviewed. The test is `totalCount > len(nodes)`, the only
+    honest one when `totalCount` is in hand -- see the long note at PAGE_CAP for
+    why an exactly-full page is complete and refusing it was a real bug
+  * a truncated reviewThreads page, same test, same reasoning
+  * the query no longer asking a connection for `totalCount`, which would
+    silently remove the two checks above
   * a Bugbot finding whose severity token is not in the declared rank. The
     observed vocabulary is High and Medium (29 findings sampled); Bugbot may
     emit others, and an unrecognised token must not silently rank as harmless
@@ -138,10 +141,28 @@ SEVERITY_RE = re.compile(r"\*\*([A-Za-z]+)\s+Severity\*\*")
 # is a failure, not a low-ranking default -- see the fail-closed list above.
 SEVERITY_RANK = ["low", "medium", "high", "critical"]
 
-# `contexts(first: 100)` / `reviewThreads(first: 100)` are what the query below
-# asks for, and GraphQL says nothing when there is more. Same constant and same
-# `>=` treatment as bricked-prs.py's ROLLUP_CONTEXT_CAP, for the same reason.
-PAGE_CAP = 100
+# THE TRUNCATION TEST IS `totalCount > len(nodes)`, NOT `>= a cap`.
+#
+# The first draft used `>= PAGE_CAP`, copied from bricked-prs.py's
+# ROLLUP_CONTEXT_CAP -- and copied its REASONING along with it, which was the
+# mistake. That file compares against a cap because its read (`gh pr view --json
+# statusCheckRollup`) hands back a flat array with NO `totalCount`: with only a
+# node count in hand, 100 nodes genuinely cannot be told apart from a cut 140,
+# so `>=` is forced and correct there.
+#
+# This query DOES ask for `totalCount`, which makes that ambiguity disappear --
+# and an exactly-full page (`totalCount == len(nodes) == 100`) is COMPLETE, not
+# truncated. Refusing it would brick any PR that lands on exactly 100 contexts
+# or exactly 100 threads: a false "cannot tell" is still a false refusal, and
+# fail-closed is a reason to be careful, never a licence to be wrong.
+# `stale-backlog.py` states the rule in so many words -- "`totalCount >
+# len(nodes)` is the only honest test" -- and it is the precedent that applies
+# here, because it is the one that has `totalCount`. (Caught by Bugbot on the PR
+# that introduced this file, backend#2284, which is a pleasing way to find out.)
+#
+# PAGE_CAP is DERIVED from the query rather than restated beside it: a constant
+# hand-kept in step with `first: N` is the same drift one level down. It is used
+# only to say what was asked for in an error message; no decision reads it.
 
 # A check run is only evidence once it has stopped moving.
 TERMINAL_STATUSES = {"COMPLETED"}
@@ -207,8 +228,56 @@ query($owner: String!, $name: String!, $number: Int!) {
 """
 
 
+# Derived, not restated -- see the note above the QUERY's page sizes.
+PAGE_CAP = max([int(n) for n in re.findall(r"first:\s*(\d+)", QUERY)] or [0])
+
+# The two connections whose completeness this gate depends on.
+PAGED_CONNECTIONS = ("contexts", "reviewThreads")
+
+
 class Unreadable(Exception):
     """The gate could not establish the facts. Never a pass."""
+
+
+def connections_missing_totalcount(query=QUERY):
+    """Which paged connections in `query` fail to request `totalCount`.
+
+    Without `totalCount` there is no honest truncation test at all, and every
+    cut page would read as complete -- so a query edited to stop asking must
+    fail the run, not quietly weaken it. stale-backlog.py carries the same
+    self-check after a query that stopped asking made every issue read as
+    complete. Derived by reading the query, so it cannot drift from it.
+    """
+    missing = []
+    for name in PAGED_CONNECTIONS:
+        match = re.search(name + r"\(first:\s*\d+\)\s*\{([^{]*)", query)
+        if match is None or "totalCount" not in match.group(1):
+            missing.append(name)
+    return missing
+
+
+def require_complete(kind, conn):
+    """Return a connection's nodes, or refuse because the page is not the whole set.
+
+    ONE function for both connections, called by both -- not two copies of the
+    same comparison that can drift apart (CLAUDE.md rule 9).
+    """
+    if not isinstance(conn, dict):
+        raise Unreadable("%s was not a connection object, so it cannot be read" % kind)
+    total = conn.get("totalCount")
+    if total is None:
+        raise Unreadable(
+            "%s did not report totalCount, so truncation cannot be ruled out. "
+            "The query must keep asking for it." % kind
+        )
+    nodes = conn.get("nodes") or []
+    if total > len(nodes):
+        raise Unreadable(
+            "%s reports %d item(s) but only %d came back (the query asks for %d) "
+            "-- the page is truncated, so an absence here is not evidence. "
+            "Refusing to guess." % (kind, total, len(nodes), PAGE_CAP)
+        )
+    return nodes
 
 
 def _run_gh(args, env):
@@ -273,17 +342,10 @@ def bugbot_check(pr):
     if rollup is None:
         # No checks at all on the head. Not truncation, and not Bugbot either.
         return None
-    contexts = rollup.get("contexts") or {}
-    total = contexts.get("totalCount")
-    if total is None:
-        raise Unreadable("rollup had no totalCount, so truncation cannot be ruled out")
-    if total >= PAGE_CAP:
-        raise Unreadable(
-            "head has %d check contexts and the query asks for %d -- the rollup "
-            "may be truncated, which would report Bugbot absent on a head it "
-            "reviewed. Refusing to guess." % (total, PAGE_CAP)
-        )
-    for node in contexts.get("nodes") or []:
+    # A context lost to pagination is indistinguishable from Bugbot never having
+    # run, which is the direction this gate must not guess in.
+    nodes = require_complete("the head's check-context list", rollup.get("contexts"))
+    for node in nodes:
         if node.get("__typename") != "CheckRun":
             continue
         slug = (((node.get("checkSuite") or {}).get("app") or {}) or {}).get("slug")
@@ -307,18 +369,10 @@ def findings(pr):
 
     Raises on a truncated thread page, same reasoning as the rollup.
     """
-    threads = pr.get("reviewThreads") or {}
-    total = threads.get("totalCount")
-    if total is None:
-        raise Unreadable("reviewThreads had no totalCount, so truncation cannot be ruled out")
-    if total >= PAGE_CAP:
-        raise Unreadable(
-            "PR has %d review threads and the query asks for %d -- the thread "
-            "page may be truncated, so an open finding could be invisible. "
-            "Refusing to guess." % (total, PAGE_CAP)
-        )
+    # A thread lost to pagination could be the open finding this gate exists to
+    # see, so a cut page is a refusal rather than a clean report.
     out = []
-    for thread in threads.get("nodes") or []:
+    for thread in require_complete("the PR's review-thread list", pr.get("reviewThreads")):
         comments = (thread.get("comments") or {}).get("nodes") or []
         if not comments:
             continue
@@ -489,6 +543,16 @@ def main(argv=None):
         return 2
     owner, name = repo.split("/", 1)
     number = int(number)
+
+    # Before any read: if the query stopped asking for `totalCount`, both
+    # truncation guards are inert and every cut page would read as complete.
+    # That is a defect in this file, so it fails the run rather than the PR's
+    # author's day.
+    blind = connections_missing_totalcount()
+    if blind:
+        _emit(FAIL, [], "the GraphQL query no longer requests totalCount for: %s. "
+                        "Without it a truncated page cannot be detected." % ", ".join(blind))
+        return 2
 
     sleeper = time.sleep
     clock = time.monotonic
