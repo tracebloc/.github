@@ -138,10 +138,21 @@ ENV_FOR_STATUS = {
     #                            parses that filter out of the workflow and asserts
     #                            no Status declaring `none` appears in it.
     #
-    # Reconcile's closed-issue arm has no option id for Done and skips, which its own
-    # comment covers: the sweep fixes MISSES and must not overrule a router that was
-    # right. A repo mapping to Done therefore has no weekly backstop -- stated, not
-    # discovered later.
+    # AND RECONCILE'S ROUTER-MISS BACKSTOP NOW HAS A `Done` ARM. The first version of
+    # this comment claimed that arm had "no option id for Done and skips", which was
+    # simply false -- `DONE_OPT` is resolved in that step and already written by the
+    # arm beside it (Bugbot, .github#304). So the skip was an omission, and it fell on
+    # exactly the repos this row exists for: a router miss left their cards in an
+    # active column with no weekly backstop, the invariant .github#127 fixed for every
+    # other mapping. Adding `Done` to the accept list without that arm would have
+    # opened a gap rather than found one.
+    #
+    # `branch-status-map-selftest.py` asserts the general form: a Status this mapping
+    # can produce, AND for which reconcile resolves an option id, must have an arm.
+    # The two with no arm have no id either -- `Staging (agent review)` is read-only
+    # until backend#1578 (RFC-BACKEND-1552 D5) and `Ready for prod` is a human
+    # `/fr-pass` act (D6) -- so the check keys on the id rather than demanding an arm
+    # for a column nothing may write.
     "Done": "none",
 }
 

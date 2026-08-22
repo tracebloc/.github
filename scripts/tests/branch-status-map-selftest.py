@@ -263,6 +263,71 @@ eq("the guard fires when a `none` Status IS in the sweep",
 eq("the guard ignores a deploy Status in the sweep, which is correct and normal",
    swept_non_deploy({"On dev": "dev"}, _swept), [])
 
+# --- WHAT THE MAPPING CAN PRODUCE, THE BACKSTOP MUST BE ABLE TO WRITE ---------
+#
+# backend#2242 added `Done`, and Bugbot found the other half of it on .github#304:
+# `kanban-reconcile.yml`'s router-miss arm resolves the mapping to a `$DEST`, then
+# looks that name up in a `case` of option ids. A Status with no arm falls through to
+# a SKIP -- so widening the accept list without widening that `case` leaves exactly
+# the repos the override exists for with no weekly backstop, silently. The card stays
+# in an active column forever, which is the invariant .github#127 fixed for every
+# other mapping.
+#
+# THE INVARIANT IS KEYED ON THE OPTION ID, not on "every declared Status needs an
+# arm" -- which would be wrong, and checking made the difference (rule 8). Two
+# declared Statuses have no arm ON PURPOSE: nothing in the fleet writes
+# `Staging (agent review)` yet (RFC-BACKEND-1552 D5, read-only until backend#1578)
+# and `Ready for prod` is a human `/fr-pass` act (D6). Reconcile resolves no option
+# id for either, so "the job knows the id but cannot write it" is the real defect
+# shape, and it is the one this asserts.
+DEST_ARM = re.compile(r'^\s*"([^"]+)"\)\s*OPT=')
+# `opt Prod` / `opt 'Code review'` / `opt_either 'A' 'B'` -- both names, since
+# `opt_either` resolves whichever exists.
+OPT_ID = re.compile(r"""\$\(opt(?:_either)?\s+(.+?)\)""")
+
+
+def reconcile_dest_arms(text: str) -> "set[str]":
+    """The Status names `case "$DEST"` has an option id for."""
+    return {m.group(1) for ln in text.splitlines()
+            if not ln.strip().startswith("#") and (m := DEST_ARM.match(ln))}
+
+
+def reconcile_option_ids(text: str) -> "set[str]":
+    """The Status names reconcile resolves a project option id for."""
+    out: "set[str]" = set()
+    for raw in OPT_ID.findall(text):
+        for tok in re.findall(r"'([^']+)'|\"([^\"]+)\"|(\S+)", raw):
+            name = next(t for t in tok if t)
+            out.add(name)
+    return out
+
+
+def armless(table, arms: "set[str]", ids: "set[str]") -> "list[str]":
+    """Declared Statuses reconcile has an id for but no arm -- a silent skip.
+
+    One function for the assertion AND for both mutations (rule 9).
+    """
+    return sorted(st for st in table if st in ids and st not in arms)
+
+
+_rec = (WF / "kanban-reconcile.yml").read_text()
+_arms, _ids = reconcile_dest_arms(_rec), reconcile_option_ids(_rec)
+# FAIL CLOSED ON A PARSE THIS NO LONGER DESCRIBES (rule 3): two empty sets satisfy
+# the assertion below and look exactly like a clean tree.
+eq("reconcile's DEST arms parsed, with the anchor they must contain",
+   ("Prod" in _arms, len(_arms) >= 3), (True, True))
+eq("reconcile's resolved option ids parsed, with the anchor they must contain",
+   ("Done" in _ids, len(_ids) >= 5), (True, True))
+eq("every declared Status reconcile has an option id for has a DEST arm, so the "
+   "weekly backstop cannot silently skip an overridden repo",
+   armless(ENV_FOR_STATUS, _arms, _ids), [])
+# BOTH DIRECTIONS. A predicate returning [] for every input is indistinguishable
+# from a satisfied invariant (rule 5).
+eq("the guard fires when an id exists and the arm does not",
+   armless(ENV_FOR_STATUS, _arms - {"Done"}, _ids), ["Done"])
+eq("the guard stays silent when there is no id to write -- the deliberate case",
+   armless(ENV_FOR_STATUS, _arms - {"Done"}, _ids - {"Done"}), [])
+
 # --- `--no-override` answers without consulting anything -------------------
 # The router needs a safe fallback: publishing NO Status leaves the built-in
 # "Item closed" automation to set `Cancelled` and archive shipped work
