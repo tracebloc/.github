@@ -28,6 +28,14 @@ AND FAIL CLOSED ON AN UNKNOWN STATUS (backend#2324). An override naming a column
 that is not in `ENV_FOR_STATUS` used to be passed through verbatim -- an unknown
 BRANCH was refused while an unknown STATUS was not, which is the asymmetry that
 made the first adopter's typo destructive rather than merely wrong. See `resolve`.
+
+THE ACCEPT LIST IS NOT THE DEPLOY PIPELINE (backend#2242). It was five deploy
+columns, and the first repo that needed an override needed the sixth: `rfcs` ships
+no artifact, so a merge there is `Done` -- completed, nothing deployed
+(RFC-BACKEND-1405 D8). Declaring only deploy columns meant the semantically correct
+override was the one the #2324 guard refused, so the accept list is the set of
+Statuses a MERGE can legitimately mean, not the set of stages a deploy passes
+through. See the `Done` row for the three consumers that had to be checked first.
 """
 from __future__ import annotations
 
@@ -78,6 +86,63 @@ ENV_FOR_STATUS = {
     # kanban-columns-check.py did not read; moving it here is what surfaced it.
     "Ready for prod": "staging",
     "Prod": "prod",
+    # `Done` -> `none`, AND IT IS THE ONLY NON-DEPLOY ROW HERE (backend#2242).
+    #
+    # RFC-BACKEND-1405 D8 says RFCs, epics and spikes belong in `Done` -- "completed,
+    # but nothing deployed". `rfcs` is a repo of exactly that: it builds no artifact
+    # and has no environment, so a merge there is completed work and not a deploy.
+    # Without this row the only mappings a `.kanban.yml` could name were the five
+    # deploy columns, so the one repo the override exists for could say `On dev` or
+    # `Prod` -- a deploy state for a repo that deploys nothing -- or say nothing and
+    # keep its cards in `Code review` forever, which is what it did.
+    #
+    # backend#2243 is cited as having unblocked that, and it unblocked half of it:
+    # ONE mapping both writers read. backend#2324 then made an undeclared Status a
+    # REFUSAL, which is right, and `Done` was undeclared -- so the semantically
+    # correct override was the one shape the new guard rejected. This row is the
+    # other half, and the asymmetry is worth naming: the accept list was derived from
+    # the DEPLOY pipeline while the board's vocabulary is wider than that.
+    #
+    # `none` is the environment, not a placeholder: it is a real option on the board's
+    # `Deploy environment` field (measured on project #2, 2026-08-22 -- none, Active,
+    # dev, staging, prod, Cancelled), and it is the one that AGREES with `Done`. The
+    # dict's contract is that acceptance carries its own environment, so leaving this
+    # at a deploy env would put the two fields in the contradiction backend#1277 was
+    # about -- a card in `Done` stamped `dev`.
+    #
+    # THREE CONSUMERS WERE CHECKED BEFORE ADDING IT, because `Done` is TERMINAL and
+    # every other value here is not:
+    #
+    #   advance-deploy-env.yml   `rank()` already scores Done 11, above Prod's 10, so
+    #                            the monotonic guard advances INTO it and nothing
+    #                            demotes out. A push re-carrying an old commit is a
+    #                            no-op rather than an un-shipping.
+    #   kanban-closure-router.yml  its `STATUS_NAME = "Done"` guard refuses to write
+    #                            Done OVER a deploy state. A merged PR's card sits in
+    #                            `Code review`, which `classify_column` places BELOW
+    #                            `On dev` and therefore returns `no` for -- so the
+    #                            write lands. The guard protects the case it was built
+    #                            for (a hand-closed card in a deploy column) and does
+    #                            not block this one.
+    #   kanban-reconcile.yml     its sweep pulls NON-TERMINAL columns only, and Done
+    #                            is not in that list -- so the weekly backstop never
+    #                            sees these cards and cannot undo the override. That
+    #                            mattered: its `drift-to-prod` arm writes `Prod` for
+    #                            any merged PR whose sha reached the prod branch and
+    #                            consults no `.kanban.yml` at all (deliberately --
+    #                            `resolve_prod_branch` refuses to trust a
+    #                            repo-controlled file, D27-L4). The sweep filter is
+    #                            the only thing standing between that arm and every
+    #                            overridden card, so it is a MACHINE CHECK rather
+    #                            than this sentence: `branch-status-map-selftest.py`
+    #                            parses that filter out of the workflow and asserts
+    #                            no Status declaring `none` appears in it.
+    #
+    # Reconcile's closed-issue arm has no option id for Done and skips, which its own
+    # comment covers: the sweep fixes MISSES and must not overrule a router that was
+    # right. A repo mapping to Done therefore has no weekly backstop -- stated, not
+    # discovered later.
+    "Done": "none",
 }
 
 

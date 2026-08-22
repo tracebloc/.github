@@ -196,6 +196,73 @@ eq("the guard ignores a no-branch policy floor",
 eq("the guard ignores a bare holding-state assignment",
    bool(pat.search('                  STATUS="On dev"')), False)
 
+# --- A NON-DEPLOY STATUS MUST BE OUTSIDE RECONCILE'S SWEEP (backend#2242) ---
+#
+# `ENV_FOR_STATUS` gained `Done` -> `none`, the first row whose environment is not a
+# deploy stage, and that row's safety rests entirely on a list in ANOTHER file.
+#
+# `kanban-reconcile.yml`'s weekly sweep pulls a fixed set of columns and its
+# `drift-to-prod` arm writes `Prod` for any merged PR whose sha reached the prod
+# branch -- consulting no `.kanban.yml` at all, deliberately, because
+# `resolve_prod_branch` refuses to trust a repo-controlled file (D27-L4). So if a
+# column a `.kanban.yml` can map to is ALSO in that sweep list, the backstop
+# silently converts every overridden card into the deploy state the override
+# rejected, once a week. `Done` is out of the list today; nothing said it had to be.
+#
+# The invariant is keyed on the ENVIRONMENT, not on a list of terminal names: a
+# Status declaring `none` deployed nothing, so a sweep arm that writes a deploy
+# column must never be able to reach it. Deploy-stage Statuses stay in the sweep on
+# purpose -- `On dev` and `Ready for prod` are in it and must be.
+RECONCILE = WF / "kanban-reconcile.yml"
+
+
+def sweep_columns(text: str) -> "set[str]":
+    """The columns kanban-reconcile's item filter pulls, read from the filter.
+
+    Derived, not restated (rule 1): a hand-copied list here would agree with itself
+    while the workflow moved. FAILS LOUDLY on a parse it does not recognise (rule 3)
+    -- an empty set would make the assertion below vacuously true, which is the one
+    outcome indistinguishable from a clean tree.
+    """
+    lines = text.splitlines()
+    end = [i for i, ln in enumerate(lines) if "index($s)" in ln]
+    if len(end) != 1:
+        sys.exit(f"error: found {len(end)} `index($s)` filters in "
+                 "kanban-reconcile.yml -- this extractor no longer describes the "
+                 "file, so it cannot report anything about the sweep")
+    start = None
+    for i in range(end[0], -1, -1):
+        if "[" in lines[i]:
+            start = i
+            break
+    if start is None:
+        sys.exit("error: could not find the opening `[` of the sweep filter")
+    return set(re.findall(r'"([^"]+)"', "\n".join(lines[start:end[0] + 1])))
+
+
+def swept_non_deploy(table: "dict[str, str]", swept: "set[str]") -> "list[str]":
+    """Statuses declaring `none` that reconcile's sweep can still reach.
+
+    ONE function, called by the assertion AND by the mutation below (rule 9), so a
+    guard that has stopped working cannot look like a clean result.
+    """
+    return sorted(st for st, env in table.items() if env == "none" and st in swept)
+
+
+_swept = sweep_columns(RECONCILE.read_text())
+# The extractor must have found the real list, or the assertion proves nothing.
+eq("the sweep filter parsed, and contains the anchor it must contain",
+   ("On dev" in _swept, len(_swept) >= 8), (True, True))
+eq("no Status declaring `none` is inside reconcile's sweep, so the weekly "
+   "drift-to-prod arm cannot overwrite an override with a deploy column",
+   swept_non_deploy(ENV_FOR_STATUS, _swept), [])
+# AND THE GUARD CAN SEE A VIOLATION. A predicate that returns [] for every input is
+# indistinguishable from a satisfied invariant (rule 5).
+eq("the guard fires when a `none` Status IS in the sweep",
+   swept_non_deploy({"On dev": "none"}, _swept), ["On dev"])
+eq("the guard ignores a deploy Status in the sweep, which is correct and normal",
+   swept_non_deploy({"On dev": "dev"}, _swept), [])
+
 # --- `--no-override` answers without consulting anything -------------------
 # The router needs a safe fallback: publishing NO Status leaves the built-in
 # "Item closed" automation to set `Cancelled` and archive shipped work
