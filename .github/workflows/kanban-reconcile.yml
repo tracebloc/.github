@@ -63,6 +63,16 @@ jobs:
       DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
       MAX_MOVES: 100
     steps:
+      # CHECKED OUT BECAUSE THIS JOB NOW RUNS A SCRIPT (Bugbot, .github#295). My
+      # note said "branch_status_map.py is local: this job only ever runs in
+      # tracebloc/.github" -- true of the REPOSITORY and false of the WORKSPACE. A
+      # hosted runner starts empty, so the stage-derivation step would have failed on
+      # a missing file and taken the weekly backstop down mid-sweep. `persist-
+      # credentials: false` because nothing here pushes.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       # Authenticates as the tracebloc-release-train App (backend#2036) instead of
       # one human's PAT -- the credential this sweep shares with fifteen other
       # workflows and with its owner's own shell. Needs both grants:
@@ -562,18 +572,81 @@ jobs:
                           # broken by the job itself (Bugbot, .github#127).
                           #
                           # So do what the router failed to do: derive the stage from the
-                          # closer. The mapping is IDENTICAL to kanban-closure-router.yml's,
-                          # deliberately -- when the two disagree the faster one wins and the
-                          # slower one silently undoes it, which was Bugbot's third finding
-                          # on .github#126.
-                          case "$CLOSER_BASE" in
-                            main|master) OPT="$PROD_OPT";       DEST="Prod" ;;
-                            staging)     OPT="$FR_STAGING_OPT"; DEST="FR on staging" ;;
-                            develop)     OPT="$ON_DEV_OPT";     DEST="On dev" ;;
-                            # A Commit closer carries no base ref, and an unrecognised base
-                            # takes the router's same default: start at On dev and let a
-                            # later deploy signal promote it.
-                            *)           OPT="$ON_DEV_OPT";     DEST="On dev" ;;
+                          # closer -- THROUGH THE SAME MAPPING THE ROUTER USES
+                          # (Bugbot, .github#295). This used to be a hand-kept copy,
+                          # justified by "identical, deliberately -- when the two disagree
+                          # the faster one wins and the slower one silently undoes it"
+                          # (.github#126). backend#2243 made that justification unsafe: the
+                          # router now honours a per-repo `.kanban.yml`, so an identical
+                          # copy here is no longer identical, and this weekly sweep would
+                          # move an overridden card BACK onto a deploy column -- the slower
+                          # one silently undoing the faster one, exactly as predicted, via
+                          # the mechanism that comment was written to prevent.
+                          #
+                          # `branch_status_map.py` is local: this job only ever runs in
+                          # tracebloc/.github.
+                          # SOFT-FAILS, BECAUSE THIS IS A SWEEP (Bugbot, .github#295).
+                          # `read_override` REFUSES on an unreadable `.kanban.yml`
+                          # (403, 5xx, rate limit, bad YAML) and `resolve` refuses on
+                          # one naming a Status the mapping does not declare
+                          # (backend#2324) -- correct for a single card, wrong here: a
+                          # bare command substitution under `set -euo pipefail` would
+                          # let ONE bad repo truncate the whole weekly backstop
+                          # mid-loop, while the sibling closer lookups beside it
+                          # already soft-fail.
+                          #
+                          # And it SKIPS rather than defaulting. Falling back to the
+                          # default mapping would be the fail-open this PR removed,
+                          # one layer out: the router already moved that card
+                          # correctly, and this sweep exists to fix MISSES, not to
+                          # overrule with a guess.
+                          #
+                          # STDERR IS KEPT (backend#2324). The skip line below says a
+                          # card was left alone; only the mapper's own message says
+                          # which repo's `.kanban.yml` to go and fix.
+                          if ! DEST=$(python3 scripts/branch_status_map.py \
+                                        "$CLOSER_BASE" "$ORG/$REPO" "$CLOSER_BASE" \
+                                        | jq -r '.status'); then
+                            echo "  $REPO#$NUM: the branch->Status mapping could not be resolved (closer base '$CLOSER_BASE'; see the error above) - leaving it alone rather than guessing a column"
+                            continue
+                          fi
+                          # A Commit closer carries no base ref, and an unrecognised base
+                          # takes the router's same default: start at On dev and let a
+                          # later deploy signal promote it.
+                          [ -n "$DEST" ] || DEST="On dev"
+                          # Status NAME -> the project's option id. NOT a second copy of
+                          # the branch mapping -- a different relation entirely, and the
+                          # only place these ids are known.
+                          case "$DEST" in
+                            "Prod")           OPT="$PROD_OPT" ;;
+                            "FR on staging")  OPT="$FR_STAGING_OPT" ;;
+                            "On dev")         OPT="$ON_DEV_OPT" ;;
+                            # A `.kanban.yml` may now map a branch to `Done` -- a repo
+                            # that deploys nothing (backend#2242). Without this arm the
+                            # backstop SKIPPED exactly the repos the override exists for:
+                            # a router miss left the card in an active column forever,
+                            # which is the invariant .github#127 fixed for every other
+                            # mapping. `$DONE_OPT` was already in scope and already
+                            # written by the no-closer arm above, so the skip was an
+                            # omission rather than a limit (Bugbot, .github#304).
+                            #
+                            # SAFE HERE FOR THE SAME REASON THAT ARM IS: the enclosing
+                            # `_skip` guard has already run `classify_column "$COL"` and
+                            # required `no`, so the card is in neither a deploy state nor
+                            # a column this board cannot place. Writing Done from inside
+                            # this branch cannot erase a deployment.
+                            "Done")           OPT="$DONE_OPT" ;;
+                            # `Staging (agent review)` and `Ready for prod` are
+                            # DELIBERATELY absent, not missed: nothing writes rank 7 yet
+                            # (RFC-BACKEND-1552 D5 -- read-only until backend#1578) and
+                            # `Ready for prod` is a human `/fr-pass` act (D6). This job
+                            # resolves no option id for either, and the selftest keys on
+                            # exactly that: an arm is required where the id exists.
+                            # An override naming a column this job has no option id for
+                            # cannot be written. Skip it rather than writing the wrong
+                            # column: the router already moved the card correctly, and
+                            # this sweep exists to fix MISSES, not to overrule.
+                            *) echo "  $REPO#$NUM: closer base '$CLOSER_BASE' maps to '$DEST', which this job has no option id for - leaving it alone" ; continue ;;
                           esac
                           printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$OPT" "$REPO#$NUM closed by $CLOSER (base=${CLOSER_BASE:-none}), router missed it ($COL -> $DEST)" "closed-issue-stage-derived" >> moves.tsv
                           ;;

@@ -41,9 +41,28 @@ def record(cond, name, detail=""):
         print(f"FAIL  {name}\n        {detail}")
 
 
+def card(status="Backlog", project=2, archived=False, drop_archived=False):
+    """One project card, in the shape ISSUES_Q's `projectItems.nodes` returns.
+
+    `isArchived` IS PART OF THAT SHAPE TOO (Bugbot, #292), for the same reason
+    `totalCount` is: a fixture that omits a field the real payload carries tests a
+    query nobody runs. `archived=True` builds the card the sweep used to close --
+    off the board, still stamped `Backlog`. `drop_archived` omits the field entirely,
+    which is what the payload looks like if ISSUES_Q stops asking for it, and must
+    read as UNKNOWN rather than as "not archived".
+    """
+    node = {
+        "project": {"number": project},
+        "fieldValueByName": ({"name": status} if status is not None else None),
+    }
+    if not drop_archived:
+        node["isArchived"] = archived
+    return node
+
+
 def issue(days_idle=100, status="Backlog", labels=(), project=2, number=1,
           updated=None, no_card=False, label_total=None, item_total=None,
-          drop_label_total=False):
+          drop_label_total=False, archived=False, drop_archived=False, cards=None):
     """One issue, in the shape ISSUES_Q returns.
 
     `totalCount` IS PART OF THAT SHAPE and defaults to the node count, i.e. "not
@@ -55,11 +74,18 @@ def issue(days_idle=100, status="Backlog", labels=(), project=2, number=1,
     Adding `totalCount` here reddened exactly two cases -- the two that WARN and
     CLOSE -- while every skip case stayed green. That is the shape of the fix: the
     only paths truncation blocks are the ones that write.
+
+    `cards` takes an explicit list built by `card()` for the MULTI-CARD cases, which
+    the single-card kwargs cannot express: two cards on one project, or a card on
+    another board alongside this one.
     """
-    items = [] if no_card else [{
-        "project": {"number": project},
-        "fieldValueByName": ({"name": status} if status is not None else None),
-    }]
+    if cards is not None:
+        items = list(cards)
+    elif no_card:
+        items = []
+    else:
+        items = [card(status=status, project=project, archived=archived,
+                      drop_archived=drop_archived)]
     stamp = updated if updated is not None else \
         (NOW - timedelta(days=days_idle)).isoformat().replace("+00:00", "Z")
     label_nodes = [{"name": n} for n in labels]
@@ -112,6 +138,74 @@ record(act(issue(days_idle=500, project=99)) is None,
        "a card on a DIFFERENT project does not make it eligible")
 record(act(issue(updated="not-a-date")) is None,
        "an unreadable updatedAt is skipped, not closed")
+
+# --- AN ARCHIVED CARD IS NOT A LIVE CARD (Bugbot, #292) ---------------------
+# The worst case this suite has held, because it ENDED IN `issue close` rather than
+# in a wrong log line. `projectItems` returns archived items by default
+# (`includeArchived: true`), and archiving a card DOES NOT CLEAR ITS STATUS --
+# `kanban-archive.yml` archives terminal items and leaves the field alone, so a card
+# archived out of `Backlog` reads `Backlog` forever. The sweep therefore matched work
+# somebody had deliberately taken OFF the board and closed it, and an issue whose card
+# is archived is precisely an issue nobody is watching. The trigger is ordinary, not
+# exotic: one bulk board tidy-up mints a batch of archived-but-`Backlog` cards.
+#
+# Both directions are asserted as a PAIR, on the same fixture but for the archived
+# flag, because either half alone is passable by a broken implementation: "archived is
+# skipped" alone passes if the sweep skips everything, and "live is warned" alone is
+# the pre-fix behaviour.
+record(act(issue(days_idle=500, archived=True)) is None,
+       "an ancient archived Backlog card is NOT warned",
+       f"got {act(issue(days_idle=500, archived=True))!r} — before the fix this was 'stale'")
+record(act(issue(days_idle=500, archived=False)) == "stale",
+       "...while the same card un-archived still IS warned",
+       "the pair is the test; skipping everything would pass the half above")
+
+# `close` specifically, not "some action": an already-warned archived card was the
+# path that destroyed work, and asserting `is None` against a fixture that would
+# merely have been re-warned understates what the fix prevents.
+record(act(issue(days_idle=20, labels=["stale"], archived=True)) is None,
+       "an archived card already carrying `stale` is NOT closed",
+       f"got {act(issue(days_idle=20, labels=['stale'], archived=True))!r} — "
+       "before the fix this was 'close', i.e. somebody's tracked work destroyed")
+record(act(issue(days_idle=20, labels=["stale"], archived=False)) == "close",
+       "...while the same card un-archived still IS closed")
+
+# `continue`, NOT `return None`, on hitting an archived card. GitHub can leave an
+# issue holding an archived card AND a live one on the SAME project; bailing out on
+# the first archived node hides the live card behind it, and the sweep then skips an
+# issue that is genuinely due. Node order is the part nobody controls, so both orders
+# are built.
+record(act(issue(days_idle=500, cards=[card(status="Backlog", archived=True),
+                                       card(status="Backlog", archived=False)])) == "stale",
+       "a live Backlog card BEHIND an archived one is still found",
+       "bailing on the first archived node would skip a due issue")
+record(act(issue(days_idle=500, cards=[card(status="Backlog", archived=False),
+                                       card(status="Backlog", archived=True)])) == "stale",
+       "...and in the other node order too")
+
+# The mirror of that: archived cards only, nothing live to fall through to.
+record(act(issue(days_idle=500, cards=[card(status="Backlog", archived=True),
+                                       card(status="Backlog", archived=True)])) is None,
+       "an issue whose ONLY cards are archived is skipped")
+
+# MULTI-PROJECT: the target board's card is archived, another board still says
+# `Backlog`. The `project.number` test already selects the target board, so this is a
+# guard against a fix that filtered archived cards while loosening that test -- the
+# sweep must never borrow eligibility from a board it was not pointed at.
+record(act(issue(days_idle=500, cards=[card(status="Backlog", project=2, archived=True),
+                                       card(status="Backlog", project=99)])) is None,
+       "another project's live Backlog does not resurrect an archived target card")
+
+# NO isArchived AT ALL means no answer, the same rule `totalCount` gets. If ISSUES_Q
+# stops asking, every card must read as un-established and the sweep must go loudly
+# useless -- counted as unreadable and failing `--strict` -- rather than quietly
+# resuming the close.
+record(act(issue(days_idle=500, drop_archived=True)) is None,
+       "a card with no isArchived field is UNKNOWN, not 'not archived'",
+       f"got {act(issue(days_idle=500, drop_archived=True))!r}")
+record(sb.decide(issue(days_idle=500, archived=True), 2, NOW)[2] is None,
+       "an archived card reports status None, so main() counts it as unreadable",
+       "it must land in the `unknown` counter that --strict fails on, not in `skipped`")
 
 # `Backlog` must match exactly — a near-miss is unknown, not eligible.
 for near in ("backlog", "BACKLOG", " Backlog", "Backlog ", "Backlogged"):
@@ -213,6 +307,27 @@ rc, out = run_main([issue(days_idle=100)], ["--repo", "o/r", "--strict"])
 record(rc == 0 and "TRUNCATED" not in out,
        "a clean sweep reports no truncation and passes --strict", f"rc={rc}")
 
+# --- main() DRIVEN on the archived card, because "nothing is closed" is the claim ---
+# The decide() cases above pin the verdict; this pins the SWEEP. It is the same
+# function-versus-wiring split this suite keeps catching: a verdict of None is worth
+# nothing if main() still logs a CLOSE, and an archived-but-`Backlog` board must show
+# up as "could not tell" rather than as a clean run -- otherwise the one mode that
+# exists to make an incomplete sweep visible reports success over a board full of
+# cards it declined to judge.
+_arch = issue(days_idle=500, labels=["stale"], archived=True)   # pre-fix: CLOSE
+
+rc, out = run_main([_arch], ["--repo", "o/r"])
+record(rc == 0 and "0 due" in out and "CLOSE" not in out,
+       "main() closes NOTHING on an archived Backlog issue",
+       out.strip().splitlines()[0] if out.strip() else "(no output)")
+record("no readable Status" in out,
+       "...and counts it as unreadable, not as an ordinary skip",
+       "an archived card the sweep declined to judge is not the same event as "
+       "an issue that simply is not in Backlog")
+
+rc, out = run_main([_arch], ["--repo", "o/r", "--strict"])
+record(rc == 2, "--strict FAILS on an archived Backlog card", f"rc={rc}")
+
 # --- ensure_label ITSELF, not just its call site ---------------------------------
 # The cases below stub `ensure_label`, so they pin WHEN it is called and nothing about
 # what it does. A mutation making it report success on a failed `gh label create` left
@@ -303,6 +418,16 @@ _it = sb.ISSUES_Q[sb.ISSUES_Q.index("projectItems("):]
 record("totalCount" in _it[:60],
        "...and on the projectItems connection",
        _it[:60])
+
+# The same producer-side check for `isArchived` (Bugbot, #292). Every archived-card
+# fixture above SUPPLIES the field, so all of them stay green if ISSUES_Q stops
+# asking for it -- and production then reads every card as un-established and sweeps
+# nothing. `includeArchived` defaults to true, so the field is the only thing standing
+# between the sweep and cards that are off the board: it is asserted against the query
+# TEXT, not against a copy of the shape in this file.
+record("isArchived" in _it[:120],
+       "ISSUES_Q asks whether each project card is archived",
+       _it[:120])
 
 # --- truncation is fail-open on the destructive path (Bugbot, #288) -----------
 # A `keep-open` label past the page would read as ABSENT and the issue would be

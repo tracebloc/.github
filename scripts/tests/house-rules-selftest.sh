@@ -471,7 +471,15 @@ else record 1 "--soft-fail reports the finding and still exits 0" "rc=$RC out=$O
 # itself (852 lines that name every pattern it matches) and this suite (which
 # writes `curl -fsSL "$url"` as fixture data). Zero findings required.
 OUT=$( sh "$HR" --all --config /dev/null 2>&1 ); RC=$?
-NF=$(printf '%s' "$OUT" | grep -oE 'across [0-9]+ file' | grep -oE '[0-9]+' | head -1)
+# The `| head -1` here is NOT the pipefail early-close hazard, and the marker
+# says so rather than hiding one. This file runs under `set -uo pipefail`
+# (line 37) -- no errexit -- so a 141 could not abort anything even if the
+# producer were large enough to SIGPIPE, which two `grep -oE` filters over one
+# line of output are not. The shared scanner reports it because it reads the
+# `set -euo pipefail` lines inside this suite's QUOTED FIXTURE SCRIPTS as this
+# file's own options; that limitation is documented and pinned by a test in
+# tracebloc/client (backend#2264).
+NF=$(printf '%s' "$OUT" | grep -oE 'across [0-9]+ file' | grep -oE '[0-9]+' | head -1)   # pipefail-guard: allow
 record "$RC" "ZERO findings over this repo's own prose-dense scripts" "rc=$RC out=$OUT"
 
 # AND A CONTROL, because "zero findings" and "the matcher stopped working" print

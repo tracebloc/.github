@@ -380,15 +380,17 @@ shared_reasons:
     it is sequenced behind that cleanup. UNREMEDIATED.
   fr_pass_comment_caller_missing: &fr_pass_comment_caller_missing >-
     no fr-pass-comment caller, so a kanban card in this repo can only be advanced by hand.
-    Measured absent 2026-08-03 (5 repos, not the 7 backend#1415 claims). UNREMEDIATED.
-  advance_deploy_env_caller_missing: &advance_deploy_env_caller_missing >-
-    no advance-deploy-env caller, so merges here never move a card to `On dev`. Measured absent
-    2026-08-03. UNREMEDIATED.
+    ONE citation, claude-skills. Re-measured on it 2026-08-21 --
+    `gh api repos/tracebloc/claude-skills/contents/.github/workflows` lists no fr-pass-comment
+    caller -- so the claim still holds everywhere it is still made. UNREMEDIATED.
+    The previous revision read "Measured absent 2026-08-03 (5 repos, not the 7 backend#1415
+    claims)", which read as this anchor's reach but was the ORG-WIDE sweep's count: 5 is what
+    that sweep found absent across the org, while the anchor has only ever been aliased TWICE,
+    and backend#2243 flipped release-train to `required` (.github#298) leaving one. Same lesson
+    as `code_quality_caller_missing` above -- an anchor cannot state its own reach -- so trust
+    `grep -n '\*fr_pass_comment_caller_missing'` over this sentence.
   kanban_closure_router_caller_missing: &kanban_closure_router_caller_missing >-
     no kanban-closure-router caller, so closing an issue here files nothing. UNREMEDIATED.
-  set_pr_status_caller_missing: &set_pr_status_caller_missing >-
-    no set-pr-status caller, so PRs here never post their gate status to the board.
-    UNREMEDIATED.
   docs_no_required_review: &docs_no_required_review >-
     docs is exempt from required review on `staging` and `main` (Lukas, 2026-06-04): docs are
     content-only and low-risk, exempt from both the develop-only rule and the FR-gate. Every OTHER
@@ -642,8 +644,7 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      advance-deploy-env.yml:
-        exempt: *advance_deploy_env_caller_missing
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml:
         exempt: *code_quality_caller_missing
       customer-priority-bump.yml: required   # customer-priority-bump.yml
@@ -1103,8 +1104,7 @@ repos:
         exempt: >-
           release-train drives the train and is exempt from riding it (RFC-BACKEND-1405 D1), so
           it has no staging branch and no staging -> prod hop. Structural.
-      fr-pass-comment.yml:
-        exempt: *fr_pass_comment_caller_missing
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
@@ -1185,8 +1185,8 @@ repos:
         exempt: >-
           fr-pass advances a card out of `FR on staging`. This repo has no `staging` branch
           and is not on the train, so that column is unreachable for it. Structural, not a
-          gap -- and distinct from the fr_pass_comment_caller_missing repos, which DO have
-          the stage and lack the valve.
+          gap -- and distinct from `fr_pass_comment_caller_missing` (claude-skills), which DOES
+          have the stage and lacks the valve.
       kanban-closure-router.yml:
         exempt: *kanban_closure_router_caller_missing
       set-pr-status.yml: required   # set-pr-status.yml

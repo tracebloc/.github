@@ -26,8 +26,17 @@ name: Advance deploy environment
 #     staging: Prod          # this repo's deploy ships staging-built artifacts
 #
 # The override merges with the default mapping. Anything you don't explicitly
-# remap stays on the default. Keys are branch names; values are Status column
-# names ("Prod", "FR on staging", "On dev").
+# remap stays on the default. Keys are branch names.
+#
+# VALUES MUST BE A STATUS `ENV_FOR_STATUS` DECLARES, in
+# tracebloc/.github's `scripts/branch_status_map.py` -- read the list there rather
+# than from a copy here. The three names this comment used to list were a copy, and
+# the table has five.
+# A value outside it is REFUSED (backend#2324): the mapper exits non-zero, this
+# workflow fails red and the card keeps whatever Status it had. It used to be
+# accepted and passed straight to the board write, where it resolves to no option
+# id -- and in the closure router that no-write let the project's built-in
+# "Item closed" automation set `Cancelled` and archive the card within a day.
 
 on:
   workflow_call:
@@ -59,40 +68,30 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve deploy env + status (with .kanban.yml override)
+      # The mapping comes from .github, not from a copy in this file: one
+      # definition of branch -> Status (backend#2243).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tracebloc/.github
+          ref: main
+          path: .kanban-map
+          persist-credentials: false
+
+      - name: Resolve deploy env + status (one shared mapping)
         id: env
         env:
           BRANCH: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          # Default mapping
-          case "$BRANCH" in
-            develop)     DEPLOY_ENV="dev";     STATUS_NAME="On dev" ;;
-            staging)     DEPLOY_ENV="staging"; STATUS_NAME="FR on staging" ;;
-            master|main) DEPLOY_ENV="prod";    STATUS_NAME="Prod" ;;
-            *)           DEPLOY_ENV="";        STATUS_NAME="" ;;
-          esac
-
-          # Per-repo override at .kanban.yml in this repo (already checked out)
-          if [ -f .kanban.yml ]; then
-            OVERRIDE=$(yq -r ".branch_status_map.\"$BRANCH\" // \"\"" .kanban.yml 2>/dev/null || true)
-            if [ -n "$OVERRIDE" ] && [ "$OVERRIDE" != "null" ]; then
-              echo "::notice::.kanban.yml overrides $BRANCH -> $OVERRIDE"
-              STATUS_NAME="$OVERRIDE"
-              # Keep Deploy environment field consistent with the override
-              case "$OVERRIDE" in
-                "Prod")          DEPLOY_ENV="prod" ;;
-                # The agent stage runs against staging, so a card there is on
-                # staging. Read-side only: nothing sets this Status yet (#1578).
-                "Staging (agent review)") DEPLOY_ENV="staging" ;;
-                "Staging (human review)"|"FR on staging") DEPLOY_ENV="staging" ;;
-                "On dev")        DEPLOY_ENV="dev" ;;
-              esac
-            fi
-          fi
-
-          echo "env=$DEPLOY_ENV"           >> "$GITHUB_OUTPUT"
-          echo "status_name=$STATUS_NAME"  >> "$GITHUB_OUTPUT"
+          # The workflow token, not the App token: this reads `.kanban.yml`
+          # from the caller's own repo, which is `contents: read` on itself.
+          GH_TOKEN: ${{ github.token }}
+        # ONE DEFINITION, SHARED WITH THE CLOSURE ROUTER (backend#2243). This step
+        # used to hold its own `case` plus its own `yq` read of `.kanban.yml`, and
+        # the router held two more copies that ignored the override entirely -- so
+        # with a `.kanban.yml` present the two workflows wrote DIFFERENT statuses
+        # for the same merge and run ordering decided which stuck.
+        # Third argument is the REF to read `.kanban.yml` from, which is the branch
+        # being mapped -- not the repo default (Bugbot, .github#295).
+        run: python3 .kanban-map/scripts/branch_status_map.py "$BRANCH" "$GITHUB_REPOSITORY" "$BRANCH"
 
       - name: Skip if branch not tracked
         if: steps.env.outputs.env == ''
@@ -249,9 +248,20 @@ jobs:
               # column already EXISTS on the board, so this was a live landmine
               # waiting for the first card to land in it (#1577, RFC-BACKEND-1552 D5).
               "Staging (agent review)")  echo 7  ;;
-              # Both names rank the same so the monotonic guard is stable across
-              # the #1592 rename instant.
-              "Staging (human review)"|"FR on staging")  echo 8 ;;
+              # `Staging (human review)` IS GONE (saadqbal on .github#295). It ranked
+              # here as a shim so the monotonic guard stayed stable across the #1592
+              # rename INSTANT -- and that instant has passed: measured against project
+              # #2, whose Status options are Backlog, North Stars, Ready, In progress,
+              # Code review, On dev, Staging (agent review), FR on staging, Ready for
+              # prod, Prod, Done, Cancelled. No card can carry the old name because the
+              # column does not exist.
+              #
+              # Keeping a shim for a completed rename is how this same file came to
+              # accept an override value naming a nonexistent column -- the headline
+              # finding of this PR. Retiring it is also what lets this file back into
+              # `kanban-columns-check.py`'s WRITERS: with the phantom gone, all twelve
+              # remaining names are live board options.
+              "FR on staging")  echo 8 ;;
               "Ready for prod") echo 9 ;;
               "Prod")           echo 10 ;;
               # Done and Cancelled are TERMINAL: nothing may demote a card out of
