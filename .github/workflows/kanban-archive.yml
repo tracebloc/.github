@@ -53,6 +53,15 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          # LEAST PRIVILEGE, DERIVED FROM WHAT THIS RUNS (backend#2157). The only
+          # mutation is `archiveProjectV2Item`, so `organization-projects: write` is
+          # the whole requirement -- no issues, no pull-requests, no contents.
+          #
+          # `repositories:` narrows the repo-level half to this repo; the board write
+          # is an ORG permission and is unaffected by it (measured, backend#2181 run
+          # 32255581084).
+          repositories: ${{ github.event.repository.name }}
+          permission-organization-projects: write
 
       - name: Resolve project id
         id: ids

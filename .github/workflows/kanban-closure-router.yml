@@ -32,6 +32,15 @@ jobs:
   route:
     runs-on: ubuntu-latest
     steps:
+      # The mapping comes from .github, not from a copy in this file: one
+      # definition of branch -> Status (backend#2243).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tracebloc/.github
+          ref: main
+          path: .kanban-map
+          persist-credentials: false
+
       # Authenticates as the tracebloc-release-train App (backend#2036) instead of
       # one human's PAT. Needs both grants: `organization_projects: write` for the
       # card, `issues: write` for the sibling-merge label and the closure comment.
@@ -80,13 +89,71 @@ jobs:
           STATUS=""
 
           SIBLING="false"
+          # SET WHEN THE OVERRIDE COULD NOT BE USED (saadqbal on .github#295). Drives
+          # the same visibility mechanism as SIBLING: a card the weekly pass must
+          # disposition, marked so a human can see why.
+          #
+          # UNUSABLE, NOT UNREADABLE (backend#2324). Two causes reach this holding
+          # state now -- a `.kanban.yml` that cannot be fetched or parsed, and one
+          # that reads fine but names a Status the mapping does not declare -- and
+          # the second sends an operator hunting a read failure that never happened.
+          # The mapper says which on stderr; this flag only says "we could not tell".
+          UNUSABLE_OVERRIDE="false"
           if [ "$EVENT_NAME" = "pull_request" ]; then
             if [ "$PR_MERGED" = "true" ]; then
-              case "$BASE_REF" in
-                main|master) STATUS="Prod" ;;
-                staging)     STATUS="FR on staging" ;;
-                develop)     STATUS="On dev" ;;
-                *)
+              # ONE SHARED MAPPING (backend#2243) -- and this site is why the fix
+              # is a shared script rather than a second `yq` read: this workflow
+              # never checks the caller out, so the per-repo `.kanban.yml` override
+              # it was silently ignoring has to be FETCHED, not read off disk.
+              # A REFUSED OVERRIDE MUST NOT COST THE WRITE (Bugbot, .github#295).
+              # `read_override` refuses on an unreadable `.kanban.yml`, and a bare
+              # command substitution under `set -euo pipefail` then exits this step
+              # before any Status is published -- so the update step's non-empty
+              # guard skips and the project's built-in "Item closed" automation sets
+              # `Cancelled`, archiving shipped-via-parent work (.github#157). That is
+              # the no-write path this file already documents, reached by a new door,
+              # and it fires exactly when the first repo adopts the override this
+              # change exists to unblock.
+              #
+              # `resolve` REFUSES HERE TOO NOW (backend#2324), on an override naming
+              # a Status the mapping does not declare. That case used to succeed and hand
+              # this arm a name the update step below cannot resolve to an option id
+              # -- so it aborted mid-write and reached the same "Item closed" branch
+              # anyway, having skipped the holding state entirely. One exit code, one
+              # policy: whatever the mapper could not answer, the card gets parked.
+              #
+              # STDERR IS KEPT. It was discarded, which cost nothing while the only
+              # refusal was "could not fetch" -- the flag said that much. The
+              # unknown-Status refusal names the branch, the bad value and the
+              # accepted vocabulary, and that message IS the fix for the operator.
+              if ! STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
+                              "$BASE_REF" "$REPO_FULL" "$BASE_REF" \
+                              | jq -r '.status'); then
+                # THE HOLDING STATE, NOT THE DEFAULT MAPPING (saadqbal on
+                # .github#295, correcting my own first fix). Writing the default
+                # would be "silently apply the mapping we could not confirm" -- it
+                # claims a promotion happened on a read that failed. The holding
+                # state claims nothing: it is an explicit WE COULD NOT TELL, exactly
+                # what the sibling arm below writes for its own reason.
+                #
+                # And it must be a WRITE rather than an exit, because the built-in
+                # "Item closed" automation acts on the close INDEPENDENTLY of this
+                # workflow. A loud red run does not protect the card; the automation
+                # still wins the race and sets `Cancelled`. So "refuse rather than
+                # guess" has to be expressed AS A WRITE here -- refusing by doing
+                # nothing delegates the decision to something that decides wrongly.
+                echo "::warning::the .kanban.yml override for $REPO_FULL could not be used (see the error above: unreadable, or it names a Status the mapping does not declare), so the Status for $BASE_REF is UNKNOWN. Writing the non-terminal holding state and labelling the card for the weekly pass -- publishing nothing would let the built-in Item-closed automation set Cancelled (.github#157)."
+                STATUS="On dev"
+                UNUSABLE_OVERRIDE="true"
+              fi
+              # KEYED ON WHETHER THE MAPPER ANSWERED, not on a list of branch names
+              # (Bugbot, .github#295). A `case` over the four stock branches
+              # overwrote ANY other result with the floor below -- so a
+              # `.kanban.yml` key for, say, `release/*` was computed and then
+              # discarded on the same run, including the `rfcs` override this
+              # change exists to unblock. The last branch-name list in this
+              # workflow is gone with it.
+              if [ -z "$STATUS" ]; then
                   # A PR merged into a SIBLING feature branch deploys nothing by
                   # itself — its content travels onward inside the parent PR
                   # (this fallthrough silently stranded 6 such cards;
@@ -99,8 +166,7 @@ jobs:
                   # holding state the weekly pass dispositions.
                   STATUS="On dev"
                   SIBLING="true"
-                  ;;
-              esac
+              fi
             else
               STATUS="Cancelled"
             fi
@@ -167,14 +233,24 @@ jobs:
               if [ "$CLOSER_TYPE" = "UNREADABLE" ]; then
                 : # decided above: no change
               elif [ "$CLOSER_TYPE" = "PullRequest" ]; then
-                case "$CLOSING_PR_BASE" in
-                  main|master) STATUS="Prod" ;;
-                  staging)     STATUS="FR on staging" ;;
-                  develop)     STATUS="On dev" ;;
+                # Same shared mapping as the pull_request arm above.
+                # Same fallback as the pull_request arm, and for the same reason.
+                if ! STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
+                                "$CLOSING_PR_BASE" "$REPO_FULL" "$CLOSING_PR_BASE" \
+                                | jq -r '.status'); then
+                  # Same holding state, same reason as the pull_request arm --
+                  # including the unknown-Status refusal, and its stderr.
+                  echo "::warning::the .kanban.yml override for $REPO_FULL could not be used (see the error above), so the Status for $CLOSING_PR_BASE is UNKNOWN. Writing the holding state and labelling for the weekly pass."
+                  STATUS="On dev"
+                  UNUSABLE_OVERRIDE="true"
+                fi
+                # Same as the pull_request arm: the mapper's answer wins, and the
+                # floor applies only when it had none.
+                if [ -z "$STATUS" ]; then
                   # Unrecognised base: mirror the pull_request branch's default so
                   # the issue and its PR agree.
-                  *)           STATUS="On dev" ;;
-                esac
+                  STATUS="On dev"
+                fi
               elif [ "$CLOSER_TYPE" = "Commit" ]; then
                 # Direct "Closes #N" push: a commit has no base ref. Start it at
                 # On dev; advance-deploy-env.yml / kanban-reconcile.yml promote it
@@ -197,9 +273,14 @@ jobs:
             echo "Unexpected event '$EVENT_NAME' — skipping"
           fi
 
-          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
-          echo "sibling=$SIBLING" >> "$GITHUB_OUTPUT"
-          echo "Routing decision: status=${STATUS:-(unchanged)} sibling=$SIBLING"
+          # Grouped: three consecutive individual redirects trip SC2129, and
+          # actionlint is a required check here.
+          {
+            echo "status=$STATUS"
+            echo "sibling=$SIBLING"
+            echo "unusable_override=$UNUSABLE_OVERRIDE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Routing decision: status=${STATUS:-(unchanged)} sibling=$SIBLING unusable-override=$UNUSABLE_OVERRIDE"
 
       # Visibility for backend#1437 mechanism 1. Runs AFTER the Status update
       # so a label failure can never suppress the column write - with the label
@@ -393,6 +474,31 @@ jobs:
             }' -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$STATUS_FIELD" -f o="$STATUS_OPT" > /dev/null
 
           echo "→ #$NUMBER → Status=$STATUS_NAME"
+      - name: Label a card whose override could not be used
+        if: steps.target.outputs.unusable_override == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO_FULL: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          # Same write rule as the sibling label below: a swallowed failure means the
+          # card silently loses the only marker saying its Status is a placeholder.
+          # `override-unusable`, not `override-unreadable` (backend#2324): the label
+          # is the operator's entry point, and a card can now reach this state with a
+          # `.kanban.yml` that read perfectly and named a column that does not exist.
+          # No card has ever carried the old name -- no repo has a `.kanban.yml` --
+          # so there is nothing to migrate.
+          #
+          # KEEP THE DESCRIPTION UNDER 100 CHARACTERS (Bugbot, #302). That is the
+          # label API's cap; over it the create 422s, `set -euo pipefail` aborts the
+          # step, and the parked card never gets the marker this holding state exists
+          # to leave. My first wording was 133. The selftest measures it now.
+          if ! gh api "repos/$REPO_FULL/labels/override-unusable" >/dev/null 2>&1; then
+            gh api "repos/$REPO_FULL/labels" -f name=override-unusable -f color=d4c5f9 -f description="Holding state: .kanban.yml unreadable, or names an undeclared Status (backend#2324)" >/dev/null
+          fi
+          gh api -X POST "repos/$REPO_FULL/issues/$NUMBER/labels" -f "labels[]=override-unusable" >/dev/null
+
       - name: Label sibling-merged PR
         if: steps.target.outputs.sibling == 'true'
         env:
