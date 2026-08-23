@@ -1255,8 +1255,12 @@ repos:
         # is only on `develop` (or not yet merged) reddens `caller-drift` and the
         # `conformance-gate` required check. Land the caller first, flip the entry
         # after. If this note outlives rfcs#41 reaching `main`, it has stopped being a
-        # sequencing note and become the written excuse that
-        # `stale_backlog_migration_in_flight` warns about; treat it as a defect then.
+        # sequencing note and become a written excuse -- the same finding as
+        # `wip_limit_check_has_no_callers` below. Treat it as a defect then, not a
+        # justification. The precedent for that clause firing is
+        # `stale_backlog_migration_in_flight`, which said exactly this about itself
+        # and was DELETED by .github#293 when the flip it was staging landed. It is
+        # named here as a worked example, not as a live anchor -- it no longer exists.
         exempt: >-
           STAGED (backend#2242, tracebloc/rfcs#41). The caller is not wired yet, so `exempt`
           records the measured state; it is not a judgement that this repo should never
