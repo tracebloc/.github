@@ -274,7 +274,8 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 # `*-selftest.*`: a file under scripts/tests/ that matches no wildcard is invisible,
 # and an invisible file makes the coverage assertion pass vacuously.
 MUTATION_FILES := $(sort $(wildcard scripts/tests/*-mutations.py))
-MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close
+MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
+                   mutation-bugbot-gate
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -304,7 +305,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns \
                     selftest-kanban-deploy-state selftest-git-reap \
                     selftest-mint-scope selftest-house-rules \
-                    selftest-pipefail-early-close
+                    selftest-pipefail-early-close \
+                    selftest-bugbot-gate
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -464,6 +466,29 @@ mutation-pipefail-early-close:
 
 mutation-pipefail-early-close-dry:
 	$(PYTHON) scripts/tests/pipefail-early-close-mutations.py --dry
+
+# The Bugbot review gate (backend#2284). NO guard-pyyaml, and that is asserted
+# rather than assumed: the gate imports only the standard library, and
+# `bugbot-gate.yml` runs it with no pip step. Do not add a dependency it does
+# not have.
+.PHONY: selftest-bugbot-gate
+selftest-bugbot-gate:
+	$(PYTHON) scripts/tests/bugbot-gate-selftest.py
+
+# The mutation tier for the gate. NOT in `selftests`: each of the 26 mutations
+# re-runs the whole suite. Measured on a laptop: the suite alone is ~0.35s, the
+# full mutation pass ~9s -- cheap enough for the required `selftests` context via
+# `make mutations`, which is where selftests.yml runs it.
+#
+# `--dry` resolves every anchor in milliseconds and is what belongs in the fast
+# tier: it catches the way this job actually breaks (a refactor moving a line an
+# anchor matched on) without proving the cases still catch.
+.PHONY: mutation-bugbot-gate mutation-bugbot-gate-dry
+mutation-bugbot-gate:
+	$(PYTHON) scripts/tests/bugbot-gate-mutations.py
+
+mutation-bugbot-gate-dry:
+	$(PYTHON) scripts/tests/bugbot-gate-mutations.py --dry
 
 .PHONY: selftest-git-reap
 selftest-git-reap:
