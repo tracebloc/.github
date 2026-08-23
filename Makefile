@@ -275,7 +275,7 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 # and an invisible file makes the coverage assertion pass vacuously.
 MUTATION_FILES := $(sort $(wildcard scripts/tests/*-mutations.py))
 MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
-                   mutation-bugbot-gate
+                   mutation-bugbot-gate mutation-bug-to-ready
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -306,7 +306,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-kanban-deploy-state selftest-git-reap \
                     selftest-mint-scope selftest-house-rules \
                     selftest-pipefail-early-close \
-                    selftest-bugbot-gate
+                    selftest-bugbot-gate \
+                    selftest-bug-to-ready
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -489,6 +490,26 @@ mutation-bugbot-gate:
 
 mutation-bugbot-gate-dry:
 	$(PYTHON) scripts/tests/bugbot-gate-mutations.py --dry
+
+# The bug-label promotion (backend#2348). guard-pyyaml: the suite parses THREE
+# workflows -- it extracts the decision out of `customer-priority-bump.yml` by its
+# `# selftest:` markers, asserts `col_index` byte-identical to the router's, and
+# derives the board's Status vocabulary from advance-deploy-env's `rank()`.
+# selftests.yml installs PyYAML, which is where CI runs this.
+.PHONY: selftest-bug-to-ready
+selftest-bug-to-ready: guard-pyyaml
+	$(PYTHON) scripts/tests/bug-to-ready-selftest.py
+
+# NOT in `selftests`: each mutation re-runs the suite. Measured on a laptop: the
+# suite alone ~1.5s, the full 21-mutation pass ~30s. `--dry` resolves every anchor
+# in milliseconds and rides `lint`, which catches the way this really breaks -- a
+# refactor moving a line an anchor matched on -- without proving the cases catch.
+.PHONY: mutation-bug-to-ready mutation-bug-to-ready-dry
+mutation-bug-to-ready: guard-pyyaml
+	$(PYTHON) scripts/tests/bug-to-ready-mutations.py
+
+mutation-bug-to-ready-dry: guard-pyyaml
+	$(PYTHON) scripts/tests/bug-to-ready-mutations.py --dry
 
 .PHONY: selftest-git-reap
 selftest-git-reap:

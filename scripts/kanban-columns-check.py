@@ -89,6 +89,14 @@ WRITERS = (
     # because the paths-filter assertion and the idiom cross-check both key on it.
     "kanban-archive.yml",
     "wip-limit-check.yml",
+    # backend#2348. Its `bug-to-ready` job names BOTH anchors it promotes between
+    # -- `SOURCE_COLUMN: "Backlog"` and `TARGET_COLUMN: "Ready"` -- and a rename in
+    # the Projects UI would turn the promotion into a silent no-op: the option id
+    # is resolved from the board by name, so a missing name resolves to nothing.
+    # `unlisted_namers()` would have found this file anyway; listing it is what
+    # puts those two names under the board assertion instead of merely reporting
+    # that they are unchecked.
+    "customer-priority-bump.yml",
 )
 
 
