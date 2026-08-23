@@ -275,7 +275,7 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 # and an invisible file makes the coverage assertion pass vacuously.
 MUTATION_FILES := $(sort $(wildcard scripts/tests/*-mutations.py))
 MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
-                   mutation-bugbot-gate
+                   mutation-bugbot-gate mutation-closing-ref-gate
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -306,7 +306,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-kanban-deploy-state selftest-git-reap \
                     selftest-mint-scope selftest-house-rules \
                     selftest-pipefail-early-close \
-                    selftest-bugbot-gate
+                    selftest-bugbot-gate \
+                    selftest-closing-ref-gate
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -489,6 +490,25 @@ mutation-bugbot-gate:
 
 mutation-bugbot-gate-dry:
 	$(PYTHON) scripts/tests/bugbot-gate-mutations.py --dry
+
+# The closing-ref gate (backend#2364): a PR whose TITLE names a ticket must LINK
+# it. NO guard-pyyaml, for the same asserted reason as bugbot-gate above -- the
+# checker imports only the standard library, and its job in `set-pr-status.yml`
+# runs it with no pip step. Do not add a dependency it does not have.
+.PHONY: selftest-closing-ref-gate
+selftest-closing-ref-gate:
+	$(PYTHON) scripts/tests/closing-ref-gate-selftest.py
+
+# Measured on a laptop: the suite alone ~0.5s, the full mutation pass ~13s for 34
+# mutations (each re-runs the whole suite). Same split as every other runner --
+# the full pass rides the required `selftests` context via `make mutations`, and
+# `--dry` (anchor resolution only, milliseconds) rides `make check`.
+.PHONY: mutation-closing-ref-gate mutation-closing-ref-gate-dry
+mutation-closing-ref-gate:
+	$(PYTHON) scripts/tests/closing-ref-gate-mutations.py
+
+mutation-closing-ref-gate-dry:
+	$(PYTHON) scripts/tests/closing-ref-gate-mutations.py --dry
 
 .PHONY: selftest-git-reap
 selftest-git-reap:
