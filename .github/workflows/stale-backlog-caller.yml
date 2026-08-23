@@ -1,0 +1,53 @@
+name: Close stale backlog issues
+
+# THIN CALLER (backend#1979). This repo is the 17th and last of the wave.
+#
+# THIS FILE SHIPS ALONE, ahead of the `exempt` -> `required` flip in .github#293,
+# and the reason is a deadlock rather than a preference. The audit reads caller
+# PRESENCE from a repo's audited branch via the API -- `--source-dir` covers only
+# copies and reusables -- so for `.github` itself the caller does not exist on
+# `develop` until this merges. Bundling the flip with the caller therefore fails
+# `MISSING required caller for stale-backlog.yml on develop` on its own PR, forever:
+# `gate` is a required context, so the PR that adds the caller cannot merge because
+# the caller is not yet added. Measured on .github#293 (run 32595845377).
+#
+# An earlier version of this comment said the caller lands in the SAME PR as the
+# flip "deliberately", because `exempt` plus a caller on the audited branch is
+# itself a finding (caller-drift.py:2260). That finding is real -- it is why this
+# repo's audit goes red between this PR and #293 -- but it is a TRANSIENT window
+# closed by the very next merge, and the alternative is not a smaller window: it is
+# a PR that can never go green. Splitting also restores this file's own governing
+# rule, which repo-inventory.yml's header states and the wave followed for all 16
+# other repos: LAND THE CALLER FIRST, FLIP THE ENTRY AFTER.
+#
+# The sweep used to be a 16-way copy of
+# `actions/stale`, which could not be given board awareness: eligibility has to
+# read the card's `Status`, and a script cannot be maintained as sixteen
+# byte-identical copies (backend#1597 item 1).
+#
+# The reusable it calls replaces `actions/stale` with `stale-backlog.py`, whose
+# eligibility is exactly `Backlog` — so a `North Stars` epic, or anything already
+# in the pipeline, can no longer be auto-closed by a sweep that could not see
+# which column it was in.
+#
+# NO INPUTS PASSED ON PURPOSE. Every input the callee declares is defaulted
+# (`project-number: 2`, `dry-run: false`, `strict: false`, `script-ref: main`),
+# and a caller may only pass inputs the `@main` callee declares — passing one it
+# does not have kills the run at startup_failure, which is why the callee had to
+# land on `main` before these callers could be armed at all.
+on:
+  schedule:
+    - cron: '0 0 * * 1'  # Mondays 00:00 UTC
+  workflow_dispatch: {}
+
+# `contents: read` only. The sweep's writes go through the App token minted
+# inside the reusable, not through GITHUB_TOKEN — and asking for more here than
+# the callee needs would exceed a minimal grant and fail the run at startup with
+# no jobs (the same constraint code-quality.yml documents).
+permissions:
+  contents: read
+
+jobs:
+  stale:
+    uses: tracebloc/.github/.github/workflows/stale-backlog.yml@main
+    secrets: inherit

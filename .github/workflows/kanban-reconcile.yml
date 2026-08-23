@@ -621,6 +621,27 @@ jobs:
                             "Prod")           OPT="$PROD_OPT" ;;
                             "FR on staging")  OPT="$FR_STAGING_OPT" ;;
                             "On dev")         OPT="$ON_DEV_OPT" ;;
+                            # A `.kanban.yml` may now map a branch to `Done` -- a repo
+                            # that deploys nothing (backend#2242). Without this arm the
+                            # backstop SKIPPED exactly the repos the override exists for:
+                            # a router miss left the card in an active column forever,
+                            # which is the invariant .github#127 fixed for every other
+                            # mapping. `$DONE_OPT` was already in scope and already
+                            # written by the no-closer arm above, so the skip was an
+                            # omission rather than a limit (Bugbot, .github#304).
+                            #
+                            # SAFE HERE FOR THE SAME REASON THAT ARM IS: the enclosing
+                            # `_skip` guard has already run `classify_column "$COL"` and
+                            # required `no`, so the card is in neither a deploy state nor
+                            # a column this board cannot place. Writing Done from inside
+                            # this branch cannot erase a deployment.
+                            "Done")           OPT="$DONE_OPT" ;;
+                            # `Staging (agent review)` and `Ready for prod` are
+                            # DELIBERATELY absent, not missed: nothing writes rank 7 yet
+                            # (RFC-BACKEND-1552 D5 -- read-only until backend#1578) and
+                            # `Ready for prod` is a human `/fr-pass` act (D6). This job
+                            # resolves no option id for either, and the selftest keys on
+                            # exactly that: an arm is required where the id exists.
                             # An override naming a column this job has no option id for
                             # cannot be written. Skip it rather than writing the wrong
                             # column: the router already moved the card correctly, and
