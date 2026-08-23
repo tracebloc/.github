@@ -196,6 +196,186 @@ eq("the guard ignores a no-branch policy floor",
 eq("the guard ignores a bare holding-state assignment",
    bool(pat.search('                  STATUS="On dev"')), False)
 
+# --- A NON-DEPLOY STATUS MUST BE OUTSIDE RECONCILE'S SWEEP (backend#2242) ---
+#
+# `ENV_FOR_STATUS` gained `Done` -> `none`, the first row whose environment is not a
+# deploy stage, and that row's safety rests entirely on a list in ANOTHER file.
+#
+# `kanban-reconcile.yml`'s weekly sweep pulls a fixed set of columns and its
+# `drift-to-prod` arm writes `Prod` for any merged PR whose sha reached the prod
+# branch -- consulting no `.kanban.yml` at all, deliberately, because
+# `resolve_prod_branch` refuses to trust a repo-controlled file (D27-L4). So if a
+# column a `.kanban.yml` can map to is ALSO in that sweep list, the backstop
+# silently converts every overridden card into the deploy state the override
+# rejected, once a week. `Done` is out of the list today; nothing said it had to be.
+#
+# The invariant is keyed on the ENVIRONMENT, not on a list of terminal names: a
+# Status declaring `none` deployed nothing, so a sweep arm that writes a deploy
+# column must never be able to reach it. Deploy-stage Statuses stay in the sweep on
+# purpose -- `On dev` and `Ready for prod` are in it and must be.
+RECONCILE = WF / "kanban-reconcile.yml"
+
+
+def sweep_columns(text: str) -> "set[str]":
+    """The columns kanban-reconcile's item filter pulls, read from the filter.
+
+    Derived, not restated (rule 1): a hand-copied list here would agree with itself
+    while the workflow moved. FAILS LOUDLY on a parse it does not recognise (rule 3)
+    -- an empty set would make the assertion below vacuously true, which is the one
+    outcome indistinguishable from a clean tree.
+    """
+    lines = text.splitlines()
+    end = [i for i, ln in enumerate(lines) if "index($s)" in ln]
+    if len(end) != 1:
+        sys.exit(f"error: found {len(end)} `index($s)` filters in "
+                 "kanban-reconcile.yml -- this extractor no longer describes the "
+                 "file, so it cannot report anything about the sweep")
+    start = None
+    for i in range(end[0], -1, -1):
+        if "[" in lines[i]:
+            start = i
+            break
+    if start is None:
+        sys.exit("error: could not find the opening `[` of the sweep filter")
+    return set(re.findall(r'"([^"]+)"', "\n".join(lines[start:end[0] + 1])))
+
+
+def swept_non_deploy(table: "dict[str, str]", swept: "set[str]") -> "list[str]":
+    """Statuses declaring `none` that reconcile's sweep can still reach.
+
+    ONE function, called by the assertion AND by the mutation below (rule 9), so a
+    guard that has stopped working cannot look like a clean result.
+    """
+    return sorted(st for st, env in table.items() if env == "none" and st in swept)
+
+
+_swept = sweep_columns(RECONCILE.read_text())
+# The extractor must have found the real list, or the assertion proves nothing.
+eq("the sweep filter parsed, and contains the anchor it must contain",
+   ("On dev" in _swept, len(_swept) >= 8), (True, True))
+eq("no Status declaring `none` is inside reconcile's sweep, so the weekly "
+   "drift-to-prod arm cannot overwrite an override with a deploy column",
+   swept_non_deploy(ENV_FOR_STATUS, _swept), [])
+# AND THE GUARD CAN SEE A VIOLATION. A predicate that returns [] for every input is
+# indistinguishable from a satisfied invariant (rule 5).
+eq("the guard fires when a `none` Status IS in the sweep",
+   swept_non_deploy({"On dev": "none"}, _swept), ["On dev"])
+eq("the guard ignores a deploy Status in the sweep, which is correct and normal",
+   swept_non_deploy({"On dev": "dev"}, _swept), [])
+
+# --- WHAT THE MAPPING CAN PRODUCE, THE BACKSTOP MUST BE ABLE TO WRITE ---------
+#
+# backend#2242 added `Done`, and Bugbot found the other half of it on .github#304:
+# `kanban-reconcile.yml`'s router-miss arm resolves the mapping to a `$DEST`, then
+# looks that name up in a `case` of option ids. A Status with no arm falls through to
+# a SKIP -- so widening the accept list without widening that `case` leaves exactly
+# the repos the override exists for with no weekly backstop, silently. The card stays
+# in an active column forever, which is the invariant .github#127 fixed for every
+# other mapping.
+#
+# THE INVARIANT IS KEYED ON THE OPTION ID, not on "every declared Status needs an
+# arm" -- which would be wrong, and checking made the difference (rule 8). Two
+# declared Statuses have no arm ON PURPOSE: nothing in the fleet writes
+# `Staging (agent review)` yet (RFC-BACKEND-1552 D5, read-only until backend#1578)
+# and `Ready for prod` is a human `/fr-pass` act (D6). Reconcile resolves no option
+# id for either, so "the job knows the id but cannot write it" is the real defect
+# shape, and it is the one this asserts.
+DEST_ARM = re.compile(r'^\s*"([^"]+)"\)\s*OPT=')
+# `$(opt Prod)` / `$(opt 'Code review')` / `$(opt_either 'A' 'B')` -- both names for
+# the last, since `opt_either` resolves whichever exists.
+#
+# SCANNED, NOT REGEXED, because a regex got this wrong in the obvious way (Bugbot,
+# .github#304, High). `\$\(opt(?:_either)?\s+(.+?)\)` stops at the FIRST `)`, and
+# the one argument list that matters contains one: `opt_either 'Staging (human
+# review)' 'FR on staging'`. So `FR on staging` was never collected, the invariant
+# below went green with its arm deleted, and the anchor assertion did not notice
+# because `Done` -- which has no parens -- was there. An under-collecting extractor
+# reporting a clean sweep of a subset is the exact shape `kanban-columns-check.py`'s
+# `cross_check` exists for, reproduced one file over.
+OPT_CALL = re.compile(r"\$\(opt(?:_either)?\s")
+
+
+def reconcile_dest_arms(text: str) -> "set[str]":
+    """The Status names `case "$DEST"` has an option id for."""
+    return {m.group(1) for ln in text.splitlines()
+            if not ln.strip().startswith("#") and (m := DEST_ARM.match(ln))}
+
+
+def _arglist(text: str, start: int) -> str:
+    """The text of a `$(...)` argument list beginning after `start`.
+
+    Depth-counted and quote-aware, so a `)` inside a quoted column name is part of
+    the name rather than the end of the call. Returns "" if the call is unterminated,
+    which the caller treats as a parse failure rather than as no arguments.
+    """
+    depth, i, quote = 1, start, ""
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:i]
+        elif ch == "\n":
+            return ""
+        i += 1
+    return ""
+
+
+def reconcile_option_ids(text: str) -> "set[str]":
+    """The Status names reconcile resolves a project option id for."""
+    out: "set[str]" = set()
+    for m in OPT_CALL.finditer(text):
+        raw = _arglist(text, m.end())
+        for tok in re.findall(r"'([^']*)'|\"([^\"]*)\"|(\S+)", raw):
+            name = next((t for t in tok if t), "")
+            if name:
+                out.add(name)
+    return out
+
+
+def armless(table, arms: "set[str]", ids: "set[str]") -> "list[str]":
+    """Declared Statuses reconcile has an id for but no arm -- a silent skip.
+
+    One function for the assertion AND for both mutations (rule 9).
+    """
+    return sorted(st for st in table if st in ids and st not in arms)
+
+
+_rec = (WF / "kanban-reconcile.yml").read_text()
+_arms, _ids = reconcile_dest_arms(_rec), reconcile_option_ids(_rec)
+# FAIL CLOSED ON A PARSE THIS NO LONGER DESCRIBES (rule 3): two empty sets satisfy
+# the assertion below and look exactly like a clean tree.
+eq("reconcile's DEST arms parsed, with the anchor they must contain",
+   ("Prod" in _arms, len(_arms) >= 3), (True, True))
+# THE ANCHOR NAMES THE HARD CASE ON PURPOSE. `Done` alone satisfied the old, broken
+# extractor; `FR on staging` is reachable only through `opt_either`, whose argument
+# list is the one containing a `)`. An anchor that a broken parser can pass is not an
+# anchor (Bugbot, .github#304).
+eq("reconcile's resolved option ids parsed, including the one only `opt_either` "
+   "reaches, whose argument list contains a `)`",
+   ("Done" in _ids, "FR on staging" in _ids, "Staging (human review)" in _ids,
+    len(_ids) >= 8), (True, True, True, True))
+eq("every declared Status reconcile has an option id for has a DEST arm, so the "
+   "weekly backstop cannot silently skip an overridden repo",
+   armless(ENV_FOR_STATUS, _arms, _ids), [])
+# BOTH DIRECTIONS. A predicate returning [] for every input is indistinguishable
+# from a satisfied invariant (rule 5).
+eq("the guard fires when an id exists and the arm does not",
+   armless(ENV_FOR_STATUS, _arms - {"Done"}, _ids), ["Done"])
+eq("the guard stays silent when there is no id to write -- the deliberate case",
+   armless(ENV_FOR_STATUS, _arms - {"Done"}, _ids - {"Done"}), [])
+# AND IT FIRES ON THE `opt_either` NAME TOO, which is the case the broken extractor
+# could not see: with only `Done` mutated, this whole guard was vacuous for it.
+eq("the guard fires for the id that only `opt_either` resolves",
+   armless(ENV_FOR_STATUS, _arms - {"FR on staging"}, _ids), ["FR on staging"])
+
 # --- `--no-override` answers without consulting anything -------------------
 # The router needs a safe fallback: publishing NO Status leaves the built-in
 # "Item closed" automation to set `Cancelled` and archive shipped work
