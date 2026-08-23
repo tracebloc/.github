@@ -111,6 +111,7 @@ reusables:
   - blocked-gate.yml
   - version-bump-gate.yml
   - stale-backlog.yml
+  - bugbot-gate.yml
 
 # Copies, not callers: these are duplicated into each repo, so the guard compares
 # content (git blob sha against the checked-out source) instead of looking for a
@@ -359,6 +360,26 @@ shared_reasons:
     ("DO NOT MERGE") - which is the gate working as intended (backend#1752,
     data-ingestors#468).
 
+  bugbot_gate_rollout_pending: &bugbot_gate_rollout_pending >-
+    bugbot-gate has ZERO callers anywhere in the org (measured 2026-08-23, immediately after
+    .github#305 landed the reusable). The reusable, its selftest and its mutation suite land
+    first so the DERIVATION can be reviewed on its own - deriving the verdict from Bugbot's
+    FINDINGS rather than trusting a status we do not control is the whole risk surface
+    (backend#2284). The callers follow in the rollout PR.
+    Same two-step blocked-gate was forced into, for the reason this file's header states:
+    .github's caller state is read from its audit branch over the API, so adding a caller and
+    flipping its entry to `required` in one PR fails on a caller not yet on the audit branch.
+    STAGED, NOT PARKED. If this anchor is still here once the rollout PR has merged, it has
+    become the same finding as wip_limit_check_has_no_callers: a reusable that shipped, was
+    never wired up, and had a written excuse for it. Treat it as a defect then, not a
+    justification.
+    Recorded because the omission was not free: with bugbot-gate.yml present as a reusable and
+    absent from this list, the org audit on develop went red at 2026-08-23T12:06Z with exit 2
+    and "Refusing to report on caller drift from an incomplete read" - failing closed before it
+    evaluated ANY per-repo state, including the stale-sweep flip that had merged 26 seconds
+    earlier. A reusable checked against no repo is reported by nothing, and the harness treats
+    that as a finding rather than a silence. It was right to.
+
   no_staging_branch_no_hop_to_gate: &no_staging_branch_no_hop_to_gate >-
     fr-gate gates the staging -> prod hop. This repo has no `staging` branch, so there is no hop
     for it to gate. Structural, not a gap.
@@ -543,6 +564,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -575,6 +598,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -606,6 +631,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -658,6 +685,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -688,6 +717,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -718,6 +749,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -750,6 +783,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -780,6 +815,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -810,6 +847,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -877,6 +916,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -923,6 +964,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1007,6 +1050,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1045,6 +1090,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1111,6 +1158,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
       stale-backlog.yml:
         exempt: *stale_backlog_exemption_needs_redeciding
     copies:
@@ -1194,6 +1243,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
       stale-backlog.yml:
         exempt: *stale_backlog_not_a_backlog
     copies:
@@ -1232,6 +1283,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1264,6 +1317,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1294,6 +1349,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1331,6 +1388,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
     copies:
       add-to-kanban.yml: required
     quality_files:
