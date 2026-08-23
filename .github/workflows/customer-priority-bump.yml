@@ -1,18 +1,60 @@
-name: Bump priority on customer-flagged issue
+name: Label-driven issue triage
 
 # Reusable workflow, called by a thin `customer-priority-bump.yml` caller in
 # each wired repo on issues.types=labeled (callers pass `secrets: inherit` and
-# no inputs). When the trigger label (default 'from:customer') is added to an
-# issue, this adds the binary 'priority' label to that same issue (D5).
-# It writes no board field — the Priority single-select was removed from the
-# board under D5.
+# no inputs). TWO label rules live here, both keyed on the label that was just
+# added:
+#
+#   from:customer   -> add the binary `priority` label to the issue (D5).
+#                      Writes no board field -- the Priority single-select was
+#                      removed from the board under D5.
+#   work-type:bug   -> move the issue's kanban card from `Backlog` to `Ready`
+#                      (backend#2348). Defects skip refinement.
+#
+# WHY BOTH LIVE IN ONE FILE, AND WHY THE FILENAME NO LONGER MATCHES
+# ----------------------------------------------------------------
+# The bug rule needs exactly one thing: to run on `issues: labeled` in every
+# repo. This reusable is the ONLY place in the org that already does, and 16 of
+# the 19 repos already call it. Adding a second reusable instead would need a
+# `repo-inventory.yml` row for all 19 repos plus a caller rollout -- and
+# `repo-inventory.yml` is guarded by `conformance-gate.yml`, so that change
+# cannot merge until an org audit passes on its exact head sha, which every other
+# merge invalidates. A rule that has been unimplemented since it was written does
+# not need to wait behind that; it needs to run.
+#
+# The cost is honest and stated: the file name and the 16 per-repo caller names
+# still say "customer priority bump", so a bug-label run shows up in each repo's
+# Actions tab under that name. The workflow's own `name:` above is the half that
+# could be fixed without touching 16 repos, so it was. Renaming the file is a
+# caller rollout (BUGBOT.md property 1: land the callee first) and is left for
+# whoever does the `.github`/`release-train`/`rfcs` wiring below.
+#
+# NOT WIRED EVERYWHERE, and that is a real gap rather than a rounding error:
+# `.github`, `release-train` and `rfcs` are `exempt` for this reusable in
+# `repo-inventory.yml` (`customer_priority_bump_caller_missing`), so a bug filed
+# in one of those three still lands in `Backlog` and still needs a hand. The
+# other 16 -- including `backend` and `frontend-app`, where all seven of
+# backend#2348's measured misses were filed -- are covered.
 
 on:
   workflow_call:
     inputs:
       trigger-label:
+        description: "The label that means 'a customer asked for this'"
         type: string
         default: "from:customer"
+      bug-label:
+        description: "The label that means 'this is a defect' (skips refinement)"
+        type: string
+        default: "work-type:bug"
+      project-number:
+        description: "GitHub Projects v2 number (default: 2 = engineer kanban)"
+        type: number
+        default: 2
+      org:
+        description: "GitHub org owning the project"
+        type: string
+        default: tracebloc
 
 jobs:
   bump:
@@ -45,3 +87,363 @@ jobs:
           # Priority single-select field has been removed from the board.
           gh issue edit "$ISSUE_NUMBER" --repo "$REPO_FULL" --add-label priority
           echo "-> Issue #$ISSUE_NUMBER labelled 'priority'"
+
+  # ---------------------------------------------------------------------------
+  #  A bug-labelled issue lands in `Ready`, not `Backlog` (backend#2348)
+  # ---------------------------------------------------------------------------
+  # THE RULE, quoted from `org-standards.md`: "label them `work-type:bug` (the
+  # Bug template does it) and the board moves the card straight into `Ready`".
+  #
+  # Nothing implemented it. `add-to-kanban.yml` adds every new issue at
+  # `Backlog` and no workflow read the label afterwards, so the rule was carried
+  # by whoever remembered. Measured 2026-08-22: seven bug-labelled tickets filed
+  # in one day (backend#2324, #2327, #2329, #2340, #2341, #2344,
+  # frontend-app#871) all landed in `Backlog` and all seven needed a hand-run
+  # mutation. A 100% miss rate is the tell that nothing does it at all -- a rule
+  # people mostly follow produces a mixed record.
+  #
+  # `Ready` is the queue engineers pull from; `Backlog` is the refinement queue
+  # nobody pulls from. That split is the whole point, so a defect filed correctly
+  # and labelled correctly was invisible to the people meant to pick it up.
+  bug-to-ready:
+    # A COST GATE, not the decision. It exists so that an unrelated label -- and
+    # every repo in the fleet fires this workflow on every `labeled` event -- does
+    # not mint an App token. The decision is `label_gate` in the step below, where
+    # it can be extracted, run and mutated by
+    # `scripts/tests/bug-to-ready-selftest.py`. `==` here is exact string
+    # equality, so this can only ever be STRICTER than that gate: it may skip work
+    # the gate would decline, never admit work the gate refuses.
+    if: github.event_name == 'issues' && github.event.label.name == inputs.bug-label
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Nothing here uses the caller's GITHUB_TOKEN: every call is made with the
+    # App installation token minted below.
+    permissions: {}
+    steps:
+      # LEAST PRIVILEGE, DERIVED FROM WHAT THIS RUNS (backend#2157), unlike the
+      # `bump` job above which still carries the App's full installation grant
+      # (`mint-scope.py`'s EXEMPT row for this file is about that job, not this
+      # one). This step reads one issue's project items and writes one
+      # single-select field on an org project -- so `issues: read` plus
+      # `organization-projects: write` is the whole requirement.
+      #
+      # `repositories:` is deliberately NOT narrowed here. The board write needs
+      # the ORG-level grant that `owner:` yields, and the interaction between repo
+      # narrowing and an org ProjectV2 write is measured for a READ
+      # (kanban-columns.yml, backend#2181) and not for a write. An unmeasured
+      # narrowing on a workflow that fires for every bug in the fleet fails red on
+      # every defect filed, and this job's whole point is that a defect should not
+      # need a human to notice it.
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-issues: read
+          permission-organization-projects: write
+
+      - name: Promote the card to Ready, but only from Backlog
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ORG: ${{ inputs.org }}
+          PROJECT_NUMBER: ${{ inputs.project-number }}
+          BUG_LABEL: ${{ inputs.bug-label }}
+          # THE TWO ANCHORS, QUOTED SO THE BOARD CHECK CAN SEE THEM.
+          # `scripts/kanban-columns-check.py` collects every board column name a
+          # WRITERS workflow quotes on a code line and asserts it exists on the
+          # live board -- which is what stops a rename in the Projects UI turning
+          # this job into a silent no-op. Unquoted YAML values are invisible to it.
+          SOURCE_COLUMN: "Backlog"
+          TARGET_COLUMN: "Ready"
+          EVENT_NAME: ${{ github.event_name }}
+          LABEL_ADDED: ${{ github.event.label.name }}
+          # A PR is not an issue. `issues` events never fire for pull requests, so
+          # this is belt and braces for a caller wired to `pull_request: labeled`
+          # -- both payload shapes are checked because they carry the PR in
+          # different places.
+          HAS_PR_PAYLOAD: ${{ github.event.pull_request != null || github.event.issue.pull_request != null }}
+          NUMBER: ${{ github.event.issue.number }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          REPO_NAME="${REPO_FULL#*/}"
+
+          # ---- 1. is this an event this job may act on? --------------------
+          # selftest:label-gate-start
+          # THE AUTHORITATIVE EVENT/LABEL GATE. The job-level `if:` above is a
+          # cost gate; this is the decision, written where a test can run it.
+          #
+          # EVERY REFUSAL NAMES ITSELF. A gate with five refusal paths and one
+          # bare failure cannot tell a test which path it took, so a case goes on
+          # passing while exercising a different refusal than its name claims
+          # (CLAUDE.md rule 10).
+          label_gate() {   # $1=event  $2=label added  $3=label we act on  $4=PR payload?
+            if [ "${1:-}" != "issues" ]; then echo "refuse:not-an-issues-event"; return; fi
+            if [ "${4:-}" = "true" ]; then echo "refuse:pull-request-payload"; return; fi
+            if [ -z "${2:-}" ]; then echo "refuse:unreadable-label"; return; fi
+            if [ -z "${3:-}" ]; then echo "refuse:no-configured-label"; return; fi
+            if [ "$2" != "$3" ]; then echo "refuse:other-label"; return; fi
+            echo proceed
+          }
+          GATE=$(label_gate "${EVENT_NAME:-}" "${LABEL_ADDED:-}" "${BUG_LABEL:-}" "${HAS_PR_PAYLOAD:-}")
+          case "$GATE" in
+            proceed)
+              echo "'${LABEL_ADDED}' added to issue #${NUMBER} - evaluating its card" ;;
+            refuse:other-label)
+              # THE ONLY GREEN REFUSAL, and the only one that is a normal event:
+              # this workflow runs on every `labeled` event in every wired repo,
+              # so most runs land here.
+              echo "::notice::'${LABEL_ADDED}' is not '${BUG_LABEL}' - nothing to do"
+              exit 0 ;;
+            *)
+              # Every other refusal is a payload this decision was never written
+              # for. Unreachable through the `if:` above, which is exactly why it
+              # is LOUD: if it ever fires, a caller has been wired to an event
+              # this job cannot judge, and a quiet exit 0 would hide that for as
+              # long as nobody reads the run log.
+              echo "::error::${GATE}: this job promotes a bug-labelled ISSUE and cannot judge this payload" >&2
+              exit 1 ;;
+          esac
+          # selftest:label-gate-end
+
+          # ---- 2. the board, read ONCE ------------------------------------
+          # One query for the project id, the Status field id, the target option
+          # id AND the option ORDER. The order is what the monotonic gate is
+          # derived from, so reading it in the same response as the ids means the
+          # decision and the write cannot be made against two different boards.
+          #
+          # FAIL CLOSED on the read (backend#1729 rule 3): an unreadable board is
+          # not evidence that the card may move.
+          # shellcheck disable=SC2016  # the $names are GraphQL variables, not shell - keep literal
+          if ! PROJ=$(gh api graphql -f query='
+            query($org: String!, $num: Int!) {
+              organization(login: $org) {
+                projectV2(number: $num) {
+                  id
+                  fields(first: 50) {
+                    totalCount
+                    nodes {
+                      ... on ProjectV2SingleSelectField { id name options { id name } }
+                    }
+                  }
+                }
+              }
+            }' -F org="$ORG" -F num="$PROJECT_NUMBER"); then
+            echo "::error::could not read project #${PROJECT_NUMBER} - refusing to guess where this card sits" >&2
+            exit 1
+          fi
+          # A GraphQL `errors[]` payload AT EXIT 0 is a partial read, and a partial
+          # read of the option list is exactly the input that makes a position
+          # comparison meaningless (the shape `bugbot-gate.py` pins a mutation for).
+          if jq -e 'has("errors")' <<< "$PROJ" >/dev/null; then
+            echo "::error::the project read came back with GraphQL errors - a partial board is not a board" >&2
+            exit 1
+          fi
+
+          FIELD_TOTAL=$(jq -r '.data.organization.projectV2.fields.totalCount // -1' <<< "$PROJ")
+          # A field list longer than the page read means `Status` may be on a page
+          # nobody looked at, and "absent from the page I read" is not "absent".
+          if [ "$FIELD_TOTAL" -lt 0 ] || [ "$FIELD_TOTAL" -gt 50 ]; then
+            echo "::error::project #${PROJECT_NUMBER} reported ${FIELD_TOTAL} fields against a page of 50 -" \
+                 "the Status field may be unread. Paginate rather than treating a truncated read as complete." >&2
+            exit 1
+          fi
+
+          PROJECT_ID=$(jq -r '.data.organization.projectV2.id // ""' <<< "$PROJ")
+          STATUS_FIELD=$(jq -r '.data.organization.projectV2.fields.nodes[]?
+            | select(.name=="Status") | .id' <<< "$PROJ")
+          # THE OPTION ID IS DERIVED, NEVER HELD. A stored `Ready` option id would
+          # keep writing after the board changed under it, and writing the WRONG
+          # column is strictly worse than writing nothing (backend#2348).
+          TARGET_OPT=$(jq -r --arg s "$TARGET_COLUMN" '.data.organization.projectV2.fields.nodes[]?
+            | select(.name=="Status") | .options[] | select(.name==$s) | .id' <<< "$PROJ")
+          if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ] \
+             || [ -z "$STATUS_FIELD" ] || [ "$STATUS_FIELD" = "null" ] \
+             || [ -z "$TARGET_OPT" ] || [ "$TARGET_OPT" = "null" ]; then
+            echo "::error::could not resolve the Status field or its '${TARGET_COLUMN}' option in" \
+                 "project #${PROJECT_NUMBER}. NOTHING WAS WRITTEN - this runs before any mutation." >&2
+            exit 1
+          fi
+
+          # ---- 3. where is the card now? ----------------------------------
+          # THE ISSUE'S OWN projectItems, not a scan of the project. Project #2
+          # carries ~700 items, so a project-side scan is a pagination bug waiting
+          # to happen; the issue knows which cards it has. `totalCount` is read so
+          # a card beyond the page cannot be reported as "not on the board".
+          #
+          # The retry is for the `opened`+template case: the Bug template applies
+          # the label at creation, so this can race `add-to-kanban.yml`.
+          ITEM_ID=""; CURRENT_COL=""; ARCHIVED=""
+          for attempt in 1 2 3 4 5; do
+            # shellcheck disable=SC2016  # the $names are GraphQL variables, not shell - keep literal
+            if ! IRESP=$(gh api graphql -f query='
+              query($org: String!, $repo: String!, $num: Int!) {
+                repository(owner: $org, name: $repo) {
+                  issue(number: $num) {
+                    projectItems(first: 20) {
+                      totalCount
+                      nodes {
+                        id isArchived project { number }
+                        status: fieldValueByName(name: "Status") {
+                          ... on ProjectV2ItemFieldSingleSelectValue { name }
+                        }
+                      }
+                    }
+                  }
+                }
+              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$NUMBER"); then
+              echo "::error::could not read issue #${NUMBER}'s project items - an unreadable card is not" \
+                   "a card that may be left where it is" >&2
+              exit 1
+            fi
+            if jq -e 'has("errors")' <<< "$IRESP" >/dev/null; then
+              echo "::error::the project-items read came back with GraphQL errors - unreadable, not 'no card'" >&2
+              exit 1
+            fi
+            PI_TOTAL=$(jq -r '.data.repository.issue.projectItems.totalCount // -1' <<< "$IRESP")
+            # A MISSING connection is not an EMPTY one. `totalCount` is absent when
+            # the issue itself did not resolve, and retrying that four more times
+            # then reporting "not on the board" would name the wrong cause.
+            if [ "${PI_TOTAL:--1}" -lt 0 ]; then
+              echo "::error::the read did not describe issue #${NUMBER}'s project items at all" \
+                   "(no totalCount) - an unreadable response is not an empty one" >&2
+              exit 1
+            fi
+            NODE=$(jq -c --arg n "$PROJECT_NUMBER" 'first(.data.repository.issue.projectItems.nodes[]?
+              | select(.project.number == ($n | tonumber))) // {}' <<< "$IRESP")
+            ITEM_ID=$(jq -r '.id // ""' <<< "$NODE")
+            if [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then
+              CURRENT_COL=$(jq -r '.status.name // ""' <<< "$NODE")
+              ARCHIVED=$(jq -r 'if .isArchived == true then "true" else "false" end' <<< "$NODE")
+              break
+            fi
+            if [ "${PI_TOTAL:-0}" -gt 20 ]; then
+              echo "::error::issue #${NUMBER} is on ${PI_TOTAL} projects and the kanban card is not among" \
+                   "the 20 read - paginate rather than reporting a truncated read as 'not on the board'" >&2
+              exit 1
+            fi
+            echo "not on project #${PROJECT_NUMBER} yet (attempt ${attempt}/5) - add-to-kanban may still be running"
+            if [ "$attempt" -lt 5 ]; then sleep 5; fi
+          done
+
+          # FAIL CLOSED, LOUDLY, AND THE DIRECTION IS THE DECISION HERE.
+          #
+          # The three sibling consumers of the board chose their failure paths as a
+          # SET (backend#2243), and this one resembles `advance-deploy-env.yml`: no
+          # fallback, abort. `kanban-closure-router.yml` exits 0 on a card it cannot
+          # find because declining to write is its conservative end state -- it is
+          # protecting shipped state from being overwritten. Declining here is not
+          # conservative: it reproduces the exact defect this job exists to fix, a
+          # defect parked in `Backlog` that nobody reads. And `kanban-reconcile.yml`
+          # may skip because it runs weekly and gets another go; a `labeled` event
+          # fires ONCE, so a green no-op is the last anyone hears of it.
+          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
+            echo "::error::issue #${NUMBER} carries '${BUG_LABEL}' but is not on project" \
+                 "#${PROJECT_NUMBER} after 5 tries. It needs '${TARGET_COLUMN}' and this run could not" \
+                 "put it there - check this repo's add-to-kanban caller, then set the column by hand." >&2
+            exit 1
+          fi
+
+          # ---- 4. may the card move? --------------------------------------
+          # Byte-identical to `kanban-closure-router.yml`'s, and asserted so by
+          # the selftest: both read the same `$PROJ` shape, so a divergence would
+          # be a defect rather than a difference.
+          col_index() {
+            echo "$PROJ" | jq -r --arg s "$1" \
+              '[.data.organization.projectV2.fields.nodes[]
+                | select(.name=="Status") | .options[].name] | index($s) // -1'
+          }
+          # selftest:monotonic-start
+          # MONOTONIC. Automation in this org never moves a card backward, and the
+          # direction is asked of the BOARD rather than restated here: a rank table
+          # in this file would agree with itself while disagreeing with reality
+          # (backend#1729 rule 1).
+          #
+          #   promote  the card is at $SOURCE_COLUMN, or is on the board with no
+          #            Status at all. Those are the only two states from which
+          #            $TARGET_COLUMN is forward. An unplaced card is not "past
+          #            Ready" -- leaving it unplaced keeps it invisible, which is
+          #            the complaint.
+          #   hold     anywhere else: `In progress`, `Code review`, `On dev`,
+          #            `FR on staging`, `Ready for prod`, `Prod`, `Done`,
+          #            `Cancelled`, `North Stars`, already `Ready`, or archived.
+          #            The label routinely arrives AFTER triage moved the card, and
+          #            demoting a shipped card would un-ship it on the board.
+          #   unknown  a column the board does not report. Nothing can be said
+          #            about "forward" from a position that cannot be placed.
+          #   noboard  an anchor is missing, or $TARGET_COLUMN does not sit
+          #            strictly AFTER $SOURCE_COLUMN. The second half is the
+          #            monotonicity assertion itself: position is load-bearing, so
+          #            one drag of the Status options in the UI can make this
+          #            "promotion" a demotion. Checked FIRST, before the
+          #            no-Status shortcut, because a board that cannot be trusted
+          #            to be in pipeline order cannot be trusted for any card
+          #            (backend#1994 is the same hole one file over: existence was
+          #            checked and ORDER was not).
+          promote_decision() {   # $1=the card's current column  $2=isArchived
+            _s=$(col_index "${SOURCE_COLUMN}"); _t=$(col_index "${TARGET_COLUMN}")
+            if [ "$_s" -lt 0 ] || [ "$_t" -lt 0 ] || [ "$_s" -ge "$_t" ]; then echo noboard; return; fi
+            if [ "${2:-}" = "true" ]; then echo hold; return; fi
+            case "${1:-}" in
+              ""|"No status") echo promote; return ;;
+            esac
+            _c=$(col_index "$1")
+            if [ "$_c" -lt 0 ]; then echo unknown; return; fi
+            if [ "$_c" -eq "$_s" ]; then echo promote; else echo hold; fi
+          }
+          # selftest:monotonic-end
+
+          # selftest:policy-start
+          _d=$(promote_decision "${CURRENT_COL:-}" "${ARCHIVED:-}")
+          case "$_d" in
+            promote)
+              _write=yes ;;
+            hold)
+              _write=no
+              echo "::notice::#${NUMBER} sits in '${CURRENT_COL:-<no Status>}' (archived=${ARCHIVED:-false})," \
+                   "not '${SOURCE_COLUMN}' - leaving it alone, automation never moves a card backward" ;;
+            unknown)
+              # NOT a quiet decline. The router's `unknown` arm exits 0 because
+              # there, declining is the safe end state; here it means a card that
+              # should be in the pull queue is somewhere this job cannot place,
+              # and nobody would ever hear about it.
+              echo "::error::#${NUMBER} sits in '${CURRENT_COL:-<none>}', which project #${PROJECT_NUMBER}" \
+                   "does not report as a Status option - refusing to guess whether '${TARGET_COLUMN}' is forward" >&2
+              exit 1 ;;
+            noboard)
+              echo "::error::project #${PROJECT_NUMBER} does not place '${SOURCE_COLUMN}' strictly before" \
+                   "'${TARGET_COLUMN}' in its Status options. Promoting would be a DEMOTION, so nothing was" \
+                   "written. Check the column order and names on the board." >&2
+              exit 1 ;;
+            *)
+              # No fall-through. An unrecognised verdict is a code defect, and the
+              # one thing it must not do is reach the write.
+              echo "::error::unrecognised promotion verdict '${_d}' - refusing to write" >&2
+              exit 1 ;;
+          esac
+          # selftest:policy-end
+
+          if [ "$_write" != "yes" ]; then
+            exit 0
+          fi
+
+          # shellcheck disable=SC2016  # the $names are GraphQL variables, not shell - keep literal
+          if ! gh api graphql -f query='
+            mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $p, itemId: $i, fieldId: $f,
+                value: {singleSelectOptionId: $o}
+              }) { projectV2Item { id } }
+            }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -f o="$TARGET_OPT" >/dev/null; then
+            echo "::error::the Status write failed for issue #${NUMBER} - the card is still in" \
+                 "'${CURRENT_COL:-<no Status>}' and needs '${TARGET_COLUMN}' by hand" >&2
+            exit 1
+          fi
+          echo "-> issue #${NUMBER}: Status '${CURRENT_COL:-<no Status>}' -> '${TARGET_COLUMN}'"
+          {
+            echo "### Defect skipped refinement"
+            echo
+            echo "\`${BUG_LABEL}\` on issue #${NUMBER}: \`${CURRENT_COL:-<no Status>}\` -> \`${TARGET_COLUMN}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
