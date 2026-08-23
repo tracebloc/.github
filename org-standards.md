@@ -9,7 +9,7 @@
 
 ### Branches & PRs
 
-- Branch model: `develop → staging → main`. Branch off `develop`; every PR targets `develop`. Never open PRs to `staging` or `main` — promotions are the release train's job. (Sole exception: the `docs` repo may target `main`.)
+- Branch model: `develop → staging → main`. Branch off `develop`; every PR targets `develop`. Never open PRs to `staging` or `main` — promotions are the release train's job. **Exception: a repo that publishes no artifact and has no deploy stages is `main`-only — `docs` and `rfcs`.** They are not on the release train, so a promotion gate has nothing to gate. `repo-inventory.yml` is the authority (`release_train: false` plus the single-branch exemption); this line follows it, not the reverse.
 - Before starting any task: `git fetch` and branch from the current tip of `develop` — never build on a stale checkout. A branch that lives more than a day gets `develop` merged back in before review. We move fast; stale starts mean silent divergence and duplicated work.
 - One self-contained change per PR. A few hundred changed lines reviews well; at 1000+ split it. Refactors ship in separate PRs from behavior changes.
 - Branches are short-lived (aim to merge within a day or two), single-author, and based on `develop` — no stacked PRs on top of other open PRs.
