@@ -28,10 +28,13 @@ matched on.
 WHAT IS DELIBERATELY NOT MUTATED, stated because an unstated gap is how a suite
 comes to be trusted for more than it proves: the network seam. The board read,
 the 5x5s retry, the "card is not on the board" fail-closed and the
-`updateProjectV2ItemFieldValue` write are driven by no case, so a mutation to
-them would report UNCAUGHT for a reason that is about the suite's scope rather
+`updateProjectV2ItemFieldValue` write's TRANSPORT are driven by no case, so a
+mutation to them would report UNCAUGHT for a reason that is about the suite's scope rather
 than about its rigour. Those paths are asserted by inspection and by copying the
 shape of the sibling workflows; they are named in the PR body as uncovered.
+WHAT IS NOW COVERED, and was not: the write's `errors[]` handling. It shares one
+`reject_graphql_errors` with both reads, that function is extracted by name, and
+the two anchors at the end of this list break each of its arms.
 """
 import os
 import subprocess
@@ -161,6 +164,17 @@ MUTATIONS = [
      CANON,
      "label them `work-type:bug`",
      "label them `type:bug`"),
+    # --- the shared GraphQL `errors[]` rejection (Bugbot on .github#313) ------
+    # Both reads AND the write go through one function now. These two anchors are
+    # what stop that function silently losing an arm.
+    ("the unparseable-JSON arm: treat a body jq cannot read as error-free",
+     WF,
+     '            if ! jq -e . >/dev/null 2>&1 <<< "$1"; then',
+     '            if false; then'),
+    ("the errors[] arm: stop rejecting an errors[] payload at exit 0",
+     WF,
+     '            if jq -e \'has("errors")\' <<< "$1" >/dev/null 2>&1; then',
+     '            if false; then'),
 ]
 
 

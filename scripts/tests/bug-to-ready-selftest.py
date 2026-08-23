@@ -382,6 +382,49 @@ for name, kwargs, want_rc, needle in GATE_CASES:
            f"rc={rc} (want {want_rc}); looked for {needle!r} in: "
            f"{out.splitlines()[-1] if out else '<no output>'}")
 
+# ---------------------------------------------------------------------------
+# 5. THE GraphQL `errors[]` REJECTION, shared by both reads AND the write.
+# ---------------------------------------------------------------------------
+# `gh api graphql` exits 0 on an HTTP 200 that carries a GraphQL `errors[]`
+# payload. The two reads always rejected that; the WRITE did not -- it discarded
+# its response and trusted the exit code, so the job could log a Backlog -> Ready
+# move and stay green while the card never moved. On a `labeled` event, which
+# fires exactly once, that false success is permanent. (Bugbot on .github#313.)
+#
+# The function is extracted BY NAME from the workflow, so this assertion and the
+# mutation both drive the code the job runs -- not a copy of it (rule 9).
+_REJECT = func(BUG_WF, "reject_graphql_errors")
+
+
+def reject(payload: str) -> "tuple[int, str]":
+    return sh(_REJECT + f'\nreject_graphql_errors {payload!r} "REFUSED-HERE"\n')
+
+
+# Rule 6: the input domain is every shape a GraphQL response can arrive in, not
+# just the happy one and the obvious sad one.
+REJECT_CASES = [
+    ("a clean payload passes", '{"data":{"x":1}}', 0, ""),
+    ("an errors[]-only payload is refused", '{"errors":[{"message":"nope"}]}',
+     1, "REFUSED-HERE"),
+    # The real trap: HTTP 200 carrying BOTH. A check that only looked for a
+    # missing `data` would call this a success.
+    ("data AND errors together is refused, not treated as partial success",
+     '{"data":{"updateProjectV2ItemFieldValue":null},"errors":[{"message":"x"}]}',
+     1, "REFUSED-HERE"),
+    # Fail-closed arm. `jq -e 'has("errors")'` exits non-zero on BOTH "key
+    # absent" and "not JSON", so without its own arm this would read as clean.
+    ("an empty body is refused as unreadable, not accepted as error-free",
+     '', 1, "not readable JSON"),
+    ("a truncated/non-JSON body is refused as unreadable",
+     '{"data":{"upda', 1, "not readable JSON"),
+]
+for name, payload, want_rc, needle in REJECT_CASES:
+    rc, out = reject(payload)
+    record(rc == want_rc and (needle in out if needle else True),
+           f"graphql errors: {name}",
+           f"rc={rc} (want {want_rc}); looked for {needle!r} in: {out or '<no output>'}")
+
+
 failed = [r for r in RESULTS if not r[0]]
 print(f"\nbug-to-ready-selftest: {len(RESULTS) - len(failed)} passed, {len(failed)} failed")
 sys.exit(1 if failed else 0)

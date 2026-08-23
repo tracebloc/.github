@@ -208,6 +208,34 @@ jobs:
           esac
           # selftest:label-gate-end
 
+          # Every GraphQL call in this job -- both reads AND the write -- goes through
+          # here. `gh api graphql` exits 0 on an HTTP 200 that carries a GraphQL
+          # `errors[]` payload, so an exit code alone cannot tell a completed
+          # operation from a refused one. ONE function rather than a check per call
+          # site: the two reads each carried their own inline copy and the write
+          # carried none, which is exactly how the write came to be fail-open
+          # (Bugbot, .github#313). Rule 1 (derive, never restate) and rule 9 -- the
+          # selftest extracts THIS function by name, so the assertion and the
+          # mutation drive the same code the job runs.
+          reject_graphql_errors() {   # $1=raw payload  $2=the message to fail with
+            # UNPARSEABLE IS ITS OWN ARM, and it has to come first. `jq -e
+            # 'has("errors")'` exits non-zero BOTH when the key is absent and when
+            # the input is not JSON at all, so a single check would read a truncated
+            # or empty body as "no errors" -- fail-open on precisely the input that
+            # means "cannot tell".
+            if ! jq -e . >/dev/null 2>&1 <<< "$1"; then
+              echo "::error::$2 (the response was not readable JSON, so it cannot be" \
+                   "shown to be error-free)" >&2
+              return 1
+            fi
+            if jq -e 'has("errors")' <<< "$1" >/dev/null 2>&1; then
+              echo "::error::$2" >&2
+              return 1
+            fi
+            return 0
+          }
+
+
           # ---- 2. the board, read ONCE ------------------------------------
           # One query for the project id, the Status field id, the target option
           # id AND the option ORDER. The order is what the monotonic gate is
@@ -237,10 +265,8 @@ jobs:
           # A GraphQL `errors[]` payload AT EXIT 0 is a partial read, and a partial
           # read of the option list is exactly the input that makes a position
           # comparison meaningless (the shape `bugbot-gate.py` pins a mutation for).
-          if jq -e 'has("errors")' <<< "$PROJ" >/dev/null; then
-            echo "::error::the project read came back with GraphQL errors - a partial board is not a board" >&2
-            exit 1
-          fi
+          reject_graphql_errors "$PROJ" \
+            "the project read came back with GraphQL errors - a partial board is not a board" || exit 1
 
           FIELD_TOTAL=$(jq -r '.data.organization.projectV2.fields.totalCount // -1' <<< "$PROJ")
           # A field list longer than the page read means `Status` may be on a page
@@ -298,10 +324,8 @@ jobs:
                    "a card that may be left where it is" >&2
               exit 1
             fi
-            if jq -e 'has("errors")' <<< "$IRESP" >/dev/null; then
-              echo "::error::the project-items read came back with GraphQL errors - unreadable, not 'no card'" >&2
-              exit 1
-            fi
+            reject_graphql_errors "$IRESP" \
+              "the project-items read came back with GraphQL errors - unreadable, not 'no card'" || exit 1
             PI_TOTAL=$(jq -r '.data.repository.issue.projectItems.totalCount // -1' <<< "$IRESP")
             # A MISSING connection is not an EMPTY one. `totalCount` is absent when
             # the issue itself did not resolve, and retrying that four more times
@@ -430,15 +454,27 @@ jobs:
           fi
 
           # shellcheck disable=SC2016  # the $names are GraphQL variables, not shell - keep literal
-          if ! gh api graphql -f query='
+          if ! WRESP=$(gh api graphql -f query='
             mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
               updateProjectV2ItemFieldValue(input: {
                 projectId: $p, itemId: $i, fieldId: $f,
                 value: {singleSelectOptionId: $o}
               }) { projectV2Item { id } }
-            }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -f o="$TARGET_OPT" >/dev/null; then
+            }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -f o="$TARGET_OPT"); then
             echo "::error::the Status write failed for issue #${NUMBER} - the card is still in" \
                  "'${CURRENT_COL:-<no Status>}' and needs '${TARGET_COLUMN}' by hand" >&2
+            exit 1
+          fi
+          # The write goes through the SAME rejection as the two reads. This event
+          # fires exactly ONCE, so a false success here is permanent: the step logs a
+          # Backlog -> Ready move, stays green, and the card never moved.
+          reject_graphql_errors "$WRESP" \
+            "the Status write for issue #${NUMBER} came back with GraphQL errors at exit 0 - the card is still in '${CURRENT_COL:-<no Status>}' and needs '${TARGET_COLUMN}' by hand" || exit 1
+          # Absence of errors is not presence of the write. Confirm the mutation
+          # returned the item it claims to have moved -- the same "did it actually
+          # land" discipline merge-confirm.sh applies to a merge.
+          if [ -z "$(jq -r '.data.updateProjectV2ItemFieldValue.projectV2Item.id // empty' <<< "$WRESP")" ]; then
+            echo "::error::the Status write for issue #${NUMBER} returned no item id, so the move is UNCONFIRMED - the card needs '${TARGET_COLUMN}' by hand" >&2
             exit 1
           fi
           echo "-> issue #${NUMBER}: Status '${CURRENT_COL:-<no Status>}' -> '${TARGET_COLUMN}'"
