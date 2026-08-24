@@ -94,11 +94,14 @@ MUTATIONS = [
     ("origin/HEAD's bare short name is listed as a branch called `origin`",
      '        if "/" not in ref or ref.endswith("/HEAD"):',
      '        if ref.endswith("/HEAD"):'),
-    ("the ref list keeps going on an unreadable tree",
-     "    rc, out = _run([\"git\", \"for-each-ref\", \"--format=%(refname:short)%09%(objectname)\",\n"
-     "                    \"refs/remotes/origin\"])\n    if rc != 0:\n        return []",
-     "    rc, out = _run([\"git\", \"for-each-ref\", \"--format=%(refname:short)%09%(objectname)\",\n"
-     "                    \"refs/remotes/origin\"])\n    if False:\n        return []"),
+    ("a failed ref read is indistinguishable from an empty clone",
+     '        return [], ("`git for-each-ref` failed, so this clone\'s branch list could "\n'
+     '                    "not be read -- and an empty inventory would read as "\n'
+     '                    "\'nothing to attribute\'")',
+     '        return [], ""'),
+    ("the ref list keeps going on a failed read, returning a partial sweep list",
+     "    if rc != 0:\n        return [], (\"`git for-each-ref` failed",
+     "    if False:\n        return [], (\"`git for-each-ref` failed"),
     ("a missing binary raises instead of failing closed",
      "    try:\n        proc = subprocess.run(args, capture_output=True, text=True)\n"
      "    except OSError as exc:\n        return 127, f\"{args[0]}: {exc}\"",

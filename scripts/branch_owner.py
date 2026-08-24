@@ -348,14 +348,25 @@ def default_branch(repo: str = "") -> "tuple[str, str]":
     return "", "no default branch could be found at all"
 
 
-def remote_branches(default: str) -> "list[tuple[str, str]]":
-    """(short name, tip sha) for every origin/* branch except integration ones."""
+def remote_branches(default: str) -> "tuple[list, str]":
+    """([(short name, tip sha)], problem) for every origin/* branch but the
+    integration ones.
+
+    THE PROBLEM STRING IS THE POINT. An earlier version returned the bare list and
+    collapsed a failed `for-each-ref` into `[]`, which `main` then printed as
+    `0 branch(es)` and exited 0 -- a clean bill of health from a read that never
+    happened, while the other two seams here refuse explicitly. "I could not read
+    the branch list" and "this clone has no branches" are different answers and
+    only one of them is a fact (Bugbot).
+    """
     protected = {"develop", "staging", "main", "master", "gh-pages", "HEAD",
                  default.split("/", 1)[-1]}
     rc, out = _run(["git", "for-each-ref", "--format=%(refname:short)%09%(objectname)",
                     "refs/remotes/origin"])
     if rc != 0:
-        return []
+        return [], ("`git for-each-ref` failed, so this clone's branch list could "
+                    "not be read -- and an empty inventory would read as "
+                    "'nothing to attribute'")
     found = []
     for line in out.splitlines():
         ref, _, sha = line.partition("\t")
@@ -372,7 +383,7 @@ def remote_branches(default: str) -> "list[tuple[str, str]]":
         if name in protected:
             continue
         found.append((name, sha))
-    return found
+    return found, ""
 
 
 def main(argv: "list[str] | None" = None) -> int:
@@ -397,7 +408,15 @@ def main(argv: "list[str] | None" = None) -> int:
         if note:
             sys.stderr.write(f"branch_owner: {note}\n")
 
-    known = dict(remote_branches(default))
+    refs, refs_problem = remote_branches(default)
+    if refs_problem:
+        # REFUSE, do not report zero. Without the ref list there is no tip for any
+        # branch and no way to tell whether a named one even exists, so every
+        # answer below would be weaker than it looks and the summary line would
+        # say so to nobody.
+        sys.stderr.write(f"branch_owner: {refs_problem}\n")
+        return 2
+    known = dict(refs)
     wanted = [(b, known.get(b, "")) for b in args.branch] if args.branch \
         else sorted(known.items())
 

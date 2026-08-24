@@ -370,7 +370,8 @@ try:
                       "origin/main\t22222222\n"
                       "origin/fix/1-a\t33333333\n"
                       "origin/feat/2-b\t44444444")
-    got = _m.remote_branches("origin/develop")
+    got, refs_problem = _m.remote_branches("origin/develop")
+    eq("a good read reports no problem", refs_problem, "")
     eq("origin/HEAD's bare short name is not a branch",
        [n for n, _ in got if "/" not in n], [])
     eq("only real feature branches are listed", sorted(n for n, _ in got),
@@ -381,15 +382,31 @@ try:
     # default when it is not `develop` -- derived from the argument, not listed.
     _m._run = stub(0, "origin/master\t1\norigin/release/9\t2")
     eq("the passed-in default is excluded by name",
-       sorted(n for n, _ in _m.remote_branches("origin/master")), ["release/9"])
+       sorted(n for n, _ in _m.remote_branches("origin/master")[0]), ["release/9"])
 
     # A FAILED READ THAT PRINTED SOMETHING is the case worth pinning: rc=1 with an
     # empty stdout yields [] whether or not the code checks rc, so asserting only
     # that would leave the guard untested. A partial list is what must not become
     # a sweep list.
+    #
+    # AND IT MUST NOT LOOK LIKE AN EMPTY CLONE. Returning a bare [] made `main`
+    # print "0 branch(es)" and exit 0 -- a clean report from a read that failed,
+    # while the other two seams refused explicitly (Bugbot). The problem string is
+    # what separates "could not read" from "nothing there".
     _m._run = stub(1, "origin/fix/partial\tabc123")
-    eq("a failed ref read yields nothing rather than a partial sweep",
-       _m.remote_branches("origin/develop"), [])
+    refs, refs_problem = _m.remote_branches("origin/develop")
+    eq("a failed ref read yields nothing rather than a partial sweep", refs, [])
+    if refs_problem and "could not be read" in refs_problem:
+        ok("a failed ref read is a problem, not an empty inventory")
+    else:
+        bad(f"a failed ref read looked like an empty clone: {refs_problem!r}")
+
+    # A genuinely empty remote is NOT a problem -- the two must not collapse, or
+    # the refusal above becomes "refuse whenever there are no branches".
+    _m._run = stub(0, "")
+    refs, refs_problem = _m.remote_branches("origin/develop")
+    eq("a genuinely empty remote yields no branches and no problem",
+       (refs, refs_problem), ([], ""))
 
     # --- the default branch, which signal 2 is measured against -----------
     #
