@@ -296,8 +296,16 @@ def pull_requests(repo: str = "") -> "tuple[dict, str]":
     return by_head, ""
 
 
-def first_commit_author(ref: str, default: str) -> str:
-    """git identity of the oldest commit on `ref` that is not on `default`.
+def first_commit_author(ref: str, default: str) -> "tuple[str, str]":
+    """(git identity, problem) for the oldest commit on `ref` not on `default`.
+
+    THE TWO EMPTIES ARE DIFFERENT ANSWERS. This returned a bare "" for both a
+    FAILED `git log` and a branch that genuinely has no commits off the default
+    branch, and `attribute` then reported the second one -- "no commit on this
+    branch that is not already on the default branch" -- for both. That is a fact
+    about the branch, asserted from a read that never ran: the same defect
+    Saqlain and Bugbot caught in `remote_branches`, one seam over, found by
+    auditing the other three rather than fixing only the one that was reported.
 
     NOT the tip, and the difference is the whole point: on the branch that
     prompted this ticket (`client fix/583-wire-ca-proxy`) the oldest commit is
@@ -308,9 +316,12 @@ def first_commit_author(ref: str, default: str) -> str:
     """
     rc, out = _run(["git", "log", "--reverse", "--format=%an <%ae>",
                     f"{default}..{ref}"])
-    if rc != 0 or not out:
-        return ""
-    return out.splitlines()[0].strip()
+    if rc != 0:
+        return "", (f"`git log {default}..{ref}` failed, so the oldest-commit "
+                    "signal could not be read")
+    if not out:
+        return "", ""
+    return out.splitlines()[0].strip(), ""
 
 
 def default_branch(repo: str = "") -> "tuple[str, str]":
@@ -435,10 +446,16 @@ def main(argv: "list[str] | None" = None) -> int:
         # default branch is untrustworthy -- the first because "no PR" is then
         # unproven, the second because the "oldest unique commit" is then measured
         # against the wrong branch. Such a branch is reported unattributable.
+        # The oldest-commit signal is only consulted when both the PR list and the
+        # default branch are trustworthy -- the first because "no PR" is otherwise
+        # unproven, the second because `default..branch` would be the wrong range.
+        # When it IS consulted and the read fails, that failure is carried through
+        # as its own reason rather than becoming "no commits".
         usable = not problem and not default_problem
-        att = attribute(name, sha, prs.get(name, []),
-                        first_commit_author(f"origin/{name}", default) if usable else "",
-                        problem, default_problem)
+        author, author_problem = (first_commit_author(f"origin/{name}", default)
+                                  if usable else ("", ""))
+        att = attribute(name, sha, prs.get(name, []), author,
+                        problem, default_problem or author_problem)
         out.append({"branch": name, "owner": att.owner, "signal": att.signal,
                     "why": att.why})
 

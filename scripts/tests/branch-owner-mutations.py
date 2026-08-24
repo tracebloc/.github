@@ -94,6 +94,32 @@ MUTATIONS = [
     ("origin/HEAD's bare short name is listed as a branch called `origin`",
      '        if "/" not in ref or ref.endswith("/HEAD"):',
      '        if ref.endswith("/HEAD"):'),
+    # --- the two-empties distinction, on BOTH reads that have one -----------
+    #
+    # A test that only asserted "something empty came back" would pass in a world
+    # where the failed and the genuine case refuse IDENTICALLY, so each pair is
+    # mutated in both directions: collapse the failure into the success, and
+    # collapse the success into the failure.
+    ("first_commit_author collapses a failed read into 'no unique commits'",
+     '    if rc != 0:\n        return "", (f"`git log {default}..{ref}` failed, so the oldest-commit "\n'
+     '                    "signal could not be read")\n    if not out:\n        return "", ""',
+     '    if rc != 0 or not out:\n        return "", ""'),
+    ("first_commit_author's failure carries no reason",
+     '        return "", (f"`git log {default}..{ref}` failed, so the oldest-commit "\n'
+     '                    "signal could not be read")',
+     '        return "", ""'),
+    ("first_commit_author reports a GENUINELY empty history as a failed read",
+     '    if not out:\n        return "", ""',
+     '    if not out:\n        return "", "could not be read"'),
+    ("main drops the failed-history reason, so it renders as 'no commits'",
+     "        att = attribute(name, sha, prs.get(name, []), author,\n"
+     "                        problem, default_problem or author_problem)",
+     "        att = attribute(name, sha, prs.get(name, []), author,\n"
+     "                        problem, default_problem)"),
+    ("remote_branches reports a GENUINELY empty remote as a failed read",
+     '        found.append((name, sha))\n    return found, ""',
+     '        found.append((name, sha))\n    return found, ("`git for-each-ref` failed" if not found else "")'),
+
     ("a failed ref read is indistinguishable from an empty clone",
      '        return [], ("`git for-each-ref` failed, so this clone\'s branch list could "\n'
      '                    "not be read -- and an empty inventory would read as "\n'

@@ -8,6 +8,8 @@ A tip-author list claimed both, and the next command in that workflow deletes.
 
 No network, no git, no gh: the rule is pure and the two seams are stubbed.
 """
+import contextlib
+import io
 import inspect
 import pathlib
 import sys
@@ -138,6 +140,21 @@ if "no commit on this branch" in measured.why:
     ok("a measured-and-empty history says so, distinctly")
 else:
     bad(f"the measured-empty refusal lost its own wording: {measured.why!r}")
+
+# THE SAME DISTINCTION AT THE RULE LEVEL. A failed oldest-commit read reaches
+# `attribute` as a problem, so the refusal must not claim the branch has no unique
+# commits -- and the genuinely-empty case must still say exactly that.
+logfail = att("old/thing", TIP, [], first_commit_author="",
+              first_commit_problem="`git log origin/develop..origin/old/thing` failed")
+eq("a failed history read refuses", logfail.signal, "unattributable")
+if "was not measured" in logfail.why and "git log" in logfail.why:
+    ok("a failed history read is reported as unmeasured, naming the command")
+else:
+    bad(f"a failed history read was reported as a finding: {logfail.why!r}")
+if "no commit on this branch" not in logfail.why:
+    ok("a failed history read does not claim the branch has no unique commits")
+else:
+    bad(f"a failed history read asserts an unmade finding: {logfail.why!r}")
 
 # --------------------------------------------------------------------------
 # 4. AMBIGUITY IS A REFUSAL, NOT A TIE-BREAK. Branch names get reused.
@@ -344,7 +361,7 @@ try:
     _m._run = stub(0, "First Person <first@example.com>\nLater Pusher <later@example.com>")
     eq("the oldest commit's author is taken",
        _m.first_commit_author("origin/b", "origin/develop"),
-       "First Person <first@example.com>")
+       ("First Person <first@example.com>", ""))
     args = calls[-1]
     eq("the request is reversed", "--reverse" in args, True)
     eq("the request does not cap the count",
@@ -352,12 +369,21 @@ try:
     eq("the request is a range against the default branch",
        "origin/develop..origin/b" in args, True)
 
+    # THE TWO EMPTIES, PINNED APART -- asserted by WHICH one came back, not merely
+    # that something empty did. Both used to return a bare "", so `attribute`
+    # reported "no commit not already on the default branch" for a git log that
+    # never ran (Saqlain's finding, generalised to this seam by audit).
     _m._run = stub(1, "")
-    eq("an unreadable history yields no author, not a guess",
-       _m.first_commit_author("origin/b", "origin/develop"), "")
+    author, why = _m.first_commit_author("origin/b", "origin/develop")
+    eq("a FAILED history read yields no author", author, "")
+    if why and "could not be read" in why and "git log" in why:
+        ok("a FAILED history read names the failed command as the reason")
+    else:
+        bad(f"a failed history read looked like an empty branch: {why!r}")
+
     _m._run = stub(0, "")
-    eq("a branch with no unique commits yields no author",
-       _m.first_commit_author("origin/b", "origin/develop"), "")
+    eq("a branch with GENUINELY no unique commits yields no author and no problem",
+       _m.first_commit_author("origin/b", "origin/develop"), ("", ""))
 
     # --- the ref list -----------------------------------------------------
     #
@@ -466,6 +492,60 @@ try:
         ok("a missing gh fails closed with the same refusal as a failed call")
     else:
         bad(f"a missing gh did not fail closed: {problem!r}")
+    # --- main(), because the SEAM-TO-RULE WIRING is where the fix pays off ----
+    #
+    # Every case above tests `attribute` or a seam in isolation. `main` is what
+    # carries a seam's problem string into the rule, and dropping that one
+    # argument reverts the whole fix while every isolated case stays green -- which
+    # is exactly what a mutation run showed. So this drives the real entry point.
+    def run_main(answers, argv=()):
+        """(exit code, stdout) with `_run` answering per command."""
+        def fake(args):
+            joined = " ".join(args)
+            for needle, reply in answers:
+                if needle in joined:
+                    return reply
+            return 0, ""
+        _m._run = fake
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            code = _m.main(list(argv))
+        return code, buf.getvalue()
+
+    GOOD_HEAD = [("repo view", (0, "develop")), ("pr list", (0, "[]")),
+                 ("for-each-ref", (0, "origin/feat/x\tabc123"))]
+
+    code, out = run_main([*GOOD_HEAD, ("git log", (128, ""))])
+    eq("main exits 0 having reported the branch", code, 0)
+    if "was not measured" in out and "git log" in out:
+        ok("main carries a FAILED history read through to the row as unmeasured")
+    else:
+        bad(f"main lost the failed-history reason: {out.strip()[:160]!r}")
+    if "no commit on this branch" not in out:
+        ok("main does not render a failed history read as 'no unique commits'")
+    else:
+        bad(f"main reported an unmade finding: {out.strip()[:160]!r}")
+
+    # ... and with the same shape but a SUCCESSFUL empty history, the other
+    # sentence is the right one. Pinned apart end-to-end, not only at the seam.
+    code, out = run_main([*GOOD_HEAD, ("git log", (0, ""))])
+    eq("main exits 0 on a genuinely empty history", code, 0)
+    if "no commit on this branch" in out and "was not measured" not in out:
+        ok("main renders a genuinely empty history as exactly that")
+    else:
+        bad(f"main confused an empty history with a failed one: {out.strip()[:160]!r}")
+
+    # A FAILED ENUMERATION IS A NON-ZERO EXIT, not a report of zero branches --
+    # Saqlain's finding, asserted at the entry point he was reading.
+    code, out = run_main([("repo view", (0, "develop")), ("pr list", (0, "[]")),
+                          ("for-each-ref", (128, ""))])
+    eq("main refuses when the branch list could not be read", code, 2)
+    eq("main prints no rows when it refuses", out.strip(), "")
+
+    # ... while a genuinely empty remote is a clean, zero-row success.
+    code, out = run_main([("repo view", (0, "develop")), ("pr list", (0, "[]")),
+                          ("for-each-ref", (0, ""))])
+    eq("main exits 0 on a genuinely empty remote", code, 0)
 finally:
     _m._run = _real
 
