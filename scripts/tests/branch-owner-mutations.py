@@ -165,6 +165,11 @@ MUTATIONS = [
      '            return guess, ("the remote\'s default branch could not be confirmed and "\n'
      '                           f"origin/HEAD is unset, so {guess} is a guess")',
      '            return guess, ""'),
+    ("a default branch the clone never fetched is reported as trustworthy",
+     '        vrc, _ = _run(["git", "rev-parse", "--verify", "--quiet", ref])\n'
+     '        if vrc != 0:',
+     '        vrc, _ = _run(["git", "rev-parse", "--verify", "--quiet", ref])\n'
+     '        if False:'),
     ("the remote is never asked, so the cache is the only source",
      '    args = ["gh", "repo", "view", "--json", "defaultBranchRef",\n'
      '            "--jq", ".defaultBranchRef.name"]',

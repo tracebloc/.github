@@ -448,9 +448,22 @@ try:
     # command at all and every case above would still pass.
     eq("the authority asked is the remote, via gh",
        ("gh" in calls[0] and "defaultBranchRef" in calls[0]), True)
+    # ... and the name it gives is checked against THIS clone, because gh can name
+    # a branch that was never fetched here (Bugbot).
+    eq("the named ref is verified to exist locally",
+       any("rev-parse" in c and "origin/develop" in c for c in calls), True)
+
     calls.clear()
     _m.default_branch("tracebloc/client")
     eq("--repo reaches the default-branch query", "tracebloc/client" in calls[0], True)
+    seq2 = [(0, "develop"), (1, "")]          # gh answers; the local ref is absent
+    _m._run = lambda args: seq2.pop(0)
+    ref, why = _m.default_branch()
+    eq("an unfetched default is still returned", ref, "origin/develop")
+    if why and "no origin/develop" in why and "fetch" in why:
+        ok("an unfetched default is one reported fact, not N failed ranges")
+    else:
+        bad(f"an unfetched default was reported as trustworthy: {why!r}")
 
     seq = [(1, ""), (0, "origin/main")]
     _m._run = lambda args: seq.pop(0)

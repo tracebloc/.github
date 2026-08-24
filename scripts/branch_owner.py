@@ -345,7 +345,18 @@ def default_branch(repo: str = "") -> "tuple[str, str]":
         args += ["--repo", repo]
     rc, out = _run(args)
     if rc == 0 and out:
-        return f"origin/{out}", ""
+        # THE REMOTE'S ANSWER IS AUTHORITATIVE ABOUT THE NAME, NOT ABOUT THIS
+        # CLONE. `gh` can name a default branch this checkout has never fetched,
+        # and then every `default..branch` range fails -- which the first-commit
+        # seam now reports honestly, but once per branch, blaming N ranges for one
+        # missing ref. Diagnose it here instead, where it is one fact (Bugbot).
+        ref = f"origin/{out}"
+        vrc, _ = _run(["git", "rev-parse", "--verify", "--quiet", ref])
+        if vrc != 0:
+            return ref, (f"the remote's default branch is {out}, but this clone has "
+                         f"no {ref} -- fetch it before the oldest-commit signal "
+                         "can mean anything")
+        return ref, ""
 
     rc, out = _run(["git", "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"])
     if rc == 0 and out:
