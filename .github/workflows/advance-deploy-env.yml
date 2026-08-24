@@ -183,13 +183,15 @@ jobs:
           # card left behind its own shipped code. The first push to a tracked
           # branch carrying a PR is the real test; if it reddens, read the failing
           # call rather than widening the list back to a full grant.
-          # SAME REQUIREMENT AS kanban-closure-router, AND FLAGGED ON NEITHER.
-          # This workflow calls `branch_status_map.py` too, which fetches the
-          # caller repo's `.kanban.yml` over the API with this token. Bugbot
-          # raised the missing `contents: read` on the router only; both have
-          # three call sites, so scoping one and not the other would have shipped
-          # the same silent mis-routing through the other writer.
-          permission-contents: read
+          # NO `contents` HERE, AND THE ROUTER'S NEED DOES NOT GENERALISE (saadqbal,
+          # .github#324). A previous revision of this PR added `contents: read` by
+          # analogy with kanban-closure-router and it bought nothing: this
+          # workflow's ONE mapper call is `:94`, in the `env` step, which runs
+          # BEFORE this mint and under `GH_TOKEN: ${{ github.token }}` -- as the
+          # comment at `:169` already says. It also maps `$GITHUB_REPOSITORY`, its
+          # own repo, where the router maps `$REPO_FULL`, the caller's. Same
+          # script, different token and different repo, so the same scope is
+          # required there and inert here.
           permission-issues: read
           permission-pull-requests: read
           permission-organization-projects: write
