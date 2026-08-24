@@ -100,5 +100,63 @@ jobs:
       # MUTATION_TARGETS it satisfied `selftests-cover` -- which asks make what
       # that list would run -- while never executing here. Covered on paper,
       # unrun in fact (Bugbot, .github#300). `make mutations` is the list.
+      # THE INVENTORY'S CITATIONS, in the SAME already-required context
+      # (backend#2449).
+      #
+      # `repo-inventory.yml` exemption reasons cite tickets, and nothing read
+      # them: `caller-drift.py` enforces staleness on the ENTRY and never on the
+      # sentence explaining it. So a reason could say "sequenced behind
+      # backend#1408" for the eighteen days after that issue closed, with the
+      # audit green throughout. `make reason-citations` fails when a cited issue
+      # is closed, or a cited PR was closed without merging.
+      #
+      # HERE RATHER THAN A NEW JOB OR A NEW WORKFLOW, for the two reasons the
+      # steps above were: `selftests` is ALREADY a required context on
+      # develop/staging/main, so this arms the check with no branch-protection
+      # edit, and a new context would sit unrequired until somebody armed it --
+      # which is how a guard ends up advisory. A new REUSABLE would also need its
+      # own repo-inventory.yml row in every repo, serialising against every other
+      # guarded-file PR in this single-writer repo.
+      #
+      # BOTH HALVES RUN, exactly as for mint-scope: `make selftests` runs the
+      # FIXTURE suite, which proves the rule catches, and this proves the live
+      # inventory complies. Either can pass while the other fails.
+      #
+      # THE TOKEN IS ORG-WIDE ON PURPOSE, which is the opposite of the narrowing
+      # `add-to-kanban.yml` argues for and for a stated reason: the reasons in
+      # repo-inventory.yml cite tickets in `backend`, `client`, `client-runtime`,
+      # `model-zoo`, `data-ingestors`, `release-train` and `.github`. A token
+      # scoped with `repositories:` to this repo would resolve NONE of those, and
+      # the check would report "cannot tell" on almost every citation. Read-only
+      # in both scopes, and it writes nothing.
+      #
+      # FAIL CLOSED ON A MISSING SECRET, which also means this step fails on a
+      # PR from a FORK, where GitHub withholds secrets. That is the correct
+      # answer for a required check whose whole contract is that it never reports
+      # clean from a read it could not make -- and `add-to-kanban.yml` already
+      # carries the same property in this repo.
+      - name: Mint a read-only token for the citation check
+        id: citation-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-issues: read
+          permission-pull-requests: read
+
+      - name: reason-citations (the live inventory, not fixtures)
+        env:
+          GH_TOKEN: ${{ steps.citation-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::the citation token is empty. Without it every citation" \
+                 "reads as unresolvable, and this check must not report clean from" \
+                 "a read it could not make." >&2
+            exit 1
+          fi
+          make reason-citations
+
       - name: mutation-check (every runner in MUTATION_TARGETS)
         run: make mutations
