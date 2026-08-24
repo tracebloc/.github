@@ -395,10 +395,6 @@ shared_reasons:
     release-train while FOUR entries pointed at the anchor: `rfcs` was added later in the same
     session and never listed. A hand-maintained citation list drifts from its own aliases, so
     trust `grep -n '\*code_quality_caller_missing'` over this sentence.
-  customer_priority_bump_caller_missing: &customer_priority_bump_caller_missing >-
-    no customer-priority-bump caller. Measured absent 2026-08-03. The reusable also has three
-    dead inputs and hard-codes the `priority` label (backend#1408 P3), so wiring more repos to
-    it is sequenced behind that cleanup. UNREMEDIATED.
   fr_pass_comment_caller_missing: &fr_pass_comment_caller_missing >-
     no fr-pass-comment caller, so a kanban card in this repo can only be advanced by hand.
     ONE citation, claude-skills. Re-measured on it 2026-08-21 --
@@ -546,8 +542,7 @@ repos:
       # pass inputs the @main callee declares, or the whole call dies with
       # startup_failure. That is why arming had to wait for the callee to land.
       code-quality.yml: required   # code-quality-caller.yml
-      customer-priority-bump.yml:
-        exempt: *customer_priority_bump_caller_missing
+      customer-priority-bump.yml: required   # customer-priority-bump-caller.yml
       fr-gate.yml: required   # fr-gate-caller.yml
       stale-backlog.yml: required   # stale-backlog-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
@@ -1145,8 +1140,7 @@ repos:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml:
         exempt: *code_quality_caller_missing
-      customer-priority-bump.yml:
-        exempt: *customer_priority_bump_caller_missing
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
       fr-gate.yml:
         exempt: >-
           release-train drives the train and is exempt from riding it (RFC-BACKEND-1405 D1), so
@@ -1267,8 +1261,7 @@ repos:
           advance a card. See the note above for the flip condition and its ordering.
       code-quality.yml:
         exempt: *code_quality_caller_missing
-      customer-priority-bump.yml:
-        exempt: *customer_priority_bump_caller_missing
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
       fr-gate.yml:
         exempt: *no_staging_branch_no_hop_to_gate
       fr-pass-comment.yml:
@@ -1289,8 +1282,11 @@ repos:
         # (measured -- and `stale_exemptions()` in kanban-columns-check.py is a
         # different mechanism entirely, about workflow files that name board columns,
         # so it does not cover this file's anchors).
-        # `customer_priority_bump_caller_missing` is cited 3x and stays -- this repo's
-        # citation of it is NOT part of the flip.
+        # WORKED EXAMPLE of the paragraph above, completed by this PR:
+        # `customer_priority_bump_caller_missing` went 3x -> 2x -> 0 as backend#2396 wired
+        # each caller (release-train#117/.github#320, then .github#316 and rfcs#47), and at
+        # 0 citations its definition was DELETED here rather than left as dead prose. Do the
+        # same with this anchor when rfcs#41 lands.
         exempt: *kanban_closure_router_caller_missing
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
