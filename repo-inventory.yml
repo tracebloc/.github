@@ -395,27 +395,6 @@ shared_reasons:
     release-train while FOUR entries pointed at the anchor: `rfcs` was added later in the same
     session and never listed. A hand-maintained citation list drifts from its own aliases, so
     trust `grep -n '\*code_quality_caller_missing'` over this sentence.
-  customer_priority_bump_caller_missing: &customer_priority_bump_caller_missing >-
-    no customer-priority-bump caller. Measured absent 2026-08-03, still absent on the two
-    repos that cite this (.github, rfcs) 2026-08-24.
-    THE ORIGINAL REASON HAS EXPIRED, and saying so is the point of this rewrite. It read
-    "three dead inputs and hard-codes the `priority` label (backend#1408 P3), so wiring
-    more repos to it is sequenced behind that cleanup". Measured 2026-08-23: backend#1408
-    is CLOSED COMPLETED; all FOUR inputs are consumed (`trigger-label`, `bug-label`,
-    `project-number`, `org`); and the hard-coded `priority` label is RFC-BACKEND-0008 D5
-    working as decided -- priority is a binary label, not a board field -- so it is a
-    decision, not a gap.
-    What remains is only that the callers are not wired yet. backend#2396 is wiring them
-    and flips each row as its caller lands; release-train's landed first (release-train#117).
-    STAGED, NOT PARKED: if this anchor outlives #2396 it has become the same finding as
-    `wip_limit_check_has_no_callers` -- a reusable a repo was never wired to, with a
-    written excuse. Treat it as a defect then, not a justification.
-    Note the cost of the wiring order, so nobody reads the red as a regression: a caller
-    that lands while its row still says `exempt` IS a finding (caller-drift.py:2309,
-    "the exemption is stale"), so the org audit goes red between each caller merging and
-    its row flipping. That window is the price of the rule this file's header states --
-    land the caller first, flip the entry after -- and the alternative is a PR that can
-    never go green.
   fr_pass_comment_caller_missing: &fr_pass_comment_caller_missing >-
     no fr-pass-comment caller, so a kanban card in this repo can only be advanced by hand.
     ONE citation, claude-skills. Re-measured on it 2026-08-21 --
@@ -563,8 +542,7 @@ repos:
       # pass inputs the @main callee declares, or the whole call dies with
       # startup_failure. That is why arming had to wait for the callee to land.
       code-quality.yml: required   # code-quality-caller.yml
-      customer-priority-bump.yml:
-        exempt: *customer_priority_bump_caller_missing
+      customer-priority-bump.yml: required   # customer-priority-bump-caller.yml
       fr-gate.yml: required   # fr-gate-caller.yml
       stale-backlog.yml: required   # stale-backlog-caller.yml
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
@@ -1283,8 +1261,7 @@ repos:
           advance a card. See the note above for the flip condition and its ordering.
       code-quality.yml:
         exempt: *code_quality_caller_missing
-      customer-priority-bump.yml:
-        exempt: *customer_priority_bump_caller_missing
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
       fr-gate.yml:
         exempt: *no_staging_branch_no_hop_to_gate
       fr-pass-comment.yml:
@@ -1305,13 +1282,11 @@ repos:
         # (measured -- and `stale_exemptions()` in kanban-columns-check.py is a
         # different mechanism entirely, about workflow files that name board columns,
         # so it does not cover this file's anchors).
-        # `customer_priority_bump_caller_missing` is cited 2x and stays -- this repo's
-        # citation of it is NOT part of the flip. (Was 3x until backend#2396 wired
-        # release-train's caller and this PR flipped that entry to `required`; the
-        # anchor is still cited by two repos -- .github and rfcs -- so it is NOT dead
-        # prose and must not be deleted. Those two rows flip once their callers land
-        # (.github#316, rfcs#47), and the anchor goes with them. The count is stated
-        # here precisely so the next flip can tell the difference.)
+        # WORKED EXAMPLE of the paragraph above, completed by this PR:
+        # `customer_priority_bump_caller_missing` went 3x -> 2x -> 0 as backend#2396 wired
+        # each caller (release-train#117/.github#320, then .github#316 and rfcs#47), and at
+        # 0 citations its definition was DELETED here rather than left as dead prose. Do the
+        # same with this anchor when rfcs#41 lands.
         exempt: *kanban_closure_router_caller_missing
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
