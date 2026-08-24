@@ -1306,10 +1306,12 @@ repos:
         # different mechanism entirely, about workflow files that name board columns,
         # so it does not cover this file's anchors).
         # `customer_priority_bump_caller_missing` is cited 2x and stays -- this repo's
-        # citation of it is NOT part of the flip. (It was 3x until backend#2396 flipped
-        # release-train's row; .github and rfcs still cite it, and their rows flip once
-        # their callers land -- .github#316 and rfcs#47. Counted here rather than
-        # asserted anywhere, which is the same gap the paragraph above records.)
+        # citation of it is NOT part of the flip. (Was 3x until backend#2396 wired
+        # release-train's caller and this PR flipped that entry to `required`; the
+        # anchor is still cited by two repos -- .github and rfcs -- so it is NOT dead
+        # prose and must not be deleted. Those two rows flip once their callers land
+        # (.github#316, rfcs#47), and the anchor goes with them. The count is stated
+        # here precisely so the next flip can tell the difference.)
         exempt: *kanban_closure_router_caller_missing
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:

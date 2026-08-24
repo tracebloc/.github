@@ -4,6 +4,40 @@ name: Set PR card Status on project
 # Moves the PR's card to the right Status:
 #   - draft PR  → In progress
 #   - non-draft → In review
+#
+# TWO JOBS, and the second one is here on purpose (tracebloc/backend#2364).
+#
+#   set-status    writes the card's Status (below)
+#   closing-ref   checks that a PR whose TITLE names a ticket actually LINKS it
+#
+# WHY closing-ref LIVES HERE rather than in a new reusable or in code-quality.yml.
+# Three constraints, and this file is the only host that satisfies all three:
+#
+#   1. It needs a token that can read the PR *and* an issue in ANOTHER repo --
+#      almost every house ticket is in `tracebloc/backend`, and nearly every repo
+#      is private. This file already mints an ORG-SCOPED installation token for
+#      the `tracebloc-release-train` App (measured 2026-08-23: `issues: write`,
+#      `pull_requests: write`, `repository_selection: all`), and every one of its
+#      19 callers already passes `secrets: inherit`. `code-quality.yml` cannot:
+#      it is deliberately secretless and declares `contents: read` only, and a
+#      called workflow may not hold more than its caller grants -- adding
+#      `pull-requests: read` there would fail all 16 callers at startup with no
+#      jobs, before any of them could be updated.
+#   2. It must run on the SAME event that puts a card in `Code review`, because
+#      the convention it enforces is what makes that card move again later. That
+#      event is this file's trigger set by construction.
+#   3. A NEW reusable would need a `repo-inventory.yml` row for all 19 repos, and
+#      that file is guarded by `conformance-gate.yml` -- a required check that
+#      every other merge invalidates. A job in an existing reusable needs no
+#      inventory row at all: the inventory tracks CALLERS, one row per reusable.
+#
+# NOT A REQUIRED STATUS CHECK ANYWHERE, measured before landing: no repo's
+# protection or rulesets name `set-status`, and `closing-ref` is new. So a
+# finding here is loud and blocks nothing -- which is the point while the fleet
+# is still non-compliant (measured 2026-08-23: of the last 25 merged PRs in each
+# of 19 repos, 44 pass, 192 would report a finding, 239 name no ticket at all).
+# Arming it as a required context is a separate, later decision that belongs
+# after that backlog, not in the change that introduces the check.
 
 on:
   workflow_call:
@@ -14,6 +48,32 @@ on:
       org:
         type: string
         default: tracebloc
+      closing-ref-check:
+        description: >-
+          Run the closing-ref job: a PR whose TITLE names a ticket must LINK it.
+          On by default -- the failure it catches is silent, and a repo that opts
+          out has to say so in its caller where a reviewer can see it.
+        type: boolean
+        default: true
+      closing-ref-soft-fail:
+        description: >-
+          Report a closing-ref finding but exit 0. Defaults FALSE: the finding is
+          fixed by adding one line to the PR body, not by clearing a backlog, so
+          there is nothing to migrate -- and this job is a required context
+          nowhere, so a red job blocks no merge. Flip it per caller if a repo
+          wants the annotation without the red X. It governs FINDINGS ONLY: a
+          malfunction of the check (an unreadable title, an unreadable link
+          graph, an API error) exits nonzero either way, which is the same split
+          `action-pins-soft-fail` keeps in code-quality.yml.
+        type: boolean
+        default: false
+      quality-ref:
+        description: >-
+          Ref of tracebloc/.github the closing-ref checker is taken from. Callers
+          pin this workflow at `@main`, so `main` is the matching version.
+          Override only to test a change to the checker before it merges.
+        type: string
+        default: "main"
 
 jobs:
   set-status:
@@ -131,3 +191,70 @@ jobs:
             }' -F p="$PROJECT_ID" -F i="$ITEM_ID" -F f="$STATUS_FIELD" -f o="$STATUS_OPT" > /dev/null
 
           echo "→ PR #$PR_NUMBER → Status=$STATUS_NAME"
+
+  # ------------------------------------------------------------------------
+  # A PR whose TITLE names a ticket must LINK it (tracebloc/backend#2364).
+  #
+  # Measured 2026-08-23: `closingIssuesReferences` was 0 on 7 of 7 epic-relevant
+  # merged PRs. The house convention puts the ticket in the TITLE; GitHub creates
+  # a closing link ONLY from a keyword in the BODY. So the title reference is
+  # inert, `kanban-closure-router.yml` finds no linked issue, and correctly does
+  # nothing -- every kanban workflow green, every card unmoved. The board has
+  # been wrong for weeks behind a green pipeline.
+  #
+  # This job is a SEPARATE job from `set-status` deliberately, the same reason
+  # code-quality.yml keeps six: a finding here must not stop the card being
+  # written, and a failed board write must not hide the finding. Steps inside one
+  # job short-circuit; jobs do not.
+  #
+  # NOTHING FROM THE PR IS INTERPOLATED INTO A `run:` BLOCK. The title is read
+  # from the API by the checker itself, so a title containing shell or an
+  # expression is data, never code. The only expressions below are the repo name
+  # and the PR number.
+  # ------------------------------------------------------------------------
+  closing-ref:
+    name: closing-ref
+    if: ${{ inputs.closing-ref-check }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The checker lives here, not in the calling repo, so the reusable fetches
+      # it -- same shape as code-quality.yml, blocked-gate.yml and
+      # bugbot-gate.yml. `.github` is public, so this needs no token.
+      - name: Check out the shared checker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tracebloc/.github
+          ref: ${{ inputs.quality-ref }}
+          path: .closing-ref-tools
+          persist-credentials: false
+
+      # WHY AN APP TOKEN AND NOT `github.token`. The link this reads points at an
+      # issue in ANOTHER repo -- `tracebloc/backend` for most of the fleet -- and
+      # a repo-scoped GITHUB_TOKEN cannot see it. A node the token cannot read
+      # comes back missing from `nodes` while `totalCount` still counts it, which
+      # the checker reports as "cannot tell" rather than "not linked". That is the
+      # right refusal, but it would be EVERY cross-repo PR's verdict, so the
+      # token has to be the org-scoped one.
+      #
+      # SCOPED, unlike the mint in `set-status` above (backend#2157): this job
+      # reads two things and needs nothing else. `set-pr-status.yml` keeps its
+      # `mint-scope` exemption for the unscoped board-write mint above; this mint
+      # does not use it.
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-pull-requests: read
+          permission-issues: read
+
+      - name: The title names a ticket, so the PR must link it
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SOFT_FAIL: ${{ inputs.closing-ref-soft-fail && 'true' || 'false' }}
+        run: python3 .closing-ref-tools/scripts/closing-ref-gate.py
