@@ -90,17 +90,32 @@ SCOPE_PREFIX = "permission-"
 #
 # These rows are the pre-existing state this guard was written to stop growing, not
 # to fix in one commit: `fr-gate` is a required check on every promotion branch in
-# the fleet, and three of the others read branch protection, where a narrower token
+# the fleet, and two of the others read branch protection, where a narrower token
 # is known to return LESS data rather than an error (the reason `caller-drift`
 # keeps a PAT at all -- ruleset `bypass_actors` is returned only to a write-access
 # caller). Downscoping those needs measurement per workflow, which is its own work.
+#
+# FOUR ROWS ARE GONE, and what remains is not "the rest of the same job"
+# (backend#2157). The four burnt down -- advance-deploy-env, customer-priority-bump,
+# fr-pass-comment, kanban-closure-router -- were the ones whose reason was literally
+# "scopes not yet measured": each makes a small, closed set of board / issue / PR
+# calls, and the scopes are derivable from those call sites plus GitHub's documented
+# per-endpoint requirement. The six left are each left for a STATED reason, not for
+# lack of time:
+#
+#   fr-gate, set-pr-status, standards-sync, kanban-reconcile -- high exposure
+#     (a required check fleet-wide, a caller in every repo, a contents:write sweep,
+#     the widest board surface). Each needs its own window so one bad scope does not
+#     redden the whole fleet at once.
+#   bricked-prs, merge-settings-drift -- branch-protection reads, where a narrower
+#     token SILENTLY RETURNS LESS rather than erroring. That failure mode is
+#     invisible to a green run, so it needs a measurement, not a derivation.
+#
+# The distinction matters because it is the difference between an exemption that is
+# a to-do and one that is a decision. Do not fold them back together.
 EXEMPT = {
-    "advance-deploy-env.yml": "board writes + PR reads; scopes not yet measured",
     "bricked-prs.yml": "reads branch protection; a narrower token may return less, not error",
-    "customer-priority-bump.yml": "issue label write; scopes not yet measured",
     "fr-gate.yml": "REQUIRED check on every promotion branch fleet-wide -- needs its own window",
-    "fr-pass-comment.yml": "board write + comment + run inspection; scopes not yet measured",
-    "kanban-closure-router.yml": "board write from issue/PR closure; scopes not yet measured",
     "kanban-reconcile.yml": "the weekly backstop -- widest board surface of the set",
     "merge-settings-drift.yml": "reads branch protection; same caveat as bricked-prs",
     "set-pr-status.yml": "runs fleet-wide from every repo; largest exposure of the set",

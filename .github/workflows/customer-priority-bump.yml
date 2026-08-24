@@ -74,6 +74,25 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          # LEAST PRIVILEGE, DERIVED FROM THIS JOB'S ONE CALL (backend#2157). The
+          # step below runs `gh issue edit --add-label priority` and nothing else:
+          # it resolves the issue and the repo's label set (Issues read) and writes
+          # the label (Issues write). `issues: write` subsumes both.
+          #
+          # Nothing here touches a project board, a pull request, or repository
+          # content -- so `organization-projects`, `pull-requests` and
+          # `contents:write` all drop, along with the administration/actions/checks
+          # reads the unscoped mint was carrying.
+          #
+          # `repositories:` is deliberately NOT narrowed, matching the reasoning on
+          # the `bug-to-ready` mint below: repo narrowing is measured in this org
+          # for a READ (add-to-kanban.yml, backend#2181) and not for a WRITE, and an
+          # unmeasured narrowing on a workflow that fires from every repo in the
+          # fleet fails red on every customer-labelled issue.
+          #
+          # NOT PROVEN BY READING: an under-scoped token fails at the call, not at
+          # the mint. The first `from:customer` label after this lands is the test.
+          permission-issues: write
 
       - name: Label the customer issue as priority
         env:

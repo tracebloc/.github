@@ -133,6 +133,36 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          # LEAST PRIVILEGE, DERIVED FROM THIS JOB'S OWN CALLS (backend#2157).
+          # Two steps share this token and between them make six calls; this is the
+          # union, with the permission each one documents:
+          #
+          #   GET repos/{r}/collaborators/{u}/permission   Metadata read (implicit)
+          #   GET repos/{r}/pulls/{n}                      PRs read
+          #   organization().projectV2 + item Status read   projects read
+          #   updateProjectV2ItemFieldValue                projects WRITE
+          #   POST issues/comments/{id}/reactions          Issues WRITE  <- only option
+          #   POST issues/{n}/comments                     Issues write (or PRs write)
+          #
+          # `issues: write` is what forces a write grant here, and it is not
+          # substitutable: GitHub documents the issue-comment REACTION endpoint as
+          # Issues write ALONE, while the comment endpoint accepts either. Both
+          # endpoints serve PR threads too -- a PR's conversation IS an issue -- so
+          # `pull-requests` stays at read, needed only for the promotion-PR ref
+          # lookup in step 3a.
+          #
+          # `Metadata` is granted implicitly alongside any repository permission,
+          # which is why the collaborator-permission read needs no row of its own.
+          # Note what happens if that call fails anyway: the step warns and falls
+          # back to `author_association`, a LOOSER authorisation test. So a scope
+          # error here degrades security rather than reddening -- if the warning
+          # "Could not read repository permission" starts appearing in these runs,
+          # treat it as this change's regression, not as noise.
+          #
+          # Nothing reads or writes repository content, so contents drops.
+          permission-issues: write
+          permission-pull-requests: read
+          permission-organization-projects: write
 
       - name: Decide the outcome and advance the card
         id: assess
