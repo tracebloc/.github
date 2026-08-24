@@ -1145,8 +1145,7 @@ repos:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml:
         exempt: *code_quality_caller_missing
-      customer-priority-bump.yml:
-        exempt: *customer_priority_bump_caller_missing
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
       fr-gate.yml:
         exempt: >-
           release-train drives the train and is exempt from riding it (RFC-BACKEND-1405 D1), so
@@ -1289,8 +1288,12 @@ repos:
         # (measured -- and `stale_exemptions()` in kanban-columns-check.py is a
         # different mechanism entirely, about workflow files that name board columns,
         # so it does not cover this file's anchors).
-        # `customer_priority_bump_caller_missing` is cited 3x and stays -- this repo's
-        # citation of it is NOT part of the flip.
+        # `customer_priority_bump_caller_missing` is cited 2x and stays -- this repo's
+        # citation of it is NOT part of the flip. (Was 3x until backend#2396 wired
+        # release-train's caller and this PR flipped that entry to `required`; the
+        # anchor is still cited by two repos, so it is NOT dead prose and must not
+        # be deleted. The count is stated here precisely so the next flip can tell
+        # the difference.)
         exempt: *kanban_closure_router_caller_missing
       set-pr-status.yml: required   # set-pr-status.yml
       wip-limit-check.yml:
