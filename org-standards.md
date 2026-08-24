@@ -9,7 +9,7 @@
 
 ### Branches & PRs
 
-- Branch model: `develop → staging → main`. Branch off `develop`; every PR targets `develop`. Never open PRs to `staging` or `main` — promotions are the release train's job. (Sole exception: the `docs` repo may target `main`.)
+- Branch model: `develop → staging → main`. Branch off `develop`; every PR targets `develop`. Never open PRs to `staging` or `main` — promotions are the release train's job. **Exception: a repo that publishes no artifact and has no deploy stages is `main`-only — `docs` and `rfcs`.** They are not on the release train, so a promotion gate has nothing to gate. `repo-inventory.yml` is the authority (`release_train: false` plus the single-branch exemption); this line follows it, not the reverse.
 - Before starting any task: `git fetch` and branch from the current tip of `develop` — never build on a stale checkout. A branch that lives more than a day gets `develop` merged back in before review. We move fast; stale starts mean silent divergence and duplicated work.
 - One self-contained change per PR. A few hundred changed lines reviews well; at 1000+ split it. Refactors ship in separate PRs from behavior changes.
 - Branches are short-lived (aim to merge within a day or two), single-author, and based on `develop` — no stacked PRs on top of other open PRs.
@@ -31,7 +31,7 @@
 
 ### Engineer kanban
 
-- Every ticket on the board carries a `Status` — no card sits at "No Status". New tickets start in `Backlog`. **Bugs are the exception:** label them `work-type:bug` (the Bug template does it) and put them straight into `Ready` — defects don't wait for refinement.
+- Every ticket on the board carries a `Status` — no card sits at "No Status". New tickets start in `Backlog`. **Bugs are the exception:** label them `work-type:bug` (the Bug template does it) and automation moves the card straight into `Ready` — defects don't wait for refinement. Three repos aren't wired for the label trigger yet (`.github`, `release-train`, `rfcs`); move the card yourself there.
 - Picking up work: the team coordinates. `Ready` is the refined queue — bugs excepted, per the line above — and the first choice when it's stocked; pulling from `Backlog` is normal when refinement hasn't caught up — say what you're taking.
 - Merging to `develop` moves the card to `On dev` automatically; there is no dev-side review.
 - Functional review happens once, on staging: when it passes, comment `/fr-pass` on the PR or drag the card to `Ready for prod`. Self-signoff is allowed.
