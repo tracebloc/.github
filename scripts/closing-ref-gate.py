@@ -152,8 +152,23 @@ SCOPE_RE = re.compile(r"^\s*[A-Za-z]+\s*\(([^()]*)\)\s*!?:")
 
 # A scope that is a bare ticket number: `fix(2218):`, `fix(#349):`.
 SCOPE_BARE_RE = re.compile(r"^#?(\d+)$")
-# A scope that names the repo: `fix(backend#2218):`, `fix(tracebloc/backend#2218):`.
-SCOPE_REPO_RE = re.compile(r"^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([A-Za-z0-9][A-Za-z0-9._-]*)#(\d+)$")
+# A scope that names the repo: `fix(backend#2218):`, `fix(tracebloc/.github#300):`.
+#
+# THE REPO CLASS ADMITS A LEADING DOT, same as PAREN_REPO_RE below and for the same
+# reason: `.github` starts with one. The requirement used to be stated only on that
+# pattern and missed here, and it was not a live defect -- PAREN_REPO_RE matches
+# ANYWHERE in the title, a scope is a parenthetical, so a `.github` scope was still
+# detected with the right repo and number. It reported `source='parenthetical'`
+# though, making a `.github` scope the one input whose label does not say where the
+# reference actually was.
+#
+# THE COINCIDENCE WAS LOAD-BEARING, which is why this is worth a character rather
+# than a note. Detection of a `.github` scope depended on PAREN_REPO_RE not being
+# anchored away from the scope position -- and narrowing it to stop double-matching
+# the scope is a natural future change. That would have silently stopped detecting
+# `.github`-scoped tickets: fail-open, on the one repo this gate lives in. Now the
+# two patterns agree and neither depends on the other's reach (Asad, .github#314).
+SCOPE_REPO_RE = re.compile(r"^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([A-Za-z0-9.][A-Za-z0-9._-]*)#(\d+)$")
 
 # A parenthetical anywhere in the title. `.github` starts with a dot, so the
 # repo character class must admit a leading one.

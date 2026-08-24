@@ -67,9 +67,13 @@ MUTATIONS = [
     ("a `#N` scope stops being a ticket",
      r'SCOPE_BARE_RE = re.compile(r"^#?(\d+)$")',
      r'SCOPE_BARE_RE = re.compile(r"^(\d+)$")'),
+    # Anchor updated when the repo class gained a leading dot (.github#314). Left as a
+    # separate entry from the leading-dot mutation below: this one makes the `#` optional
+    # (a bare word scope becomes a repo+number), that one removes the dot. Different
+    # properties, different cases.
     ("a scope that is a word is read as a repo plus a number",
-     r'SCOPE_REPO_RE = re.compile(r"^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([A-Za-z0-9][A-Za-z0-9._-]*)#(\d+)$")',
-     r'SCOPE_REPO_RE = re.compile(r"^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([A-Za-z0-9][A-Za-z0-9._-]*)#?(\d+)$")'),
+     r'SCOPE_REPO_RE = re.compile(r"^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([A-Za-z0-9.][A-Za-z0-9._-]*)#(\d+)$")',
+     r'SCOPE_REPO_RE = re.compile(r"^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([A-Za-z0-9.][A-Za-z0-9._-]*)#?(\d+)$")'),
     ("the same ticket named twice becomes two references",
      "    unique = []\n    for ref in refs:",
      "    unique = list(refs)\n    for ref in []:"),
@@ -178,6 +182,12 @@ MUTATIONS = [
     ("the bare-number remedy names a guessed repo instead of a placeholder",
      '"which repo owns it -- and will accept a link to any repo at that "\n                "number. Add `Closes <owner>/<repo>#%d` for the repo that actually "',
      '"which repo owns it -- and will accept a link to any repo at that "\n                "number. Add `Closes tracebloc/backend#%d` for the repo that actually "'),
+    # Reverts the one-character fix: the scope repo class stops admitting a leading
+    # dot, so a `.github` scope falls back to being rescued by PAREN_REPO_RE and
+    # reports source='parenthetical' again (Asad, .github#314).
+    ("the scope repo class stops admitting a leading dot",
+     '^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([A-Za-z0-9.][A-Za-z0-9._-]*)#(\\d+)$',
+     '^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([A-Za-z0-9][A-Za-z0-9._-]*)#(\\d+)$'),
 ]
 
 

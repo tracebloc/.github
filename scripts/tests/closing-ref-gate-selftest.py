@@ -456,6 +456,38 @@ check(
     "%r" % (_l2,),
 )
 
+# `.github` STARTS WITH A DOT, and the SCOPE pattern has to know that too (Asad,
+# .github#314). This was never a wrong ANSWER -- PAREN_REPO_RE matches anywhere in the
+# title and a scope is a parenthetical, so a `.github` scope was detected with the right
+# repo and number. It was a wrong LABEL (`source='parenthetical'`) resting on a
+# coincidence: that PAREN_REPO_RE is not anchored away from the scope position.
+# Narrowing it to stop double-matching the scope is a natural change, and it would have
+# silently stopped detecting `.github`-scoped tickets -- fail-open on the repo this gate
+# lives in. These cases pin `source`, so the two patterns can no longer drift apart
+# without a test saying so.
+_dot = gate.parse_title("ci(.github#300): arm the stale sweep")
+check(
+    "a .github scope is read AS A SCOPE, not rescued by the parenthetical pattern",
+    len(_dot) == 1 and _dot[0].repo == ".github" and _dot[0].number == 300
+    and _dot[0].source == "scope",
+    "%r" % (_dot,),
+)
+_dot_owner = gate.parse_title("ci(tracebloc/.github#300): arm the stale sweep")
+check(
+    "an owner-qualified .github scope keeps both the owner and source=scope",
+    len(_dot_owner) == 1 and _dot_owner[0].owner == "tracebloc"
+    and _dot_owner[0].repo == ".github" and _dot_owner[0].source == "scope",
+    "%r" % (_dot_owner,),
+)
+# THE OTHER DIRECTION, so the two rows above cannot be satisfied by a pattern that
+# calls everything a scope: a real parenthetical must still report `parenthetical`.
+_mixed = gate.parse_title("ci(.github#300): summary (tracebloc/.github#301)")
+check(
+    "scope and parenthetical are still distinguishable from each other",
+    [r.source for r in _mixed] == ["scope", "parenthetical"],
+    "%r" % (_mixed,),
+)
+
 verdict, lines = gate.evaluate(pr("chore(global_model): delete dead TF FLOPS path"))
 check("a title naming no ticket is NOTHING_NAMED, and passes", verdict == gate.NOTHING_NAMED)
 verdict, lines = gate.evaluate(
