@@ -18,10 +18,10 @@ out "protection.status" "$S"
 out "protection.required_status_checks" "$(jq -r 'if has("required_status_checks") then "PRESENT" else "ABSENT" end' /tmp/body.json 2>/dev/null || echo PARSE_FAIL)"
 out "protection.rsc.checks[]" "$(jq -r '(.required_status_checks.checks // []) | length | tostring' /tmp/body.json 2>/dev/null || echo PARSE_FAIL)"
 out "protection.rsc.contexts[]" "$(jq -r '(.required_status_checks.contexts // []) | length | tostring' /tmp/body.json 2>/dev/null || echo PARSE_FAIL)"
-out "protection.rsc.strict" "$(jq -r '.required_status_checks.strict // "ABSENT"' /tmp/body.json 2>/dev/null || echo PARSE_FAIL)"
-out "protection.enforce_admins" "$(jq -r '.enforce_admins.enabled // "ABSENT"' /tmp/body.json 2>/dev/null || echo PARSE_FAIL)"
-out "protection.rpr.count" "$(jq -r '.required_pull_request_reviews.required_approving_review_count // "ABSENT"' /tmp/body.json 2>/dev/null || echo PARSE_FAIL)"
-out "protection.req_conv_resolution" "$(jq -r '.required_conversation_resolution.enabled // "ABSENT"' /tmp/body.json 2>/dev/null || echo PARSE_FAIL)"
+out "protection.rsc.strict" "$(jq -r 'if (.required_status_checks//{})|has("strict") then (.required_status_checks.strict|tostring) else "ABSENT" end' /tmp/body.json 2>/dev/null || echo PARSE_FAIL)"
+out "protection.enforce_admins" "$(jq -r 'if has("enforce_admins") then (.enforce_admins.enabled|tostring) else "ABSENT" end' /tmp/body.json 2>/dev/null || echo PARSE_FAIL)"
+out "protection.rpr.count" "$(jq -r 'if (.required_pull_request_reviews//{})|has("required_approving_review_count") then (.required_pull_request_reviews.required_approving_review_count|tostring) else "ABSENT" end' /tmp/body.json 2>/dev/null || echo PARSE_FAIL)"
+out "protection.req_conv_resolution" "$(jq -r 'if has("required_conversation_resolution") then (.required_conversation_resolution.enabled|tostring) else "ABSENT" end' /tmp/body.json 2>/dev/null || echo PARSE_FAIL)"
 
 # --- 2. rulesets resolved for a branch (bricked-prs, same reader)
 S=$(req "repos/tracebloc/backend/rules/branches/main")

@@ -25,28 +25,8 @@ jobs:
         env:
           RESULTS: ${{ github.workspace }}/results.tsv
         run: printf 'variant\tprobe\tvalue\n' > "$RESULTS"
-      - name: Mint A-full-grant
-        id: tok-a
-        continue-on-error: true
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
-          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-      - name: Probe A-full-grant
-        continue-on-error: true
-        env:
-          GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
-          RESULTS: ${{ github.workspace }}/results.tsv
-        run: |
-          if [ -z "${{ steps.tok-a.outputs.token }}" ]; then
-            printf '%s\tMINT\tFAILED\n' 'A-full-grant' >> "$RESULTS"
-            exit 0
-          fi
-          printf '%s\tMINT\tOK\n' 'A-full-grant' >> "$RESULTS"
-          bash .github/scripts-probe/probe.sh '${{ steps.tok-a.outputs.token }}' 'A-full-grant'
-      - name: Mint B-admin-ro-quartet
-        id: tok-b
+      - name: Mint F-contents-write
+        id: tok-f
         continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -54,46 +34,23 @@ jobs:
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           permission-administration: read
-          permission-checks: read
-          permission-contents: read
+          permission-contents: write
           permission-pull-requests: read
-      - name: Probe B-admin-ro-quartet
+          permission-checks: read
+      - name: Probe F-contents-write
         continue-on-error: true
         env:
           GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
           RESULTS: ${{ github.workspace }}/results.tsv
         run: |
-          if [ -z "${{ steps.tok-b.outputs.token }}" ]; then
-            printf '%s\tMINT\tFAILED\n' 'B-admin-ro-quartet' >> "$RESULTS"
+          if [ -z "${{ steps.tok-f.outputs.token }}" ]; then
+            printf '%s\tMINT\tFAILED\n' 'F-contents-write' >> "$RESULTS"
             exit 0
           fi
-          printf '%s\tMINT\tOK\n' 'B-admin-ro-quartet' >> "$RESULTS"
-          bash .github/scripts-probe/probe.sh '${{ steps.tok-b.outputs.token }}' 'B-admin-ro-quartet'
-      - name: Mint C-no-administration
-        id: tok-c
-        continue-on-error: true
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
-          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          permission-checks: read
-          permission-contents: read
-          permission-pull-requests: read
-      - name: Probe C-no-administration
-        continue-on-error: true
-        env:
-          GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
-          RESULTS: ${{ github.workspace }}/results.tsv
-        run: |
-          if [ -z "${{ steps.tok-c.outputs.token }}" ]; then
-            printf '%s\tMINT\tFAILED\n' 'C-no-administration' >> "$RESULTS"
-            exit 0
-          fi
-          printf '%s\tMINT\tOK\n' 'C-no-administration' >> "$RESULTS"
-          bash .github/scripts-probe/probe.sh '${{ steps.tok-c.outputs.token }}' 'C-no-administration'
-      - name: Mint D-admin-plus-issues
-        id: tok-d
+          printf '%s\tMINT\tOK\n' 'F-contents-write' >> "$RESULTS"
+          bash .github/scripts-probe/probe.sh '${{ steps.tok-f.outputs.token }}' 'F-contents-write'
+      - name: Mint G-pr-write
+        id: tok-g
         continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -101,40 +58,142 @@ jobs:
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           permission-administration: read
+          permission-contents: read
+          permission-pull-requests: write
+          permission-checks: read
+      - name: Probe G-pr-write
+        continue-on-error: true
+        env:
+          GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
+          RESULTS: ${{ github.workspace }}/results.tsv
+        run: |
+          if [ -z "${{ steps.tok-g.outputs.token }}" ]; then
+            printf '%s\tMINT\tFAILED\n' 'G-pr-write' >> "$RESULTS"
+            exit 0
+          fi
+          printf '%s\tMINT\tOK\n' 'G-pr-write' >> "$RESULTS"
+          bash .github/scripts-probe/probe.sh '${{ steps.tok-g.outputs.token }}' 'G-pr-write'
+      - name: Mint H-plus-actions
+        id: tok-h
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+          permission-checks: read
+          permission-actions: read
+      - name: Probe H-plus-actions
+        continue-on-error: true
+        env:
+          GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
+          RESULTS: ${{ github.workspace }}/results.tsv
+        run: |
+          if [ -z "${{ steps.tok-h.outputs.token }}" ]; then
+            printf '%s\tMINT\tFAILED\n' 'H-plus-actions' >> "$RESULTS"
+            exit 0
+          fi
+          printf '%s\tMINT\tOK\n' 'H-plus-actions' >> "$RESULTS"
+          bash .github/scripts-probe/probe.sh '${{ steps.tok-h.outputs.token }}' 'H-plus-actions'
+      - name: Mint I-plus-issues
+        id: tok-i
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+          permission-checks: read
           permission-issues: write
-      - name: Probe D-admin-plus-issues
+      - name: Probe I-plus-issues
         continue-on-error: true
         env:
           GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
           RESULTS: ${{ github.workspace }}/results.tsv
         run: |
-          if [ -z "${{ steps.tok-d.outputs.token }}" ]; then
-            printf '%s\tMINT\tFAILED\n' 'D-admin-plus-issues' >> "$RESULTS"
+          if [ -z "${{ steps.tok-i.outputs.token }}" ]; then
+            printf '%s\tMINT\tFAILED\n' 'I-plus-issues' >> "$RESULTS"
             exit 0
           fi
-          printf '%s\tMINT\tOK\n' 'D-admin-plus-issues' >> "$RESULTS"
-          bash .github/scripts-probe/probe.sh '${{ steps.tok-d.outputs.token }}' 'D-admin-plus-issues'
-      - name: Mint E-contents-only
-        id: tok-e
+          printf '%s\tMINT\tOK\n' 'I-plus-issues' >> "$RESULTS"
+          bash .github/scripts-probe/probe.sh '${{ steps.tok-i.outputs.token }}' 'I-plus-issues'
+      - name: Mint J-contents-write-only
+        id: tok-j
         continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          permission-contents: read
-      - name: Probe E-contents-only
+          permission-contents: write
+      - name: Probe J-contents-write-only
         continue-on-error: true
         env:
           GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
           RESULTS: ${{ github.workspace }}/results.tsv
         run: |
-          if [ -z "${{ steps.tok-e.outputs.token }}" ]; then
-            printf '%s\tMINT\tFAILED\n' 'E-contents-only' >> "$RESULTS"
+          if [ -z "${{ steps.tok-j.outputs.token }}" ]; then
+            printf '%s\tMINT\tFAILED\n' 'J-contents-write-only' >> "$RESULTS"
             exit 0
           fi
-          printf '%s\tMINT\tOK\n' 'E-contents-only' >> "$RESULTS"
-          bash .github/scripts-probe/probe.sh '${{ steps.tok-e.outputs.token }}' 'E-contents-only'
+          printf '%s\tMINT\tOK\n' 'J-contents-write-only' >> "$RESULTS"
+          bash .github/scripts-probe/probe.sh '${{ steps.tok-j.outputs.token }}' 'J-contents-write-only'
+      - name: Mint K-plus-projects
+        id: tok-k
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+          permission-checks: read
+          permission-organization-projects: write
+      - name: Probe K-plus-projects
+        continue-on-error: true
+        env:
+          GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
+          RESULTS: ${{ github.workspace }}/results.tsv
+        run: |
+          if [ -z "${{ steps.tok-k.outputs.token }}" ]; then
+            printf '%s\tMINT\tFAILED\n' 'K-plus-projects' >> "$RESULTS"
+            exit 0
+          fi
+          printf '%s\tMINT\tOK\n' 'K-plus-projects' >> "$RESULTS"
+          bash .github/scripts-probe/probe.sh '${{ steps.tok-k.outputs.token }}' 'K-plus-projects'
+      - name: Mint L-ask-statuses
+        id: tok-l
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+          permission-checks: read
+          permission-statuses: read
+      - name: Probe L-ask-statuses
+        continue-on-error: true
+        env:
+          GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
+          RESULTS: ${{ github.workspace }}/results.tsv
+        run: |
+          if [ -z "${{ steps.tok-l.outputs.token }}" ]; then
+            printf '%s\tMINT\tFAILED\n' 'L-ask-statuses' >> "$RESULTS"
+            exit 0
+          fi
+          printf '%s\tMINT\tOK\n' 'L-ask-statuses' >> "$RESULTS"
+          bash .github/scripts-probe/probe.sh '${{ steps.tok-l.outputs.token }}' 'L-ask-statuses'
       - name: Render
         if: always()
         env:
