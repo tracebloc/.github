@@ -275,7 +275,8 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 # and an invisible file makes the coverage assertion pass vacuously.
 MUTATION_FILES := $(sort $(wildcard scripts/tests/*-mutations.py))
 MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
-                   mutation-bugbot-gate mutation-closing-ref-gate mutation-bug-to-ready
+                   mutation-bugbot-gate mutation-closing-ref-gate mutation-bug-to-ready \
+                   mutation-branch-owner
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -308,7 +309,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-pipefail-early-close \
                     selftest-bugbot-gate \
                     selftest-closing-ref-gate \
-                    selftest-bug-to-ready
+                    selftest-bug-to-ready \
+                    selftest-branch-owner
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -533,6 +535,23 @@ mutation-bug-to-ready-dry: guard-pyyaml
 .PHONY: selftest-git-reap
 selftest-git-reap:
 	bash scripts/tests/git-reap-selftest.sh
+
+# Branch OWNERSHIP, which git-reap above deliberately does not need: it reaps the
+# caller's OWN local branches, so "whose is it" never arises. Anything that
+# reasons about ownership across people -- a per-person report, a remote sweep --
+# calls `branch_owner.py`, and this is the tier that keeps that rule honest
+# (backend#2365). NO guard-pyyaml: the module imports only the standard library
+# and the suite stubs both of its seams, so there is nothing to install.
+.PHONY: selftest-branch-owner
+selftest-branch-owner:
+	$(PYTHON) scripts/tests/branch-owner-selftest.py
+
+.PHONY: mutation-branch-owner mutation-branch-owner-dry
+mutation-branch-owner:
+	$(PYTHON) scripts/tests/branch-owner-mutations.py
+
+mutation-branch-owner-dry:
+	$(PYTHON) scripts/tests/branch-owner-mutations.py --dry
 
 # ---- CI steps that need something a working tree does not have ----
 
