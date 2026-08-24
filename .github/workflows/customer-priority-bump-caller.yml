@@ -1,0 +1,45 @@
+name: Customer priority bump
+
+# THIN CALLER (backend#2396). This repo is the last of the three that were never
+# wired -- the others are `release-train` and `rfcs`.
+#
+# NAMED `-caller.yml`, NOT `customer-priority-bump.yml`. In this repo that path
+# already holds the REUSABLE, so a caller under the same name would overwrite the
+# thing it calls. This repo pairs `<name>.yml` with `<name>-caller.yml` throughout:
+# stale-backlog, set-pr-status, fr-gate, advance-deploy-env, code-quality,
+# fr-pass-comment, kanban-closure.
+#
+# THIS FILE SHIPS AHEAD OF THE `exempt` -> `required` FLIP, and that ordering is
+# forced rather than preferred -- the same deadlock #307 documented for the stale
+# sweep. The audit reads caller PRESENCE from a repo's audited branch via the API
+# (`--source-dir` covers only copies and reusables), so for `.github` itself the
+# caller does not exist on `develop` until this merges. Bundling the flip here would
+# fail `MISSING required caller` on its own PR, forever, because `gate` is required.
+#
+# KNOWN TRANSIENT: `exempt` plus a caller on the audited branch is ITSELF a finding
+# (caller-drift.py:2260), so this repo's audit goes red between this merge and the
+# flip. That window blocks every other GUARDED-file PR while it is open, so the flip
+# should follow immediately -- and anything already queued on a green audit (e.g.
+# .github#306) is better landed first.
+#
+# WHY NOW: .github#313 (backend#2348) added a second job to the reusable,
+# `bug-to-ready`, which moves a `work-type:bug` card from `Backlog` to `Ready`.
+# Without a caller, a bug filed in this repo still lands in `Backlog` -- the
+# refinement queue nobody pulls from. The exemption's stated blocker (backend#1408
+# P3: "three dead inputs and hard-codes the `priority` label") has expired: #1408 is
+# CLOSED COMPLETED, all four inputs are consumed, and the hard-coded `priority`
+# label is RFC-BACKEND-0008 D5 working as decided.
+#
+# NO INPUTS AND NO `permissions:` BLOCK, matching all 16 working callers and the
+# callee itself, which declares neither. Every input is defaulted
+# (`trigger-label`, `bug-label`, `project-number: 2`, `org: tracebloc`), and a
+# narrower grant than the callee needs fails the run at startup with no jobs.
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  bump:
+    uses: tracebloc/.github/.github/workflows/customer-priority-bump.yml@main
+    secrets: inherit
