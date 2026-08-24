@@ -153,6 +153,39 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          # LEAST PRIVILEGE, DERIVED FROM THIS JOB'S OWN CALLS (backend#2157).
+          # Without any `permission-*` the token carried the App's FULL installation
+          # grant -- contents:write included -- across every installed repo. The
+          # step below makes exactly five kinds of call, and this is the union of
+          # what they need:
+          #
+          #   organization(login:).projectV2 field/option lookup   projects  read
+          #   updateProjectV2ItemFieldValue                        projects  WRITE
+          #   repository.pullRequest(n).projectItems               PRs       read
+          #   pullRequest.closingIssuesReferences                  PRs       read
+          #   repository.issue(n) {state, projectItems} CROSS-REPO issues    read
+          #
+          # Nothing here reads or writes repository CONTENT: both checkouts above
+          # use `github.token` / `persist-credentials: false`, not this token. So
+          # contents drops entirely, along with administration/actions/checks read.
+          #
+          # `repositories:` STAYS UNNARROWED, and that is load-bearing rather than
+          # an oversight: the closing-issue advancement is deliberately cross-repo
+          # (a client or website PR routinely closes a `backend` issue -- see the
+          # backend#1600 block below), so a token scoped to the calling repo would
+          # read `Could not resolve` on precisely the cards this job exists to
+          # unstick. `organization-projects` is an ORG-level grant and is not
+          # narrowed by `owner:` alone either way.
+          #
+          # WHAT IS NOT PROVEN HERE. These are the scopes the calls DOCUMENT a need
+          # for, not scopes a run has exercised. An under-scoped token does not fail
+          # at mint time -- it fails at the call, which for this workflow means a
+          # card left behind its own shipped code. The first push to a tracked
+          # branch carrying a PR is the real test; if it reddens, read the failing
+          # call rather than widening the list back to a full grant.
+          permission-issues: read
+          permission-pull-requests: read
+          permission-organization-projects: write
 
       - name: Update project fields for each PR
         if: steps.env.outputs.env != '' && steps.prs.outputs.prs != ''
