@@ -78,8 +78,9 @@ for name, number in (("fix/bugbot-tier0-helm-prereqs", 395), ("fix/583-wire-ca-p
 params = list(inspect.signature(attribute).parameters)
 eq("attribute() takes no tip-author parameter",
    [p for p in params if "tip" in p and "author" in p], [])
-eq("attribute()'s parameters are the declared five", params,
-   ["branch", "tip_sha", "prs", "first_commit_author", "pr_list_problem"])
+eq("attribute()'s parameters are the declared six", params,
+   ["branch", "tip_sha", "prs", "first_commit_author", "pr_list_problem",
+    "first_commit_problem"])
 
 # ... and the fixup pusher's identity is nowhere in the answer, even though it
 # was handed in as the first-commit fallback.
@@ -114,6 +115,30 @@ empty = att("develop-backup-20231120T094000GMT", TIP, [], first_commit_author=""
 eq("no PR and no unique commit is unattributable",
    (empty.owner, empty.signal), (UNATTRIBUTABLE, "unattributable"))
 
+# A WITHHELD SIGNAL IS NOT A FINDING. When the caller could not trust the default
+# branch it passes no commit author -- and reporting "no commit not already on the
+# default branch" would be a fact about the branch, asserted from a check nobody
+# ran (Bugbot). The two refusals must read differently.
+withheld = att("old/thing", TIP, [], first_commit_author="",
+               first_commit_problem="the remote's default branch could not be confirmed")
+eq("a withheld commit signal refuses", withheld.signal, "unattributable")
+if "was not measured" in withheld.why and "could not be confirmed" in withheld.why:
+    ok("a withheld commit signal is reported as unmeasured, with the reason")
+else:
+    bad(f"a withheld commit signal was reported as a finding: {withheld.why!r}")
+if "no commit on this branch" not in withheld.why:
+    ok("the withheld refusal does not also claim the branch has no unique commits")
+else:
+    bad(f"the withheld refusal asserts an unmade finding: {withheld.why!r}")
+
+# ... and with the signal actually measured and genuinely empty, the other sentence
+# is the right one. Same inputs but no problem, so the two arms are pinned apart.
+measured = att("old/thing", TIP, [], first_commit_author="", first_commit_problem="")
+if "no commit on this branch" in measured.why:
+    ok("a measured-and-empty history says so, distinctly")
+else:
+    bad(f"the measured-empty refusal lost its own wording: {measured.why!r}")
+
 # --------------------------------------------------------------------------
 # 4. AMBIGUITY IS A REFUSAL, NOT A TIE-BREAK. Branch names get reused.
 # --------------------------------------------------------------------------
@@ -143,6 +168,16 @@ if "moved past" in overtook.why:
     ok("a genuinely overtaken head says so")
 else:
     bad(f"an overtaken head is not reported as such: {overtook.why!r}")
+
+# ... and the SAME distinction on the multi-author arm. "None is at the current tip"
+# is a comparison, so with no tip it is a claim about nothing (Bugbot).
+notip_reuse = att("fix/typo", "", [pr(10, "waqaskhanroghani", "fix/typo", "0" * 40),
+                                   pr(88, "aptracebloc", "fix/typo", "1" * 40)])
+eq("an absent tip with two authors still refuses", notip_reuse.signal, "unattributable")
+if "no tip was supplied" in notip_reuse.why:
+    ok("the reuse refusal does not claim a tip comparison it never made")
+else:
+    bad(f"the reuse refusal claims an unmade comparison: {notip_reuse.why!r}")
 
 # NOT "refuse anything with two PRs": one person, two PRs, is still that person.
 twice = att("fix/typo", TIP,

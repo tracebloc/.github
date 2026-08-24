@@ -109,6 +109,24 @@ MUTATIONS = [
      '                     else "no tip was supplied, so the PR head could not be compared")',
      '            moved = "the tip has moved past the PR head"'),
 
+    # --- the two Bugbot findings on the first review ----------------------
+    ("the reuse refusal claims a tip comparison it never made",
+     '            tail = ("and none is at the current tip" if tip_sha\n'
+     '                    else "and no tip was supplied to break the tie with")',
+     '            tail = "and none is at the current tip"'),
+    ("a withheld commit signal is reported as a finding about the branch",
+     '    if first_commit_problem:\n        return _refuse(\n'
+     '            "no pull request, and the oldest-commit signal was not measured: "\n'
+     '            f"{first_commit_problem}"\n        )',
+     '    if False:\n        return _refuse(\n'
+     '            "no pull request, and the oldest-commit signal was not measured: "\n'
+     '            f"{first_commit_problem}"\n        )'),
+    ("the withheld and measured-empty refusals collapse into one wording",
+     '            "no pull request, and the oldest-commit signal was not measured: "\n'
+     '            f"{first_commit_problem}"',
+     '            "no pull request, and no commit on this branch that is not already on the "\n'
+     '            f"default branch, so there is nothing to attribute{first_commit_problem}"'),
+
     # --- the default branch, which the FIRST-COMMIT signal is measured against
     ("a stale origin/HEAD is returned as trustworthy",
      '        return out, (f"the remote\'s default branch could not be confirmed, and {out} "\n'

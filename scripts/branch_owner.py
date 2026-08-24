@@ -152,6 +152,7 @@ def attribute(
     prs: list,
     first_commit_author: str = "",
     pr_list_problem: str = "",
+    first_commit_problem: str = "",
 ) -> Attribution:
     """Who owns `branch`, from the PR author first and never from the tip commit.
 
@@ -160,6 +161,8 @@ def attribute(
     commit on `branch` that is not on the default branch -- "" if there is none or
     it could not be read. `pr_list_problem`, if set, says why the PR list is not
     evidence of absence, and refuses every branch on the spot.
+    `first_commit_problem` says why the caller did not measure the oldest commit,
+    so a withheld signal is reported as withheld rather than as "no commits".
 
     There is deliberately no `tip_author` parameter. See the module docstring.
     """
@@ -207,9 +210,13 @@ def attribute(
         if len(by) > 1:
             # Branch names get reused. Guessing here is how one person's cleanup
             # reaches another person's work.
+            # SAME RULE AS THE `pr` ARM ABOVE: with no tip in hand, "none is at
+            # the current tip" asserts a comparison that never ran (Bugbot).
+            tail = ("and none is at the current tip" if tip_sha
+                    else "and no tip was supplied to break the tie with")
             return _refuse(
                 f"{len(prs)} pull requests share this head name with different authors "
-                f"({', '.join(sorted(by))}) and none is at the current tip"
+                f"({', '.join(sorted(by))}) {tail}"
             )
         return _refuse(
             f"the pull request(s) for this head ({_cite(prs)}) carry no author -- "
@@ -220,6 +227,17 @@ def attribute(
         return Attribution(first_commit_author, "first-commit",
                            "no pull request; author of the oldest commit not on the "
                            "default branch")
+
+    # "NO COMMITS" AND "NOBODY LOOKED" ARE DIFFERENT ANSWERS, and only one of them
+    # is a fact about the branch. A caller that withheld the signal -- because the
+    # default branch could not be confirmed, so `default..branch` would have been
+    # the wrong range -- says so here, and the refusal reports that instead of a
+    # finding from a check that never ran (Bugbot).
+    if first_commit_problem:
+        return _refuse(
+            "no pull request, and the oldest-commit signal was not measured: "
+            f"{first_commit_problem}"
+        )
 
     return _refuse(
         "no pull request, and no commit on this branch that is not already on the "
@@ -401,9 +419,7 @@ def main(argv: "list[str] | None" = None) -> int:
         usable = not problem and not default_problem
         att = attribute(name, sha, prs.get(name, []),
                         first_commit_author(f"origin/{name}", default) if usable else "",
-                        problem)
-        if att.signal == "unattributable" and default_problem and not problem:
-            att = att._replace(why=f"{att.why}; also, {default_problem}")
+                        problem, default_problem)
         out.append({"branch": name, "owner": att.owner, "signal": att.signal,
                     "why": att.why})
 
