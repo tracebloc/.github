@@ -393,14 +393,26 @@ check(
     any("linked nowhere" in line for line in lines),
     "%r" % (lines,),
 )
+# THESE TWO USED TO PIN THE DEFECT. `MEASURED_UNLINKED` is release-train#109, whose
+# title is a BARE `fix(2256)` -- so the gate cannot know the owning repo. The old
+# assertion demanded the message contain "Closes tracebloc/", which it satisfied only
+# because the remediation defaulted to `ref.repo or "backend"`. It looked correct here
+# by luck: backend#2256 IS the right ticket for #109. For release-train#95's `fix(90)`
+# the same default advises `tracebloc/backend#90` when the ticket is
+# release-train#90 -- and following it links the wrong issue, greens this gate, and
+# closes the wrong ticket on merge (Bugbot, .github#314).
+#
+# So a test asserting the guess is a test asserting the bug. It now asserts the honest
+# form instead: name the placeholder, not a repo.
 check(
-    "the unlinked message spells the full cross-repo form",
-    any("Closes tracebloc/" in line for line in lines),
+    "the bare-number unlinked message offers a placeholder, never a guessed repo",
+    any("<owner>/<repo>#2256" in line for line in lines)
+    and not any("Closes tracebloc/backend#2256" in line for line in lines),
     "%r" % (lines,),
 )
 check(
-    "the unlinked message warns that a bare `Closes #N` resolves locally",
-    any("resolve against THIS repo" in line for line in lines),
+    "the unlinked message still warns that a bare `Closes #N` resolves locally",
+    any("resolves against THIS repo" in line for line in lines),
     "%r" % (lines,),
 )
 
@@ -413,6 +425,35 @@ check(
     "the wrong-repo message names the trap and the remedy",
     any("wrong repository" in line and "Closes tracebloc/backend#304" in line for line in lines),
     "%r" % (lines,),
+)
+
+# THE REMEDY MUST NOT NAME A REPO THE GATE CANNOT KNOW (Bugbot, .github#314). A bare
+# title number is repo-agnostic by decision -- `_classify` accepts a link to ANY repo at
+# that number. An earlier remediation defaulted to `ref.repo or "backend"`, so a bare
+# `fix(90)` in `release-train` was advised to add `Closes tracebloc/backend#90`. Follow
+# that and the gate goes GREEN having linked the wrong issue, which merge then closes:
+# a remedy that manufactures the exact defect this gate exists to prevent.
+verdict, lines = gate.evaluate(pr("fix(90): summary"))
+check("a bare title number with no link FAILS", verdict == gate.FAIL, "%s" % verdict)
+_advice = " ".join(lines)
+check(
+    "the bare-number remedy does NOT hardcode a repo",
+    "tracebloc/backend#90" not in _advice,
+    "advice must not name a repo it cannot know: %r" % (lines,),
+)
+check(
+    "the bare-number remedy says the owning repo is unknown and must be supplied",
+    "cannot tell" in _advice and "<owner>/<repo>#90" in _advice,
+    "%r" % (lines,),
+)
+# The repo-qualified branch is unaffected: when the title DOES name a repo, the remedy
+# still names it. Asserted so the fix above cannot be "achieved" by dropping the repo
+# from every message.
+_v2, _l2 = gate.evaluate(pr("fix(2242): summary (backend#304)"))
+check(
+    "a repo-qualified title still gets a repo-qualified remedy",
+    any("Closes tracebloc/backend#304" in line for line in _l2),
+    "%r" % (_l2,),
 )
 
 verdict, lines = gate.evaluate(pr("chore(global_model): delete dead TF FLOPS path"))

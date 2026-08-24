@@ -171,6 +171,13 @@ MUTATIONS = [
     ("a malformed REPO/PR_NUMBER is guessed at instead of refused",
      '    if "/" not in repo or not number.isdigit():',
      '    if False and ("/" not in repo or not number.isdigit()):'),
+    # --- the remedy must not guess a repo (Bugbot, .github#314) --------------
+    # Reverts the FIX, not the prose around it: put a guessed repo back into the
+    # remedy a bare title number gets. This is the shape that greened the gate on a
+    # wrong link and closed the wrong ticket.
+    ("the bare-number remedy names a guessed repo instead of a placeholder",
+     '"which repo owns it -- and will accept a link to any repo at that "\n                "number. Add `Closes <owner>/<repo>#%d` for the repo that actually "',
+     '"which repo owns it -- and will accept a link to any repo at that "\n                "number. Add `Closes tracebloc/backend#%d` for the repo that actually "'),
 ]
 
 

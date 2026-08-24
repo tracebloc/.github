@@ -391,14 +391,36 @@ def evaluate(pr):
                 "the full form: `Closes tracebloc/%s#%d`."
                 % (_spell(ref), ref.number, ref.number, ref.repo, ref.number)
             )
-        else:
+        elif ref.repo is not None:
             lines.append(
                 "%s -- named in the title, linked nowhere. A title reference is "
                 "inert: GitHub creates a closing link only from a keyword in the "
                 "PR BODY. Add `Closes tracebloc/%s#%d` to the body -- and note that "
                 "a bare `Closes #%d` would resolve against THIS repo, not the "
                 "ticket's."
-                % (_spell(ref), ref.repo or "backend", ref.number, ref.number)
+                % (_spell(ref), ref.repo, ref.number, ref.number)
+            )
+        else:
+            # THE REMEDY MUST NOT NAME A REPO THE CHECK CANNOT KNOW. A bare title
+            # number is repo-agnostic by decision -- `_classify` returns LINKED for
+            # ANY repo at that number (see its comment: client-runtime#365's
+            # `fix(2218)` is backend#2218, release-train#95's `fix(90)` is
+            # release-train#90). An earlier version defaulted to
+            # `ref.repo or "backend"` and so advised `Closes tracebloc/backend#N`
+            # on every bare number. Following that advice on a `release-train`
+            # ticket links the WRONG issue, turns this check GREEN, and closes the
+            # wrong ticket on merge -- a remedy that manufactures the defect the
+            # gate exists to prevent (Bugbot, .github#314).
+            lines.append(
+                "%s -- named in the title, linked nowhere. A title reference is "
+                "inert: GitHub creates a closing link only from a keyword in the "
+                "PR BODY. The title names only a NUMBER, so this check cannot tell "
+                "which repo owns it -- and will accept a link to any repo at that "
+                "number. Add `Closes <owner>/<repo>#%d` for the repo that actually "
+                "owns the ticket (most internal work lives in `tracebloc/backend`, "
+                "but confirm it rather than assuming). A bare `Closes #%d` resolves "
+                "against THIS repo, which is only right when the ticket lives here."
+                % (_spell(ref), ref.number, ref.number)
             )
     lines.append("")
     lines.append(
