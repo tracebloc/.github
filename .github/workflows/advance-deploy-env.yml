@@ -183,6 +183,13 @@ jobs:
           # card left behind its own shipped code. The first push to a tracked
           # branch carrying a PR is the real test; if it reddens, read the failing
           # call rather than widening the list back to a full grant.
+          # SAME REQUIREMENT AS kanban-closure-router, AND FLAGGED ON NEITHER.
+          # This workflow calls `branch_status_map.py` too, which fetches the
+          # caller repo's `.kanban.yml` over the API with this token. Bugbot
+          # raised the missing `contents: read` on the router only; both have
+          # three call sites, so scoping one and not the other would have shipped
+          # the same silent mis-routing through the other writer.
+          permission-contents: read
           permission-issues: read
           permission-pull-requests: read
           permission-organization-projects: write

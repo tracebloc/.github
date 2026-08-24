@@ -75,10 +75,24 @@ jobs:
           # the Issues endpoints. So `pull-requests` stays at READ, which is all the
           # `projectItems` lookup on a PR needs.
           #
-          # Nothing here reads or writes repository content: the `.kanban.yml`
-          # override is fetched by `branch_status_map.py` and the checkout above
-          # runs with `persist-credentials: false`. So contents:write drops, with
-          # administration/actions/checks read.
+          # `contents: READ` IS REQUIRED, and the previous revision of this comment
+          # got it wrong in a way worth recording. It proved contents:WRITE could
+          # drop and then concluded nothing reads content either -- in the same
+          # sentence that names the read. `branch_status_map.py` fetches the
+          # `.kanban.yml` override over the API (`FETCHED, NOT READ OFF DISK,
+          # because the router never checks the repo out`) and is passed
+          # `$REPO_FULL` -- the CALLER's repo, not this one -- with
+          # `GH_TOKEN: steps.app-token.outputs.token`. `persist-credentials: false`
+          # applies to the `.github` checkout, which is not the repo being read.
+          #
+          # AND IT WOULD NOT HAVE FAILED LOUDLY. The mapper's own contract treats
+          # 404 as "no override" but REFUSES on any other fetch failure, and the
+          # call sites below wrap it in `if ! STATUS=$(...)` which falls to the
+          # holding state by design. So a 403 parks EVERY merged PR at
+          # `override-unusable` with a green job -- silent mis-routing fleet-wide.
+          # Found by Bugbot and confirmed by saadqbal on .github#324.
+          #
+          # contents:write still drops, as do administration/actions/checks read.
           #
           # `repositories:` STAYS UNNARROWED -- the closer lookup is cross-repo, as
           # the comment above already says, and `organization-projects` is an
@@ -89,6 +103,7 @@ jobs:
           # automation then sets to `Cancelled` (.github#157). The next closed PR or
           # issue in any repo is the real test; read the failing call before
           # widening this list.
+          permission-contents: read
           permission-issues: write
           permission-pull-requests: read
           permission-organization-projects: write
