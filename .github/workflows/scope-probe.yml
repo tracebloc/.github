@@ -1,0 +1,147 @@
+name: TEMP scope probe (backend#2157)
+
+# TEMPORARY. Measures, per token scope, WHICH FIELDS the branch-protection,
+# ruleset and repo-settings endpoints actually return. Deleted once measured.
+# Read-only: every call is a GET. Nothing is created, patched or deleted.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/scope-probe.yml'
+      - '.github/scripts-probe/**'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  checks: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Start results file
+        env:
+          RESULTS: ${{ github.workspace }}/results.tsv
+        run: printf 'variant\tprobe\tvalue\n' > "$RESULTS"
+      - name: Mint A-full-grant
+        id: tok-a
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+      - name: Probe A-full-grant
+        continue-on-error: true
+        env:
+          GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
+          RESULTS: ${{ github.workspace }}/results.tsv
+        run: |
+          if [ -z "${{ steps.tok-a.outputs.token }}" ]; then
+            printf '%s\tMINT\tFAILED\n' 'A-full-grant' >> "$RESULTS"
+            exit 0
+          fi
+          printf '%s\tMINT\tOK\n' 'A-full-grant' >> "$RESULTS"
+          bash .github/scripts-probe/probe.sh '${{ steps.tok-a.outputs.token }}' 'A-full-grant'
+      - name: Mint B-admin-ro-quartet
+        id: tok-b
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-administration: read
+          permission-checks: read
+          permission-contents: read
+          permission-pull-requests: read
+      - name: Probe B-admin-ro-quartet
+        continue-on-error: true
+        env:
+          GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
+          RESULTS: ${{ github.workspace }}/results.tsv
+        run: |
+          if [ -z "${{ steps.tok-b.outputs.token }}" ]; then
+            printf '%s\tMINT\tFAILED\n' 'B-admin-ro-quartet' >> "$RESULTS"
+            exit 0
+          fi
+          printf '%s\tMINT\tOK\n' 'B-admin-ro-quartet' >> "$RESULTS"
+          bash .github/scripts-probe/probe.sh '${{ steps.tok-b.outputs.token }}' 'B-admin-ro-quartet'
+      - name: Mint C-no-administration
+        id: tok-c
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-checks: read
+          permission-contents: read
+          permission-pull-requests: read
+      - name: Probe C-no-administration
+        continue-on-error: true
+        env:
+          GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
+          RESULTS: ${{ github.workspace }}/results.tsv
+        run: |
+          if [ -z "${{ steps.tok-c.outputs.token }}" ]; then
+            printf '%s\tMINT\tFAILED\n' 'C-no-administration' >> "$RESULTS"
+            exit 0
+          fi
+          printf '%s\tMINT\tOK\n' 'C-no-administration' >> "$RESULTS"
+          bash .github/scripts-probe/probe.sh '${{ steps.tok-c.outputs.token }}' 'C-no-administration'
+      - name: Mint D-admin-plus-issues
+        id: tok-d
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-administration: read
+          permission-issues: write
+      - name: Probe D-admin-plus-issues
+        continue-on-error: true
+        env:
+          GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
+          RESULTS: ${{ github.workspace }}/results.tsv
+        run: |
+          if [ -z "${{ steps.tok-d.outputs.token }}" ]; then
+            printf '%s\tMINT\tFAILED\n' 'D-admin-plus-issues' >> "$RESULTS"
+            exit 0
+          fi
+          printf '%s\tMINT\tOK\n' 'D-admin-plus-issues' >> "$RESULTS"
+          bash .github/scripts-probe/probe.sh '${{ steps.tok-d.outputs.token }}' 'D-admin-plus-issues'
+      - name: Mint E-contents-only
+        id: tok-e
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+      - name: Probe E-contents-only
+        continue-on-error: true
+        env:
+          GH_ADMIN: ${{ secrets.GITHUB_TOKEN }}
+          RESULTS: ${{ github.workspace }}/results.tsv
+        run: |
+          if [ -z "${{ steps.tok-e.outputs.token }}" ]; then
+            printf '%s\tMINT\tFAILED\n' 'E-contents-only' >> "$RESULTS"
+            exit 0
+          fi
+          printf '%s\tMINT\tOK\n' 'E-contents-only' >> "$RESULTS"
+          bash .github/scripts-probe/probe.sh '${{ steps.tok-e.outputs.token }}' 'E-contents-only'
+      - name: Render
+        if: always()
+        env:
+          RESULTS: ${{ github.workspace }}/results.tsv
+        run: |
+          echo '### Scope probe results' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat "$RESULTS" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat "$RESULTS"
