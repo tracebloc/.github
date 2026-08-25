@@ -386,15 +386,15 @@ shared_reasons:
   code_quality_caller_missing: &code_quality_caller_missing >-
     no code-quality caller. One of the nine missing callers named in backend#1415 and confirmed
     by measurement. UNREMEDIATED - this exemption is the finding, not a justification.
-    Down to THREE citations (claude-skills, release-train, rfcs): model-zoo and start-training
-    were remediated 2026-08-04 under backend#1420 (model-zoo#115, start-training#32), and docs
-    the same day (docs code-quality-caller.yml), so all three are now `required`. Their
-    exemptions going stale is what the drift guard caught -- adding a caller without flipping
-    its entry is the same two-file coupling as repos.yml vs release_train.
-    The previous revision of this text also said THREE and named claude-skills, docs and
-    release-train while FOUR entries pointed at the anchor: `rfcs` was added later in the same
-    session and never listed. A hand-maintained citation list drifts from its own aliases, so
-    trust `grep -n '\*code_quality_caller_missing'` over this sentence.
+    Down to TWO citations (claude-skills, release-train): model-zoo and start-training were
+    remediated 2026-08-04 under backend#1420 (model-zoo#115, start-training#32), docs the same
+    day (docs code-quality-caller.yml), and `rfcs` on 2026-08-25 (rfcs#51), so all four are now
+    `required`. Their exemptions going stale is what the drift guard caught -- adding a caller
+    without flipping its entry is the same two-file coupling as repos.yml vs release_train.
+    A hand-maintained citation list drifts from its own aliases, and this sentence has now been
+    wrong about its own reach twice: it said THREE while FOUR entries pointed here, and before
+    that named claude-skills, docs and release-train when docs was already remediated. Trust
+    `grep -n '\*code_quality_caller_missing'` over it.
   fr_pass_comment_caller_missing: &fr_pass_comment_caller_missing >-
     no fr-pass-comment caller, so a kanban card in this repo can only be advanced by hand.
     ONE citation, claude-skills. Re-measured on it 2026-08-21 --
@@ -1177,22 +1177,30 @@ repos:
     visibility: private
     release_train: false
     protection:
-      develop:
-        # WAS the `no_develop_branch_single_branch_repo` anchor, false here and
-        # measured so on 2026-08-22 (backend#2242): `rfcs` HAS a `develop`, and it
-        # takes merges -- #32, #33, #34, #35, #36 and #38 all merged into it, while
-        # #37, #39 and #40 went to `main`. That anchor is correct for `release-train`
-        # (no `develop` at all, 404) and wrong for this repo, so it was one anchor
-        # describing two different situations.
-        #
-        # The accurate anchor already existed. `develop` here exists, carries NO
-        # protection (classic 404, zero matching rules), and nothing promotes out of
-        # it -- which is `develop_unprotected_non_train` exactly, including its
-        # "UNREMEDIATED" framing. Note `no_develop_branch_single_branch_repo`'s own
-        # text says the guard cannot tell these two apart ("a `develop` created and
-        # left UNPROTECTED is not flagged"), so this correction is human-only work:
-        # no check was going to surface it.
-        exempt: *develop_unprotected_non_train
+      # FLIPPED 2026-08-25. `develop` was protected the same day -- 1 review,
+      # dismiss stale, no force-pushes, no deletions, `enforce_admins: false`,
+      # mirroring `rfcs/main` -- which closed the gap this cell had recorded as
+      # UNREMEDIATED under `develop_unprotected_non_train`.
+      #
+      # It also left the cell with NO true value, which is why the repair took
+      # three steps and not one edit:
+      #
+      #   `exempt`   went stale the instant the branch was protected. Measured
+      #              live 2026-08-25: "protection.develop is `exempt` but develop
+      #              exists and is protected by classic protection" -- exit 1,
+      #              and the fleet's ONLY finding.
+      #   `required` reported two, because the develop policy asserts
+      #              `require_conversation_resolution: true` and the three
+      #              `quality / *` contexts, and the branch had neither. It could
+      #              not have had the contexts: `rfcs` had no code-quality caller
+      #              to report them (`code_quality_caller_missing`, below).
+      #
+      # Order, per this file's own header: producer, then protection, then the
+      # entry. rfcs#51 added the caller on `main` -- the branch this guard reads
+      # for a non-train repo -- and its three contexts reported green there;
+      # `rfcs/develop` was then armed with conversation resolution and those
+      # three as required checks; this cell records the result.
+      develop: required
       staging:
         exempt: *no_staging_branch_not_on_train
       prod:
@@ -1204,13 +1212,22 @@ repos:
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
-          # The same is true of the three `quality / *` contexts, including
-          # `quality / action-pins` added to the baseline by backend#1976: they
-          # are reported by the code-quality caller, which this repo records as
-          # `exempt: *code_quality_caller_missing` above. Requiring a context
-          # nothing reports leaves every PR pending forever (client#665), so
-          # this cell drops them BECAUSE the producer is absent, not because the
-          # rule was judged not to matter here.
+          #
+          # The three `quality / *` contexts are a DIFFERENT case, and this note
+          # used to conflate them with `gate / gate`. It read that they are
+          # dropped "BECAUSE the producer is absent" -- true while
+          # `code-quality.yml` was exempt here, false from rfcs#51 onward. The
+          # caller now reports `quality / gitleaks`, `quality / house-rules` and
+          # `quality / action-pins` on this repo's `main`, all green, so the
+          # client#665 hazard (requiring a context nothing reports leaves every
+          # PR pending forever) no longer applies and cannot carry the cell.
+          #
+          # The honest statement is narrower: they are simply NOT ARMED on
+          # `main`. UNDECIDED, recorded as such rather than left reading as a
+          # structural impossibility -- `develop` was armed first because that
+          # is where the work lands, and arming `main` is a protection change
+          # nobody has taken yet. Do not read this `[]` as a decision that the
+          # rule does not matter here.
           required_checks: []
     rulesets:
       promotion_merge_commit_only:
@@ -1235,8 +1252,14 @@ repos:
       # deleted here rather than restated, following `stale_backlog_migration_in_flight`
       # (.github#293).
       advance-deploy-env.yml: required   # advance-deploy-env.yml
-      code-quality.yml:
-        exempt: *code_quality_caller_missing
+      # FLIPPED 2026-08-25 (rfcs#51). One of the nine callers backend#1415
+      # measured as missing, and the reason `protection.develop` above had no
+      # true value: the develop policy asserts three `quality / *` contexts and
+      # nothing in this repo reported any of them. The caller sits at
+      # `.github/workflows/code-quality-caller.yml` on `main` -- the branch this
+      # guard reads for a non-train repo -- with `soft-fail: false` and
+      # `action-pins-soft-fail: false`, the floor `caller_inputs` asserts.
+      code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
       fr-gate.yml:
         exempt: *no_staging_branch_no_hop_to_gate
