@@ -56,6 +56,57 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          # LEAST PRIVILEGE, DERIVED FROM THIS JOB'S OWN CALLS (backend#2157).
+          # Four steps share this token; this is the union of what they call:
+          #
+          #   repository.issue(n).timelineItems (closer lookup)   issues   read
+          #   organization().projectV2 fields/options             projects read
+          #   repository.pullRequest|issue(n).projectItems        PRs+issues read
+          #   updateProjectV2ItemFieldValue                       projects WRITE
+          #   gh issue comment (the D8 parked-card note)          Issues  WRITE
+          #   GET repos/{r}/labels/{name} (does it exist?)        Issues  read
+          #   POST repos/{r}/labels (create it)                   Issues  WRITE
+          #   POST repos/{r}/issues/{n}/labels                    Issues  write
+          #
+          # The last one lands on a PULL REQUEST in the sibling-merge case, and it
+          # still only needs `issues: write`: GitHub documents the label endpoints
+          # as "at least one of" Issues write / Pull requests write, and every
+          # shared action on a PR -- labels, assignees, milestones -- is served by
+          # the Issues endpoints. So `pull-requests` stays at READ, which is all the
+          # `projectItems` lookup on a PR needs.
+          #
+          # `contents: READ` IS REQUIRED, and the previous revision of this comment
+          # got it wrong in a way worth recording. It proved contents:WRITE could
+          # drop and then concluded nothing reads content either -- in the same
+          # sentence that names the read. `branch_status_map.py` fetches the
+          # `.kanban.yml` override over the API (`FETCHED, NOT READ OFF DISK,
+          # because the router never checks the repo out`) and is passed
+          # `$REPO_FULL` -- the CALLER's repo, not this one -- with
+          # `GH_TOKEN: steps.app-token.outputs.token`. `persist-credentials: false`
+          # applies to the `.github` checkout, which is not the repo being read.
+          #
+          # AND IT WOULD NOT HAVE FAILED LOUDLY. The mapper's own contract treats
+          # 404 as "no override" but REFUSES on any other fetch failure, and the
+          # call sites below wrap it in `if ! STATUS=$(...)` which falls to the
+          # holding state by design. So a 403 parks EVERY merged PR at
+          # `override-unusable` with a green job -- silent mis-routing fleet-wide.
+          # Found by Bugbot and confirmed by saadqbal on .github#324.
+          #
+          # contents:write still drops, as do administration/actions/checks read.
+          #
+          # `repositories:` STAYS UNNARROWED -- the closer lookup is cross-repo, as
+          # the comment above already says, and `organization-projects` is an
+          # org-level grant regardless.
+          #
+          # NOT PROVEN BY READING. An under-scoped token fails at the call site, and
+          # this workflow's failure mode is a card the built-in "Item closed"
+          # automation then sets to `Cancelled` (.github#157). The next closed PR or
+          # issue in any repo is the real test; read the failing call before
+          # widening this list.
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: read
+          permission-organization-projects: write
 
       - name: Determine target Status
         id: target
