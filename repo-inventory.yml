@@ -402,16 +402,22 @@ shared_reasons:
     Its own last line already said so, and the list outlived the advice.
     So the roster is DERIVED, never restated -- and the derivation is ANCHORED, because
     the unanchored form has the same defect the count had (saadqbal + Bugbot on
-    .github#332). `grep -n "exempt: \*code_quality_caller_missing"` returns FOUR lines
-    here: two real aliases and two comments that merely mention the anchor by name. A
-    reader following it lands back on "three or four", which is where this sentence
-    started. Match the alias in value position, at line start, and nothing else:
+    .github#332). ONE real alias remains -- `release-train` -- and the unanchored
+    `grep -n "exempt: \*code_quality_caller_missing"` returns THREE lines: that alias
+    plus two comments that merely mention the anchor by name. Those numbers were "FOUR
+    lines: two real aliases and two comments" until .github#335 flipped claude-skills,
+    which is the point of stating them: a count in prose is falsified by the next flip,
+    every time (Bugbot on .github#335). Match the alias in value position, at line
+    start, and nothing else:
         grep -nE '^\s*exempt: \*code_quality_caller_missing\s*$' repo-inventory.yml
+    The anchor stays because that one citation is genuine: `release-train` has no
+    code-quality caller (verified 2026-08-25).
     Remediation history, which is measurement rather than a tally: model-zoo and
     start-training were remediated 2026-08-04 under backend#1420 (model-zoo#115,
-    start-training#32), `docs` the same day (its own code-quality-caller.yml), and
-    `rfcs` on 2026-08-25 under backend#2498. Each went stale the same way -- a caller
-    added without flipping its entry, the same two-file coupling as repos.yml vs
+    start-training#32), `docs` the same day (its own code-quality-caller.yml), `rfcs`
+    on 2026-08-25 under backend#2498, and `claude-skills` on 2026-08-25 under
+    .github#335 (claude-skills#36 added the caller). Each went stale the same way -- a
+    caller added without flipping its entry, the same two-file coupling as repos.yml vs
     release_train -- which is what the drift guard catches.
   fr_pass_comment_caller_missing: &fr_pass_comment_caller_missing >-
     no fr-pass-comment caller, so a kanban card in this repo can only be advanced by hand.
@@ -718,13 +724,24 @@ repos:
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
-          # The same is true of the three `quality / *` contexts, including
-          # `quality / action-pins` added to the baseline by backend#1976: they
-          # are reported by the code-quality caller, which this repo records as
-          # `exempt: *code_quality_caller_missing` above. Requiring a context
-          # nothing reports leaves every PR pending forever (client#665), so
-          # this cell drops them BECAUSE the producer is absent, not because the
-          # rule was judged not to matter here.
+          # The three `quality / *` contexts are a DIFFERENT case, and this comment
+          # stated it wrongly until .github#335 (Bugbot). It said they are dropped
+          # "BECAUSE the producer is absent", citing
+          # `exempt: *code_quality_caller_missing`. That reason dies with the row
+          # above: this repo's `code-quality.yml` is now `required` because
+          # `code-quality-caller.yml` exists, so the contexts ARE produced here.
+          #
+          # The accurate reason is narrower, and measured: `claude-skills/main` carries
+          # NO required status checks at all (classic protection, empty `contexts`,
+          # measured 2026-08-25). This is non-train infra whose `main` is a working
+          # branch, so nothing is required there by decision -- the same decision as
+          # `enforce_admins: false` above, not a gap.
+          #
+          # The client#665 lesson still holds, but about ORDER rather than this cell:
+          # requiring a context nothing reports leaves every PR pending forever, so a
+          # caller becomes `required` BEFORE its contexts do, never the reverse.
+          # (`release-train` still carries the original wording, correctly -- it has no
+          # code-quality caller, so its producer really is absent.)
           required_checks: []
     rulesets:
       promotion_merge_commit_only:
@@ -735,10 +752,22 @@ repos:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
       advance-deploy-env.yml: required   # advance-deploy-env.yml
-      code-quality.yml:
-        exempt: *code_quality_caller_missing
+      code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
-      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-gate.yml:
+        exempt: >-
+          no fr-gate caller, and none is applicable: this repo has no staging branch and no
+          promotion PRs, which the `rulesets.promotion_merge_commit_only` reason in this same
+          entry already asserts. The fr-gate only reports on a PR targeting staging/main/master
+          as a promotion, so there is nothing here for it to gate. Structural, the same shape as
+          release-train's fr-gate reason.
+          WAS `required` until .github#335. The audit began reporting "MISSING required caller
+          for fr-gate.yml on develop" mid-review, and the caller is genuinely absent from the
+          repo. Flipping the row rather than restoring the caller is the call: a required caller
+          that cannot report leaves the row permanently red, and requiring a context nothing
+          produces is the client#665 defect this file warns about two entries up. If the caller
+          was removed by mistake, restore it and flip this back -- the remedy runs both ways and
+          the audit will say so either way.
       stale-backlog.yml: required   # stale-backlog-caller.yml
       fr-pass-comment.yml:
         exempt: *fr_pass_comment_caller_missing
