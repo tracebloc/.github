@@ -45,6 +45,34 @@ jobs:
       # one human's PAT. `owner:` yields an ORG-scoped installation token, which is
       # what an org-wide read needs. No fallback to the PAT: a fallback would let a
       # broken App path keep working silently.
+      #
+      # SCOPES WERE MEASURED, NOT DERIVED (backend#2157, 2026-08-24). This audit was
+      # exempted from `scripts/mint-scope.py` because the protection endpoints are
+      # known to DEGRADE rather than error -- a narrower token can answer 200 with
+      # fewer fields, and a missing field reads as "not configured", which would make
+      # a protected branch look unprotected on a green run. Reading the docs cannot
+      # settle that, so it was run: five token scopes against the real endpoints, then
+      # `scripts/bricked-prs.py` itself over backend + client-runtime + client +
+      # .github. At the five scopes below the script produces output IDENTICAL to the
+      # full grant -- 4 findings, `0 COULD NOT AUDIT`, exit 1.
+      #
+      # Two of the five are non-obvious and BOTH were verified by removal:
+      #
+      #   administration: read -- classic protection. Dropping it does not silently
+      #     empty the required set; `branches/{b}/protection` answers 403, which
+      #     read_protection() turns into an error (12 COULD NOT AUDIT, exit 2). It
+      #     also keeps the 404 on an UNPROTECTED branch reading "Branch not
+      #     protected", the fact read_protection() relies on to tell "no classic
+      #     protection" apart from "could not read".
+      #   actions: read -- NOT for any Actions API. `gh pr list --json
+      #     statusCheckRollup` resolves `commit.status` underneath, and without
+      #     actions:read GraphQL refuses that subfield on a PRIVATE repo while every
+      #     other scope here is untouched (3 COULD NOT AUDIT, exit 2). Nothing in the
+      #     docs connects the two; only removing it shows the link.
+      #
+      # The measurement drops contents from WRITE to read and removes issues:write and
+      # organization-projects:write entirely. Do not add them back to "be safe": this
+      # token reads, and the App holds bypass_reviews fleet-wide.
       - name: Mint an installation token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -52,6 +80,11 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          permission-administration: read # classic branch protection
+          permission-actions: read # statusCheckRollup -> commit.status (see above)
+          permission-checks: read # check-suites, the head-age clock
+          permission-contents: read # branch list, commit fallback clock
+          permission-pull-requests: read # the open-PR list and its rollup
       - name: Audit
         env:
           # Needs to read branch protection, rulesets and PRs across the org.
