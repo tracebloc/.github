@@ -25,7 +25,8 @@
 #   bricked-prs-selftest.yml  -> `selftest-bricked-prs`
 #   kanban-columns.yml        -> `selftest-kanban-columns`
 #   kanban-deploy-state-selftest.yml -> `selftest-kanban-deploy-state`
-#   selftests.yml             -> `selftests`, `mint-scope` AND `selftest-house-rules`
+#   selftests.yml             -> `selftests`, `mint-scope`, `reason-citations`
+#                                AND `selftest-house-rules`
 #     (the `selftests` required context runs all three. `selftests` + the fixture
 #      suites prove the rules CATCH; `mint-scope` proves the real workflows COMPLY.
 #      They disagree in either direction, so neither substitutes for the other.
@@ -105,6 +106,7 @@ help:
 	@echo "  selftests       all $(words $(SELFTEST_FILES)) gate selftests (+ the coverage assertion)"
 	@echo "  credential-scan gitleaks over the whole history, as code-quality.yml runs it"
 	@echo "  audit           caller-drift.py against the live org — needs a token"
+	@echo "  reason-citations  the live inventory's ticket citations — needs a token"
 	@echo
 	@echo "  Not reproducible locally, by construction:"
 	@echo "    conformance-gate.yml polls the API for caller-drift's verdict on a"
@@ -213,6 +215,25 @@ selftest-mint-scope: guard-pyyaml
 mint-scope: guard-pyyaml
 	$(PYTHON) scripts/mint-scope.py
 
+# reason-citations: a ticket cited by a repo-inventory exemption reason must still
+# be live (backend#2449). THREE targets, in three different tiers, because they
+# answer three different questions:
+#
+#   selftest-reason-citations   does the rule CATCH?      fixtures, offline, in `check`
+#   mutation-reason-citations   would the suite NOTICE?   `mutations`, in `check-all`
+#   reason-citations            does the INVENTORY comply? the live file, needs a token
+#
+# The third is NOT in `check` or `lint`, unlike `mint-scope` -- and that is the
+# only reason the two are wired differently. mint-scope reads workflow files off
+# disk; this one reads issue state from the API, so it needs `gh` authenticated
+# and the network. `make check` is the offline pre-push tier with an ~18 s budget,
+# and a target that can fail on somebody's train wifi does not belong in it. It
+# runs in CI from selftests.yml, where the App token is minted, and on demand
+# here -- the same split `audit` gets, for the same reason.
+.PHONY: reason-citations
+reason-citations: guard-pyyaml
+	$(PYTHON) scripts/reason-citations.py
+
 
 action-pins:
 	@set -e; \
@@ -276,7 +297,7 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 MUTATION_FILES := $(sort $(wildcard scripts/tests/*-mutations.py))
 MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-bugbot-gate mutation-closing-ref-gate mutation-bug-to-ready \
-                   mutation-branch-owner
+                   mutation-branch-owner mutation-reason-citations
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -306,6 +327,7 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns \
                     selftest-kanban-deploy-state selftest-git-reap \
                     selftest-mint-scope selftest-house-rules \
+                    selftest-reason-citations \
                     selftest-pipefail-early-close \
                     selftest-bugbot-gate \
                     selftest-closing-ref-gate \
@@ -512,6 +534,25 @@ mutation-closing-ref-gate:
 
 mutation-closing-ref-gate-dry:
 	$(PYTHON) scripts/tests/closing-ref-gate-mutations.py --dry
+
+# The reason-citation check (backend#2449). guard-pyyaml: it parses
+# repo-inventory.yml. The suite stubs `gh` on PATH, so neither of these two needs
+# a token or the network -- only the `reason-citations` target above does.
+.PHONY: selftest-reason-citations
+selftest-reason-citations: guard-pyyaml
+	$(PYTHON) scripts/tests/reason-citations-selftest.py
+
+# Measured on a laptop: the suite alone ~4 s (every case runs the checker as a
+# subprocess against a fixture inventory), the full mutation pass ~95 s for 23
+# mutations. Same split as every other runner -- the full pass rides the required
+# `selftests` context via `make mutations`, and `--dry` (anchor resolution only,
+# milliseconds) rides `make check`.
+.PHONY: mutation-reason-citations mutation-reason-citations-dry
+mutation-reason-citations:
+	$(PYTHON) scripts/tests/reason-citations-mutations.py
+
+mutation-reason-citations-dry:
+	$(PYTHON) scripts/tests/reason-citations-mutations.py --dry
 # The bug-label promotion (backend#2348). guard-pyyaml: the suite parses THREE
 # workflows -- it extracts the decision out of `customer-priority-bump.yml` by its
 # `# selftest:` markers, asserts `col_index` byte-identical to the router's, and
