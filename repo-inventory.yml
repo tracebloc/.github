@@ -402,16 +402,22 @@ shared_reasons:
     Its own last line already said so, and the list outlived the advice.
     So the roster is DERIVED, never restated -- and the derivation is ANCHORED, because
     the unanchored form has the same defect the count had (saadqbal + Bugbot on
-    .github#332). `grep -n "exempt: \*code_quality_caller_missing"` returns FOUR lines
-    here: two real aliases and two comments that merely mention the anchor by name. A
-    reader following it lands back on "three or four", which is where this sentence
-    started. Match the alias in value position, at line start, and nothing else:
+    .github#332). ONE real alias remains -- `release-train` -- and the unanchored
+    `grep -n "exempt: \*code_quality_caller_missing"` returns THREE lines: that alias
+    plus two comments that merely mention the anchor by name. Those numbers were "FOUR
+    lines: two real aliases and two comments" until .github#335 flipped claude-skills,
+    which is the point of stating them: a count in prose is falsified by the next flip,
+    every time (Bugbot on .github#335). Match the alias in value position, at line
+    start, and nothing else:
         grep -nE '^\s*exempt: \*code_quality_caller_missing\s*$' repo-inventory.yml
+    The anchor stays because that one citation is genuine: `release-train` has no
+    code-quality caller (verified 2026-08-25).
     Remediation history, which is measurement rather than a tally: model-zoo and
     start-training were remediated 2026-08-04 under backend#1420 (model-zoo#115,
-    start-training#32), `docs` the same day (its own code-quality-caller.yml), and
-    `rfcs` on 2026-08-25 under backend#2498. Each went stale the same way -- a caller
-    added without flipping its entry, the same two-file coupling as repos.yml vs
+    start-training#32), `docs` the same day (its own code-quality-caller.yml), `rfcs`
+    on 2026-08-25 under backend#2498, and `claude-skills` on 2026-08-25 under
+    .github#335 (claude-skills#36 added the caller). Each went stale the same way -- a
+    caller added without flipping its entry, the same two-file coupling as repos.yml vs
     release_train -- which is what the drift guard catches.
   fr_pass_comment_caller_missing: &fr_pass_comment_caller_missing >-
     no fr-pass-comment caller, so a kanban card in this repo can only be advanced by hand.
