@@ -395,8 +395,13 @@ shared_reasons:
     verifies that an issue cited in a reason is still OPEN, not that a tally is still
     right -- so a hand-maintained list here rots silently and always will.
     Its own last line already said so, and the list outlived the advice.
-    So the roster is DERIVED, never restated:
-        grep -n "exempt: \*code_quality_caller_missing" repo-inventory.yml
+    So the roster is DERIVED, never restated -- and the derivation is ANCHORED, because
+    the unanchored form has the same defect the count had (saadqbal + Bugbot on
+    .github#332). `grep -n "exempt: \*code_quality_caller_missing"` returns FOUR lines
+    here: two real aliases and two comments that merely mention the anchor by name. A
+    reader following it lands back on "three or four", which is where this sentence
+    started. Match the alias in value position, at line start, and nothing else:
+        grep -nE '^\s*exempt: \*code_quality_caller_missing\s*$' repo-inventory.yml
     Remediation history, which is measurement rather than a tally: model-zoo and
     start-training were remediated 2026-08-04 under backend#1420 (model-zoo#115,
     start-training#32), `docs` the same day (its own code-quality-caller.yml), and
