@@ -645,6 +645,58 @@ repos:
       CLAUDE.md: required
       ".cursor/BUGBOT.md": required
 
+  # ADDED 2026-08-25 (.github#332). `design-system-v2` was created at 11:35 that day,
+  # WHILE this PR was in review, and the audit went red on `active in tracebloc but
+  # absent from repo-inventory.yml`. That is backend#2498's second half in one sentence:
+  # `caller-drift` audits the LIVE FLEET rather than the diff, so `.github` can only
+  # merge at an instant when every repo in the org is conformant.
+  #
+  # IT COULD NOT BE ENTERED WHEN IT FIRST APPEARED, and that is worth recording. While
+  # the repo was empty the guard refused to audit it at all -- "An empty repo is a
+  # legitimate state, but it is not one this guard can audit" -- so an entry only moved
+  # the finding from `absent from repo-inventory.yml` to `repo has no branches`. Neither
+  # is fixable from this file. The entry became possible only once the repo got its
+  # first branch, which is the correct order: the inventory records measured reality,
+  # and there was nothing to measure.
+  #
+  # Every cell below is measured on `develop`, this repo's DEFAULT and only branch.
+  design-system-v2:
+    visibility: private
+    release_train: false
+    protection:
+      develop:
+        exempt: *develop_unprotected_non_train
+      staging:
+        exempt: *no_staging_branch_not_on_train
+      prod:
+        exempt: "No prod branch exists. `develop` is the DEFAULT and the only branch (measured 2026-08-25) - this repo has neither `staging` nor `main`, so there is no prod role for a policy to describe. Structural, not a gap."
+    rulesets:
+      promotion_merge_commit_only:
+        exempt: "Not on the release train: no staging or prod branch, so there are no promotion branches for a merge-method rule to protect."
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag today - no tag-triggered workflow and no v* tags cut (measured 2026-08-25). Revisit if `publish.yml` gains a tag trigger."
+    callers:
+      version-bump-gate.yml: required   # version-bump-gate-caller.yml
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      stale-backlog.yml: required   # stale-backlog-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
+      bugbot-gate.yml:
+        exempt: *bugbot_gate_rollout_pending
+    copies:
+      add-to-kanban.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
+
   claude-skills:
     visibility: private
     release_train: false
