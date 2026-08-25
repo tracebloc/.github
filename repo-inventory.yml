@@ -754,7 +754,20 @@ repos:
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
-      fr-gate.yml: required   # fr-gate-caller.yml
+      fr-gate.yml:
+        exempt: >-
+          no fr-gate caller, and none is applicable: this repo has no staging branch and no
+          promotion PRs, which the `rulesets.promotion_merge_commit_only` reason in this same
+          entry already asserts. The fr-gate only reports on a PR targeting staging/main/master
+          as a promotion, so there is nothing here for it to gate. Structural, the same shape as
+          release-train's fr-gate reason.
+          WAS `required` until .github#335. The audit began reporting "MISSING required caller
+          for fr-gate.yml on develop" mid-review, and the caller is genuinely absent from the
+          repo. Flipping the row rather than restoring the caller is the call: a required caller
+          that cannot report leaves the row permanently red, and requiring a context nothing
+          produces is the client#665 defect this file warns about two entries up. If the caller
+          was removed by mistake, restore it and flip this back -- the remedy runs both ways and
+          the audit will say so either way.
       stale-backlog.yml: required   # stale-backlog-caller.yml
       fr-pass-comment.yml:
         exempt: *fr_pass_comment_caller_missing
