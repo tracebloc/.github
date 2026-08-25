@@ -22,9 +22,14 @@
 # on merge. With the setting off, no cleanup command can ever reap the branch.
 #
 # REPORT-ONLY by design. It never PATCHes a repo: a settings change should be a
-# visible, deliberate act, and the token then only needs read access rather than
-# standing administration:write over every repo (see backend#1343 on
-# over-scoped credentials). The report tells you the one command to run.
+# visible, deliberate act, and the token then needs no repo-administration
+# permission at all (see backend#1343 on over-scoped credentials). The report
+# tells you the one command to run.
+#
+# It does still hold `contents: write`, which looks like a contradiction and is
+# not: GitHub returns the four merge-setting fields only to a caller with PUSH
+# access, so that grant buys this job a READ it cannot otherwise perform. Measured
+# 2026-08-24 -- the mint step below carries the numbers.
 
 name: Merge-settings drift
 
@@ -49,6 +54,37 @@ jobs:
       # not calls it makes, so no repo-administration permission is needed or asked
       # for. No fallback to the PAT: a fallback would let a broken App path keep
       # working silently.
+      #
+      # `contents: write` IS LOAD-BEARING AND IT IS NOT A TYPO. Read this before
+      # "fixing" it (backend#2157, measured 2026-08-24).
+      #
+      # `GET /repos/{owner}/{repo}` returns `allow_merge_commit`,
+      # `allow_squash_merge`, `allow_rebase_merge` and `delete_branch_on_merge` ONLY
+      # to a caller with PUSH access. For an App installation the push signal is
+      # `contents: write`. Everything else is a 200 with those four keys simply
+      # ABSENT -- no error, no warning, nothing in the status line to notice.
+      #
+      # Measured, not reasoned, because the shape of the failure is invisible to a
+      # green run. Six token scopes were run against the real endpoint and then this
+      # job's own audit loop over all 19 active repos:
+      #
+      #   contents: write            -> 19 readable, 0 unreadable  (same as the full grant)
+      #   contents: read             ->  0 readable, 19 unreadable
+      #   administration: read, no contents:write ->  0 readable, 19 unreadable
+      #   contents: write, no administration      -> 19 readable, 0 unreadable
+      #
+      # So `administration: read` is neither necessary NOR sufficient here, which is
+      # the opposite of what both this file and the report below used to say, and it
+      # is dropped. What the org listing needs (metadata) is implicit.
+      #
+      # This is the one grant backend#2157 set out to delete everywhere, and this is
+      # the one workflow that measurably cannot lose it. Swapping it to `read` does
+      # not fail loudly at mint time -- it fails 19 times inside the loop, where the
+      # non-boolean guard catches it and reddens the run. Loud, but only after the
+      # fact, and only because that guard exists.
+      #
+      # Still a real narrowing: administration:read, actions:read, checks:read,
+      # pull-requests:write and organization-projects:write all go.
       - name: Mint an installation token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -56,6 +92,8 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          permission-contents: write # a READ requirement, not a write one -- read the block above
+          permission-issues: write # the drift report comments on backend#1337
 
       # Needed for repo-inventory.yml, which the listing is cross-checked against
       # below. The sibling audits (caller-drift, standards-sync) check out for the
@@ -154,12 +192,18 @@ jobs:
             autodelete=$(printf '%s' "$settings" | cut -f4)
 
             # FAIL CLOSED on anything that is not a literal true/false. These
-            # four fields are only returned to a principal with admin on the
-            # repo, so a token that can LIST but not read settings gets a
-            # perfectly successful response with the keys absent — jq then
-            # yields empty strings, which match neither branch below and would
-            # have been silently counted as compliant. That is the same false
-            # all-clear the zero-repo guard above exists to prevent.
+            # four fields are only returned to a principal with PUSH access to
+            # the repo (`contents: write` on an App installation — measured
+            # 2026-08-24, backend#2157; it is NOT `administration`, which this
+            # comment claimed until then), so a token that can LIST but not read
+            # settings gets a perfectly successful response with the keys absent
+            # — jq then yields empty strings, which match neither branch below
+            # and would have been silently counted as compliant. That is the same
+            # false all-clear the zero-repo guard above exists to prevent.
+            #
+            # If every repo lands in `failed(unreadable)` at once, the token lost
+            # `contents: write`, not `administration: read`. That is the whole
+            # failure mode, and it looks like a settings problem.
             for value in "$merge" "$squash" "$rebase" "$autodelete"; do
               case "$value" in
                 true | false) ;;
@@ -279,10 +323,11 @@ jobs:
 
             if [ -n "$FAILED" ]; then
               printf '### Settings could not be read\n\n%s\n\n' "$FAILED"
-              printf 'These are NOT known to be compliant. The three merge fields are only returned\n'
-              printf 'to a principal with admin on the repo, so `(unreadable)` usually means the\n'
-              printf 'token lacks admin there rather than that anything is misconfigured. Fix the\n'
-              printf 'token permissions (or check the repo still exists), then re-run.\n\n'
+              printf 'These are NOT known to be compliant. The four merge fields are only returned\n'
+              printf 'to a principal with PUSH access, so `(unreadable)` usually means the token\n'
+              printf 'lost `contents: write` rather than that anything is misconfigured — and if\n'
+              printf 'EVERY repo is listed here, that is certainly what happened (backend#2157).\n'
+              printf 'Fix the token permissions (or check the repo still exists), then re-run.\n\n'
             fi
 
             printf '[Run log](%s)\n' "$RUN_URL"

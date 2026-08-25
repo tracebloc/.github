@@ -29,6 +29,9 @@ on:
       # ever checked by the daily cron.
       - ".github/workflows/kanban-archive.yml"
       - ".github/workflows/wip-limit-check.yml"
+      # backend#2348: its bug-to-ready job names `Backlog` and `Ready`, so a PR
+      # touching it must run this check rather than waiting for the daily cron.
+      - ".github/workflows/customer-priority-bump.yml"
       - ".github/workflows/kanban-columns.yml"
       # The mapping is an INPUT to the check now (backend#2243), so a PR that only
       # touches it must run this (Bugbot, .github#295) -- otherwise a new Status can

@@ -89,20 +89,46 @@ SCOPE_PREFIX = "permission-"
 # reported as a finding (see `stale_exemptions`).
 #
 # These rows are the pre-existing state this guard was written to stop growing, not
-# to fix in one commit: `fr-gate` is a required check on every promotion branch in
-# the fleet, and three of the others read branch protection, where a narrower token
-# is known to return LESS data rather than an error (the reason `caller-drift`
-# keeps a PAT at all -- ruleset `bypass_actors` is returned only to a write-access
-# caller). Downscoping those needs measurement per workflow, which is its own work.
+# to fix in one commit. Ten became six (advance-deploy-env, customer-priority-bump,
+# fr-pass-comment, kanban-closure-router -- derivable from their call sites), and
+# six became four.
+#
+# THE TWO JUST BURNT DOWN WERE THE ONES THAT COULD NOT BE DERIVED, and the reason
+# they could not is worth keeping (backend#2157, measured 2026-08-24). Their rows
+# said a narrower token may return LESS rather than erroring -- a 200 with a field
+# missing, which a checker reads as "not configured" on a green run. That was the
+# right worry, so it was measured rather than argued: token scopes minted against
+# the live endpoints, then each workflow's OWN script run at the candidate scope and
+# compared to the full grant, then each permission removed one at a time to prove it
+# was load-bearing. What came back was not what either row predicted:
+#
+#   bricked-prs -- branch protection does NOT degrade silently. Without
+#     `administration: read` it answers 403, which read_protection() reports as an
+#     error, so the audit fails closed exactly as designed. It narrowed to five READ
+#     scopes, output identical to the full grant.
+#   merge-settings-drift -- reads no branch protection at all; the row was wrong
+#     about which endpoint it even used. It reads `GET /repos/{o}/{r}`, and THAT is
+#     the endpoint that degrades silently: the four merge-setting fields are
+#     returned only to a caller with PUSH access, absent otherwise, 200 either way.
+#     `contents: write` is the one grant it measurably cannot lose -- the same grant
+#     this ticket set out to delete everywhere.
+#
+# So the silent-degradation risk was real, but attached to the other workflow. That
+# is the argument for measuring rather than reasoning, and it is why the four below
+# say what they say.
+#
+# The four left are left for a STATED reason, not for lack of time:
+#
+#   fr-gate, set-pr-status, standards-sync, kanban-reconcile -- high exposure
+#     (a required check fleet-wide, a caller in every repo, a contents:write sweep,
+#     the widest board surface). Each needs its own window so one bad scope does not
+#     redden the whole fleet at once.
+#
+# The distinction matters because it is the difference between an exemption that is
+# a to-do and one that is a decision. Do not fold them back together.
 EXEMPT = {
-    "advance-deploy-env.yml": "board writes + PR reads; scopes not yet measured",
-    "bricked-prs.yml": "reads branch protection; a narrower token may return less, not error",
-    "customer-priority-bump.yml": "issue label write; scopes not yet measured",
     "fr-gate.yml": "REQUIRED check on every promotion branch fleet-wide -- needs its own window",
-    "fr-pass-comment.yml": "board write + comment + run inspection; scopes not yet measured",
-    "kanban-closure-router.yml": "board write from issue/PR closure; scopes not yet measured",
     "kanban-reconcile.yml": "the weekly backstop -- widest board surface of the set",
-    "merge-settings-drift.yml": "reads branch protection; same caveat as bricked-prs",
     "set-pr-status.yml": "runs fleet-wide from every repo; largest exposure of the set",
     "standards-sync.yml": "writes CLAUDE.md across the fleet; contents:write is real here",
 }
