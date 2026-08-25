@@ -361,8 +361,13 @@ shared_reasons:
     data-ingestors#468).
 
   bugbot_gate_rollout_pending: &bugbot_gate_rollout_pending >-
-    bugbot-gate has ZERO callers anywhere in the org (measured 2026-08-23, immediately after
-    .github#305 landed the reusable). The reusable, its selftest and its mutation suite land
+    bugbot-gate had ZERO callers anywhere in the org when this anchor was written (measured
+    2026-08-23, immediately after .github#305 landed the reusable). THAT IS NO LONGER TRUE:
+    `claude-skills` took the first caller on 2026-08-25 (claude-skills#36, the backend#2284
+    pilot) and its row is now `required`, leaving this anchor cited by the OTHER repos only.
+    Re-derive the roster rather than trusting a count here:
+        grep -nE '^\s*exempt: \*bugbot_gate_rollout_pending\s*$' repo-inventory.yml
+    anchored deliberately -- the bare identifier also matches this paragraph (backend#2507). The reusable, its selftest and its mutation suite land
     first so the DERIVATION can be reviewed on its own - deriving the verdict from Bugbot's
     FINDINGS rather than trusting a status we do not control is the whole risk surface
     (backend#2284). The callers follow in the rollout PR.
@@ -743,8 +748,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
