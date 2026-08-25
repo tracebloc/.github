@@ -1192,7 +1192,22 @@ repos:
         # text says the guard cannot tell these two apart ("a `develop` created and
         # left UNPROTECTED is not flagged"), so this correction is human-only work:
         # no check was going to surface it.
-        exempt: *develop_unprotected_non_train
+        # FLIPPED 2026-08-25 (backend#2498). The exemption said `develop` "carries no
+        # branch protection", and that stopped being true. Measured today, `rfcs/develop`
+        # matches the `develop` baseline on EVERY key, so it needs no `divergent` cell:
+        #
+        #   classic_protection true | min_reviews 1 | bypass_reviews [] | strict false
+        #   block_force_pushes true | block_deletions true | require_conversation_resolution true
+        #   required_checks: quality/gitleaks, quality/house-rules, quality/action-pins
+        #
+        # `enforce_admins` is false and the baseline does not assert it on develop
+        # (backend#1276 D1 leaves it open), so that is conformant, not divergent.
+        #
+        # This is the anchor's own warning coming true: it describes a repo whose
+        # `develop` was created and left UNPROTECTED and says no check would surface
+        # the change. None did -- the row went stale silently, and only the promotion
+        # audit caught it.
+        required
       staging:
         exempt: *no_staging_branch_not_on_train
       prod:
@@ -1204,13 +1219,21 @@ repos:
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
-          # The same is true of the three `quality / *` contexts, including
-          # `quality / action-pins` added to the baseline by backend#1976: they
-          # are reported by the code-quality caller, which this repo records as
-          # `exempt: *code_quality_caller_missing` above. Requiring a context
-          # nothing reports leaves every PR pending forever (client#665), so
-          # this cell drops them BECAUSE the producer is absent, not because the
-          # rule was judged not to matter here.
+          # The three `quality / *` contexts are dropped too, but the REASON given
+          # here was wrong as of 2026-08-25 (backend#2498), so it is corrected rather
+          # than left standing. It said they are dropped "BECAUSE the producer is
+          # absent" -- the producer is NOT absent: `code-quality-caller.yml` is on
+          # `rfcs/main`, and the caller row below is now `required`.
+          #
+          # The cell stays `[]` because that IS the measured state: `rfcs/main`
+          # requires ZERO contexts (measured 2026-08-25). The list was accurate and
+          # only its justification had rotted -- the failure backend#2449 added the
+          # citation guard for, one field over.
+          #
+          # OPEN QUESTION, deliberately not decided here: now that the caller exists
+          # and reports those three contexts on every `rfcs` PR, `main` COULD require
+          # them. That is a protection change, not an inventory correction, so it is
+          # named here rather than made quietly.
           required_checks: []
     rulesets:
       promotion_merge_commit_only:
@@ -1235,8 +1258,12 @@ repos:
       # deleted here rather than restated, following `stale_backlog_migration_in_flight`
       # (.github#293).
       advance-deploy-env.yml: required   # advance-deploy-env.yml
-      code-quality.yml:
-        exempt: *code_quality_caller_missing
+      # FLIPPED 2026-08-25 (backend#2498). `code_quality_caller_missing` says the
+      # caller is absent, and it is not: `code-quality-caller.yml` is on `rfcs/main`,
+      # which is the branch this guard reads for a `release_train: false` repo (the
+      # audit reports `rfcs @ main`). Measured, because the branch decides the answer:
+      # it is NOT on `develop`, so a check against the wrong ref reads the opposite way.
+      code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
       fr-gate.yml:
         exempt: *no_staging_branch_no_hop_to_gate
