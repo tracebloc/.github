@@ -386,15 +386,23 @@ shared_reasons:
   code_quality_caller_missing: &code_quality_caller_missing >-
     no code-quality caller. One of the nine missing callers named in backend#1415 and confirmed
     by measurement. UNREMEDIATED - this exemption is the finding, not a justification.
-    Down to THREE citations (claude-skills, release-train, rfcs): model-zoo and start-training
-    were remediated 2026-08-04 under backend#1420 (model-zoo#115, start-training#32), and docs
-    the same day (docs code-quality-caller.yml), so all three are now `required`. Their
-    exemptions going stale is what the drift guard caught -- adding a caller without flipping
-    its entry is the same two-file coupling as repos.yml vs release_train.
-    The previous revision of this text also said THREE and named claude-skills, docs and
-    release-train while FOUR entries pointed at the anchor: `rfcs` was added later in the same
-    session and never listed. A hand-maintained citation list drifts from its own aliases, so
-    trust `grep -n '\*code_quality_caller_missing'` over this sentence.
+    THE COUNT AND THE NAMED LIST ARE GONE, and that is the fix rather than a smaller
+    number (Bugbot + saadqbal on .github#332). This sentence has now been wrong TWICE
+    in the same way: it said THREE and named claude-skills/docs/release-train while
+    FOUR entries pointed at the anchor (`rfcs` was added later in the same session and
+    never listed), and it said THREE and named `rfcs` again after backend#2498 flipped
+    `rfcs` to `required` and left TWO. Nothing checks a prose count -- `reason-citations.py`
+    verifies that an issue cited in a reason is still OPEN, not that a tally is still
+    right -- so a hand-maintained list here rots silently and always will.
+    Its own last line already said so, and the list outlived the advice.
+    So the roster is DERIVED, never restated:
+        grep -n "exempt: \*code_quality_caller_missing" repo-inventory.yml
+    Remediation history, which is measurement rather than a tally: model-zoo and
+    start-training were remediated 2026-08-04 under backend#1420 (model-zoo#115,
+    start-training#32), `docs` the same day (its own code-quality-caller.yml), and
+    `rfcs` on 2026-08-25 under backend#2498. Each went stale the same way -- a caller
+    added without flipping its entry, the same two-file coupling as repos.yml vs
+    release_train -- which is what the drift guard catches.
   fr_pass_comment_caller_missing: &fr_pass_comment_caller_missing >-
     no fr-pass-comment caller, so a kanban card in this repo can only be advanced by hand.
     ONE citation, claude-skills. Re-measured on it 2026-08-21 --
@@ -1230,10 +1238,13 @@ repos:
           # only its justification had rotted -- the failure backend#2449 added the
           # citation guard for, one field over.
           #
-          # OPEN QUESTION, deliberately not decided here: now that the caller exists
-          # and reports those three contexts on every `rfcs` PR, `main` COULD require
-          # them. That is a protection change, not an inventory correction, so it is
-          # named here rather than made quietly.
+          # TRACKED IN backend#2501, not left as a question in this file (saadqbal on
+          # .github#332). Now that the caller exists and reports those three contexts on
+          # every `rfcs` PR, `main` COULD require them -- `rfcs/develop` already does,
+          # which makes develop stricter than main here and backwards from the fleet.
+          # That is a protection change rather than an inventory correction, so it is a
+          # ticket: naming it in a comment is the same mechanism that just failed, and
+          # `reason-citations.py` can at least check that a cited issue is still open.
           required_checks: []
     rulesets:
       promotion_merge_commit_only:
