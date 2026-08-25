@@ -718,13 +718,24 @@ repos:
           # The fleet baseline names `gate / gate` -- the fr-gate, which only
           # exists on a promotion pipeline. This repo has none, so the baseline
           # cannot apply; the narrower set is stated rather than left implicit.
-          # The same is true of the three `quality / *` contexts, including
-          # `quality / action-pins` added to the baseline by backend#1976: they
-          # are reported by the code-quality caller, which this repo records as
-          # `exempt: *code_quality_caller_missing` above. Requiring a context
-          # nothing reports leaves every PR pending forever (client#665), so
-          # this cell drops them BECAUSE the producer is absent, not because the
-          # rule was judged not to matter here.
+          # The three `quality / *` contexts are a DIFFERENT case, and this comment
+          # stated it wrongly until .github#335 (Bugbot). It said they are dropped
+          # "BECAUSE the producer is absent", citing
+          # `exempt: *code_quality_caller_missing`. That reason dies with the row
+          # above: this repo's `code-quality.yml` is now `required` because
+          # `code-quality-caller.yml` exists, so the contexts ARE produced here.
+          #
+          # The accurate reason is narrower, and measured: `claude-skills/main` carries
+          # NO required status checks at all (classic protection, empty `contexts`,
+          # measured 2026-08-25). This is non-train infra whose `main` is a working
+          # branch, so nothing is required there by decision -- the same decision as
+          # `enforce_admins: false` above, not a gap.
+          #
+          # The client#665 lesson still holds, but about ORDER rather than this cell:
+          # requiring a context nothing reports leaves every PR pending forever, so a
+          # caller becomes `required` BEFORE its contexts do, never the reverse.
+          # (`release-train` still carries the original wording, correctly -- it has no
+          # code-quality caller, so its producer really is absent.)
           required_checks: []
     rulesets:
       promotion_merge_commit_only:
@@ -735,8 +746,7 @@ repos:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
       advance-deploy-env.yml: required   # advance-deploy-env.yml
-      code-quality.yml:
-        exempt: *code_quality_caller_missing
+      code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
       fr-gate.yml: required   # fr-gate-caller.yml
       stale-backlog.yml: required   # stale-backlog-caller.yml
