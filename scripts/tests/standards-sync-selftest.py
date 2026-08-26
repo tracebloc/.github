@@ -278,6 +278,87 @@ try:
 finally:
     sync.gh, sync.time.sleep = _real_gh, _real_sleep
 
+# ------------------------------------------------- _ensure_pr(): the PR title
+# WHY: the title had no coverage at all, and that is how it shipped naming
+# backend#1602 parenthetically. closing-ref-gate.py then refused every sync PR
+# the remediation opened -- 19 repos, all red, none of them mergeable. The rule
+# is not restated here: parse_title is imported from the REAL gate, so if the
+# gate's notion of "names a ticket" changes, this test moves with it.
+_gate_path = os.path.join(HERE, os.pardir, "closing-ref-gate.py")
+_gspec = importlib.util.spec_from_file_location("closing_ref_gate", _gate_path)
+if _gspec is None or _gspec.loader is None:
+    sys.exit(f"cannot import {_gate_path}")
+gate = importlib.util.module_from_spec(_gspec)
+_gspec.loader.exec_module(gate)
+
+try:
+    stub = GhScript([
+        (0, "", ""),                    # pr list -> no open PR
+        (0, "https://x/pull/7", ""),    # pr create
+        (0, "", ""),                    # pr edit --add-assignee
+    ])
+    sync.gh = stub
+    sync._ensure_pr("o/r", "head", "develop", 1602)
+    created = [c for c in stub.calls if "create" in c]
+    title = created[0][created[0].index("--title") + 1] if created else ""
+    body = created[0][created[0].index("--body") + 1] if created else ""
+
+    named = gate.parse_title(title)
+    record(bool(created) and not named,
+           "_ensure_pr: the PR title names no ticket the PR does not close",
+           f"title={title!r} -> closing-ref-gate.parse_title found {len(named)} ref(s); "
+           "any ref here would demand a closing link to an epic 19 PRs share")
+
+    # ALL THREE KEYWORD FAMILIES, not just "Closes". GitHub honours close/closes/
+    # closed, fix/fixes/fixed and resolve/resolves/resolved, case-insensitively, and
+    # any one of them creates the closing link. Asserting only "Closes" left the door
+    # this whole PR exists to shut: `Fixes tracebloc/backend#1602` would have passed
+    # and closed the epic on the first of nineteen merges (Asad, .github#345).
+    # Written here rather than imported because closing-ref-gate.py has no such
+    # constant to import -- it delegates to GitHub's computed
+    # closingIssuesReferences and never scans text. If it ever grows one, import it
+    # the way parse_title is imported above and delete this tuple.
+    CLOSING_KEYWORDS = (
+        "close", "closes", "closed",
+        "fix", "fixes", "fixed",
+        "resolve", "resolves", "resolved",
+    )
+
+    def closing_keyword_in(text: str) -> "str | None":
+        low = text.lower()
+        return next((k for k in CLOSING_KEYWORDS if f"{k} " in low), None)
+
+    found = closing_keyword_in(body)
+    record("backend#1602" in body and found is None,
+           "_ensure_pr: the body keeps traceability WITHOUT any closing keyword",
+           f"'Part of ...#1602' is a reference (mentions 1602={'backend#1602' in body}); "
+           f"closing keyword found={found!r} — any of {len(CLOSING_KEYWORDS)} forms would "
+           "close the epic on the first of nineteen merges")
+
+    # Mutation anchor for the check above: the scan must catch a family it is not
+    # named after, or it is just the old "Closes"-only assertion wearing a tuple.
+    _fx = closing_keyword_in("Fixes tracebloc/backend#1602")
+    _rs = closing_keyword_in("Resolves tracebloc/backend#1602")
+    _cl = closing_keyword_in("Closed tracebloc/backend#1602")
+    _pt = closing_keyword_in("Part of tracebloc/backend#1602")
+    record(bool(_fx) and _fx.startswith("fix")
+           and bool(_rs) and _rs.startswith("resolve")
+           and bool(_cl) and _cl.startswith("clos")
+           and _pt is None,
+           "_ensure_pr: the keyword scan catches all three families, not only close/",
+           f"Fixes -> {_fx!r}, Resolves -> {_rs!r}, Closed -> {_cl!r}, 'Part of' -> {_pt!r} "
+           "(stem-prefix, not equality: the trailing space in the probe means the "
+           "inflected form matches, so 'Fixes' resolves to 'fixes' and not 'fix')")
+
+    # Mutation anchor: prove the assertion above is live rather than vacuous.
+    # If parse_title cannot see a ticket in a title that plainly has one, the
+    # check would pass for the wrong reason and the bug would return unseen.
+    record(bool(gate.parse_title("docs(claude): sync org-standards block (backend#1602)")),
+           "_ensure_pr: the title assertion is not vacuous",
+           "the pre-fix title IS seen as naming a ticket, so a regression reddens")
+finally:
+    sync.gh = _real_gh
+
 # ---------------------------------------------------------------------- tally
 failed = [name for ok, name, _ in RESULTS if not ok]
 print(f"\n{len(RESULTS)} checks, {len(failed)} failed.")
