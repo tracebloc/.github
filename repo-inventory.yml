@@ -365,10 +365,10 @@ shared_reasons:
     2026-08-23, immediately after .github#305 landed the reusable). THAT HAS NOW CHANGED
     TWICE, and this sentence has had to be corrected each time -- which is the argument for
     not writing a count here at all. `claude-skills` took the first caller on 2026-08-25
-    (claude-skills#36, the backend#2284 pilot)(claude-skills#36, the backend#2284 pilot), and more have landed since --
-      deliberately NOT enumerated here, because that list is what went stale both
-      previous times.
-      This anchor is cited ONLY by the repos whose caller PR has not merged yet, and
+    (claude-skills#36, the backend#2284 pilot), and more have landed since --
+    deliberately NOT enumerated here, because that list is what went stale both
+    previous times.
+    This anchor is cited ONLY by the repos whose caller PR has not merged yet, and
     DO NOT TRUST THAT LIST EITHER -- re-derive it with the anchored grep below.
     DELETE THIS DEFINITION when that grep returns zero: an anchor left defined and uncited
     is dead prose, which this file treats as a defect rather than as harmless.
@@ -773,7 +773,7 @@ repos:
           DO NOT RESTORE IT. An earlier revision of this reason ended "if the caller was removed
           by mistake, restore it and flip this back", which reads as an open question and invites
           undoing a deliberate change; the remedy does NOT run both ways here (saadqbal via
-          Bugbot, backend#2516). Restoring it would require a context nothing produces, which is
+          saadqbal via Bugbot on the .github#334 staging hop). Restoring it would require a context nothing produces, which is
           the client#665 defect this file warns about two entries up.
       stale-backlog.yml: required   # stale-backlog-caller.yml
       fr-pass-comment.yml:
