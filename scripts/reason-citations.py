@@ -223,12 +223,21 @@ EXEMPT = {
     "tracebloc/backend#1816": "cited in the past tense: the ticket that made add-to-kanban v2.0.0 the fleet norm",
     "tracebloc/backend#1563": "cited in the past tense: the ticket version-bump-pr.yml was deleted under",
     "tracebloc/backend#1752": (
-        "cited in the past tense, as the provenance of the two live PRs blocked-gate would redden"
+        "cited in the past tense, as the provenance of the two PRs blocked-gate would have reddened"
     ),
     "tracebloc/backend#1975": "cited in the past tense: the ticket that armed frontend-app's Vitest contexts",
     "tracebloc/backend#1976": "cited in the past tense: the ticket that raised the action-pins baseline",
     "tracebloc/backend#1979": "cited in the past tense: the ticket that removed stale-backlog's column-blindness",
     "tracebloc/backend#2243": "cited in the past tense: the ticket that flipped release-train to `required`",
+    "tracebloc/client-runtime#192": (
+        "THE DEADNESS IS THE CONTENT. `blocked_gate_rollout_pending` names this PR as one of "
+        "two that blocked-gate would have reddened when the anchor was written. It was closed "
+        "unmerged on 2026-08-26, and the reason now SAYS so -- it does not lean on the PR "
+        "landing, it records that it did not. That is the opposite of the leaning-on-vapour "
+        "shape this guard exists to catch, so the citation stays and keeps the provenance. "
+        "If the reason is ever reworded back into the present tense, this exemption stops "
+        "describing it and should be deleted with the sentence"
+    ),
 }
 
 # The GraphQL field that answers "issue or PR?" in one read. `state` is

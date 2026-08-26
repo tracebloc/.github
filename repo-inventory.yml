@@ -355,10 +355,13 @@ shared_reasons:
     then, not a justification. That comparison used to name version_bump_pr_never_wired
     too; version-bump-pr.yml was DELETED under backend#1563 rather than wired, which is
     the other way this ends and the better one when nothing is calling it.
-    Arming is a briefing decision rather than a silent flip because two live PRs go red
-    the moment it is on - client#490 ("HOLD until v0.8.0 image") and client-runtime#192
-    ("DO NOT MERGE") - which is the gate working as intended (backend#1752,
-    data-ingestors#468).
+    Arming was a briefing decision rather than a silent flip: at the time this was
+    written two live PRs would have gone red the moment it was on, which is the gate
+    working as intended (backend#1752, data-ingestors#468). Neither is live now -
+    client#490 ("HOLD until v0.8.0 image") merged, and client-runtime#192 ("DO NOT
+    MERGE") was closed unmerged on 2026-08-26 - so treat those two as history rather
+    than as a standing reason to delay. Re-measure which blocked PRs are actually open
+    before arming; do not trust this sentence to still describe the fleet.
 
   bugbot_gate_rollout_pending: &bugbot_gate_rollout_pending >-
     bugbot-gate had ZERO callers anywhere in the org when this anchor was written (measured
