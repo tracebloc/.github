@@ -20,6 +20,7 @@ import contextlib
 import io
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -280,17 +281,58 @@ for runner in runners:
     except OSError as exc:
         bad("%s could not be read (%s)" % (runner.name, exc))
         continue
-    call = src.find("mutation_baseline.guard(")
+    # `.guard(` RATHER THAN `mutation_baseline.guard(`. The runner that mutates
+    # the guard itself must not import it from the working tree -- a run killed
+    # mid-mutation leaves a fail-open copy there, and asking that one whether
+    # the tree is clean adopts the corruption as the baseline (Bugbot, #340).
+    # It loads the SAME function from HEAD instead, so its call site reads
+    # `_guard_from_head().guard(`. Matching the method name keeps this check
+    # about what it is for -- is a guard consulted before the first write --
+    # rather than about how the module happened to be bound.
+    call = src.find(".guard(")
     write = src.find(".write_text(mutated")
     if call < 0:
-        bad("%s never calls mutation_baseline.guard()" % runner.name)
+        bad("%s never calls a baseline guard before writing" % runner.name)
     elif write < 0:
         bad("%s has no `.write_text(mutated` -- this check cannot locate its "
             "first write, so it cannot say the guard runs first" % runner.name)
     elif call > write:
         bad("%s calls the guard AFTER it starts writing" % runner.name)
     else:
-        ok("%s calls mutation_baseline.guard() before its first write" % runner.name)
+        ok("%s calls its baseline guard before its first write" % runner.name)
+
+# --- THE RUNNER THAT MUTATES THE GUARD MUST NOT IMPORT IT FROM THE TREE ------
+#
+# STRUCTURAL, and said so rather than dressed up as behavioural: the real proof
+# is running it against a corrupted tree, which cannot be done here without
+# corrupting this repo's own `mutation_baseline.py` mid-suite. What this pins is
+# the exact regression -- rebinding the working-tree copy (Bugbot, #340).
+#
+# Why it matters: a run killed mid-mutation leaves a fail-open `guard()` on
+# disk. `import mutation_baseline` binds THAT one, it certifies its own
+# corruption as clean, the runner captures the mutation as `pristine`, and the
+# `finally` writes it back permanently. Every later harness then imports a guard
+# that does not guard -- backend#2441's fail-open, inside the fix for it.
+self_runner = ROOT / "scripts" / "tests" / "mutation-baseline-mutations.py"
+try:
+    src = self_runner.read_text(encoding="utf-8")
+except OSError as exc:
+    bad("mutation-baseline-mutations.py could not be read (%s)" % exc)
+else:
+    imports_tree_copy = re.search(
+        r"^(?:import\s+mutation_baseline|from\s+mutation_baseline\s+import)",
+        src, re.M)
+    if imports_tree_copy:
+        bad("mutation-baseline-mutations.py imports mutation_baseline from the "
+            "working tree -- the copy it is about to mutate. A run killed "
+            "mid-mutation leaves a fail-open guard there and this adopts it")
+    else:
+        ok("mutation-baseline-mutations.py does not bind the working-tree guard")
+    if "HEAD:%s" in src and "git" in src:
+        ok("mutation-baseline-mutations.py reads its guard from HEAD instead")
+    else:
+        bad("mutation-baseline-mutations.py neither imports the tree copy nor "
+            "reads one from HEAD -- it is not guarding its baseline at all")
 
 print("\n%d passed, %d failed" % (P, F))
 sys.exit(1 if F else 0)

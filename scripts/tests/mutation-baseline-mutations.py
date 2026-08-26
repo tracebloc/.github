@@ -28,8 +28,52 @@ MOD = ROOT / "scripts" / "tests" / "mutation_baseline.py"
 SUITE = ROOT / "scripts" / "tests" / "mutation-baseline-selftest.py"
 
 sys.dont_write_bytecode = True
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import mutation_baseline  # noqa: E402
+
+
+def _guard_from_head():
+    """`mutation_baseline` AS COMMITTED, never as it sits in the tree.
+
+    THE RUNNER MUST NOT ASK THE MUTATED MODULE WHETHER IT IS MUTATED (Bugbot,
+    #340). This used to `import mutation_baseline` from disk and then hand that
+    same in-memory copy `mutation_baseline.py` to certify. A run killed
+    mid-mutation leaves a fail-open `guard()` on disk, so the import binds the
+    broken one, it certifies its own corruption as clean, `pristine` below
+    captures the MUTATION, and the `finally` writes it back for good. Every
+    other harness then imports a guard that no longer guards -- which is the
+    fail-open of backend#2441 exactly, one level up, in the fix for it.
+
+    Loading from HEAD is not a second copy of the rule (this file would then be
+    the thing that drifts). It is the SAME function, read from the one version
+    of it a mid-run kill cannot have touched.
+
+    FAILS CLOSED. No git, no HEAD, no such path at HEAD, or a file that will not
+    compile -> this exits rather than falling back to the working tree, because
+    the fallback is the defect.
+    """
+    rel = MOD.relative_to(ROOT).as_posix()
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(ROOT), "show", "HEAD:%s" % rel],
+            capture_output=True, text=True,
+        )
+    except OSError as exc:
+        sys.exit("mutation-baseline-mutations: git could not be run (%s), so "
+                 "%s cannot be read from HEAD. Refusing rather than trusting "
+                 "the working tree, which is what this runner mutates." % (exc, rel))
+    if proc.returncode != 0:
+        sys.exit("mutation-baseline-mutations: `git show HEAD:%s` failed (%s). "
+                 "Refusing rather than trusting the working tree." % (rel, proc.stderr.strip()))
+    module = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader("mutation_baseline_at_head", loader=None))
+    try:
+        exec(compile(proc.stdout, "HEAD:%s" % rel, "exec"), module.__dict__)
+    except Exception as exc:  # noqa: BLE001 - any failure here is "cannot tell"
+        sys.exit("mutation-baseline-mutations: %s at HEAD does not import "
+                 "(%s), so nothing trustworthy can certify the tree." % (rel, exc))
+    if not hasattr(module, "guard"):
+        sys.exit("mutation-baseline-mutations: %s at HEAD has no `guard`, so "
+                 "the baseline cannot be checked." % rel)
+    return module
 
 # (label, old, new)
 MUTATIONS = [
@@ -111,11 +155,12 @@ def apply_one(src, old, new):
 def main():
     dry = "--dry" in sys.argv
 
-    # This runner mutates the guard, so it guards itself with it. A previous run
-    # killed mid-mutation would otherwise leave a broken guard on disk and this
-    # would measure the suite against it -- the exact defect, one level up.
+    # This runner mutates the guard, so it guards itself WITH THE COMMITTED
+    # COPY -- see `_guard_from_head`. A previous run killed mid-mutation leaves
+    # a broken guard on disk; asking that one whether the tree is clean is the
+    # exact defect this whole change exists to close, one level up.
     if not dry:
-        rc = mutation_baseline.guard(ROOT, [MOD])
+        rc = _guard_from_head().guard(ROOT, [MOD])
         if rc:
             return rc
 
