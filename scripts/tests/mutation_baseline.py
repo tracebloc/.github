@@ -2,7 +2,7 @@
 """The baseline every mutation harness in this directory measures against
 (backend#2441).
 
-WHY THIS FILE EXISTS. All seven `*-mutations.py` runners work the same way: read
+WHY THIS FILE EXISTS. Every `*-mutations.py` runner works the same way: read
 the tracked file, write a mutation over it, run the suite, restore it in a
 `finally`. That `finally` covers a crash and an exception. It does not cover
 SIGKILL, a runner timeout, or a second harness racing the first in the same
@@ -25,7 +25,7 @@ which file it is and what to do about it.
 
 WHY DETECT RATHER THAN RELOCATE. The other shape -- copy the tree to a temp dir
 and never touch the tracked file -- is cleaner in principle and is what
-`release-train`'s runner does. It does not transplant here: two of the seven
+`release-train`'s runner does. It does not transplant here: two of the runner
 targets are whole-tree gates that call `git ls-files` in the directory they are
 pointed at, so a plain copy is not merely different, it REFUSES
 (`pipefail-early-close: 'git ls-files' failed ... refusing to report clean`,

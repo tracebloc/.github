@@ -268,7 +268,7 @@ with tempfile.TemporaryDirectory() as work:
 
 # --- EVERY runner IS GUARDED, derived from the directory --------------------
 #
-# Not a hand-written list of seven: a new `*-mutations.py` that overwrites a
+# Not a hand-written list: a new `*-mutations.py` that overwrites a
 # tracked file without calling the guard is the whole defect coming back, and a
 # restated list would not see it. Fails closed if the glob finds nothing.
 runners = sorted((ROOT / "scripts" / "tests").glob("*-mutations.py"))
