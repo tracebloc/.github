@@ -411,6 +411,37 @@ try:
     record(err2 is None and fell_back and warned,
            "_ensure_pr: a PAT that cannot see the repo falls back LOUDLY to the app",
            f"fell_back={fell_back} warned_about_gate={warned} err={err2}")
+    # AND THE ABSENT PAT IS LOUD TOO -- the case that was silent (Bugbot, #351).
+    # With PR_AUTHOR_TOKEN unset, `gh_as_pr_author` falls back to the caller's
+    # token, so the create SUCCEEDS as the app and `code == 0`. The loud branch
+    # above never fired: it requires code != 0 AND the token present, and this
+    # case has neither. An unmergeable app-authored PR was opened with nothing
+    # written anywhere -- the exact state backend#2594 exists to end.
+    #
+    # NOT PATCHED OUT: `gh_as_pr_author` is left REAL here so the fallback it
+    # performs is the real one. Only `gh` is scripted.
+    os.environ.pop("PR_AUTHOR_TOKEN", None)
+    sync.gh_as_pr_author = _real_as_author
+    plain3 = GhScript([list_no_pr, created, (0, "", "")])  # list, app create, assignee
+    sync.gh = plain3
+    buf3 = io.StringIO()
+    _stderr, sys.stderr = sys.stderr, buf3
+    try:
+        err3 = sync._ensure_pr("tracebloc/demo", "docs/x", "develop", 1602)
+    finally:
+        sys.stderr = _stderr
+    said = buf3.getvalue()
+    record(err3 is None and "::error::" in said and "bugbot-gate" in said
+           and "PR_AUTHOR_TOKEN" in said,
+           "_ensure_pr: an ABSENT PAT says so loudly instead of opening a silent "
+           "app-authored PR",
+           f"annotated={'::error::' in said} named_gate={'bugbot-gate' in said} "
+           f"named_secret={'PR_AUTHOR_TOKEN' in said} err={err3}")
+
+    # AND THE TWO PATHS SHARE ONE SENTENCE, so they cannot drift apart.
+    record(sync._APP_AUTHORED_CANNOT_MERGE in said,
+           "_ensure_pr: both fallbacks state the same consequence",
+           "the absent-PAT message does not carry the shared sentence")
 finally:
     sync.gh_as_pr_author = _real_as_author
     sync.gh = _real_gh

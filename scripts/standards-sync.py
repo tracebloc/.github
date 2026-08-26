@@ -115,6 +115,16 @@ def gh(*args: str) -> "tuple[int, str, str]":
     return proc.returncode, proc.stdout, proc.stderr
 
 
+#: The consequence both fallback paths have to state. ONE STRING, TWO CALLERS:
+#: the absent-PAT case and the PAT-cannot-see-this-repo case reach the same dead
+#: end, and two hand-written copies of that sentence is how one of them ends up
+#: saying something the other stopped meaning.
+_APP_AUTHORED_CANNOT_MERGE = (
+    "An app-authored PR CANNOT pass bugbot-gate -- Bugbot does not review "
+    "app-authored PRs -- so it waits its full 900s and then fails, forever."
+)
+
+
 def gh_as_pr_author(*args: str) -> "tuple[int, str, str]":
     """Run `gh` as the PAT owner when `PR_AUTHOR_TOKEN` is set, else as the caller.
 
@@ -399,15 +409,38 @@ def _ensure_pr(full: str, head: str, base: str, issue: int) -> "str | None":
                         # traceability without a closing link. Pinned by the selftest.
                         "--title", "docs(claude): sync the org-standards block",
                         "--body", body)
-    if code != 0 and os.environ.get("PR_AUTHOR_TOKEN", "").strip():
+    pat_present = bool(os.environ.get("PR_AUTHOR_TOKEN", "").strip())
+    if code == 0 and not pat_present:
+        # NO PAT AT ALL, AND THAT WAS THE SILENT CASE (Bugbot High, #351).
+        # `gh_as_pr_author` falls back to the caller's token when PR_AUTHOR_TOKEN
+        # is unset, so the create SUCCEEDS as the App -- `code == 0` -- and the
+        # branch below never fires, because it also requires the token to be
+        # present. The result was an app-authored PR opened with no annotation
+        # anywhere: exactly the unmergeable state backend#2594 exists to end,
+        # reproduced by the fix for it.
+        #
+        # It is also what this workflow's own `env:` comment already PROMISED --
+        # "absent, the script falls back to the App and says so loudly" -- which
+        # was a claim in prose standing where the check belonged.
+        #
+        # `::error::` rather than `::warning::` because this case is fleet-wide:
+        # a missing PAT makes EVERY PR in the sweep unmergeable, where a PAT that
+        # cannot see one repo costs one. Still non-fatal, so the sweep lands
+        # something rather than nothing -- the same trade the branch below makes.
+        sys.stderr.write(
+            f"::error::{full}: PR_AUTHOR_TOKEN is unset, so this PR was opened by "
+            f"the APP. {_APP_AUTHORED_CANNOT_MERGE} Set the RELEASE_TRAIN_PR_TOKEN "
+            f"secret on this workflow and re-run; every PR in this sweep has the "
+            f"same problem.\n"
+        )
+    if code != 0 and pat_present:
         # The PAT could not open it -- most often because this repo is missing from a
         # fine-grained token's repository list, which is what happened to
         # design-system-v2. Say so, then try the App so the sync still lands SOMETHING
         # rather than nothing.
         sys.stderr.write(
             f"::warning::{full}: PR-create as the PAT owner failed, falling back to the "
-            f"app: {err.strip()}. An app-authored PR CANNOT pass bugbot-gate -- Bugbot "
-            f"does not review app-authored PRs -- so add {full} to the "
+            f"app: {err.strip()}. {_APP_AUTHORED_CANNOT_MERGE} Add {full} to the "
             f"release-train-pr-author PAT's repository list and re-run.\n"
         )
         code, out, err = gh("pr", "create", "-R", full, "--base", base, "--head", head,
