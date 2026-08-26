@@ -309,11 +309,46 @@ try:
            f"title={title!r} -> closing-ref-gate.parse_title found {len(named)} ref(s); "
            "any ref here would demand a closing link to an epic 19 PRs share")
 
-    record("backend#1602" in body and "Closes" not in body,
-           "_ensure_pr: the body keeps traceability WITHOUT a closing keyword",
-           "'Part of ...#1602' is a reference; 'Closes' would close the epic on the "
-           f"first merge (body mentions 1602={'backend#1602' in body}, "
-           f"has Closes={'Closes' in body})")
+    # ALL THREE KEYWORD FAMILIES, not just "Closes". GitHub honours close/closes/
+    # closed, fix/fixes/fixed and resolve/resolves/resolved, case-insensitively, and
+    # any one of them creates the closing link. Asserting only "Closes" left the door
+    # this whole PR exists to shut: `Fixes tracebloc/backend#1602` would have passed
+    # and closed the epic on the first of nineteen merges (Asad, .github#345).
+    # Written here rather than imported because closing-ref-gate.py has no such
+    # constant to import -- it delegates to GitHub's computed
+    # closingIssuesReferences and never scans text. If it ever grows one, import it
+    # the way parse_title is imported above and delete this tuple.
+    CLOSING_KEYWORDS = (
+        "close", "closes", "closed",
+        "fix", "fixes", "fixed",
+        "resolve", "resolves", "resolved",
+    )
+
+    def closing_keyword_in(text: str) -> "str | None":
+        low = text.lower()
+        return next((k for k in CLOSING_KEYWORDS if f"{k} " in low), None)
+
+    found = closing_keyword_in(body)
+    record("backend#1602" in body and found is None,
+           "_ensure_pr: the body keeps traceability WITHOUT any closing keyword",
+           f"'Part of ...#1602' is a reference (mentions 1602={'backend#1602' in body}); "
+           f"closing keyword found={found!r} — any of {len(CLOSING_KEYWORDS)} forms would "
+           "close the epic on the first of nineteen merges")
+
+    # Mutation anchor for the check above: the scan must catch a family it is not
+    # named after, or it is just the old "Closes"-only assertion wearing a tuple.
+    _fx = closing_keyword_in("Fixes tracebloc/backend#1602")
+    _rs = closing_keyword_in("Resolves tracebloc/backend#1602")
+    _cl = closing_keyword_in("Closed tracebloc/backend#1602")
+    _pt = closing_keyword_in("Part of tracebloc/backend#1602")
+    record(bool(_fx) and _fx.startswith("fix")
+           and bool(_rs) and _rs.startswith("resolve")
+           and bool(_cl) and _cl.startswith("clos")
+           and _pt is None,
+           "_ensure_pr: the keyword scan catches all three families, not only close/",
+           f"Fixes -> {_fx!r}, Resolves -> {_rs!r}, Closed -> {_cl!r}, 'Part of' -> {_pt!r} "
+           "(stem-prefix, not equality: the trailing space in the probe means the "
+           "inflected form matches, so 'Fixes' resolves to 'fixes' and not 'fix')")
 
     # Mutation anchor: prove the assertion above is live rather than vacuous.
     # If parse_title cannot see a ticket in a title that plainly has one, the
