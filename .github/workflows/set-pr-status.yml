@@ -108,6 +108,28 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          # SCOPED TO WHAT THIS JOB ACTUALLY DOES (backend#2157). Without these
+          # it minted the App's ENTIRE permission set -- contents:write,
+          # issues:write, administration:read and the rest -- across every repo
+          # the installation covers, on every PR event in the fleet. Of the four
+          # mints backend#2157 left, this one has the largest exposure purely
+          # because of how often it runs.
+          #
+          # DERIVED FROM THE CALLS BELOW rather than copied from a template:
+          #   organization.projectV2 { fields }     -> projects, read
+          #   repository.pullRequest.projectItems   -> pull-requests, read
+          #   updateProjectV2ItemFieldValue         -> projects, WRITE
+          #
+          # NO `issues` SCOPE: this job is PR-only (`github.event.pull_request`).
+          # The second mint in this file already carries `permission-issues:
+          # read` because the closing-ref job reads the linked ISSUE -- the two
+          # differ because their calls differ, not by oversight.
+          #
+          # A PASSING MINT IS NOT THE PROOF. `release-train/add-to-kanban.yml`
+          # records why: "a mint can succeed with a scope the board write then
+          # needs and lacks". The evidence is a card that actually moves.
+          permission-pull-requests: read
+          permission-organization-projects: write
 
       - name: Update PR Status on project
         env:
