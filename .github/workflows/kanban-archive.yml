@@ -154,7 +154,7 @@ jobs:
           set -euo pipefail
           PROJECT_ID="${{ steps.ids.outputs.project_id }}"
           n=$(wc -l < terminal.ids | tr -d ' ')
-          if [ "$n" = "0" ]; then echo "Nothing to archive."; exit 0; fi
+          if [ "$n" = "0" ]; then echo "Nothing to archive."; fi
           if [ "$DRY_RUN" = "true" ]; then
             echo "DRY RUN - would archive $n terminal item(s)."
             exit 0
@@ -194,6 +194,24 @@ jobs:
             exit 1
           fi
 
+
+      # A SEPARATE STEP, AND THAT IS THE FIX (Bugbot High, #339). This block used
+      # to sit at the bottom of "Archive them", BELOW `if [ "$n" = "0" ]; then
+      # ... exit 0; fi`. So the one case it exists to catch -- a first read that
+      # finds nothing terminal because the credential cannot see it -- left the
+      # step before asserting anything, and the job went green having checked
+      # nothing. A guard reachable only when the bug is absent is not a guard.
+      # As its own step it runs whatever the archive did or did not do.
+      # NOT IN DRY RUN. A dry run archives nothing, so terminal cards are still
+      # there by construction and this would fail every time -- turning the
+      # preview into a permanent red that teaches people to ignore it. The
+      # assertion is about whether a REAL run left the board clean.
+      - name: Assert the board is clean
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
           # ASSERT THE BOARD IS CLEAN, not that the archive did what it saw
           # (backend#2526). Every guard above answers "did my writes succeed?" and
           # every one of them can answer yes while the board is untouched -- which is
@@ -213,7 +231,7 @@ jobs:
           # It fails CLOSED on an unreadable re-read too: zero parsed items is not
           # evidence of a clean board, so an empty result with a non-zero total is a
           # finding, not a pass.
-          left=0; reread_total=0; cursor="null"
+          left=0; reread_total=0; nullst_after=0; cursor="null"
           while :; do
             if [ "$cursor" = "null" ]; then
               # shellcheck disable=SC2016  # $names are GraphQL variables, not shell - keep literal
@@ -248,6 +266,10 @@ jobs:
               | select(.isArchived == false)
               | select(.fieldValueByName.name == "Prod" or .fieldValueByName.name == "Cancelled" or .fieldValueByName.name == "Done")]
               | length')))
+            nullst_after=$((nullst_after + $(echo "$OUT" | jq -r '[.data.organization.projectV2.items.nodes[]
+              | select(.isArchived == false)
+              | select(.fieldValueByName == null or .fieldValueByName.name == null)]
+              | length')))
             HAS_NEXT=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
             cursor=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.pageInfo.endCursor')
             [ "$HAS_NEXT" = "true" ] || break
@@ -259,5 +281,33 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$left" -ne 0 ]; then
             echo "::error::$left terminal item(s) remain un-archived after this run. The archive succeeded on what it could see, which is NOT the same as the board being clean -- see backend#2526."
+            exit 1
+          fi
+          # THE RE-READ IS THE SAME CREDENTIAL, SO IT SHARES THE BLIND SPOT
+          # (Bugbot High, #339). The comment above says a second read avoids
+          # comparing the first read against itself. That is true of the ITEM
+          # LIST and false of what actually made the incident invisible: the
+          # items WERE returned; their `Status` came back null for this
+          # credential, so they matched no terminal filter and `left` stayed 0.
+          # A second read with the same token reproduces that precisely, and
+          # then agrees with itself -- the trap the comment claims to dodge.
+          #
+          # Two things the terminal count alone cannot say are therefore findings:
+          #
+          #   1. A null Status on an UN-ARCHIVED item. It may be terminal and
+          #      this credential cannot tell. "Cannot tell" is not "clean". The
+          #      first read only ::warning::-ed on exactly this, which is the
+          #      silent skip backend#2526 exists to close, one layer further in.
+          #   2. A re-read that saw FEWER items than the first read. Both reads
+          #      are this credential's, so this cannot see what neither can; it
+          #      does catch a read that degraded mid-run, which would otherwise
+          #      lower `left` and read as the board having improved.
+          if [ "$nullst_after" -gt 0 ]; then
+            echo "::error::$nullst_after un-archived item(s) returned an unreadable Status on the post-archive re-read. They cannot be judged terminal, so this run CANNOT show the board is clean -- unverified is not verified-clean (backend#2526)."
+            exit 1
+          fi
+          first_total=$(cat seen.total)
+          if [ "$reread_total" -lt "$first_total" ]; then
+            echo "::error::the post-archive re-read saw $reread_total item(s) but the first read saw $first_total. A read that shrank mid-run lowers the terminal count for a reason that is not archiving, so this run cannot show the board is clean."
             exit 1
           fi
