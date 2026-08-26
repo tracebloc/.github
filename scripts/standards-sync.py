@@ -361,7 +361,13 @@ def _ensure_pr(full: str, head: str, base: str, issue: int) -> "str | None":
         "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"
     )
     code, out, err = gh("pr", "create", "-R", full, "--base", base, "--head", head,
-                        "--title", f"docs(claude): sync org-standards block (backend#{issue})",
+                        # NO TICKET IN THIS TITLE, deliberately. closing-ref-gate.py requires every
+                        # ticket a title names to appear in the PR's closingIssuesReferences,
+                        # and these PRs must NOT close #1602 -- one sync PR per repo, all
+                        # naming the same epic, means the first to merge closes it and the
+                        # rest re-close it. The body carries "Part of ..." instead, which is
+                        # traceability without a closing link. Pinned by the selftest.
+                        "--title", "docs(claude): sync the org-standards block",
                         "--body", body)
     if code != 0:
         return f"cannot open PR: {err.strip()}"

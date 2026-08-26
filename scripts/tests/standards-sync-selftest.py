@@ -278,6 +278,52 @@ try:
 finally:
     sync.gh, sync.time.sleep = _real_gh, _real_sleep
 
+# ------------------------------------------------- _ensure_pr(): the PR title
+# WHY: the title had no coverage at all, and that is how it shipped naming
+# backend#1602 parenthetically. closing-ref-gate.py then refused every sync PR
+# the remediation opened -- 19 repos, all red, none of them mergeable. The rule
+# is not restated here: parse_title is imported from the REAL gate, so if the
+# gate's notion of "names a ticket" changes, this test moves with it.
+_gate_path = os.path.join(HERE, os.pardir, "closing-ref-gate.py")
+_gspec = importlib.util.spec_from_file_location("closing_ref_gate", _gate_path)
+if _gspec is None or _gspec.loader is None:
+    sys.exit(f"cannot import {_gate_path}")
+gate = importlib.util.module_from_spec(_gspec)
+_gspec.loader.exec_module(gate)
+
+try:
+    stub = GhScript([
+        (0, "", ""),                    # pr list -> no open PR
+        (0, "https://x/pull/7", ""),    # pr create
+        (0, "", ""),                    # pr edit --add-assignee
+    ])
+    sync.gh = stub
+    sync._ensure_pr("o/r", "head", "develop", 1602)
+    created = [c for c in stub.calls if "create" in c]
+    title = created[0][created[0].index("--title") + 1] if created else ""
+    body = created[0][created[0].index("--body") + 1] if created else ""
+
+    named = gate.parse_title(title)
+    record(bool(created) and not named,
+           "_ensure_pr: the PR title names no ticket the PR does not close",
+           f"title={title!r} -> closing-ref-gate.parse_title found {len(named)} ref(s); "
+           "any ref here would demand a closing link to an epic 19 PRs share")
+
+    record("backend#1602" in body and "Closes" not in body,
+           "_ensure_pr: the body keeps traceability WITHOUT a closing keyword",
+           "'Part of ...#1602' is a reference; 'Closes' would close the epic on the "
+           f"first merge (body mentions 1602={'backend#1602' in body}, "
+           f"has Closes={'Closes' in body})")
+
+    # Mutation anchor: prove the assertion above is live rather than vacuous.
+    # If parse_title cannot see a ticket in a title that plainly has one, the
+    # check would pass for the wrong reason and the bug would return unseen.
+    record(bool(gate.parse_title("docs(claude): sync org-standards block (backend#1602)")),
+           "_ensure_pr: the title assertion is not vacuous",
+           "the pre-fix title IS seen as naming a ticket, so a regression reddens")
+finally:
+    sync.gh = _real_gh
+
 # ---------------------------------------------------------------------- tally
 failed = [name for ok, name, _ in RESULTS if not ok]
 print(f"\n{len(RESULTS)} checks, {len(failed)} failed.")
