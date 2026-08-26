@@ -92,6 +92,7 @@ jobs:
                 query($org: String!, $num: Int!) {
                   organization(login: $org) { projectV2(number: $num) {
                     items(first: 100) {
+                      totalCount
                       pageInfo { hasNextPage endCursor }
                       nodes { id isArchived
                         fieldValueByName(name: "Status") {
@@ -103,6 +104,7 @@ jobs:
                 query($org: String!, $num: Int!, $c: String!) {
                   organization(login: $org) { projectV2(number: $num) {
                     items(first: 100, after: $c) {
+                      totalCount
                       pageInfo { hasNextPage endCursor }
                       nodes { id isArchived
                         fieldValueByName(name: "Status") {
@@ -231,7 +233,7 @@ jobs:
           # It fails CLOSED on an unreadable re-read too: zero parsed items is not
           # evidence of a clean board, so an empty result with a non-zero total is a
           # finding, not a pass.
-          left=0; reread_total=0; nullst_after=0; cursor="null"
+          left=0; reread_total=0; nullst_after=0; declared_total=""; cursor="null"
           while :; do
             if [ "$cursor" = "null" ]; then
               # shellcheck disable=SC2016  # $names are GraphQL variables, not shell - keep literal
@@ -239,6 +241,7 @@ jobs:
                 query($org: String!, $num: Int!) {
                   organization(login: $org) { projectV2(number: $num) {
                     items(first: 100) {
+                      totalCount
                       pageInfo { hasNextPage endCursor }
                       nodes { id isArchived
                         fieldValueByName(name: "Status") {
@@ -250,6 +253,7 @@ jobs:
                 query($org: String!, $num: Int!, $c: String!) {
                   organization(login: $org) { projectV2(number: $num) {
                     items(first: 100, after: $c) {
+                      totalCount
                       pageInfo { hasNextPage endCursor }
                       nodes { id isArchived
                         fieldValueByName(name: "Status") {
@@ -260,6 +264,25 @@ jobs:
               echo "::error::the post-archive re-read failed, so this run cannot show the board is clean. Unverified is not verified-clean."
               exit 1
             fi
+            # FAIL CLOSED ON AN UNREADABLE CONNECTION. `nodes|length` renders a
+            # missing or null path as 0, so a query that returned no items at all
+            # would read as "nothing left to archive" and pass (Bugbot HIGH,
+            # backend#2528). Check the connection resolved before counting it.
+            if [ "$(echo "$OUT" | jq -r 'try (.data.organization.projectV2.items.nodes|type) catch "null"')" != "array" ]; then
+              echo "::error::the post-archive re-read returned no items array, so this run cannot show the board is clean. Unverified is not verified-clean."
+              exit 1
+            fi
+            # THE SERVER'S OWN COUNT, which is the only number in this job that does
+            # not come from the same credential's view of `nodes`. Comparing two
+            # same-credential reads catches a read that DEGRADED, never one that was
+            # incomplete in both -- the blindness this whole step exists to close.
+            page_tc=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.totalCount // "null"')
+            case "$page_tc" in
+              ''|null|*[!0-9]*)
+                echo "::error::the post-archive re-read did not return totalCount, so the completeness of this read cannot be established."
+                exit 1 ;;
+            esac
+            [ -z "$declared_total" ] && declared_total="$page_tc"
             n=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.nodes|length')
             reread_total=$((reread_total + n))
             left=$((left + $(echo "$OUT" | jq -r '[.data.organization.projectV2.items.nodes[]
@@ -304,6 +327,15 @@ jobs:
           #      lower `left` and read as the board having improved.
           if [ "$nullst_after" -gt 0 ]; then
             echo "::error::$nullst_after un-archived item(s) returned an unreadable Status on the post-archive re-read. They cannot be judged terminal, so this run CANNOT show the board is clean -- unverified is not verified-clean (backend#2526)."
+            exit 1
+          fi
+          # DID THIS READ SEE THE WHOLE BOARD? `totalCount` is the server's count of
+          # the connection; `reread_total` is what pagination actually yielded. They
+          # disagree exactly when items are being omitted from `nodes` while still
+          # being counted -- which is the credential-blind path, and it would
+          # otherwise land as a LOWER terminal count and read as success.
+          if [ "$reread_total" -ne "$declared_total" ]; then
+            echo "::error::the post-archive re-read paginated $reread_total item(s) but the server reports totalCount=$declared_total. Items are being omitted from the read, so a terminal card can exist that this run never judged -- this run cannot show the board is clean (backend#2528)."
             exit 1
           fi
           first_total=$(cat seen.total)
