@@ -107,12 +107,16 @@ MUTATIONS = [
         "author == SYNC_REVIEWER is refused",
     ),
     (
-        # The other half of the same gate: an unresolvable token must refuse
-        # rather than sail past into a comparison it cannot make.
-        "an unresolvable token stops being a refusal",
-        '''    if login is None:''',
-        '''    if False:''',
-        "an UNRESOLVABLE token refuses rather than guessing",
+        # The other half of the same gate, aimed at `author_login` rather than
+        # at the `is None` branch: skipping that branch crashes on
+        # `login.lower()`, which is red WITHOUT a verdict and tells the harness
+        # nothing. Making the resolver return a value it could not resolve is
+        # the same defect with a readable outcome -- the gate then compares a
+        # login GitHub never confirmed and lets the run proceed.
+        "an unresolvable token resolves to something anyway",
+        '''    return login if code == 0 and login else None''',
+        '''    return login or "unknown"''',
+        "an unresolvable token is None, not a guess",
     ),
 ]
 

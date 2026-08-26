@@ -483,7 +483,6 @@ finally:
     os.environ.pop(sync.AUTHOR_TOKEN_ENV, None)
 
 # ---------------------------------------------------------------------- tally
-failed = [name for ok, name, _ in RESULTS if not ok]
 
 # --------------------------------- the reviewer-is-not-the-author invariant,
 # --------------------------------- asked of the TOKEN rather than of a literal
@@ -618,6 +617,12 @@ try:
 finally:
     sync.gh = _real_gh
 
+# COMPUTED HERE, NOT EARLIER. This sat above the last hundred lines of checks,
+# so anything appended below it PRINTED its FAIL and did not count: the summary
+# read `0 failed` while two checks had failed, and the script exited 0. The
+# mutation harness is what surfaced it -- a gate mutation came back UNCAUGHT
+# because the suite it was measured against could not go red (#348).
+failed = [name for ok, name, _ in RESULTS if not ok]
 print(f"\n{len(RESULTS)} checks, {len(failed)} failed.")
 if failed:
     for name in failed:
