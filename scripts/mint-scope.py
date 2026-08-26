@@ -127,7 +127,6 @@ SCOPE_PREFIX = "permission-"
 # The distinction matters because it is the difference between an exemption that is
 # a to-do and one that is a decision. Do not fold them back together.
 EXEMPT = {
-    "fr-gate.yml": "REQUIRED check on every promotion branch fleet-wide -- needs its own window",
     "kanban-reconcile.yml": "the weekly backstop -- widest board surface of the set",
     "set-pr-status.yml": "runs fleet-wide from every repo; largest exposure of the set",
     "standards-sync.yml": "writes CLAUDE.md across the fleet; contents:write is real here",
