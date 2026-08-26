@@ -272,12 +272,20 @@ try:
         (1, "", "gh: Reference already exists (HTTP 422)"),   # branch REUSED, not fresh
         NOT_FOUND, NOT_FOUND,                          # absence, confirmed by one re-read
         (0, "{}", ""),                                 # sha-less PUT creates it
-        (0, "[]", ""),                                 # pr list
+        # EMPTY, not "[]" -- `--jq '.[0].number // empty'` returns an empty
+        # string when there is no open PR, and "[]" is TRUTHY. With the
+        # existing-PR path now also making two edit calls (#348), a "[]" here
+        # would send this test down that branch while still consuming the same
+        # number of stub entries -- passing while exercising the opposite case.
+        (0, "", ""),                                   # pr list -- none yet
         (0, "https://x/pull/1", ""),                   # pr create
+        (0, "", ""),                                   # pr edit --add-reviewer
+        (0, "", ""),                                   # pr edit --add-assignee
     ])
     sync.gh = stub
     try:
-        err = sync.remediate("o", "r", "develop", "content", 1602, file_on_base=True)
+        err = sync.remediate("o", "r", "develop", "content", 1602, file_on_base=True,
+                             author_token="pat-for-the-human")
         reads = [c for c in stub.calls if any("contents/CLAUDE.md?ref=" in str(a) for a in c)]
         record(err is None and len(reads) == 2,
                "reused branch: a genuine 404 is absence after ONE re-read, not a retry storm",
@@ -313,7 +321,7 @@ try:
     ])
     sync.gh = stub
     os.environ[sync.AUTHOR_TOKEN_ENV] = "pat-for-the-human"
-    sync._ensure_pr("o/r", "head", "develop", 1602)
+    sync._ensure_pr("o/r", "head", "develop", 1602, "pat-for-the-human")
     created = [c for c in stub.calls if "create" in c]
     title = created[0][created[0].index("--title") + 1] if created else ""
     body = created[0][created[0].index("--body") + 1] if created else ""
@@ -394,7 +402,7 @@ try:
     ])
     sync.gh = stub
     os.environ[sync.AUTHOR_TOKEN_ENV] = "pat-for-the-human"
-    err = sync._ensure_pr("o/r", "head", "develop", 1602)
+    err = sync._ensure_pr("o/r", "head", "develop", 1602, "pat-for-the-human")
 
     create_kw = stub.kwargs_for("create")
     list_kw = stub.kwargs_for("list")
@@ -421,15 +429,16 @@ try:
            f"reviewer={reviewer_edit} assignee={assignee_edit}")
 
     # THE REVIEWER MAY NOT BE THE AUTHOR. GitHub refuses an approving review from
-    # a PR's own author, so a sync PR authored by LukasWodka and reviewed by
-    # LukasWodka can never merge -- which is precisely the state 4 of the 14 open
-    # PRs were in before they were reassigned (docs#143, release-train#130,
-    # .github#344, claude-skills#39). Asserted against the PAT OWNER named in the
-    # workflow rather than a literal, so changing one and not the other reddens.
-    record(sync.SYNC_REVIEWER != "LukasWodka",
-           "_ensure_pr: the reviewer is not the account that authors the PRs",
-           f"SYNC_REVIEWER={sync.SYNC_REVIEWER!r} -- equal to the author would mean a "
-           "required review only the author could give, i.e. a permanent deadlock")
+    # a PR's own author, so a sync PR authored by X and reviewed by X can never
+    # merge -- precisely the state 4 of the 14 open PRs were in before they were
+    # reassigned (docs#143, release-train#130, .github#344, claude-skills#39).
+    #
+    # THIS USED TO READ `SYNC_REVIEWER != "LukasWodka"` (@saqlainsyed007, #348).
+    # Two literals, in two files, agreeing with each other and with nothing
+    # else: re-provision SYNC_PR_AUTHOR_TOKEN to saqlainsyed007's PAT and
+    # author == reviewer, every --add-reviewer 422s, the deadlock returns, and
+    # this check stays GREEN because neither literal moved. The invariant is
+    # about the TOKEN's owner, so it is now asked of the token.
 
     # -- fail closed with no PAT ------------------------------------------------
     # The important direction. A fallback to the App token would open a PR that
@@ -450,7 +459,10 @@ try:
     ])
     sync.gh = stub
     os.environ[sync.AUTHOR_TOKEN_ENV] = ""
-    err = sync._ensure_pr("o/r", "head", "develop", 1602)
+    # THE EMPTY TOKEN IS THE INPUT, so it is passed as one. `main()` now refuses
+    # before any write (#348), and this pins the belt-and-braces refusal that
+    # remains here for a caller that skipped that gate.
+    err = sync._ensure_pr("o/r", "head", "develop", 1602, "")
     created = [c for c in stub.calls if "create" in c]
     record(err is not None and not created and sync.AUTHOR_TOKEN_ENV in err,
            "_ensure_pr: an empty PAT opens NO PR and says which variable is missing",
@@ -472,6 +484,99 @@ finally:
 
 # ---------------------------------------------------------------------- tally
 failed = [name for ok, name, _ in RESULTS if not ok]
+
+# --------------------------------- the reviewer-is-not-the-author invariant,
+# --------------------------------- asked of the TOKEN rather than of a literal
+#
+# @saqlainsyed007 on #348. The old form compared two hardcoded logins, so the
+# one re-provisioning that breaks it -- pointing SYNC_PR_AUTHOR_TOKEN at
+# SYNC_REVIEWER's own PAT -- was invisible to the suite. `author_login` asks
+# GitHub who the credential is, and `main()` refuses before any write.
+_real_gh = sync.gh
+try:
+    stub = GhScript([(0, "saqlainsyed007", "")])
+    sync.gh = stub
+    record(sync.author_login("pat") == "saqlainsyed007",
+           "author_login: resolves the credential's owner from GitHub",
+           f"got {sync.author_login!r}")
+
+    stub = GhScript([(1, "", "gh: Bad credentials (HTTP 401)")])
+    sync.gh = stub
+    record(sync.author_login("pat") is None,
+           "author_login: an unresolvable token is None, not a guess",
+           "a token GitHub will not identify must not be treated as anybody")
+
+    # AND IT ASKS AS THE TOKEN, not as the ambient App identity -- otherwise it
+    # would resolve the App's login and compare the wrong pair.
+    stub = GhScript([(0, "someone", "")])
+    sync.gh = stub
+    sync.author_login("the-pat")
+    record(stub.kwargs_for("user") == {"token": "the-pat"},
+           "author_login: asks as the PAT, not as the ambient identity",
+           f"kwargs={stub.kwargs_for('user')} (the App's login would be the wrong pair)")
+finally:
+    sync.gh = _real_gh
+
+# ---------------------------------- an existing PR still gets its roles repaired
+#
+# @saqlainsyed007 on #348, F1. `_ensure_pr` returned as soon as an open PR
+# tracked the branch, so a PR whose --add-reviewer failed once was never
+# repaired -- and the reviewer is what makes it mergeable, so it sat
+# un-mergeable for ever while every later run reported success.
+_real_gh = sync.gh
+try:
+    stub = GhScript([
+        (0, "42", ""),      # pr list -- an open PR already tracks the branch
+        (0, "", ""),        # pr edit --add-reviewer
+        (0, "", ""),        # pr edit --add-assignee
+    ])
+    sync.gh = stub
+    err = sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+    edits = [c for c in stub.calls if "edit" in c]
+    record(err is None and any("--add-reviewer" in c for c in edits),
+           "_ensure_pr: an EXISTING PR still gets its reviewer re-requested",
+           f"err={err} edits={edits} (returning early leaves a reviewer-less PR "
+           "un-mergeable for ever)")
+finally:
+    sync.gh = _real_gh
+
+# ------------------------------------- a reviewer that cannot be set is FATAL
+#
+# @saqlainsyed007 on #348, F2. Combined with F1 this was the silent shape: a
+# warning, no self-heal, and a green run over a PR that could never merge.
+_real_gh = sync.gh
+try:
+    stub = GhScript([
+        # EMPTY, not "[]": the real call carries `--jq '.[0].number // empty'`,
+        # so "no open PR" is an empty string. "[]" is truthy and would send this
+        # down the existing-PR path instead -- which is how the first version of
+        # this stub tested something other than what it names.
+        (0, "", ""),                        # pr list -- none yet
+        (0, "https://x/pull/7", ""),        # pr create
+        (1, "", "HTTP 422: reviewer is the author"),   # --add-reviewer FAILS
+    ])
+    sync.gh = stub
+    err = sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+    record(err is not None and "reviewer" in err.lower(),
+           "_ensure_pr: a reviewer that cannot be requested is an ERROR, not a warning",
+           f"err={err!r} -- a warning here ships an un-mergeable PR on a green run")
+
+    # THE OTHER HALF STAYS COSMETIC. Making both fatal would fail the run over
+    # an assignee, which blocks nothing.
+    stub = GhScript([
+        (0, "", ""),                        # pr list -- none yet
+        (0, "https://x/pull/8", ""),
+        (0, "", ""),                        # --add-reviewer succeeds
+        (1, "", "HTTP 422: assignee"),      # --add-assignee fails
+    ])
+    sync.gh = stub
+    err = sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+    record(err is None,
+           "_ensure_pr: a failed ASSIGNEE stays cosmetic",
+           f"err={err!r} -- an assignee blocks no merge, so it must not fail the run")
+finally:
+    sync.gh = _real_gh
+
 print(f"\n{len(RESULTS)} checks, {len(failed)} failed.")
 if failed:
     for name in failed:

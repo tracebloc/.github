@@ -134,6 +134,25 @@ AUTHOR_TOKEN_ENV = "SYNC_PR_AUTHOR_TOKEN"
 SYNC_REVIEWER = "saqlainsyed007"
 
 
+def author_login(token: str) -> "str | None":
+    """Who `token` actually is, asked of GitHub rather than assumed.
+
+    THE INVARIANT IS reviewer != AUTHOR, AND ONLY ONE HALF OF IT WAS DERIVED
+    (@saqlainsyed007, #348). `SYNC_REVIEWER` is a literal here and the selftest
+    pinned the other side as a literal too -- so if `SYNC_PR_AUTHOR_TOKEN` is
+    ever re-provisioned to saqlainsyed007's PAT, author == reviewer, every
+    `--add-reviewer` 422s, and the backend#2590 deadlock this whole change
+    exists to remove comes back **with the tests still green**.
+
+    A credential's owner is a fact about the credential, so it is read from the
+    credential. Returns None when the token cannot be resolved at all, which is
+    its own refusal rather than a guess.
+    """
+    code, out, _ = gh("api", "user", "--jq", ".login", token=token)
+    login = out.strip()
+    return login if code == 0 and login else None
+
+
 class Unreadable(Exception):
     """A read that produced neither a value nor a clean 404."""
 
@@ -351,7 +370,8 @@ def _write_head_file(full: str, head: str, desired: str, head_sha: "str | None",
     return f"cannot write CLAUDE.md on {head}: exhausted retries"
 
 
-def remediate(org: str, repo: str, base: str, desired: str, issue: int, file_on_base: bool) -> "str | None":
+def remediate(org: str, repo: str, base: str, desired: str, issue: int,
+              file_on_base: bool, author_token: str) -> "str | None":
     """Push the sync branch and open/refresh the PR. Returns an error string or None."""
     head = f"docs/{issue}-org-standards-sync"
     full = f"{org}/{repo}"
@@ -383,22 +403,29 @@ def remediate(org: str, repo: str, base: str, desired: str, issue: int, file_on_
     if rerr:
         return rerr
     if current is not None and current == desired:
-        return _ensure_pr(full, head, base, issue)  # content already pushed; just ensure the PR
+        return _ensure_pr(full, head, base, issue, author_token)  # content pushed; ensure the PR
 
     werr = _write_head_file(full, head, desired, head_sha, issue)
     if werr:
         return werr
 
-    return _ensure_pr(full, head, base, issue)
+    return _ensure_pr(full, head, base, issue, author_token)
 
 
-def _ensure_pr(full: str, head: str, base: str, issue: int) -> "str | None":
+def _ensure_pr(full: str, head: str, base: str, issue: int,
+               author_token: str) -> "str | None":
     code, out, err = gh("pr", "list", "-R", full, "--head", head, "--base", base,
                         "--state", "open", "--json", "number", "--jq", ".[0].number // empty")
     if code != 0:
         return f"cannot list PRs: {err.strip()}"
     if out.strip():
-        return None  # open PR already tracks the branch; the push above refreshed it
+        # AN EXISTING PR STILL NEEDS ITS ROLES CHECKED (@saqlainsyed007, #348).
+        # This returned here, so a PR whose `--add-reviewer` failed on an
+        # earlier run was never repaired on any later one -- and since the
+        # reviewer is what makes it mergeable, it would sit un-mergeable for
+        # ever while every subsequent run reported success. Self-healing is the
+        # difference between a warning and a permanent state.
+        return _assign_roles(full, out.strip(), author_token)
 
     body = (
         "Managed sync of the org-standards block into this repo's `CLAUDE.md` — canonical\n"
@@ -407,10 +434,11 @@ def _ensure_pr(full: str, head: str, base: str, issue: int) -> "str | None":
         f"Part of tracebloc/backend#{issue} (org-wide engineering standards).\n\n"
         "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"
     )
-    # FAIL CLOSED ON A MISSING PAT (backend#2590). Without it `gh` would fall
-    # back to the ambient App token and open a PR Bugbot will not review -- the
-    # exact defect this token split exists to remove, and invisible on the PR.
-    author_token = os.environ.get(AUTHOR_TOKEN_ENV, "").strip()
+    # THE PAT IS VALIDATED IN `main()` NOW, before any branch is pushed
+    # (@saqlainsyed007, #348) -- the check used to live here, which is after
+    # `remediate()` has already written to every drifted repo. Belt-and-braces
+    # only: an empty token reaching this point means the caller skipped the
+    # gate, and opening the PR as the App is the defect backend#2590 removed.
     if not author_token:
         return (f"{AUTHOR_TOKEN_ENV} is empty, so this PR could only be opened as the "
                 "App, whose PRs Bugbot never reviews (backend#2590). Refusing to open it.")
@@ -429,21 +457,36 @@ def _ensure_pr(full: str, head: str, base: str, issue: int) -> "str | None":
     if code != 0:
         return f"cannot open PR: {err.strip()}"
 
-    # Reviewer AND assignee = SYNC_REVIEWER, never the dispatcher. This used to be
-    # GITHUB_ACTOR, which was right while a Bot opened the PR and is wrong now: the
-    # dispatcher IS the author, and GitHub will not take an approving review from a
-    # PR's own author. See SYNC_REVIEWER.
-    #
-    # Non-fatal, and asymmetrically so. A missing assignee is cosmetic, but a
-    # missing REVIEWER means a PR that cannot merge until someone notices, so the
-    # warning names which half failed instead of one message for both.
-    pr_ref = out.strip() or head
-    for flag, role in (("--add-reviewer", "review"), ("--add-assignee", "assignment")):
-        code, _, err = gh("pr", "edit", pr_ref, "-R", full, flag, SYNC_REVIEWER,
-                          token=author_token)
-        if code != 0:
-            sys.stderr.write(f"::warning::{full}: could not set @{SYNC_REVIEWER} for "
-                             f"{role}: {err.strip()}\n")
+    return _assign_roles(full, out.strip() or head, author_token)
+
+
+def _assign_roles(full: str, pr_ref: str, author_token: str) -> "str | None":
+    """Reviewer and assignee on a sync PR. The reviewer half is FATAL.
+
+    Reviewer AND assignee = SYNC_REVIEWER, never the dispatcher. That used to be
+    GITHUB_ACTOR, which was right while a Bot opened the PR and is wrong now: the
+    dispatcher IS the author, and GitHub will not take an approving review from a
+    PR's own author. See SYNC_REVIEWER.
+
+    ASYMMETRIC ON PURPOSE, and the asymmetry moved (@saqlainsyed007, #348). A
+    missing assignee is cosmetic, so it stays a warning. A missing REVIEWER
+    means a PR that CANNOT MERGE -- branch protection requires one -- so
+    reporting it as a warning let a reviewer-less, un-mergeable PR ship on a
+    green run, which is the same class of silent failure this whole change
+    exists to kill. It is an error now, and the run reports the repo as a failed
+    write.
+    """
+    code, _, err = gh("pr", "edit", pr_ref, "-R", full, "--add-reviewer",
+                      SYNC_REVIEWER, token=author_token)
+    if code != 0:
+        return (f"opened, but could not request @{SYNC_REVIEWER} as reviewer: "
+                f"{err.strip()}. Branch protection needs one, so the PR cannot "
+                "merge until it is added by hand.")
+    code, _, err = gh("pr", "edit", pr_ref, "-R", full, "--add-assignee",
+                      SYNC_REVIEWER, token=author_token)
+    if code != 0:
+        sys.stderr.write(f"::warning::{full}: could not set @{SYNC_REVIEWER} as "
+                         f"assignee (cosmetic): {err.strip()}\n")
     return None
 
 
@@ -466,6 +509,31 @@ def main() -> int:
             die(f"--repo names {unknown}, which are not sync targets")
         targets = sorted(set(args.repo))
 
+    # BEFORE ANY WRITE, NOT AT THE FIRST PR (@saqlainsyed007, #348). The
+    # PAT-empty guard used to live inside `_ensure_pr`, which runs AFTER
+    # `remediate()` has already created the branch and pushed CLAUDE.md -- so a
+    # missing token produced a fleet-wide half-rollout: branches pushed
+    # everywhere, no PRs anywhere, and nothing to review the change through.
+    # Fail closed before the first repo is touched.
+    author_token = ""
+    if args.create_prs:
+        author_token = os.environ.get(AUTHOR_TOKEN_ENV, "").strip()
+        if not author_token:
+            die(f"{AUTHOR_TOKEN_ENV} is empty. Opening these PRs as the App is "
+                "the defect backend#2590 removed -- Bugbot never reviews them. "
+                "Refusing before any branch is pushed.")
+        login = author_login(author_token)
+        if login is None:
+            die(f"{AUTHOR_TOKEN_ENV} is set but GitHub will not say who it "
+                "belongs to, so the reviewer-is-not-the-author invariant "
+                "cannot be checked. Refusing before any branch is pushed.")
+        if login.lower() == SYNC_REVIEWER.lower():
+            die(f"{AUTHOR_TOKEN_ENV} belongs to @{login}, who is also "
+                f"SYNC_REVIEWER. GitHub refuses a review request on one's own "
+                "PR, so every sync PR would open un-reviewable and unmergeable "
+                "-- the backend#2590 deadlock, restored. Re-provision the token "
+                "or move SYNC_REVIEWER.")
+
     rows: "list[tuple[str, str, str, str]]" = []
     drifted = unreadable = write_errors = 0
 
@@ -487,7 +555,8 @@ def main() -> int:
             drifted += 1
             if args.create_prs:
                 error = remediate(org, repo, branch, build_desired(text, canon, state),
-                                  args.issue, file_on_base=(state != NO_FILE))
+                                  args.issue, file_on_base=(state != NO_FILE),
+                                  author_token=author_token)
                 if error:
                     write_errors += 1
                     action = f"REMEDIATION FAILED: {error}"
