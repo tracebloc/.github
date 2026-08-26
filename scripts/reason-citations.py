@@ -191,6 +191,16 @@ PREFIX_RE = re.compile(r"\A(?:([A-Za-z0-9][A-Za-z0-9-]*)/)?([A-Za-z0-9.][A-Za-z0
 # and is NOT something this script tries to infer (see mechanism (3) in the
 # header).
 EXEMPT = {
+    "tracebloc/backend#2347": (
+        "PROVENANCE, re-read 2026-08-26 and still true. `claude-skills`' fr-gate "
+        "reason cites it for WHY the caller was removed -- #2347 decided the three "
+        "non-train repos are working repos, and claude-skills#38 carried that out "
+        "(+0/-15). The issue is CLOSED COMPLETED, which is what this guard flags, "
+        "and that is exactly right for a citation that might be a live dependency. "
+        "This one is not: it is past-tense history and stays true. Recorded here "
+        "rather than reworded out of the reason, because dropping the number to "
+        "silence the guard would lose the traceability the reason exists to give."
+    ),
     "tracebloc/backend#1408": (
         "already re-read, and the prose says so: `stale_backlog_exemption_needs_redeciding` "
         "states that this ticket's basis is gone and records the exemption as UNDECIDED"
@@ -213,12 +223,21 @@ EXEMPT = {
     "tracebloc/backend#1816": "cited in the past tense: the ticket that made add-to-kanban v2.0.0 the fleet norm",
     "tracebloc/backend#1563": "cited in the past tense: the ticket version-bump-pr.yml was deleted under",
     "tracebloc/backend#1752": (
-        "cited in the past tense, as the provenance of the two live PRs blocked-gate would redden"
+        "cited in the past tense, as the provenance of the two PRs blocked-gate would have reddened"
     ),
     "tracebloc/backend#1975": "cited in the past tense: the ticket that armed frontend-app's Vitest contexts",
     "tracebloc/backend#1976": "cited in the past tense: the ticket that raised the action-pins baseline",
     "tracebloc/backend#1979": "cited in the past tense: the ticket that removed stale-backlog's column-blindness",
     "tracebloc/backend#2243": "cited in the past tense: the ticket that flipped release-train to `required`",
+    "tracebloc/client-runtime#192": (
+        "THE DEADNESS IS THE CONTENT. `blocked_gate_rollout_pending` names this PR as one of "
+        "two that blocked-gate would have reddened when the anchor was written. It was closed "
+        "unmerged on 2026-08-26, and the reason now SAYS so -- it does not lean on the PR "
+        "landing, it records that it did not. That is the opposite of the leaning-on-vapour "
+        "shape this guard exists to catch, so the citation stays and keeps the provenance. "
+        "If the reason is ever reworded back into the present tense, this exemption stops "
+        "describing it and should be deleted with the sentence"
+    ),
 }
 
 # The GraphQL field that answers "issue or PR?" in one read. `state` is
