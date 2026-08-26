@@ -412,6 +412,39 @@ def remediate(org: str, repo: str, base: str, desired: str, issue: int,
     return _ensure_pr(full, head, base, issue, author_token)
 
 
+def check_author_identity(token: str) -> "str | None":
+    """Why the PAT cannot be used, or None. Called BEFORE any repo is written.
+
+    EXTRACTED SO IT CAN BE TESTED (@saqlainsyed007, #348). Inline in `main()`
+    this was unreachable from the selftest, and the mutation harness said so
+    out loud: "SYNC_REVIEWER becomes the account that authors the PRs" came
+    back UNCAUGHT once the old literal-vs-literal check was retired. A guard
+    nothing can exercise is the shape this repo keeps removing, so the gate is a
+    function and the three refusals are pinned individually.
+
+    ORDER MATTERS. Emptiness first, because an empty token cannot be resolved;
+    resolution second, because an unresolvable one cannot be compared; the
+    identity comparison last. Each says what it could not establish rather than
+    collapsing into one message.
+    """
+    if not token:
+        return (f"{AUTHOR_TOKEN_ENV} is empty. Opening these PRs as the App is "
+                "the defect backend#2590 removed -- Bugbot never reviews them. "
+                "Refusing before any branch is pushed.")
+    login = author_login(token)
+    if login is None:
+        return (f"{AUTHOR_TOKEN_ENV} is set but GitHub will not say who it "
+                "belongs to, so the reviewer-is-not-the-author invariant cannot "
+                "be checked. Refusing before any branch is pushed.")
+    if login.lower() == SYNC_REVIEWER.lower():
+        return (f"{AUTHOR_TOKEN_ENV} belongs to @{login}, who is also "
+                f"SYNC_REVIEWER. GitHub refuses a review request on one's own "
+                "PR, so every sync PR would open un-reviewable and unmergeable "
+                "-- the backend#2590 deadlock, restored. Re-provision the token "
+                "or move SYNC_REVIEWER.")
+    return None
+
+
 def _ensure_pr(full: str, head: str, base: str, issue: int,
                author_token: str) -> "str | None":
     code, out, err = gh("pr", "list", "-R", full, "--head", head, "--base", base,
@@ -518,21 +551,9 @@ def main() -> int:
     author_token = ""
     if args.create_prs:
         author_token = os.environ.get(AUTHOR_TOKEN_ENV, "").strip()
-        if not author_token:
-            die(f"{AUTHOR_TOKEN_ENV} is empty. Opening these PRs as the App is "
-                "the defect backend#2590 removed -- Bugbot never reviews them. "
-                "Refusing before any branch is pushed.")
-        login = author_login(author_token)
-        if login is None:
-            die(f"{AUTHOR_TOKEN_ENV} is set but GitHub will not say who it "
-                "belongs to, so the reviewer-is-not-the-author invariant "
-                "cannot be checked. Refusing before any branch is pushed.")
-        if login.lower() == SYNC_REVIEWER.lower():
-            die(f"{AUTHOR_TOKEN_ENV} belongs to @{login}, who is also "
-                f"SYNC_REVIEWER. GitHub refuses a review request on one's own "
-                "PR, so every sync PR would open un-reviewable and unmergeable "
-                "-- the backend#2590 deadlock, restored. Re-provision the token "
-                "or move SYNC_REVIEWER.")
+        refusal = check_author_identity(author_token)
+        if refusal:
+            die(refusal)
 
     rows: "list[tuple[str, str, str, str]]" = []
     drifted = unreadable = write_errors = 0

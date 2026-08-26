@@ -517,6 +517,47 @@ try:
 finally:
     sync.gh = _real_gh
 
+# ------------------------- the gate that runs BEFORE any repo is written
+#
+# @saqlainsyed007 on #348, F3 + F4. The three refusals are pinned individually
+# because each says something different about what could not be established --
+# and because the mutation harness reported "SYNC_REVIEWER becomes the account
+# that authors the PRs" as UNCAUGHT once the old literal-vs-literal check was
+# retired. This is what catches it.
+_real_gh, _real_login = sync.gh, sync.author_login
+try:
+    record(sync.check_author_identity("") is not None
+           and sync.AUTHOR_TOKEN_ENV in sync.check_author_identity(""),
+           "check_author_identity: an empty PAT refuses, naming the variable",
+           "an empty token must stop the run before the first branch is pushed")
+
+    sync.author_login = lambda _t: None
+    refusal = sync.check_author_identity("pat")
+    record(refusal is not None and "will not say who it belongs to" in refusal,
+           "check_author_identity: an UNRESOLVABLE token refuses rather than guessing",
+           f"got {refusal!r} -- 'cannot tell' must not read as 'fine'")
+
+    sync.author_login = lambda _t: sync.SYNC_REVIEWER
+    refusal = sync.check_author_identity("pat")
+    record(refusal is not None and sync.SYNC_REVIEWER in refusal,
+           "check_author_identity: author == SYNC_REVIEWER is refused",
+           f"got {refusal!r} -- this is the backend#2590 deadlock, and the old "
+           "literal-vs-literal check could not see it")
+
+    # CASE-INSENSITIVELY, because GitHub logins are.
+    sync.author_login = lambda _t: sync.SYNC_REVIEWER.upper()
+    record(sync.check_author_identity("pat") is not None,
+           "check_author_identity: the identity comparison ignores case",
+           "GitHub logins are case-insensitive, so a differently-cased owner is "
+           "the same person and the same deadlock")
+
+    sync.author_login = lambda _t: "somebody-else"
+    record(sync.check_author_identity("pat") is None,
+           "check_author_identity: a DIFFERENT owner passes",
+           "the gate must not refuse the configuration it exists to permit")
+finally:
+    sync.gh, sync.author_login = _real_gh, _real_login
+
 # ---------------------------------- an existing PR still gets its roles repaired
 #
 # @saqlainsyed007 on #348, F1. `_ensure_pr` returned as soon as an open PR

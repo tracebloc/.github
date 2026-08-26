@@ -87,17 +87,32 @@ MUTATIONS = [
     # --- (C) the reviewer, whose absence deadlocks the PR ----------------------
     (
         "reviewer reverts to GITHUB_ACTOR, who is now the author",
-        '''        code, _, err = gh("pr", "edit", pr_ref, "-R", full, flag, SYNC_REVIEWER,
-                          token=author_token)''',
-        '''        code, _, err = gh("pr", "edit", pr_ref, "-R", full, flag,
-                          os.environ.get("GITHUB_ACTOR", "x"), token=author_token)''',
+        '''    code, _, err = gh("pr", "edit", pr_ref, "-R", full, "--add-reviewer",
+                      SYNC_REVIEWER, token=author_token)''',
+        '''    code, _, err = gh("pr", "edit", pr_ref, "-R", full, "--add-reviewer",
+                      os.environ.get("GITHUB_ACTOR", "x"), token=author_token)''',
         "requests review from SYNC_REVIEWER",
     ),
     (
-        "SYNC_REVIEWER becomes the account that authors the PRs",
-        'SYNC_REVIEWER = "saqlainsyed007"',
-        'SYNC_REVIEWER = "LukasWodka"',
-        "the reviewer is not the account that authors",
+        # RE-AIMED (#348). This used to flip the SYNC_REVIEWER literal to the
+        # PAT owner's login and expect a literal-vs-literal check to catch it.
+        # That check is gone, and deliberately: the invariant is now enforced
+        # at RUN TIME against the token's real owner, which means flipping the
+        # literal is survivable -- `check_author_identity` refuses the run
+        # instead. So the mutation that matters is removing the comparison, not
+        # changing one of its operands.
+        "the author-is-not-the-reviewer comparison is dropped",
+        '''    if login.lower() == SYNC_REVIEWER.lower():''',
+        '''    if False:''',
+        "author == SYNC_REVIEWER is refused",
+    ),
+    (
+        # The other half of the same gate: an unresolvable token must refuse
+        # rather than sail past into a comparison it cannot make.
+        "an unresolvable token stops being a refusal",
+        '''    if login is None:''',
+        '''    if False:''',
+        "an UNRESOLVABLE token refuses rather than guessing",
     ),
 ]
 
