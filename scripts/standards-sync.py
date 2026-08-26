@@ -157,6 +157,24 @@ class Unreadable(Exception):
     """A read that produced neither a value nor a clean 404."""
 
 
+class AuthorUnusable(Exception):
+    """`pr create` failed as the PAT -- a FLEET-WIDE fact, not a per-repo one.
+
+    RAISED RATHER THAN RETURNED, because it has to stop the loop (Bugbot,
+    #348). `check_author_identity` proves the token EXISTS, RESOLVES, and is
+    not the reviewer; none of that proves it can open a PR in this org. A
+    token with the wrong fine-grained permissions, or one never SSO-authorized,
+    passes every one of those checks and then fails at `pr create` -- by which
+    point `remediate` has pushed a branch and a commit to every drifted repo,
+    which is exactly the half-rollout that gate was added to prevent.
+
+    Nothing read-only can fully prove "this token can open a PR"; the only
+    proof is opening one. So the guarantee is BOUNDED instead of claimed: the
+    first failed creation aborts the fleet, leaving at most ONE repo with a
+    branch and no PR rather than all of them.
+    """
+
+
 def die(message: str) -> "None":
     sys.stderr.write(f"::error::{message}\n")
     sys.stderr.write("::error::Refusing to report on standards drift from an incomplete read.\n")
@@ -488,7 +506,9 @@ def _ensure_pr(full: str, head: str, base: str, issue: int,
                         # As the human, so the PR has an author Bugbot can see.
                         token=author_token)
     if code != 0:
-        return f"cannot open PR: {err.strip()}"
+        # FLEET-WIDE BY CONSTRUCTION: the same credential opens every one of
+        # these, so a refusal here will refuse the next repo too (Bugbot, #348).
+        raise AuthorUnusable(f"cannot open PR: {err.strip()}")
 
     return _assign_roles(full, out.strip() or head, author_token)
 
@@ -557,6 +577,7 @@ def main() -> int:
 
     rows: "list[tuple[str, str, str, str]]" = []
     drifted = unreadable = write_errors = 0
+    aborted_after = ""
 
     for repo in targets:
         try:
@@ -575,9 +596,26 @@ def main() -> int:
         elif state != IN_SYNC:
             drifted += 1
             if args.create_prs:
-                error = remediate(org, repo, branch, build_desired(text, canon, state),
-                                  args.issue, file_on_base=(state != NO_FILE),
-                                  author_token=author_token)
+                try:
+                    error = remediate(org, repo, branch,
+                                      build_desired(text, canon, state),
+                                      args.issue,
+                                      file_on_base=(state != NO_FILE),
+                                      author_token=author_token)
+                except AuthorUnusable as exc:
+                    # STOP THE FLEET (Bugbot, #348). The credential is the
+                    # same for every repo, so carrying on would push a branch
+                    # to all of them and open a PR on none -- the half-rollout
+                    # the `main()` gate exists to prevent, arriving through the
+                    # one failure mode that gate cannot see: a token that
+                    # resolves but cannot create.
+                    write_errors += 1
+                    aborted_after = repo
+                    rows.append((repo, branch, state,
+                                 f"REMEDIATION FAILED: {exc} -- ABORTING the "
+                                 "remaining repos; this credential cannot open "
+                                 "PRs anywhere"))
+                    break
                 if error:
                     write_errors += 1
                     action = f"REMEDIATION FAILED: {error}"
@@ -593,6 +631,13 @@ def main() -> int:
     lines.append("")
     lines.append(f"{len(targets)} targets: {drifted} drifted, {unreadable} unreadable/malformed, "
                  f"{write_errors} failed writes, {len(EXEMPT)} exempt.")
+    if aborted_after:
+        # SAID IN THE REPORT, not only in the log. A run that stopped early
+        # and did not say so reads as a complete sweep of a smaller fleet.
+        lines.append("")
+        lines.append(f"**ABORTED at `{aborted_after}`** -- `{AUTHOR_TOKEN_ENV}` "
+                     "resolves but cannot open PRs, so the remaining targets "
+                     "were left untouched rather than given a branch each.")
     report = "\n".join(lines)
     print(report)
 

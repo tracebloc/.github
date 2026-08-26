@@ -557,6 +557,45 @@ try:
 finally:
     sync.gh, sync.author_login = _real_gh, _real_login
 
+# ------------------- a PAT that RESOLVES but cannot CREATE stops the fleet
+#
+# Bugbot on #348. `check_author_identity` proves the token exists, resolves and
+# is not the reviewer. None of that proves it can open a PR: the wrong
+# fine-grained permissions, or a token never SSO-authorized for the org, passes
+# every one of those checks and fails at `pr create` -- after `remediate` has
+# pushed a branch and a commit to every drifted repo.
+#
+# Nothing read-only can fully prove "this token can open a PR"; the only proof
+# is opening one. So the guarantee is BOUNDED rather than claimed: the first
+# failed creation aborts, leaving at most ONE repo with a branch and no PR.
+_real_gh = sync.gh
+try:
+    stub = GhScript([
+        (0, "", ""),                                  # pr list -- none yet
+        (1, "", "HTTP 403: Resource not accessible by personal access token"),
+    ])
+    sync.gh = stub
+    raised = None
+    try:
+        sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+    except sync.AuthorUnusable as exc:
+        raised = exc
+    record(raised is not None and "cannot open PR" in str(raised),
+           "_ensure_pr: a PAT that cannot CREATE raises rather than returning",
+           f"raised={raised!r} -- returning a string lets the loop carry on to "
+           "the next repo, which is the fleet-wide half-rollout")
+
+    # AND IT IS A DIFFERENT TYPE FROM THE ORDINARY PER-REPO ERROR, because the
+    # loop has to tell "this repo failed" from "this credential fails
+    # everywhere". A shared string would need matching on prose.
+    record(issubclass(sync.AuthorUnusable, Exception)
+           and not issubclass(sync.AuthorUnusable, sync.Unreadable),
+           "AuthorUnusable is its own type, not a flavour of Unreadable",
+           "the loop must distinguish a fleet-wide credential failure from a "
+           "per-repo read problem without matching on message text")
+finally:
+    sync.gh = _real_gh
+
 # ---------------------------------- an existing PR still gets its roles repaired
 #
 # @saqlainsyed007 on #348, F1. `_ensure_pr` returned as soon as an open PR
