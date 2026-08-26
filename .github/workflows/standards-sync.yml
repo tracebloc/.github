@@ -198,6 +198,13 @@ jobs:
           # `[ -z ]` check here would still be wrong, because it would abort
           # before the audit and turn "PRs could not be opened" into "fleet
           # state unknown" -- strictly less information.
+          #
+          # AND THAT ARGUMENT BINDS `main()` TOO (Bugbot, #348). The first
+          # version of the moved guard called `die()`, which is the same abort
+          # this paragraph rejects, one layer in. It now DISARMS remediation
+          # instead: the fleet is still classified and reported, every drifted
+          # row reads NOT REMEDIATED, nothing is pushed, and the run exits 2
+          # naming the credential.
           SYNC_PR_AUTHOR_TOKEN: ${{ secrets.SYNC_PR_AUTHOR_TOKEN }}
           CREATE_PRS: ${{ github.event_name == 'workflow_dispatch' && inputs.create-prs == true }}
         run: |

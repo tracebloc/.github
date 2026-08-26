@@ -595,12 +595,26 @@ def main() -> int:
     # missing token produced a fleet-wide half-rollout: branches pushed
     # everywhere, no PRs anywhere, and nothing to review the change through.
     # Fail closed before the first repo is touched.
+    #
+    # IT DISARMS THE WRITES, IT DOES NOT ABORT THE RUN (Bugbot, #348). `die()`
+    # here contradicted the reasoning written twenty lines up in
+    # standards-sync.yml, which rejects a `[ -z ]` check in the workflow
+    # precisely because aborting "before the audit ... would turn 'PRs could
+    # not be opened' into 'fleet state unknown' -- strictly less information".
+    # The gate exists to stop WRITES, and the audit is a read. So a refusal
+    # switches remediation off, the fleet is still classified and reported, and
+    # the run exits 2 naming the credential. No branch is pushed either way,
+    # which is the whole of what the move to `main()` bought.
     author_token = ""
+    author_refusal = ""
     if args.create_prs:
         author_token = os.environ.get(AUTHOR_TOKEN_ENV, "").strip()
-        refusal = check_author_identity(author_token)
-        if refusal:
-            die(refusal)
+        author_refusal = check_author_identity(author_token) or ""
+        if author_refusal:
+            sys.stderr.write(f"::error::{author_refusal}\n")
+            sys.stderr.write("::error::Remediation is disabled for this run; the "
+                             "read-only audit below still ran.\n")
+    remediating = args.create_prs and not author_refusal
 
     rows: "list[tuple[str, str, str, str]]" = []
     drifted = unreadable = write_errors = 0
@@ -622,7 +636,13 @@ def main() -> int:
             action = "unpaired/duplicated markers — repair by hand, never auto-spliced"
         elif state != IN_SYNC:
             drifted += 1
-            if args.create_prs:
+            if args.create_prs and not remediating:
+                # NAMED PER ROW, so the report cannot be mistaken for a plain
+                # audit that nobody asked to remediate. Not counted as a write
+                # error: the write was never attempted, and inflating the count
+                # per repo would hide the single cause behind sixteen symptoms.
+                action = f"NOT REMEDIATED: {AUTHOR_TOKEN_ENV} refused (see below)"
+            elif remediating:
                 try:
                     error = remediate(org, repo, branch,
                                       build_desired(text, canon, state),
@@ -658,6 +678,15 @@ def main() -> int:
     lines.append("")
     lines.append(f"{len(targets)} targets: {drifted} drifted, {unreadable} unreadable/malformed, "
                  f"{write_errors} failed writes, {len(EXEMPT)} exempt.")
+    if author_refusal:
+        # IN THE REPORT, not only on stderr. The report is what lands in the
+        # step summary and in report.md; a refusal that lived only in the log
+        # would leave a reader of the table wondering why every drifted repo
+        # says NOT REMEDIATED.
+        lines.append("")
+        lines.append(f"**REMEDIATION DISABLED** — {author_refusal} The audit "
+                     "above is complete and current; no branch was pushed and "
+                     "no PR was opened or refreshed.")
     if aborted_after:
         # SAID IN THE REPORT, not only in the log. A run that stopped early
         # and did not say so reads as a complete sweep of a smaller fleet.
@@ -676,7 +705,10 @@ def main() -> int:
         with open(args.report_file, "w", encoding="utf-8") as handle:
             handle.write(report + "\n")
 
-    if unreadable or write_errors:
+    if unreadable or write_errors or author_refusal:
+        # `author_refusal` is exit 2 -- "could not remediate" -- and NOT the
+        # `drifted` path below, which returns 0 under --create-prs on the
+        # premise that every drifted repo now has a PR open. Here none does.
         return 2
     if drifted:
         # With --create-prs every drifted repo now has a sync PR open: the run

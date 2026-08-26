@@ -11,7 +11,9 @@ Exit 0 when every path behaves the way it is supposed to.
 from __future__ import annotations
 
 import base64
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -732,6 +734,105 @@ try:
            f"err={err!r} -- an assignee blocks no merge, so it must not fail the run")
 finally:
     sync.gh = _real_gh
+
+# --------------- a refused credential DISARMS the writes, it does not abort
+#
+# Bugbot on #348. Moving the PAT gate into `main()` was right -- it stops the
+# half-rollout -- but it was implemented with `die()`, which also skipped the
+# read-only audit. standards-sync.yml argues against exactly that twenty lines
+# above the secret: aborting before the audit turns "PRs could not be opened"
+# into "fleet state unknown", which is strictly less information. So the run
+# must still classify and report the whole fleet, push nothing, and exit 2.
+def _run_main(argv, token, remediate_calls):
+    """`main()` with the fleet reads stubbed. Returns (exit_code, report)."""
+    saved = {name: getattr(sync, name)
+             for name in ("load_canon", "load_targets", "resolve_branch",
+                          "fetch_claude_md", "remediate")}
+    saved_argv, saved_env = sys.argv, os.environ.get(sync.AUTHOR_TOKEN_ENV)
+    saved_summary = os.environ.pop("GITHUB_STEP_SUMMARY", None)
+
+    def _remediate(*a, **kw):
+        remediate_calls.append((a, kw))
+        return None
+
+    sync.load_canon = lambda _p: CANON
+    sync.load_targets = lambda _p: ("tracebloc", ["alpha"])
+    sync.resolve_branch = lambda _o, _r: "develop"
+    # No markers, so it classifies as drifted -- the only state that reaches
+    # the remediation branch at all.
+    sync.fetch_claude_md = lambda _o, _r, _b: "# CLAUDE.md\n\nrepo-owned prose.\n"
+    sync.remediate = _remediate
+    os.environ[sync.AUTHOR_TOKEN_ENV] = token
+    sys.argv = ["standards-sync.py", *argv]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            code = sync.main()
+    except SystemExit as exc:
+        # A `die()` anywhere in main() is a RESULT here, not a crash. Letting
+        # it propagate would take the whole suite down with no FAIL line --
+        # red without a verdict, which the mutation harness cannot tell from a
+        # vacuous test (CLAUDE.md rule 10). Aborting IS the regression these
+        # checks are about, so it has to be observable as one.
+        code = exc.code
+    finally:
+        for name, fn in saved.items():
+            setattr(sync, name, fn)
+        sys.argv = saved_argv
+        if saved_env is None:
+            os.environ.pop(sync.AUTHOR_TOKEN_ENV, None)
+        else:
+            os.environ[sync.AUTHOR_TOKEN_ENV] = saved_env
+        if saved_summary is not None:
+            os.environ["GITHUB_STEP_SUMMARY"] = saved_summary
+    return code, buf.getvalue()
+
+
+_real_stderr = sys.stderr
+try:
+    sys.stderr = io.StringIO()          # the ::error:: annotations are not the subject
+    calls: list = []
+    code, report = _run_main(["--create-prs"], "", calls)
+
+    record("| alpha |" in report,
+           "main: a refused PAT still AUDITS the fleet and prints the table",
+           f"code={code} report={report.strip()[:160]!r} -- `die()` here made "
+           "'PRs could not be opened' read as 'fleet state unknown'")
+    record(not calls,
+           "main: a refused PAT pushes nothing -- remediate() is never called",
+           f"calls={calls} -- disarming the writes is the whole point of the gate")
+    record("NOT REMEDIATED" in report and "REMEDIATION DISABLED" in report,
+           "main: the report says the writes were skipped, and why",
+           f"report={report.strip()[-200:]!r} -- a table of drifted repos with "
+           "no explanation reads as a plain audit nobody asked to remediate")
+    record(code == 2,
+           "main: a refused PAT exits 2, not the --create-prs 0",
+           f"code={code} -- 0 would claim every drifted repo has a PR open")
+
+    # NOT VACUOUS. The same call with a usable credential must remediate and
+    # be green, or the four checks above would pass over a script that has
+    # simply stopped remediating.
+    _real_check = sync.check_author_identity
+    try:
+        sync.check_author_identity = lambda _t: None
+        calls = []
+        code, report = _run_main(["--create-prs"], "a-usable-pat", calls)
+        record(code == 0 and len(calls) == 1 and "NOT REMEDIATED" not in report,
+               "main: the disarm is not vacuous -- a usable PAT still remediates",
+               f"code={code} calls={len(calls)}")
+    finally:
+        sync.check_author_identity = _real_check
+
+    # AND WITHOUT --create-prs the refusal path must not fire at all: the token
+    # is irrelevant to a report-only run, so drift must still exit 1.
+    calls = []
+    code, report = _run_main([], "", calls)
+    record(code == 1 and not calls and "NOT REMEDIATED" not in report,
+           "main: report-only runs never consult the PAT",
+           f"code={code} calls={calls} -- a read-only audit must not be gated "
+           "on a credential it does not use")
+finally:
+    sys.stderr = _real_stderr
 
 # COMPUTED HERE, NOT EARLIER. This sat above the last hundred lines of checks,
 # so anything appended below it PRINTED its FAIL and did not count: the summary

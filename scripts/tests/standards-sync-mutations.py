@@ -121,6 +121,39 @@ MUTATIONS = [
         if False:''',
         "an unreadable author fails closed",
     ),
+    (
+        # Bugbot on #348, the second round. The gate belongs in `main()`, but
+        # `die()`ing there also skipped the read-only audit -- which
+        # standards-sync.yml argues against in prose twenty lines above the
+        # secret. Restoring the abort is the regression this pins.
+        "a refused PAT aborts the run instead of disarming the writes",
+        '''        if author_refusal:
+            sys.stderr.write(f"::error::{author_refusal}\\n")''',
+        '''        if author_refusal:
+            die(author_refusal)
+            sys.stderr.write(f"::error::{author_refusal}\\n")''',
+        "a refused PAT still AUDITS the fleet",
+    ),
+    (
+        # The other direction, and the more dangerous one: keeping the report
+        # but letting the writes through. The gate would then be pure
+        # narration -- a run that says REMEDIATION DISABLED while pushing a
+        # branch to every drifted repo.
+        "the refusal is reported but the writes run anyway",
+        '''    remediating = args.create_prs and not author_refusal''',
+        '''    remediating = args.create_prs''',
+        "a refused PAT pushes nothing",
+    ),
+    (
+        # And the exit code, which is what the workflow's final step fails the
+        # run from. Falling through to the `drifted` branch returns 0 under
+        # --create-prs on the premise that every drifted repo now has a PR --
+        # false here, and green.
+        "a refused PAT exits 0 as though every drifted repo had a PR",
+        '''    if unreadable or write_errors or author_refusal:''',
+        '''    if unreadable or write_errors:''',
+        "a refused PAT exits 2",
+    ),
     # --- (C) the reviewer, whose absence deadlocks the PR ----------------------
     (
         "reviewer reverts to GITHUB_ACTOR, who is now the author",
