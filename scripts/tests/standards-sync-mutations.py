@@ -79,10 +79,47 @@ MUTATIONS = [
     # MALFORMED note in the docstring.
     (
         "the PAT leaks onto the fleet-read path, reverting backend#2036",
-        '''                        "--state", "open", "--json", "number", "--jq", ".[0].number // empty")''',
-        '''                        "--state", "open", "--json", "number", "--jq", ".[0].number // empty",
+        '''                        "--jq", r'.[0] | select(.) | "\\(.number)\\t\\(.author.login)\\t\\(.author.is_bot)"')''',
+        '''                        "--jq", r'.[0] | select(.) | "\\(.number)\\t\\(.author.login)\\t\\(.author.is_bot)"',
                         token=os.environ.get(AUTHOR_TOKEN_ENV) or None)''',
         "only PR creation changes identity",
+    ),
+    (
+        # Bugbot on #348. The existing-PR path is the one that runs for every
+        # sync PR already open, and all fourteen of those are bot-authored.
+        # Dropping the check restores the exact defect: roles repaired, None
+        # returned, repo reported ensured, PR still unreviewable for ever.
+        "an existing BOT-authored PR is repaired and reported as ensured",
+        '''        if is_bot != "false":''',
+        '''        if False:''',
+        "an existing BOT-authored PR is an ERROR",
+    ),
+    (
+        # The other half: an author that could not be read must not fall through
+        # to the happy path. `len(row) != 3` is what separates "GitHub said
+        # human" from "we could not tell".
+        #
+        # THE MUTATION PADS TO EXACTLY THREE rather than deleting the branch,
+        # and both halves of that are load-bearing:
+        #
+        #   * deleting it outright makes the tuple unpack raise, and a crash is
+        #     not a catch (see the docstring) -- the harness would report
+        #     CRASHED and name no assertion;
+        #   * padding to the WRONG width is worse than useless. The first draft
+        #     appended three defaults to a one-field row and sliced to 3, which
+        #     yields `is_bot=""` -- still caught, but by the `is_bot != "false"`
+        #     branch, so the mutation came back UNCAUGHT while looking like it
+        #     had exercised the len guard.
+        #
+        # Padding to a literal `false` is the plausible wrong fix -- the one a
+        # developer writes after seeing the unpack crash -- and it fails the way
+        # the defect would: an unreadable row is read as a human author and the
+        # repo is reported ensured.
+        "an unreadable author row is padded into a false all-clear",
+        '''        if len(row) != 3:''',
+        '''        row = (row + ["", "false"])[:3] if len(row) < 3 else row
+        if False:''',
+        "an unreadable author fails closed",
     ),
     # --- (C) the reviewer, whose absence deadlocks the PR ----------------------
     (

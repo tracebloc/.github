@@ -605,7 +605,12 @@ finally:
 _real_gh = sync.gh
 try:
     stub = GhScript([
-        (0, "42", ""),      # pr list -- an open PR already tracks the branch
+        # THREE TAB-SEPARATED FIELDS, because the real call now carries
+        # `--json number,author` and a jq that renders number/login/is_bot. A
+        # bare "42" is what the previous stub returned, and it now means "the
+        # author could not be read" -- so leaving it would have this case
+        # asserting the fail-closed path under the name of the happy one.
+        (0, "42\tLukasWodka\tfalse", ""),   # pr list -- an open, human-authored PR
         (0, "", ""),        # pr edit --add-reviewer
         (0, "", ""),        # pr edit --add-assignee
     ])
@@ -616,6 +621,78 @@ try:
            "_ensure_pr: an EXISTING PR still gets its reviewer re-requested",
            f"err={err} edits={edits} (returning early leaves a reviewer-less PR "
            "un-mergeable for ever)")
+finally:
+    sync.gh = _real_gh
+
+# ------------------- an existing BOT-authored PR is refused, not "ensured"
+#
+# Bugbot on #348. The case above is the whole reason this one is needed: the
+# existing-PR path repairs roles and returns None, which is right for a PR this
+# code opened as the human and WRONG for the fourteen already open as
+# `tracebloc-release-train[bot]`. An author cannot be reassigned, so no amount
+# of role repair makes those reviewable -- and reporting them ensured would
+# land this change on exactly none of the PRs it was written for.
+#
+# THE ROLE EDITS MUST NOT HAPPEN EITHER. Returning an error while still editing
+# would leave the run reporting a failure it had half-performed.
+_real_gh = sync.gh
+try:
+    stub = GhScript([
+        (0, "848\tapp/tracebloc-release-train\ttrue", ""),   # pr list
+        # THE ROLE EDITS ARE SCRIPTED THOUGH THEY MUST NOT RUN. Without them a
+        # regression over-runs the stub and raises out of the suite: red, but
+        # with no assertion naming the behaviour -- scaffolding, not a verdict
+        # (CLAUDE.md rule 10). Scripting them makes `not edits` below the thing
+        # that goes red.
+        (0, "", ""),        # pr edit --add-reviewer  (must NOT be reached)
+        (0, "", ""),        # pr edit --add-assignee  (must NOT be reached)
+    ])
+    sync.gh = stub
+    err = sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+    edits = [c for c in stub.calls if "edit" in c]
+    record(err is not None and "848" in err and not edits,
+           "_ensure_pr: an existing BOT-authored PR is an ERROR, not a repair",
+           f"err={err!r} edits={edits} -- a PR's author cannot be changed, so "
+           "repairing its roles reports an unreviewable PR as ensured")
+
+    # AND IT NAMES THE REMEDY. The operator has to know that closing it is what
+    # lets the next run reopen it as the human; "failed" alone strands the repo.
+    record(err is not None and "close" in err.lower(),
+           "_ensure_pr: the bot-author refusal says what to do about it",
+           f"err={err!r} -- an error nobody can act on stalls the whole fleet")
+
+    # NOT VACUOUS: the same path with is_bot=false must go through.
+    stub = GhScript([
+        (0, "848\tLukasWodka\tfalse", ""),
+        (0, "", ""),
+        (0, "", ""),
+    ])
+    sync.gh = stub
+    ok = sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+    record(ok is None,
+           "_ensure_pr: the bot-author check is not vacuous",
+           f"err={ok!r} -- is_bot=false must still be repaired and reported ensured")
+finally:
+    sync.gh = _real_gh
+
+# ------------------------- an unreadable author is a finding, not an all-clear
+#
+# Design rule 1, one layer in. A row that does not parse says nothing about who
+# opened the PR, and "not provably a bot" is not "human". Fail closed: three
+# states, and only the one that reads `false` proceeds.
+_real_gh = sync.gh
+try:
+    for row, why in (("42", "the old number-only shape"),
+                     ("42\tsomebody\tnull", "is_bot absent from the payload")):
+        # The role edits are scripted for the same reason as above: a
+        # regression must redden the assertion, not over-run the stub.
+        stub = GhScript([(0, row, ""), (0, "", ""), (0, "", "")])
+        sync.gh = stub
+        err = sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+        record(err is not None and not [c for c in stub.calls if "edit" in c],
+               f"_ensure_pr: an unreadable author fails closed ({why})",
+               f"row={row!r} err={err!r} -- reporting ensured off a read that "
+               "failed is the all-clear-from-a-failed-read design rule 1 refuses")
 finally:
     sync.gh = _real_gh
 

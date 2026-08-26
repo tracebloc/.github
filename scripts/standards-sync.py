@@ -465,18 +465,45 @@ def check_author_identity(token: str) -> "str | None":
 
 def _ensure_pr(full: str, head: str, base: str, issue: int,
                author_token: str) -> "str | None":
+    # THE AUTHOR IS READ, NOT ASSUMED (Bugbot, #348). The number alone was
+    # enough while every open PR on this branch was one this code had just
+    # opened. It is not enough now: the sync PRs already open were opened as
+    # `tracebloc-release-train[bot]`, and **a PR's author cannot be changed
+    # after the fact**. Repairing the roles and returning None reported those
+    # repos as ensured while leaving them exactly as unreviewable as before --
+    # so the first green `--create-prs` run after this change would have landed
+    # the author split on none of the fourteen PRs it was written for.
+    # `is_bot` is asked of GitHub rather than pattern-matched off the login,
+    # whose shape varies (`app/<slug>` from `pr list`, `<slug>[bot]` elsewhere).
     code, out, err = gh("pr", "list", "-R", full, "--head", head, "--base", base,
-                        "--state", "open", "--json", "number", "--jq", ".[0].number // empty")
+                        "--state", "open", "--json", "number,author",
+                        "--jq", r'.[0] | select(.) | "\(.number)\t\(.author.login)\t\(.author.is_bot)"')
     if code != 0:
         return f"cannot list PRs: {err.strip()}"
     if out.strip():
+        row = out.strip().split("\t")
+        if len(row) != 3:
+            # CANNOT TELL IS A FINDING (design rule 1). An unparseable row is
+            # not evidence that the author is human, and reporting the repo as
+            # ensured off one is the same all-clear-from-a-failed-read this
+            # script refuses everywhere else.
+            return (f"an open PR tracks {head} but its author could not be read "
+                    f"from {out.strip()!r}. Refusing to report it as ensured.")
+        number, login, is_bot = row
+        if is_bot != "false":
+            return (f"#{number} tracks {head} but was opened by @{login} "
+                    f"(is_bot={is_bot}), and GitHub cannot reassign a PR's "
+                    "author. Bugbot keys its review on the author, so this PR "
+                    "stays unreviewable however its roles are repaired "
+                    f"(backend#2590). Close #{number}; the next run reopens it "
+                    f"as {AUTHOR_TOKEN_ENV}'s owner.")
         # AN EXISTING PR STILL NEEDS ITS ROLES CHECKED (@saqlainsyed007, #348).
         # This returned here, so a PR whose `--add-reviewer` failed on an
         # earlier run was never repaired on any later one -- and since the
         # reviewer is what makes it mergeable, it would sit un-mergeable for
         # ever while every subsequent run reported success. Self-healing is the
         # difference between a warning and a permanent state.
-        return _assign_roles(full, out.strip(), author_token)
+        return _assign_roles(full, number, author_token)
 
     body = (
         "Managed sync of the org-standards block into this repo's `CLAUDE.md` — canonical\n"
