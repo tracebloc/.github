@@ -115,6 +115,31 @@ def gh(*args: str) -> "tuple[int, str, str]":
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def gh_as_pr_author(*args: str) -> "tuple[int, str, str]":
+    """Run `gh` as the PAT owner when `PR_AUTHOR_TOKEN` is set, else as the caller.
+
+    WHY THE AUTHOR OF THESE PRs MATTERS (backend#2594). Cursor Bugbot only
+    reviews HUMAN-authored pull requests. `bugbot-gate` is a required context and
+    refuses to treat a missing verdict as approval -- correctly -- so an
+    App-authored PR waits its full 900s and then fails, forever. Measured
+    2026-08-26: every open org-standards sync PR was blocked that way, and
+    `bugbot run` does not help either (tried on .github#344: nine minutes, no
+    check appeared).
+
+    The audit itself still runs as the App: an org-scoped installation token can
+    read the whole fleet where a repo-scoped PAT cannot, which is backend#2036 and
+    is unchanged here. Only `pr create` moves, because AUTHORSHIP and FLEET READS
+    are different questions and only the first one decides whether a review can
+    ever arrive. `promote-repo.sh` already splits them exactly this way.
+    """
+    token = os.environ.get("PR_AUTHOR_TOKEN", "").strip()
+    if not token:
+        return gh(*args)
+    env = dict(os.environ, GH_TOKEN=token)
+    proc = subprocess.run(["gh", *args], capture_output=True, text=True, env=env)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
 def http_status(stderr: str) -> "int | None":
     match = HTTP_STATUS.search(stderr or "")
     return int(match.group(1)) if match else None
@@ -360,7 +385,12 @@ def _ensure_pr(full: str, head: str, base: str, issue: int) -> "str | None":
         f"Part of tracebloc/backend#{issue} (org-wide engineering standards).\n\n"
         "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"
     )
-    code, out, err = gh("pr", "create", "-R", full, "--base", base, "--head", head,
+    # OPENED AS THE PAT OWNER so Bugbot will review it, falling back to the caller's
+    # token (the App) if the PAT is absent or cannot see this repo. The fallback is
+    # LOUD, not silent: an App-authored PR cannot pass `bugbot-gate`, so a quiet
+    # fallback would produce a PR that looks fine and can never merge -- which is the
+    # state the whole fleet was in before backend#2594.
+    code, out, err = gh_as_pr_author("pr", "create", "-R", full, "--base", base, "--head", head,
                         # NO TICKET IN THIS TITLE, deliberately. closing-ref-gate.py requires every
                         # ticket a title names to appear in the PR's closingIssuesReferences,
                         # and these PRs must NOT close #1602 -- one sync PR per repo, all
@@ -369,6 +399,20 @@ def _ensure_pr(full: str, head: str, base: str, issue: int) -> "str | None":
                         # traceability without a closing link. Pinned by the selftest.
                         "--title", "docs(claude): sync the org-standards block",
                         "--body", body)
+    if code != 0 and os.environ.get("PR_AUTHOR_TOKEN", "").strip():
+        # The PAT could not open it -- most often because this repo is missing from a
+        # fine-grained token's repository list, which is what happened to
+        # design-system-v2. Say so, then try the App so the sync still lands SOMETHING
+        # rather than nothing.
+        sys.stderr.write(
+            f"::warning::{full}: PR-create as the PAT owner failed, falling back to the "
+            f"app: {err.strip()}. An app-authored PR CANNOT pass bugbot-gate -- Bugbot "
+            f"does not review app-authored PRs -- so add {full} to the "
+            f"release-train-pr-author PAT's repository list and re-run.\n"
+        )
+        code, out, err = gh("pr", "create", "-R", full, "--base", base, "--head", head,
+                           "--title", "docs(claude): sync the org-standards block",
+                           "--body", body)
     if code != 0:
         return f"cannot open PR: {err.strip()}"
 

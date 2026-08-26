@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import io
 import os
 import subprocess
 import sys
@@ -360,6 +361,62 @@ finally:
     sync.gh = _real_gh
 
 # ---------------------------------------------------------------------- tally
+# THE SYNC PR MUST BE OPENED AS THE PAT OWNER (backend#2594). Bugbot reviews only
+# human-authored PRs and `bugbot-gate` is a required context that will not read a
+# missing verdict as approval -- so an app-authored sync PR waits 900s and fails,
+# which is the state every open sync PR was in on 2026-08-26.
+#
+# This asserts WHICH helper opens it, because that is the whole behaviour: the
+# change is invisible in the PR body, the title and the diff. Reverting
+# `gh_as_pr_author` to `gh` for the create reddens exactly this case and nothing
+# else, which is what makes it worth having.
+_real_as_author = sync.gh_as_pr_author
+try:
+    list_no_pr = (0, "", "")          # `pr list` finds no open PR
+    created = (0, "https://github.com/tracebloc/demo/pull/7\n", "")
+
+    author_calls = []
+
+    def _as_author(*args):
+        author_calls.append(args)
+        return created
+
+    plain = GhScript([list_no_pr, (0, "", "")])   # list, then the assignee edit
+    sync.gh = plain
+    sync.gh_as_pr_author = _as_author
+    os.environ["GITHUB_ACTOR"] = "LukasWodka"
+    err = sync._ensure_pr("tracebloc/demo", "docs/x", "develop", 1602)
+    opened_as_author = any(a[:2] == ("pr", "create") for a in author_calls)
+    opened_as_app = any(a[:2] == ("pr", "create") for a in plain.calls)
+    record(err is None and opened_as_author and not opened_as_app,
+           "_ensure_pr: the PR is created as the PAT owner, not as the app",
+           f"as-author create={opened_as_author} as-app create={opened_as_app} err={err}")
+
+    # AND THE FALLBACK IS LOUD, NOT SILENT. If the PAT cannot see the repo -- what
+    # happened to design-system-v2 -- the sync still opens the PR via the app so
+    # something lands, but it must say the PR cannot pass the gate.
+    os.environ["PR_AUTHOR_TOKEN"] = "sentinel"
+    denied = (1, "", "GraphQL: Could not resolve to a Repository with the name 'tracebloc/demo'.")
+    plain2 = GhScript([list_no_pr, created, (0, "", "")])  # list, app create, assignee
+    sync.gh = plain2
+    sync.gh_as_pr_author = lambda *a: denied
+    buf = io.StringIO()
+    _stderr, sys.stderr = sys.stderr, buf
+    try:
+        err2 = sync._ensure_pr("tracebloc/demo", "docs/x", "develop", 1602)
+    finally:
+        sys.stderr = _stderr
+    warned = "bugbot-gate" in buf.getvalue() and "::warning::" in buf.getvalue()
+    fell_back = any(a[:2] == ("pr", "create") for a in plain2.calls)
+    record(err2 is None and fell_back and warned,
+           "_ensure_pr: a PAT that cannot see the repo falls back LOUDLY to the app",
+           f"fell_back={fell_back} warned_about_gate={warned} err={err2}")
+finally:
+    sync.gh_as_pr_author = _real_as_author
+    sync.gh = _real_gh
+    os.environ.pop("PR_AUTHOR_TOKEN", None)
+
+
 failed = [name for ok, name, _ in RESULTS if not ok]
 print(f"\n{len(RESULTS)} checks, {len(failed)} failed.")
 if failed:

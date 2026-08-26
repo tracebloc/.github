@@ -141,6 +141,17 @@ jobs:
         id: audit
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # THE SYNC PRs ARE OPENED AS THIS TOKEN'S OWNER, not as the App
+          # (backend#2594). Bugbot reviews only human-authored PRs, and
+          # `bugbot-gate` is a required context that will not read a missing
+          # verdict as approval -- so every app-authored sync PR waited 900s and
+          # failed, fleet-wide. The App still does the fleet reads and the pushes
+          # above: backend#2036's reasoning was about the AUDIT needing an
+          # org-scoped token, and that is unchanged. Only `pr create` uses this.
+          #
+          # Absent, the script falls back to the App and says so loudly rather
+          # than opening a PR that can never merge.
+          PR_AUTHOR_TOKEN: ${{ secrets.RELEASE_TRAIN_PR_TOKEN }}
           CREATE_PRS: ${{ github.event_name == 'workflow_dispatch' && inputs.create-prs == true }}
         run: |
           set -uo pipefail
