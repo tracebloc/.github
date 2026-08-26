@@ -110,9 +110,17 @@ jobs:
       # Authenticates as the tracebloc-release-train App (backend#2036) instead of
       # one human's PAT. `owner:` yields an ORG-scoped installation token; a
       # repo-scoped one cannot read the fleet. The App carries `contents: write`,
-      # which is what `create-prs` mode needs to open the per-repo sync PRs. No
-      # fallback to the PAT: a fallback would let a broken App path keep working
-      # silently.
+      # which is what `create-prs` mode needs to push the per-repo sync branches.
+      # No fallback to the PAT: a fallback would let a broken App path keep
+      # working silently.
+      #
+      # THIS TOKEN NO LONGER OPENS THE PRs, and that is the one thing it may not
+      # do (backend#2590). Cursor Bugbot keys its review on the PR author's Cursor
+      # seat; an App installation token makes the author
+      # `tracebloc-release-train[bot]`, which has none, so Bugbot skipped all 14
+      # sync PRs and `bugbot / review` failed closed on every one. Everything
+      # here still runs as the App -- fleet reads, the CLAUDE.md write, the branch
+      # push -- and `SYNC_PR_AUTHOR_TOKEN` below covers `gh pr create` alone.
       - name: Mint an installation token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -141,6 +149,19 @@ jobs:
         id: audit
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # PR CREATION ONLY -- scripts/standards-sync.py reads this for
+          # `gh pr create` and the reviewer/assignee edit, and for nothing else
+          # (backend#2590). A PAT owned by a seated Cursor user, so the sync PRs
+          # have an author Bugbot will review. Needs `repo` scope across the
+          # fleet; `contents: write` alone cannot open a PR.
+          #
+          # NOT GUARDED FOR EMPTINESS HERE, deliberately. An unset secret
+          # interpolates to "" and the guard belongs where the consequence is:
+          # the script refuses per repo and the run fails with a reason naming
+          # this variable. A `[ -z ]` check here would abort before the audit,
+          # turning "PRs could not be opened" into "fleet state unknown" --
+          # strictly less information.
+          SYNC_PR_AUTHOR_TOKEN: ${{ secrets.SYNC_PR_AUTHOR_TOKEN }}
           CREATE_PRS: ${{ github.event_name == 'workflow_dispatch' && inputs.create-prs == true }}
         run: |
           set -uo pipefail

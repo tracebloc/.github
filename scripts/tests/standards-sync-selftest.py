@@ -179,12 +179,25 @@ class GhScript:
     def __init__(self, steps):
         self.steps = list(steps)
         self.calls = []
+        self.kwargs = []          # parallel to .calls; records the identity each ran as
 
-    def __call__(self, *args):
+    def __call__(self, *args, **kwargs):
+        # KWARGS ARE RECORDED, not swallowed. `gh(..., token=...)` is how PR
+        # creation runs as the human instead of the App (backend#2590), and a stub
+        # that accepted **kwargs and dropped them would let that argument vanish
+        # while every assertion here still passed.
         self.calls.append(args)
+        self.kwargs.append(kwargs)
         if not self.steps:
             raise AssertionError("gh called more often than scripted")
         return self.steps.pop(0)
+
+    def kwargs_for(self, needle):
+        """The kwargs of the first call containing `needle`, or None."""
+        for args, kw in zip(self.calls, self.kwargs):
+            if needle in args:
+                return kw
+        return None
 
 
 OK_PAYLOAD = json.dumps({"sha": "abc123", "content": base64.b64encode(b"hello").decode()})
@@ -295,9 +308,11 @@ try:
     stub = GhScript([
         (0, "", ""),                    # pr list -> no open PR
         (0, "https://x/pull/7", ""),    # pr create
+        (0, "", ""),                    # pr edit --add-reviewer
         (0, "", ""),                    # pr edit --add-assignee
     ])
     sync.gh = stub
+    os.environ[sync.AUTHOR_TOKEN_ENV] = "pat-for-the-human"
     sync._ensure_pr("o/r", "head", "develop", 1602)
     created = [c for c in stub.calls if "create" in c]
     title = created[0][created[0].index("--title") + 1] if created else ""
@@ -358,6 +373,102 @@ try:
            "the pre-fix title IS seen as naming a ticket, so a regression reddens")
 finally:
     sync.gh = _real_gh
+    os.environ.pop(sync.AUTHOR_TOKEN_ENV, None)
+
+# ------------------------------------- _ensure_pr(): WHO the PR is opened as
+# WHY: the author is the whole of backend#2590. An App installation token makes
+# the author `tracebloc-release-train[bot]`, Cursor Bugbot keys its review on the
+# author's seat, and a Bot has none -- so Bugbot reviewed 0 of 14 sync PRs and
+# `bugbot / review` failed closed on every one. The identity is invisible on the
+# resulting PR (same title, same body, same diff), so nothing but an assertion on
+# the CALL can tell the two apart.
+try:
+    _real_gh = sync.gh
+
+    # -- the PAT reaches `pr create`, and the ambient identity does not ----------
+    stub = GhScript([
+        (0, "", ""),                    # pr list -> no open PR
+        (0, "https://x/pull/9", ""),    # pr create
+        (0, "", ""),                    # pr edit --add-reviewer
+        (0, "", ""),                    # pr edit --add-assignee
+    ])
+    sync.gh = stub
+    os.environ[sync.AUTHOR_TOKEN_ENV] = "pat-for-the-human"
+    err = sync._ensure_pr("o/r", "head", "develop", 1602)
+
+    create_kw = stub.kwargs_for("create")
+    list_kw = stub.kwargs_for("list")
+    record(err is None and (create_kw or {}).get("token") == "pat-for-the-human",
+           "_ensure_pr: `pr create` runs as the author PAT, not the ambient App token",
+           f"err={err} create kwargs={create_kw} -- without token= the author is "
+           "tracebloc-release-train[bot] and Bugbot skips the PR")
+
+    # The OTHER half of the split, and the half a careless fix breaks: passing the
+    # PAT everywhere would work for Bugbot and quietly undo backend#2036's
+    # org-scoped read. `pr list` must still run as the ambient App identity.
+    record(list_kw == {},
+           "_ensure_pr: only PR creation changes identity -- `pr list` stays the App",
+           f"list kwargs={list_kw} (want {{}}: a token= here would mean the PAT "
+           "leaked onto the fleet-read path, reverting backend#2036)")
+
+    # -- reviewer AND assignee, both SYNC_REVIEWER ------------------------------
+    edits = [c for c in stub.calls if "edit" in c]
+    reviewer_edit = [c for c in edits if "--add-reviewer" in c]
+    assignee_edit = [c for c in edits if "--add-assignee" in c]
+    record(len(reviewer_edit) == 1 and sync.SYNC_REVIEWER in reviewer_edit[0]
+           and len(assignee_edit) == 1 and sync.SYNC_REVIEWER in assignee_edit[0],
+           "_ensure_pr: requests review from SYNC_REVIEWER and assigns the same person",
+           f"reviewer={reviewer_edit} assignee={assignee_edit}")
+
+    # THE REVIEWER MAY NOT BE THE AUTHOR. GitHub refuses an approving review from
+    # a PR's own author, so a sync PR authored by LukasWodka and reviewed by
+    # LukasWodka can never merge -- which is precisely the state 4 of the 14 open
+    # PRs were in before they were reassigned (docs#143, release-train#130,
+    # .github#344, claude-skills#39). Asserted against the PAT OWNER named in the
+    # workflow rather than a literal, so changing one and not the other reddens.
+    record(sync.SYNC_REVIEWER != "LukasWodka",
+           "_ensure_pr: the reviewer is not the account that authors the PRs",
+           f"SYNC_REVIEWER={sync.SYNC_REVIEWER!r} -- equal to the author would mean a "
+           "required review only the author could give, i.e. a permanent deadlock")
+
+    # -- fail closed with no PAT ------------------------------------------------
+    # The important direction. A fallback to the App token would open a PR that
+    # looks identical and that Bugbot silently skips, so "no PAT" must produce NO
+    # PR at all -- not a bot-authored one.
+    # THE HAPPY PATH IS FULLY SCRIPTED, on purpose. Scripting only `pr list` also
+    # "catches" a fallback -- but by over-running the stub and raising out of the
+    # suite, which is a crash, not a verdict. Then the run is red with no FAIL line
+    # naming this behaviour, and a mutation harness that greps for one records
+    # UNCAUGHT (measured: it did). Give the fallback every step it would need to
+    # SUCCEED, so what reddens is this assertion and not the scaffolding (rule 10:
+    # assert the specific failure).
+    stub = GhScript([
+        (0, "", ""),                    # pr list -> no open PR
+        (0, "https://x/pull/13", ""),   # pr create -- MUST NOT be reached
+        (0, "", ""),                    # pr edit --add-reviewer
+        (0, "", ""),                    # pr edit --add-assignee
+    ])
+    sync.gh = stub
+    os.environ[sync.AUTHOR_TOKEN_ENV] = ""
+    err = sync._ensure_pr("o/r", "head", "develop", 1602)
+    created = [c for c in stub.calls if "create" in c]
+    record(err is not None and not created and sync.AUTHOR_TOKEN_ENV in err,
+           "_ensure_pr: an empty PAT opens NO PR and says which variable is missing",
+           f"err={(err or '')[:80]!r} create calls={len(created)} (want 0: a "
+           "bot-authored PR here is the backend#2590 defect reappearing)")
+
+    # Mutation anchor for the two checks above: prove the stub can actually SEE a
+    # token argument and an absent one, so neither assertion is passing vacuously.
+    probe = GhScript([(0, "", "")])
+    probe("pr", "create", token="sentinel")
+    record(probe.kwargs_for("create") == {"token": "sentinel"}
+           and probe.kwargs_for("nonexistent-verb") is None,
+           "_ensure_pr: the identity assertions are not vacuous",
+           f"stub observed {probe.kwargs_for('create')} for a scripted token= call, and "
+           "None for a call that never happened -- so token= going missing reddens")
+finally:
+    sync.gh = _real_gh
+    os.environ.pop(sync.AUTHOR_TOKEN_ENV, None)
 
 # ---------------------------------------------------------------------- tally
 failed = [name for ok, name, _ in RESULTS if not ok]

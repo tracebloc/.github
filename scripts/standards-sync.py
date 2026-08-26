@@ -100,6 +100,40 @@ STUB = (
 )
 
 
+# WHO OPENS THE SYNC PRs, AND WHY IT CANNOT BE THE APP (tracebloc/backend#2590).
+# Cursor Bugbot keys its review on the PR AUTHOR's Cursor seat. Authenticating
+# `gh pr create` with the tracebloc-release-train installation token makes the
+# author `tracebloc-release-train[bot]` (type: Bot), which has no seat -- so
+# Bugbot never reviews, and `bugbot / review` fails closed on every sync PR.
+# Measured 2026-08-26: zero `Cursor Bugbot` check runs across all 14 open sync
+# PRs, while every human-authored PR that day got a verdict. Cursor attributes an
+# explicit `bugbot run` to the author too, so commenting on the PR cannot rescue
+# it -- it answers "Bugbot is not enabled for your user on this team".
+#
+# So PR CREATION -- and only PR creation -- runs as a human PAT. The fleet reads
+# and the branch push keep the App token: `owner:`-scoped, short-lived, and not
+# tied to one person's account, which is the whole of backend#2036.
+#
+# NO FALLBACK TO THE APP TOKEN. An empty PAT is a hard per-repo error, not a
+# quiet downgrade, because the downgrade IS the bug: it opens a bot-authored PR
+# that looks identical to a working one and that Bugbot silently skips.
+# `standards-sync.yml` already refuses a fallback in the other direction for the
+# same reason.
+AUTHOR_TOKEN_ENV = "SYNC_PR_AUTHOR_TOKEN"
+
+# Reviewer AND assignee on every sync PR. The two are ordinarily distinct roles
+# (RFC-BACKEND-0008 D31: the assignee owns landing it, the reviewer owns judging
+# it) and they are deliberately collapsed here: nobody "does the work" on a
+# machine-generated prose sync, so one person owning both is the honest reading.
+#
+# It CANNOT be the author. GitHub refuses an approving review from a PR's own
+# author, and LukasWodka was the requested reviewer on 4 of the 14 open sync PRs
+# (docs#143, release-train#130, .github#344, claude-skills#39) -- authoring as
+# LukasWodka without moving those would deadlock them permanently: a required
+# review nobody eligible can give.
+SYNC_REVIEWER = "saqlainsyed007"
+
+
 class Unreadable(Exception):
     """A read that produced neither a value nor a clean 404."""
 
@@ -110,8 +144,21 @@ def die(message: str) -> "None":
     raise SystemExit(2)
 
 
-def gh(*args: str) -> "tuple[int, str, str]":
-    proc = subprocess.run(["gh", *args], capture_output=True, text=True)
+def gh(*args: str, token: "str | None" = None) -> "tuple[int, str, str]":
+    """Run `gh`. With `token`, run it as THAT identity instead of the ambient one.
+
+    Every call but PR creation wants the App installation token the workflow
+    already exports as GH_TOKEN, so `token` defaults to None and nothing about
+    the fleet reads changes. `_ensure_pr` is the one caller that passes it --
+    see AUTHOR_TOKEN_ENV for why the PR author has to be a human.
+    """
+    env = None
+    if token is not None:
+        # BOTH names, because `gh` reads GITHUB_TOKEN too and whichever the
+        # workflow happens to export would otherwise win over this argument --
+        # silently restoring the App identity this exists to displace.
+        env = dict(os.environ, GH_TOKEN=token, GITHUB_TOKEN=token)
+    proc = subprocess.run(["gh", *args], capture_output=True, text=True, env=env)
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -360,6 +407,14 @@ def _ensure_pr(full: str, head: str, base: str, issue: int) -> "str | None":
         f"Part of tracebloc/backend#{issue} (org-wide engineering standards).\n\n"
         "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"
     )
+    # FAIL CLOSED ON A MISSING PAT (backend#2590). Without it `gh` would fall
+    # back to the ambient App token and open a PR Bugbot will not review -- the
+    # exact defect this token split exists to remove, and invisible on the PR.
+    author_token = os.environ.get(AUTHOR_TOKEN_ENV, "").strip()
+    if not author_token:
+        return (f"{AUTHOR_TOKEN_ENV} is empty, so this PR could only be opened as the "
+                "App, whose PRs Bugbot never reviews (backend#2590). Refusing to open it.")
+
     code, out, err = gh("pr", "create", "-R", full, "--base", base, "--head", head,
                         # NO TICKET IN THIS TITLE, deliberately. closing-ref-gate.py requires every
                         # ticket a title names to appear in the PR's closingIssuesReferences,
@@ -368,17 +423,27 @@ def _ensure_pr(full: str, head: str, base: str, issue: int) -> "str | None":
                         # rest re-close it. The body carries "Part of ..." instead, which is
                         # traceability without a closing link. Pinned by the selftest.
                         "--title", "docs(claude): sync the org-standards block",
-                        "--body", body)
+                        "--body", body,
+                        # As the human, so the PR has an author Bugbot can see.
+                        token=author_token)
     if code != 0:
         return f"cannot open PR: {err.strip()}"
 
-    # Assignee = whoever dispatched the sync (D31: the person doing the work).
-    # Non-fatal: a missing assignee is visible on the PR and cheap to add by hand.
-    actor = os.environ.get("GITHUB_ACTOR", "").strip()
-    if actor:
-        code, _, err = gh("pr", "edit", out.strip() or head, "-R", full, "--add-assignee", actor)
+    # Reviewer AND assignee = SYNC_REVIEWER, never the dispatcher. This used to be
+    # GITHUB_ACTOR, which was right while a Bot opened the PR and is wrong now: the
+    # dispatcher IS the author, and GitHub will not take an approving review from a
+    # PR's own author. See SYNC_REVIEWER.
+    #
+    # Non-fatal, and asymmetrically so. A missing assignee is cosmetic, but a
+    # missing REVIEWER means a PR that cannot merge until someone notices, so the
+    # warning names which half failed instead of one message for both.
+    pr_ref = out.strip() or head
+    for flag, role in (("--add-reviewer", "review"), ("--add-assignee", "assignment")):
+        code, _, err = gh("pr", "edit", pr_ref, "-R", full, flag, SYNC_REVIEWER,
+                          token=author_token)
         if code != 0:
-            sys.stderr.write(f"::warning::{full}: could not assign @{actor}: {err.strip()}\n")
+            sys.stderr.write(f"::warning::{full}: could not set @{SYNC_REVIEWER} for "
+                             f"{role}: {err.strip()}\n")
     return None
 
 
