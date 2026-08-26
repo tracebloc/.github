@@ -191,6 +191,16 @@ PREFIX_RE = re.compile(r"\A(?:([A-Za-z0-9][A-Za-z0-9-]*)/)?([A-Za-z0-9.][A-Za-z0
 # and is NOT something this script tries to infer (see mechanism (3) in the
 # header).
 EXEMPT = {
+    "tracebloc/backend#2347": (
+        "PROVENANCE, re-read 2026-08-26 and still true. `claude-skills`' fr-gate "
+        "reason cites it for WHY the caller was removed -- #2347 decided the three "
+        "non-train repos are working repos, and claude-skills#38 carried that out "
+        "(+0/-15). The issue is CLOSED COMPLETED, which is what this guard flags, "
+        "and that is exactly right for a citation that might be a live dependency. "
+        "This one is not: it is past-tense history and stays true. Recorded here "
+        "rather than reworded out of the reason, because dropping the number to "
+        "silence the guard would lose the traceability the reason exists to give."
+    ),
     "tracebloc/backend#1408": (
         "already re-read, and the prose says so: `stale_backlog_exemption_needs_redeciding` "
         "states that this ticket's basis is gone and records the exemption as UNDECIDED"
