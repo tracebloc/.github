@@ -691,12 +691,45 @@ repos:
       tag_trust_root:
         exempt: "Publishes nothing from a `v*` tag today - no tag-triggered workflow and no v* tags cut (measured 2026-08-25). Revisit if `publish.yml` gains a tag trigger."
     callers:
+      # WHY THIS REPO'S PROMOTION CELLS DIFFER FROM EVERY OTHER OFF-TRAIN REPO
+      # (Bugbot Medium, backend#2512, deferred from the .github#334 hop). This
+      # block was created 2026-08-25 by copying ON-TRAIN `design-system`, so all
+      # three promotion-shaped rows arrived `required` while `claude-skills`,
+      # `release-train` and `rfcs` exempt version-bump and fr-gate. The rows were
+      # not wrong so much as UNEXPLAINED -- and the three are NOT the same case.
+      # Measured 2026-08-26, this repo has ONE branch, `develop`:
+      #
+      #   version-bump-gate  fires on `branches: [develop]` -- ACTIVE on every PR
+      #                      here, applicable independently of the train.
+      #   fr-gate            fires on `branches: [staging, main, master]`, NONE of
+      #                      which exist. Permanently dormant.
+      #   fr-pass-comment    fires on `issue_comment` with NO branch filter, so it
+      #                      CAN fire. See its own note.
+      #
+      # WHY ALL THREE STAY `required` RATHER THAN MATCHING THE SIBLINGS: all three
+      # callers EXIST here, and an `exempt` row whose caller is present is the
+      # stale-exemption finding (caller-drift.py:2309). Flipping them would trade
+      # an unexplained row for a red audit. Exempting means DELETING the callers
+      # first -- caller first, entry after -- which is the onboarding question in
+      # backend#2512, not a bookkeeping edit.
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
+      # DORMANT, NOT ENFORCING. The caller's `branches:` names staging/main/master
+      # and this repo has only `develop`, so no event can ever match. The row
+      # asserts the caller is PRESENT, which it is; it asserts nothing about the
+      # gate running, because it cannot.
       fr-gate.yml: required   # fr-gate-caller.yml
       stale-backlog.yml: required   # stale-backlog-caller.yml
+      # THE ONE OF THE THREE THAT CAN ACTUALLY MISFIRE. Its caller triggers on
+      # `issue_comment` with no branch filter, so a `/fr-pass` typed here reaches
+      # the reusable -- in a repo with no `staging`, and so no `FR on staging`
+      # card to advance. `release-train` also keeps this `required` while
+      # exempting the other two, which is the sibling split Bugbot flagged; that
+      # is deliberate there, because the train's own cards do get functionally
+      # reviewed. Whether the reasoning transfers to a component library nobody
+      # promotes is the open half of backend#2512 and is NOT settled here.
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
       set-pr-status.yml: required   # set-pr-status.yml
