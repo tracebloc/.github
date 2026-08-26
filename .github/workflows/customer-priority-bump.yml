@@ -29,12 +29,26 @@ name: Label-driven issue triage
 # caller rollout (BUGBOT.md property 1: land the callee first) and is left for
 # whoever does the `.github`/`release-train`/`rfcs` wiring below.
 #
-# NOT WIRED EVERYWHERE, and that is a real gap rather than a rounding error:
-# `.github`, `release-train` and `rfcs` are `exempt` for this reusable in
-# `repo-inventory.yml` (`customer_priority_bump_caller_missing`), so a bug filed
-# in one of those three still lands in `Backlog` and still needs a hand. The
-# other 16 -- including `backend` and `frontend-app`, where all seven of
-# backend#2348's measured misses were filed -- are covered.
+# NOT WIRED EVERYWHERE -- but the REASON HAS MOVED, so do not trust the anchor
+# this comment used to cite. Every repo now has a caller (`.github`'s landed under
+# backend#2396), and `customer_priority_bump_caller_missing` is GONE from
+# `repo-inventory.yml`: grepping for it returns nothing, so the old text sent the
+# reader to a key that no longer exists.
+#
+# What remains is narrower and invisible. `release-train` and `rfcs` have no
+# `work-type:*` labels AT ALL, and GitHub silently DROPS a template label the
+# target repo lacks. Neither has its own `.github/ISSUE_TEMPLATE`, so both inherit
+# the org Bug template, which asks for `work-type:bug` -- nothing is added, the
+# `bug-to-ready` job below never sees its label, and the card sits in `Backlog`,
+# the refinement queue nobody pulls from. That is the exact miss backend#2348 was
+# filed to close, surviving in the two repos a caller-presence check calls done.
+#
+# A CALLER WITHOUT THE LABEL IS WIRED IN EXACTLY THE WAY THAT DOES NOTHING, and
+# today nothing can tell -- caller-drift.py asserts presence of the caller, not of
+# the vocabulary it fires on. backend#2598 creates the labels and weighs asserting
+# them alongside. Until it lands, a bug filed in those two needs a hand. The other
+# 17 -- including `backend` and `frontend-app`, where all seven of backend#2348's
+# measured misses were filed -- are covered.
 
 on:
   workflow_call:

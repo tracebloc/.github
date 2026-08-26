@@ -1,7 +1,10 @@
 name: Customer priority bump
 
 # THIN CALLER (backend#2396). This repo is the last of the three that were never
-# wired -- the others are `release-train` and `rfcs`.
+# wired -- the others are `release-train` and `rfcs`, which now have callers too.
+# All three are wired at the CALLER level; `release-train` and `rfcs` still cannot
+# fire because they have no `work-type:*` labels for the trigger to match
+# (backend#2598).
 #
 # NAMED `-caller.yml`, NOT `customer-priority-bump.yml`. In this repo that path
 # already holds the REUSABLE, so a caller under the same name would overwrite the

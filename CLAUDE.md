@@ -41,7 +41,7 @@ and this repo's default reviewer. Rollout: tracebloc/backend#1602.
 
 ### Engineer kanban
 
-- Every ticket on the board carries a `Status` — no card sits at "No Status". New tickets start in `Backlog`. **Bugs are the exception:** label them `work-type:bug` (the Bug template does it) and automation moves the card straight into `Ready` — defects don't wait for refinement. Three repos aren't wired for the label trigger yet (`.github`, `release-train`, `rfcs`); move the card yourself there.
+- Every ticket on the board carries a `Status` — no card sits at "No Status". New tickets start in `Backlog`. **Bugs are the exception:** label them `work-type:bug` (the Bug template does it) and automation moves the card straight into `Ready` — defects don't wait for refinement. That fires only where the `work-type:bug` label exists to be added: `release-train` and `rfcs` have no `work-type:*` labels at all, and GitHub silently drops a template label the target repo lacks — so the card stays in `Backlog`. Move it by hand in those two until backend#2598 creates the labels.
 - Picking up work: the team coordinates. `Ready` is the refined queue — bugs excepted, per the line above — and the first choice when it's stocked; pulling from `Backlog` is normal when refinement hasn't caught up — say what you're taking.
 - Merging to `develop` moves the card to `On dev` automatically; there is no dev-side review.
 - Functional review happens once, on staging: when it passes, comment `/fr-pass` on the PR or drag the card to `Ready for prod`. Self-signoff is allowed.
