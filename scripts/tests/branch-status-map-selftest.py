@@ -412,7 +412,14 @@ eq("without the flag, an unreachable override refuses", _r.returncode != 0, True
 # because the failure is a MISSING argument and no unit call can show that.
 _WF = pathlib.Path(__file__).resolve().parent.parent.parent / ".github" / "workflows"
 for _f, _n in (("advance-deploy-env.yml", 1),
-               ("kanban-closure-router.yml", 2),
+               # ONE call site in the router, not two, since backend#2722. The second
+               # was in the "issue closed as completed" arm, which mirrored the closing
+               # PR's base and therefore had to consult the override. A completed issue
+               # now goes straight to `Done`, so it consults nothing and the arm is gone.
+               # Kept as an exact count rather than `>= 1`: this assertion exists to
+               # catch a call site that forgets the ref, and a floor would let a new
+               # unchecked one hide behind an old good one.
+               ("kanban-closure-router.yml", 1),
                ("kanban-reconcile.yml", 1)):
     _txt = (_WF / _f).read_text()
     _lines = _txt.splitlines()
@@ -464,8 +471,12 @@ _adv = (_WF / "advance-deploy-env.yml").read_text()
 # labels the card. Writing the default would claim a promotion happened on a read
 # that failed; writing nothing lets the built-in Item-closed automation set
 # `Cancelled`, and it acts on the close independently of this workflow.
+# ONE holding-state write, not two, since backend#2722 -- same reason as the call-site
+# count above: the completed-issue arm no longer maps a base, so it has no override to
+# find unusable. The pull_request arm still must write the holding state rather than the
+# default mapping.
 eq("the router writes the holding state on an unusable override",
-   _router.count('UNUSABLE_OVERRIDE="true"'), 2)
+   _router.count('UNUSABLE_OVERRIDE="true"'), 1)
 eq("the router does NOT fall back to the default mapping",
    "--no-override" in _router, False)
 eq("the router labels the card for the weekly pass",

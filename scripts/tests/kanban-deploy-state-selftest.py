@@ -271,6 +271,57 @@ echo "_protect=${{_protect:-unset}} _skip=${{_skip:-unset}}"
         record(ok, f"{copy} policy: {verdict} -> {want}",
                f"rc={rc} (want {want_rc}); {out.splitlines()[0] if out else '<no output>'}")
 
+# ---------------------------------------------------------------------------
+# A COMPLETED ISSUE IS TERMINAL, AND NOTHING PUTS IT IN A DEPLOY COLUMN
+# (backend#2722)
+#
+# Guarding this because it was unguarded: flipping the router's completed-issue
+# destination from `Done` to `On dev` left all 29 selftest suites green, which is
+# exactly how the old mirroring survived months of a written-down convention
+# saying the opposite. 117 closed issues were cleared out of deploy columns by
+# hand in one session on 2026-08-27 before anyone reached for a test.
+#
+# Both halves are asserted, because fixing one is worse than fixing neither -- it
+# looks fixed. The router must send the card to `Done`; advance-deploy-env must
+# not carry issues at all, or it pulls them straight back in.
+with open(ROUTER) as _fh:
+    _router_txt = _fh.read()
+with open(os.path.join(WORKFLOWS, "advance-deploy-env.yml")) as _fh:
+    _adv_txt = _fh.read()
+
+# The completed arm, read out of the file rather than restated: everything between
+# the `completed` test and the `else` that begins the not_planned arm.
+_m = re.search(r'if \[ "\$ISSUE_REASON" = "completed" \]; then(.*?)\n            else',
+               _router_txt, re.S)
+record(_m is not None, "router: the completed-issue arm was located", "regex matched" if _m else "NOT FOUND")
+if _m:
+    _arm = _m.group(1)
+    _assigns = re.findall(r'STATUS="([^"]*)"', _arm)
+    # Exactly one destination, and it is Done. A second assignment would mean the
+    # branching came back.
+    record(_assigns == ["Done"],
+           "router: a completed issue routes to Done and nothing else",
+           f"STATUS assignments in the arm: {_assigns!r}")
+    # The deploy columns must not be reachable from this arm at all.
+    _deploy_named = [c for c in ("On dev", "FR on staging", "Ready for prod", "Prod",
+                                 "Staging (agent review)") if f'"{c}"' in _arm]
+    record(not _deploy_named,
+           "router: the completed-issue arm names no deploy column",
+           f"named: {_deploy_named!r}")
+
+# advance-deploy-env must not resolve or advance closing issues. Keyed on the API
+# field name, which is the only way to ask for them -- a rename of local variables
+# cannot slip past this.
+record("closingIssuesReferences" not in _adv_txt.replace(
+           "# the removed loop resolved closingIssuesReferences CROSS-REPO, failed CLOSED", ""),
+       "advance-deploy-env: does not resolve closing issues",
+       "no live closingIssuesReferences call")
+# And it must not hold the permission those reads needed. An active grant is a
+# `permission-issues:` key; the word inside a comment is not.
+record(not re.search(r'^\s+permission-issues:', _adv_txt, re.M),
+       "advance-deploy-env: no longer requests issues permission",
+       "no active permission-issues grant")
+
 failed = [r for r in RESULTS if not r[0]]
 print(f"\n{len(RESULTS) - len(failed)} passed, {len(failed)} failed")
 sys.exit(1 if failed else 0)
