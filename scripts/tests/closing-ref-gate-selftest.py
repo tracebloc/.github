@@ -354,12 +354,19 @@ check(
     "%r" % (gate.QUERY,),
 )
 
-DERIVED_KEYWORDS = value(gate.reference_keywords)
+# `value` returns the exception TEXT when the derivation refuses, and a string is
+# iterable -- so a case that walks this list would iterate characters and, on the
+# space in "RAISED Unreadable: ...", raise IndexError from `"".split()[0]`,
+# killing the suite. Normalised to a list once, here, so every case below reports
+# instead. (Found by the multi-word-keyword mutation, which is exactly the job:
+# it was scored UNCAUGHT for breaking the harness rather than being detected.)
+_DERIVED = value(gate.reference_keywords)
+DERIVED_KEYWORDS = _DERIVED if isinstance(_DERIVED, list) else []
 check(
     "the canon's non-closing form is derived from the real org-standards.md "
     "(the derivation is not vacuous)",
-    isinstance(DERIVED_KEYWORDS, list) and len(DERIVED_KEYWORDS) >= 1,
-    "%r" % (DERIVED_KEYWORDS,),
+    isinstance(_DERIVED, list) and len(_DERIVED) >= 1,
+    "%r" % (_DERIVED,),  # the RAW result, so a refusal shows its own message here
 )
 # WRITTEN DOWN INDEPENDENTLY OF THE MATCHER (rule 9's corollary): this is the
 # string org-standards.md actually carries today, typed here as a literal rather
