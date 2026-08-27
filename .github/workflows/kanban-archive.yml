@@ -60,7 +60,11 @@ jobs:
           # `repositories:` narrows the repo-level half to this repo; the board write
           # is an ORG permission and is unaffected by it (measured, backend#2181 run
           # 32255581084).
-          repositories: ${{ github.event.repository.name }}
+          # PROBE backend#2623 (do not merge): `repositories:` narrowing REMOVED
+          # ALONE, with NO content-read permissions added. The 2623-content-perms
+          # probe moved both at once (102 -> 1626) and so cannot say which was
+          # load-bearing. If this alone reaches ~1626, the archiver needs no new
+          # permissions at all and the least-privilege posture is preserved.
           permission-organization-projects: write
 
       - name: Resolve project id
