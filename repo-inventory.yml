@@ -645,58 +645,101 @@ repos:
   # first branch, which is the correct order: the inventory records measured reality,
   # and there was nothing to measure.
   #
-  # Every cell below is measured on `develop`, this repo's DEFAULT and only branch.
+  # ON THE TRAIN SINCE 2026-08-26T12:12:21Z -- release-train/repos.yml commit
+  # 8330f408, "feat(train): design-system-v2 joins the train", onboarded under
+  # backend#2547. `release_train: false` survived that hop by one day, and that
+  # single cell failed the repo-conformance audit -> the required `gate` context
+  # -> `.github`'s OWN promotion to staging (backend#2653). The guard was right
+  # to refuse: it cannot tell a bookkeeping disagreement from a repo that joined
+  # the train with no fr-gate caller, and must not guess. (The caller is present
+  # here -- `fr-gate-caller.yml`, measured on develop 2026-08-27 -- so nothing
+  # was ever actually ungated.)
+  #
+  # THE ONE-BRANCH MEASUREMENT THIS BLOCK WAS WRITTEN ON IS GONE. Joining the
+  # train created the promotion lane: re-measured 2026-08-27, the repo has
+  # `develop` (default), `staging` and `main`. Every cell below is measured on
+  # `develop`, which is now the develop-first audit branch BECAUSE the repo is
+  # on the train (caller-drift.py:1216), not because it is the only branch.
   design-system-v2:
     visibility: private
-    release_train: false
+    release_train: true
     protection:
+      # ALL THREE ROLES NOW EXIST AND NOT ONE OF THEM IS PROTECTED. Measured
+      # 2026-08-27: `develop`, `staging` and `main` each return "Branch not
+      # protected" from the classic endpoint AND the repo has ZERO rulesets, so
+      # neither protection system covers any of them. Joining the train created
+      # the branches; it did not arm them.
+      #
+      # WHY THESE STAY `exempt` RATHER THAN FLIPPING TO `required` WITH THE FLAG
+      # ABOVE: `required` over an unarmed branch is a RED gate on merge, and
+      # nothing in this file may land red (CLAUDE.md rule 4 -- arm while green).
+      # The order is branch first, cell after, the same order the callers block
+      # below states for exemptions. Arming is the open half of backend#2547.
+      #
+      # STALENESS STILL BITES, which is what keeps these honest: the moment any
+      # of the three gains protection of either kind, caller-drift flags the
+      # exemption as stale (caller-drift.py evaluate_protection) and the cell
+      # must be promoted. An unprotected branch is the ONE state these rows can
+      # describe without the guard objecting -- see `no_develop_branch_single_branch_repo`.
       develop:
-        exempt: *develop_unprotected_non_train
+        exempt: "`develop` exists and carries NO protection of either kind (classic endpoint 404s `Branch not protected`; repo has zero rulesets - measured 2026-08-27). This repo is ON the train since 2026-08-26, so protection_policy.develop DOES apply here: this is a real, UNREMEDIATED gap rather than a structural one, and arming it is the open half of backend#2547. Deliberately not `required` yet - see the block comment above on arming before asserting."
       staging:
-        exempt: *no_staging_branch_not_on_train
+        exempt: "`staging` was created by the train onboarding and carries NO protection of either kind (measured 2026-08-27). Same case as `develop` above: on-train policy applies, nothing is armed, UNREMEDIATED under backend#2547. Recorded rather than aliased to `no_staging_branch_not_on_train`, whose premise - no train, no staging branch - is false here in both halves as of 2026-08-26."
       prod:
-        exempt: "No prod branch exists. `develop` is the DEFAULT and the only branch (measured 2026-08-25) - this repo has neither `staging` nor `main`, so there is no prod role for a policy to describe. Structural, not a gap."
+        exempt: "`main` exists (measured 2026-08-27) and carries NO protection of either kind, so the fleet's strictest role - enforce_admins closed, fr-gate required - is enforced by nothing. Same case as the two rows above: on-train policy applies, arming is UNREMEDIATED under backend#2547. This row previously read \"No prod branch exists ... structural, not a gap\"; the branch now exists, so that reading is retired."
     rulesets:
       promotion_merge_commit_only:
-        exempt: "Not on the release train: no staging or prod branch, so there are no promotion branches for a merge-method rule to protect."
+        exempt: "The repo has ZERO rulesets of any kind (measured 2026-08-27) while `staging` and `main` now exist and the train promotes through them - so nothing stops a promotion PR being squash-merged, which collapses the merge-commit ancestry promote-repo.sh reads and jams the next prepare. UNREMEDIATED, tracked with the protection arming in backend#2547. Not `required`, for the same arm-before-asserting reason as the protection rows above."
       tag_trust_root:
-        exempt: "Publishes nothing from a `v*` tag today - no tag-triggered workflow and no v* tags cut (measured 2026-08-25). Revisit if `publish.yml` gains a tag trigger."
+        exempt: "The repo has ZERO rulesets (measured 2026-08-27). The previous reason here - \"publishes nothing from a `v*` tag today - no tag-triggered workflow and no v* tags cut\" - is now false in BOTH halves: `publish.yml` triggers on `push: tags: ['v*']` and publishes to GitHub Packages, and `v0.1.0-rc.1` is cut. So the trust root is MISSING rather than inapplicable. UNREMEDIATED, tracked in backend#2547."
     callers:
-      # WHY THIS REPO'S PROMOTION CELLS DIFFER FROM EVERY OTHER OFF-TRAIN REPO
-      # (Bugbot Medium, backend#2512, deferred from the .github#334 hop). This
-      # block was created 2026-08-25 by copying ON-TRAIN `design-system`, so all
-      # three promotion-shaped rows arrived `required` while `claude-skills`,
-      # `release-train` and `rfcs` exempt version-bump and fr-gate. The rows were
-      # not wrong so much as UNEXPLAINED -- and the three are NOT the same case.
-      # Measured 2026-08-26, this repo has ONE branch, `develop`:
+      # THE QUESTION THIS NOTE ANSWERED HAS EXPIRED, and the answer is kept
+      # because the measurements in it are the record. It asked why an OFF-TRAIN
+      # repo carried on-train promotion cells (Bugbot Medium, backend#2512,
+      # deferred from the .github#334 hop): this block was created 2026-08-25 by
+      # copying ON-TRAIN `design-system`, so all three promotion-shaped rows
+      # arrived `required` while `claude-skills`, `release-train` and `rfcs`
+      # exempt version-bump and fr-gate. Since 2026-08-26 this repo IS on the
+      # train, so `design-system` is simply the right template and the three
+      # non-train repos are no longer the comparison class.
+      # RE-MEASURED 2026-08-27, AFTER THE REPO JOINED THE TRAIN (backend#2653).
+      # The 2026-08-26 measurement this note was written on said "ONE branch,
+      # `develop`", and the whole dormancy argument below rested on it. The
+      # onboarding created `staging` and `main`, so it no longer holds:
       #
       #   version-bump-gate  fires on `branches: [develop]` -- ACTIVE on every PR
-      #                      here, applicable independently of the train.
-      #   fr-gate            fires on `branches: [staging, main, master]`, NONE of
-      #                      which exist. Permanently dormant.
+      #                      here, and now applicable through the train too: the
+      #                      repo declares `version_file: package.json`.
+      #   fr-gate            fires on `branches: [staging, main, master]`. `staging`
+      #                      and `main` NOW EXIST, so this is LIVE, not dormant --
+      #                      it is the gate on every promotion into them.
       #   fr-pass-comment    fires on `issue_comment` with NO branch filter, so it
       #                      CAN fire. See its own note.
       #
-      # WHY ALL THREE STAY `required` RATHER THAN MATCHING THE SIBLINGS: all three
-      # callers EXIST here, and an `exempt` row whose caller is present is the
-      # stale-exemption finding (caller-drift.py:2309). Flipping them would trade
-      # an unexplained row for a red audit. Exempting means DELETING the callers
-      # first -- caller first, entry after -- which is the onboarding question in
-      # backend#2512, not a bookkeeping edit.
+      # WHY ALL THREE STAY `required`: they are what an on-train repo is meant to
+      # carry, and independently all three callers EXIST here -- an `exempt` row
+      # whose caller is present is the stale-exemption finding
+      # (caller-drift.py:2309). Exempting anything here would mean DELETING the
+      # caller first -- caller first, entry after -- and there is now no reason
+      # to want that. backend#2512's open half was whether a component library
+      # nobody promotes should carry them; the train answered it by promoting one.
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
-      # DORMANT, NOT ENFORCING. The caller's `branches:` names staging/main/master
-      # and this repo has only `develop`, so no event can ever match. The row
-      # asserts the caller is PRESENT, which it is; it asserts nothing about the
-      # gate running, because it cannot.
+      # LIVE AS OF 2026-08-26, and it was DORMANT when this row was written --
+      # the note here said so, on the then-true measurement that staging/main
+      # did not exist. Joining the train created both, so the caller's
+      # `branches: [staging, main, master]` now matches real promotion PRs and
+      # this row asserts an enforcing gate, not merely a present file.
       fr-gate.yml: required   # fr-gate-caller.yml
       stale-backlog.yml: required   # stale-backlog-caller.yml
-      # THE ONE OF THE THREE THAT CAN ACTUALLY MISFIRE. Its caller triggers on
-      # `issue_comment` with no branch filter, so a `/fr-pass` typed here reaches
-      # the reusable -- in a repo with no `staging`, and so no `FR on staging`
-      # card to advance. `release-train` also keeps this `required` while
+      # THE MISFIRE THIS NOTE DESCRIBED IS GONE, and the reason is worth keeping:
+      # its caller triggers on `issue_comment` with no branch filter, so a
+      # `/fr-pass` typed here always reached the reusable -- which, in a repo with
+      # no `staging`, had no `FR on staging` card to advance. Since 2026-08-26 the
+      # repo is on the train and HAS a `staging`, so the comment now means exactly
+      # what it means everywhere else. `release-train` also keeps this `required` while
       # exempting the other two, which is the sibling split Bugbot flagged; that
       # is deliberate there, because the train's own cards do get functionally
       # reviewed. Whether the reasoning transfers to a component library nobody
