@@ -149,6 +149,36 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          # CONDITIONAL, BECAUSE THE TWO MODES NEED DIFFERENT THINGS
+          # (backend#2157, last of four). This minted the App's entire permission
+          # set across every repo the installation covers. Scoping it to the
+          # UNION would have kept fleet-wide contents:WRITE on every scheduled
+          # report -- which is the mismatch, not the fix, since `report` mode
+          # only ever reads.
+          #
+          # `write` is granted for exactly one thing: the `create-prs` dispatch,
+          # which PUTs CLAUDE.md and POSTs a branch ref in each drifted repo. On
+          # a schedule run -- where `inputs` is empty, so the condition is false
+          # -- the same job gets `read`.
+          #
+          # DERIVED FROM THE CALLS THIS TOKEN MAKES, checked one by one:
+          #   git/ref/heads/develop, repos/{r}, contents/CLAUDE.md?ref=  -> contents: read
+          #   PUT contents/CLAUDE.md, POST git/refs   (create-prs only)  -> contents: WRITE
+          #   gh pr list                                                 -> pull-requests: read
+          #   gh issue comment 1602 (the drift report)                   -> issues: WRITE
+          #
+          # `== true` RATHER THAN A BARE TRUTHINESS TEST, matching the CREATE_PRS
+          # line further down. The input is `type: boolean` today, so a bare
+          # `inputs.create-prs` is equivalent -- but if it ever became a string,
+          # `'false'` is TRUTHY and this would silently mint write on every
+          # scheduled run while still looking conditional.
+          #
+          # NOT pull-requests:write -- `pr create` and both `pr edit` calls run
+          # on SYNC_PR_AUTHOR_TOKEN, not on this token (backend#2590). The App
+          # only LISTS PRs here.
+          permission-contents: ${{ (github.event_name == 'workflow_dispatch' && inputs.create-prs == true) && 'write' || 'read' }}
+          permission-pull-requests: read
+          permission-issues: write
 
       - name: Check the sync token is present
         # KEPT, and pointed at the minted token. A failed mint fails its own step,

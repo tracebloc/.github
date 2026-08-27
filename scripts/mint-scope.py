@@ -117,19 +117,20 @@ SCOPE_PREFIX = "permission-"
 # is the argument for measuring rather than reasoning, and it is why the four below
 # say what they say.
 #
-# The ONE left is left for a STATED reason, not for lack of time:
+# NONE ARE LEFT, and that is a burn-down completing rather than a list being
+# deleted. The last two were the two that needed their own window, and each got
+# one: fr-gate (#352) because it is a REQUIRED check on every promotion branch
+# fleet-wide, so a bad scope there reddens every hop at once rather than one
+# workflow; standards-sync (#355) because it is a contents:write sweep whose risky
+# mode cannot be rehearsed without opening 19 real PRs. They were scoped in
+# separate PRs for exactly that reason, and landing both is what empties this.
 #
-#   standards-sync -- a contents:write sweep across the fleet, and the only one of
-#     the four whose risky mode cannot be rehearsed without opening 19 real PRs.
-#     It needs its own window so one bad scope does not redden the whole fleet at
-#     once. set-pr-status, kanban-reconcile and fr-gate were the other three and
-#     are now scoped; their windows were taken.
-#
-# The distinction matters because it is the difference between an exemption that is
-# a to-do and one that is a decision. Do not fold them back together.
-EXEMPT = {
-    "standards-sync.yml": "writes CLAUDE.md across the fleet; contents:write is real here",
-}
+# AN EMPTY MAP IS NOT AN INERT ONE. `stale_exemptions` compares against the live
+# unscoped set, so the guard keeps working from here in the only direction left:
+# a re-introduced full-grant mint has no row to hide behind and is reported the
+# first time it appears. Do not add a row back to make a red run green -- scope
+# the workflow, which is what every row above was eventually replaced by.
+EXEMPT: dict = {}
 
 
 def _exempt() -> dict:
