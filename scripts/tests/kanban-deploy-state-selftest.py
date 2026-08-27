@@ -322,6 +322,40 @@ record(not re.search(r'^\s+permission-issues:', _adv_txt, re.M),
        "advance-deploy-env: no longer requests issues permission",
        "no active permission-issues grant")
 
+# THE THIRD WRITER, which the two assertions above could not see (Bugbot).
+# `kanban-reconcile.yml` is the weekly backstop and it derived a deploy stage
+# from the closing PR's base for exactly the cards the router now terminalises.
+# With only the router and advance-deploy-env read, a green run confirmed the two
+# EDITED files rather than the invariant the comments describe -- and the
+# backstop would have quietly put every card back, the slower job undoing the
+# faster one.
+with open(os.path.join(WORKFLOWS, "kanban-reconcile.yml")) as _fh:
+    _rec_txt = _fh.read()
+
+# The closed-completed-issue routing, read out of the file: the `case` on the
+# closer lookup, which is where every destination for such a card is chosen.
+_rm = re.search(r'case "\$CLOSER" in(.*?)\n\s+esac', _rec_txt, re.S)
+record(_rm is not None, "reconcile: the closed-issue closer arm was located",
+       "regex matched" if _rm else "NOT FOUND")
+if _rm:
+    _rarm = _rm.group(1)
+    # Every option id this job can write, read from the arm rather than listed:
+    # the only legitimate destination for a completed issue is Done.
+    _opts = sorted(set(re.findall(r'"\$([A-Z_]+_OPT)"', _rarm)))
+    record(_opts == ["DONE_OPT"],
+           "reconcile: a completed issue is written only to Done",
+           f"option ids written in the arm: {_opts!r}")
+    _rdeploy = [c for c in ("On dev", "FR on staging", "Ready for prod", "Prod",
+                            "Staging (agent review)") if f'"{c}"' in _rarm]
+    record(not _rdeploy,
+           "reconcile: the closed-issue arm names no deploy column",
+           f"named: {_rdeploy!r}")
+    # And the branch->stage mapper must not be reached from here at all: it is
+    # what turned a closer's base ref into a deploy column.
+    record("branch_status_map" not in _rarm,
+           "reconcile: the closed-issue arm does not derive a stage from a branch",
+           "no branch_status_map call in the arm")
+
 failed = [r for r in RESULTS if not r[0]]
 print(f"\n{len(RESULTS) - len(failed)} passed, {len(failed)} failed")
 sys.exit(1 if failed else 0)
