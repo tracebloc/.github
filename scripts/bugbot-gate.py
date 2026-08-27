@@ -213,19 +213,53 @@ FAIL = "fail"        # Bugbot reviewed the head and something is open
 # is worth blocking on. A check that never appeared is Bugbot declining or
 # dropping the PR -- something this repo cannot fix, retry, or wait out.
 #
-# Measured 2026-08-26, human-authored PRs, well past the p50 164s / max 635s
-# latency: 6 of 9 never got a check at all -- .github#349 (57 min), #350 (55),
-# #352 (40), #353 (37), #354 (32), e2e-test-agent#273 (2h+) -- while #351,
-# opened BETWEEN two of them, was reviewed in 3 minutes. Not latency, not the
-# seat limit, not the author: backend#2114 closed COMPLETED saying "no
-# discriminator survives the data", and the drop it describes is still live.
+# THE MEASUREMENT THIS COMMENT USED TO CARRY WAS WRONG, AND IT IS RETRACTED
+# HERE RATHER THAN QUIETLY DELETED (backend#2586).
 #
-# `bugbot run` cannot recover it either: Cursor refuses it on a seat limit, and
-# the App will not be given a seat (decision, 2026-08-26).
+# It said: "Measured 2026-08-26, human-authored PRs [...] 6 of 9 never got a
+# check at all -- .github#349 (57 min), #350 (55), #352 (40), #353 (37), #354
+# (32), e2e-test-agent#273 (2h+)", and concluded that failing on UNCLAIMED would
+# block "roughly two thirds of all PRs".
 #
-# So requiring this context while failing on UNCLAIMED would block roughly two
-# thirds of all PRs for the full wait and then fail them, with no remedy. The
-# gate would look broken while behaving exactly as written.
+# Re-measured 2026-08-27, per COMMIT rather than per PR, and every one of those
+# rows is false. Each named PR carried a COMPLETED `Cursor Bugbot` run on every
+# commit it ever had, and this gate's own `bugbot / review` context concluded
+# SUCCESS on their heads -- so the gate SAW the reviews it was said to have
+# missed:
+#
+#   .github#349  bd84b548  commit 14:29:16Z  bugbot done 14:31:20Z  success
+#   .github#350  aa90a361  commit 14:30:32Z  bugbot done 14:33:59Z  success
+#   .github#352  25bb5874  commit 14:46:27Z  bugbot done 14:49:37Z  success
+#   .github#353  8bf43d8f  commit 14:49:09Z  bugbot done 14:53:23Z  success
+#   e2e#273      1a5d97ea  commit 13:20:31Z  bugbot done 13:27:02Z  success
+#
+# The likely cause of the original reading is that it timed latency from PR
+# creation while the head had since moved; anchoring on the head COMMIT makes
+# every case ordinary.
+#
+# WHAT SURVIVES RE-MEASUREMENT IS A SINGLE DISCRIMINATOR: THE PR'S AUTHOR.
+# 662 PRs, 20 repos, 2026-08-24..27, plus a 2026-07-01 sweep for the bot rows:
+#
+#   PR author        head commit author   n     got a `Cursor Bugbot` check
+#   -------------------------------------------------------------------------
+#   human            human                594   yes (all)
+#   human            release-train[bot]     43   yes, 43 of 43
+#   Bot (App)        human                   3   yes, 3 of 3
+#   Bot (App, sync)  release-train[bot]     20   NO, 0 of 20
+#   Bot (dependabot) either                 15   NO, 0 of 15
+#
+# The only PRs with no review are the ones a Bot AUTHORED; the head commit's
+# author does not matter (43 of 43 bot-authored COMMITS on human-opened PRs were
+# reviewed). backend#2114 closed COMPLETED saying "no discriminator survives the
+# data" -- one does, and it is the author. `bugbot run` cannot recover it:
+# Cursor attributes the request to the AUTHOR and answers with a seat refusal.
+#
+# So `UNCLAIMED` is not a general drop. It is, on all evidence, the bot-author
+# case -- which is why the report DERIVES the author instead of restating this
+# paragraph, and why failing on it would block that class forever with no
+# remedy, and (on the corrected numbers) almost nothing else. Whether the HUMAN
+# case should block is the open decision on backend#2586; the exit code is
+# deliberately unchanged here so that decision is made, not smuggled.
 #
 # Both are WAITABLE -- an unclaimed head may still be claimed inside the window,
 # and that is the common case for a healthy Bugbot. They differ only at the
@@ -239,6 +273,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       number
       isDraft
       headRefOid
+      author { __typename login }
       commits(last: 1) {
         nodes {
           commit {
@@ -307,6 +342,69 @@ def connections_missing_totalcount(query=QUERY):
         if match is None or "totalCount" not in match.group(1):
             missing.append(name)
     return missing
+
+
+# THE TWO ACTOR KINDS THIS GATE CAN ACT ON, spelled as GitHub spells them.
+# `Actor.__typename` also admits `Organization`, `Mannequin` and
+# `EnterpriseUserAccount`; those are neither, and land in "cannot tell" on
+# purpose rather than being folded into whichever branch looks close.
+BOT_AUTHOR = "Bot"
+HUMAN_AUTHOR = "User"
+
+# Returned by `author_kind`. Not booleans: "we could not tell" is a third answer
+# with its own report, per CLAUDE.md rule 3, and a bool cannot hold it.
+AUTHOR_BOT = "bot"
+AUTHOR_HUMAN = "human"
+
+
+def query_lacks_author_kind(query=QUERY):
+    """True when `query` no longer asks what kind of actor opened the PR.
+
+    `author_kind` reads `author.__typename`, so a query edited to stop asking
+    for it would make the whole discriminator answer "cannot tell" on EVERY PR
+    -- and "cannot tell" is the quietest of the three branches. That is the
+    `connections_missing_totalcount` failure shape one field over: a guard going
+    inert while its log stays green. Derived by reading the query, and the run
+    refuses rather than reporting from a field it stopped requesting.
+
+    WHAT IT CHECKS, EXACTLY: that SOME `author { ... }` selection asks for
+    `__typename`. It does not model nesting, so a `__typename` added to the
+    thread-level author would satisfy it -- stated rather than implied, because a
+    guard's limits belong next to the guard. Nothing asks for one today, and the
+    field this gate reads is pinned separately by the fixtures in the selftest.
+    """
+    return re.search(r"author\s*\{[^}]*__typename", query) is None
+
+
+def author_kind(pr):
+    """Which kind of actor opened this PR: AUTHOR_BOT, AUTHOR_HUMAN, or None.
+
+    THIS IS THE ONE DISCRIMINATOR THAT SURVIVES THE DATA (backend#2586 -- see
+    the retraction above WAITABLE for the 662-PR measurement). Bugbot reviews
+    every human-authored PR and no Bot-authored one, so an unclaimed head means
+    two entirely different things depending on this answer, and the report has
+    no business guessing which.
+
+    None means GitHub did not say -- a deleted account returns `author: null`,
+    and an actor type this gate has not measured returns something else. Both
+    are reported as "cannot tell", never quietly filed under either branch.
+    """
+    author = pr.get("author")
+    if not isinstance(author, dict):
+        return None
+    typename = author.get("__typename")
+    if typename == BOT_AUTHOR:
+        return AUTHOR_BOT
+    if typename == HUMAN_AUTHOR:
+        return AUTHOR_HUMAN
+    return None
+
+
+def author_label(pr):
+    """`@login` for the report, or a stand-in when GitHub gave no login."""
+    author = pr.get("author")
+    login = author.get("login") if isinstance(author, dict) else None
+    return ("@" + login) if login else "an author GitHub did not name"
 
 
 def require_complete(kind, conn):
@@ -688,6 +786,16 @@ def main(argv=None):
                         "Without it a truncated page cannot be detected." % ", ".join(blind))
         return 2
 
+    # Same shape, one field over (backend#2586): if the query stopped asking for
+    # the author's `__typename`, the UNCLAIMED report's discriminator answers
+    # "cannot tell" on every PR while the run stays green. That is a defect in
+    # this file, so it fails the run rather than the author's day.
+    if query_lacks_author_kind():
+        _emit(FAIL, [], "the GraphQL query no longer requests author.__typename, "
+                        "so an unreviewed head cannot be told apart from a "
+                        "Bot-authored one. See author_kind.")
+        return 2
+
     sleeper = time.sleep
     clock = time.monotonic
     deadline = clock() + max(0, wait_seconds)
@@ -706,28 +814,72 @@ def main(argv=None):
         if verdict not in WAITABLE or clock() >= deadline:
             if verdict == UNCLAIMED:
                 # THE ONE ABSENCE THIS GATE DOES NOT BLOCK ON, and it says so
-                # rather than passing quietly. See the WAITABLE comment for the
-                # measurement: Bugbot drops PRs it never claims, this repo
-                # cannot make it claim one, and failing here would block roughly
-                # two thirds of PRs with no available remedy.
+                # rather than passing quietly. It is NOT a pass: the exit code is
+                # 0 so the context can be required, and every other word out of
+                # this run says the head is UNREVIEWED.
                 #
-                # It is NOT a pass. The exit code is 0 so the context can be
-                # required, and every other word out of this run says the head
-                # is UNREVIEWED -- because the honest report is "nothing looked
-                # at this", not "this is clean".
+                # WHY IT NOW ASKS WHO OPENED THE PR (backend#2586). The prose
+                # here used to assert, of every unclaimed head, that Bugbot
+                # "drops PRs" and that "no one here can fix" it. On the corrected
+                # measurement (see the retraction above WAITABLE) that is true of
+                # exactly one class -- a PR a Bot authored -- and false of the
+                # rest, where an absent check is unprecedented and the reader
+                # should treat it as an anomaly, not as weather. Two opposite
+                # instructions to the next reader, and the run cannot tell them
+                # apart without reading the author. So it reads the author.
+                #
+                # DERIVED, NOT RESTATED (rule 1): the branch is decided by
+                # `author_kind`, which reads GitHub's answer, rather than by this
+                # comment's numbers -- and `query_lacks_author_kind` refuses the
+                # run if the query ever stops asking, so the discriminator cannot
+                # go inert while the log stays green.
+                kind = author_kind(pr)
                 lines.append("")
                 lines.append(
                     "Waited %ds over %d attempt(s) and Bugbot never claimed this "
                     "head. Measured latency is p50 164s / max 635s over 40 runs, "
-                    "so this is not slowness -- it is the drop backend#2114 "
-                    "described and closed without a discriminator."
-                    % (wait_seconds, attempt)
+                    "so this is not slowness." % (wait_seconds, attempt)
                 )
+                lines.append("")
+                if kind == AUTHOR_BOT:
+                    lines.append(
+                        "**This PR was opened by a Bot (%s), and Bugbot reviews "
+                        "no PR a Bot authored.** Measured 2026-08-27 across 20 "
+                        "repos: 0 of 20 release-train sync PRs and 0 of 15 "
+                        "dependabot PRs ever received a `Cursor Bugbot` check, "
+                        "while 43 of 43 human-opened PRs whose head COMMIT was "
+                        "bot-authored did -- so it is authorship, not the "
+                        "commits. Re-running will not help: Cursor attributes a "
+                        "`bugbot run` to the AUTHOR and answers with a seat "
+                        "refusal. The remedy is to open the PR as a seated human "
+                        "(backend#2590), not to wait."
+                        % author_label(pr)
+                    )
+                elif kind == AUTHOR_HUMAN:
+                    lines.append(
+                        "**This PR was opened by a user (%s), which makes this "
+                        "absence anomalous rather than routine.** Measured "
+                        "2026-08-24..27 across 20 repos, every non-draft "
+                        "human-authored PR carried a `Cursor Bugbot` check -- 637 "
+                        "of 637, arriving 8s to 439s after the head commit. Do "
+                        "not read this as \"Bugbot is flaky\": RE-RUN this check, "
+                        "and if it stays unclaimed, say so on backend#2586, "
+                        "because that would be the first measured instance."
+                        % author_label(pr)
+                    )
+                else:
+                    lines.append(
+                        "**GitHub did not say what kind of actor opened this PR, "
+                        "so this run cannot tell** whether the missing review is "
+                        "the known Bot-author case (expected, unfixable here) or "
+                        "a human-authored PR going unreviewed (unprecedented, and "
+                        "worth raising). Cannot tell is a finding, not a detail "
+                        "-- read the diff yourself, and see backend#2586."
+                    )
                 lines.append("")
                 lines.append(
                     "**This head is UNREVIEWED. The gate is not asserting it is "
-                    "clean** -- it is recording that nothing looked at it, and "
-                    "declining to block on something no one here can fix. Read "
+                    "clean** -- it is recording that nothing looked at it. Read "
                     "the diff yourself before approving."
                 )
                 _emit(UNCLAIMED, lines)
