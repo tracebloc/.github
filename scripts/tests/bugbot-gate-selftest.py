@@ -170,18 +170,43 @@ def pr(contexts=None, threads=None, head=HEAD, ctx_total=None, thread_total=None
 v = ev(pr(contexts=[check_run()]), "high")
 check("clean head with a terminal Bugbot run passes", v == gate.PASS, "got %r" % v)
 
+# THE FOUR "NOTHING CLAIMED IT" CASES ARE `UNCLAIMED` SINCE backend#2284, and
+# what each one asserts is that it is NOT `PASS`. That is the property worth
+# pinning: `UNCLAIMED` exits 0 so the context can be required, so a test that
+# only checked the exit code would stop distinguishing "clean" from "nobody
+# looked". The verdict is the thing that still tells them apart.
 v = ev(pr(contexts=[]), "high")
-check("no checks at all on the head is PENDING, not PASS", v == gate.PENDING, "got %r" % v)
+check("no checks at all on the head is UNCLAIMED, not PASS",
+      v == gate.UNCLAIMED and v != gate.PASS, "got %r" % v)
 
 v = ev(pr(contexts=[], rollup=False), "high")
-check("a null rollup is PENDING, not PASS", v == gate.PENDING, "got %r" % v)
+check("a null rollup is UNCLAIMED, not PASS",
+      v == gate.UNCLAIMED and v != gate.PASS, "got %r" % v)
 
 other = check_run(slug="github-actions", name="Unit tests", conclusion="SUCCESS")
 v = ev(pr(contexts=[other]), "high")
-check("a head full of OTHER green checks is still PENDING", v == gate.PENDING, "got %r" % v)
+check("a head full of OTHER green checks is still UNCLAIMED",
+      v == gate.UNCLAIMED and v != gate.PASS, "got %r" % v)
 
 v = ev(pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)]), "high")
 check("a still-running Bugbot is PENDING, not PASS", v == gate.PENDING, "got %r" % v)
+
+# THE SPLIT IS THE WHOLE CHANGE, so it is asserted in both directions. A claimed
+# head that never finishes is a review that BROKE and still blocks; a head
+# nothing ever claimed is a review that never happened and does not. Collapsing
+# them back into one verdict -- in either direction -- reddens here.
+check("a CLAIMED but unfinished head is not UNCLAIMED",
+      ev(pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)]), "high")
+      != gate.UNCLAIMED, "a running check must not read as never-claimed")
+check("an UNCLAIMED head is not PENDING",
+      ev(pr(contexts=[]), "high") != gate.PENDING,
+      "an absent check must not read as a running one")
+check("both absences are waitable, so neither fails early",
+      gate.PENDING in gate.WAITABLE and gate.UNCLAIMED in gate.WAITABLE,
+      "WAITABLE=%r" % (gate.WAITABLE,))
+check("PASS and FAIL are NOT waitable",
+      gate.PASS not in gate.WAITABLE and gate.FAIL not in gate.WAITABLE,
+      "WAITABLE=%r" % (gate.WAITABLE,))
 
 v = ev(pr(contexts=[check_run(status="QUEUED", conclusion=None)]), "high")
 check("a queued Bugbot is PENDING, not PASS", v == gate.PENDING, "got %r" % v)
@@ -196,7 +221,7 @@ check("a RENAMED Bugbot check still counts (matched on app slug)", v == gate.PAS
 v = ev(pr(contexts=[check_run(slug="impostor", name="Cursor Bugbot")]), "high")
 check(
     "a check named 'Cursor Bugbot' from another app does NOT satisfy the gate",
-    v == gate.PENDING,
+    v == gate.UNCLAIMED and v != gate.PASS,
     "got %r" % v,
 )
 
@@ -574,6 +599,63 @@ check("severity_of returns None on empty input", gate.severity_of("") is None)
 check("severity_of returns None on None", gate.severity_of(None) is None)
 
 # --------------------------------------------------------------------------
+# --- THE EXIT CODES, WHICH ARE THE ACTUAL BEHAVIOUR CHANGE -------------------
+#
+# `evaluate` returning UNCLAIMED is only half of backend#2284; what the gate
+# DOES with it at the deadline is the half that decides whether a PR merges.
+# Asserted through `main` with WAIT_SECONDS=0, so the deadline is already past
+# on the first pass and no test sleeps. NOTE `main` takes its budget from the
+# ENVIRONMENT, not argv -- passing `--wait-seconds 0` is silently ignored and
+# the test then polls for the real 900s. Measured the slow way.
+#
+# The pairing is the point: same absence-shaped input, opposite exit codes,
+# decided solely by whether Bugbot ever claimed the head.
+import os as _os
+
+_ENV_KEYS = ("REPO", "PR_NUMBER", "WAIT_SECONDS", "POLL_SECONDS",
+             "GITHUB_STEP_SUMMARY")
+_env_keep = {k: _os.environ.get(k) for k in _ENV_KEYS}
+try:
+    _os.environ["REPO"] = "tracebloc/demo"
+    _os.environ["PR_NUMBER"] = "1"
+    _os.environ["WAIT_SECONDS"] = "0"
+    _os.environ["POLL_SECONDS"] = "0"
+    _os.environ.pop("GITHUB_STEP_SUMMARY", None)
+
+    def _main_rc(pr_obj):
+        gate.fetch = lambda *a, **k: pr_obj
+        return gate.main([])
+
+    _real_fetch = gate.fetch
+    try:
+        rc_unclaimed = _main_rc(pr(contexts=[]))
+        check("main: an UNCLAIMED head at the deadline exits 0 (not blocked)",
+              rc_unclaimed == 0, "got rc=%r" % rc_unclaimed)
+
+        rc_pending = _main_rc(pr(contexts=[check_run(status="IN_PROGRESS",
+                                                     conclusion=None)]))
+        check("main: a CLAIMED-but-unfinished head at the deadline exits 1 (blocked)",
+              rc_pending == 1, "got rc=%r" % rc_pending)
+
+        # And the two must not have collapsed into the same answer.
+        check("main: the two absences produce DIFFERENT exit codes",
+              rc_unclaimed != rc_pending,
+              "both returned %r -- the split is inert" % rc_unclaimed)
+
+        # A real finding still blocks; tolerance must not have leaked into FAIL.
+        rc_fail = _main_rc(pr(contexts=[check_run()],
+                              threads=[thread(finding_body("High"), resolved=False)]))
+        check("main: an open finding still exits 1", rc_fail == 1, "got rc=%r" % rc_fail)
+    finally:
+        gate.fetch = _real_fetch
+finally:
+    for k, v in _env_keep.items():
+        if v is None:
+            _os.environ.pop(k, None)
+        else:
+            _os.environ[k] = v
+
+
 if FAILURES:
     print("bugbot-gate-selftest: %d/%d FAILED" % (len(FAILURES), COUNT))
     for f in FAILURES:

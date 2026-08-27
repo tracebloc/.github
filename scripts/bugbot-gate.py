@@ -196,12 +196,41 @@ TERMINAL_STATUSES = {"COMPLETED"}
 # report. An earlier draft of this file sniffed its own message strings to
 # decide what was worth waiting for, which is CLAUDE.md rule 9 one level in: the
 # decision was a COPY of the rule, so editing a sentence in the report would
-# silently have changed which failures poll. Only PENDING is waitable; an open
-# finding will not clear itself, so polling on it burns the budget and then
-# reports the same thing.
+# silently have changed which failures poll. `WAITABLE` below is that set, and
+# it is READ by `main` rather than restated there -- an open finding will not
+# clear itself, so polling on it burns the budget and then reports the same
+# thing. It held only PENDING until backend#2284 split the two absences apart.
 PASS = "pass"        # the gate is satisfied
-PENDING = "pending"  # Bugbot has not delivered a terminal verdict on this head
+PENDING = "pending"  # Bugbot CLAIMED this head and has not finished
+UNCLAIMED = "unclaimed"  # Bugbot never posted a check run for this head at all
 FAIL = "fail"        # Bugbot reviewed the head and something is open
+
+# TWO ABSENCES, NOT ONE, AND THEY MEAN OPPOSITE THINGS (backend#2284).
+#
+# `PENDING` used to cover both "Bugbot is still running" and "Bugbot never
+# showed up", and the timeout failed both identically. They are not the same
+# claim: a check that STARTED and never finished is a review that broke, which
+# is worth blocking on. A check that never appeared is Bugbot declining or
+# dropping the PR -- something this repo cannot fix, retry, or wait out.
+#
+# Measured 2026-08-26, human-authored PRs, well past the p50 164s / max 635s
+# latency: 6 of 9 never got a check at all -- .github#349 (57 min), #350 (55),
+# #352 (40), #353 (37), #354 (32), e2e-test-agent#273 (2h+) -- while #351,
+# opened BETWEEN two of them, was reviewed in 3 minutes. Not latency, not the
+# seat limit, not the author: backend#2114 closed COMPLETED saying "no
+# discriminator survives the data", and the drop it describes is still live.
+#
+# `bugbot run` cannot recover it either: Cursor refuses it on a seat limit, and
+# the App will not be given a seat (decision, 2026-08-26).
+#
+# So requiring this context while failing on UNCLAIMED would block roughly two
+# thirds of all PRs for the full wait and then fail them, with no remedy. The
+# gate would look broken while behaving exactly as written.
+#
+# Both are WAITABLE -- an unclaimed head may still be claimed inside the window,
+# and that is the common case for a healthy Bugbot. They differ only at the
+# deadline. See `main`.
+WAITABLE = frozenset({PENDING, UNCLAIMED})
 
 QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
@@ -485,10 +514,10 @@ def evaluate(pr, min_severity):
 
     check = bugbot_check(pr)
     if check is None:
-        return PENDING, [
+        return UNCLAIMED, [
             "No Bugbot check run on head %s." % (pr.get("headRefOid") or "?")[:12],
-            "Bugbot has not reviewed the current head, so nothing has looked at "
-            "the last push. An absence never approves.",
+            "Bugbot has not claimed this head. Inside the wait window that is "
+            "ordinary; at the deadline it means Bugbot never showed up.",
         ]
     if check.get("status") not in TERMINAL_STATUSES:
         return PENDING, [
@@ -558,10 +587,14 @@ def _emit(verdict, lines, hard_error=None):
         body.append(str(hard_error))
         body.append("```")
     else:
-        body.append(
-            "**%s**"
-            % ("Bugbot review gate: pass" if verdict == PASS else "Bugbot review gate: FAIL")
-        )
+        # THREE BANNERS, NOT TWO. `UNCLAIMED` exits 0 but must never read as a
+        # pass: a reader skimming the summary is the last line of defence on a
+        # head nothing reviewed, so the word they see is UNREVIEWED.
+        banner = {
+            PASS: "Bugbot review gate: pass",
+            UNCLAIMED: "Bugbot review gate: UNREVIEWED (not blocked, not clean)",
+        }.get(verdict, "Bugbot review gate: FAIL")
+        body.append("**%s**" % banner)
         body.append("")
         body.extend(lines)
     text = "\n".join(body)
@@ -617,13 +650,45 @@ def main(argv=None):
         if verdict == PASS:
             _emit(PASS, lines)
             return 0
-        if verdict != PENDING or clock() >= deadline:
-            if verdict == PENDING:
+        if verdict not in WAITABLE or clock() >= deadline:
+            if verdict == UNCLAIMED:
+                # THE ONE ABSENCE THIS GATE DOES NOT BLOCK ON, and it says so
+                # rather than passing quietly. See the WAITABLE comment for the
+                # measurement: Bugbot drops PRs it never claims, this repo
+                # cannot make it claim one, and failing here would block roughly
+                # two thirds of PRs with no available remedy.
+                #
+                # It is NOT a pass. The exit code is 0 so the context can be
+                # required, and every other word out of this run says the head
+                # is UNREVIEWED -- because the honest report is "nothing looked
+                # at this", not "this is clean".
                 lines.append("")
                 lines.append(
-                    "Waited %ds over %d attempt(s) and Bugbot never reported a "
-                    "terminal verdict on this head. Measured Bugbot latency is "
-                    "p50 164s / max 635s over 40 runs, so this is not slowness."
+                    "Waited %ds over %d attempt(s) and Bugbot never claimed this "
+                    "head. Measured latency is p50 164s / max 635s over 40 runs, "
+                    "so this is not slowness -- it is the drop backend#2114 "
+                    "described and closed without a discriminator."
+                    % (wait_seconds, attempt)
+                )
+                lines.append("")
+                lines.append(
+                    "**This head is UNREVIEWED. The gate is not asserting it is "
+                    "clean** -- it is recording that nothing looked at it, and "
+                    "declining to block on something no one here can fix. Read "
+                    "the diff yourself before approving."
+                )
+                _emit(UNCLAIMED, lines)
+                return 0
+            if verdict == PENDING:
+                # STILL BLOCKS, and the difference from UNCLAIMED is the point:
+                # a check that STARTED and never finished is a review that
+                # broke. That is worth stopping for, and it is rare.
+                lines.append("")
+                lines.append(
+                    "Waited %ds over %d attempt(s). Bugbot CLAIMED this head and "
+                    "never finished, which is a broken review rather than an "
+                    "absent one -- so this blocks. Measured latency is p50 164s "
+                    "/ max 635s over 40 runs."
                     % (wait_seconds, attempt)
                 )
             _emit(verdict, lines)

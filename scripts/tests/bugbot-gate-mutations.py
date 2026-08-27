@@ -70,9 +70,30 @@ import mutation_baseline  # noqa: E402
 # (label, old, new)
 MUTATIONS = [
     # --- (A) the load-bearing claim: a TERMINAL verdict on THIS head --------
-    ("a missing Bugbot verdict reports PASS instead of PENDING",
-     '    check = bugbot_check(pr)\n    if check is None:\n        return PENDING, [',
+    ("a missing Bugbot verdict reports PASS instead of UNCLAIMED",
+     '    check = bugbot_check(pr)\n    if check is None:\n        return UNCLAIMED, [',
      '    check = bugbot_check(pr)\n    if check is None:\n        return PASS, ['),
+
+    # --- (A2) THE SPLIT backend#2284 ADDED, mutated in both directions ------
+    #
+    # `UNCLAIMED` exits 0, so the cheapest way to get this wrong is to let that
+    # tolerance leak onto the case it must not cover -- a review that STARTED
+    # and broke. These two mutations are the collapse, one way each.
+    ("the two absences collapse: a never-claimed head reports as PENDING",
+     '    check = bugbot_check(pr)\n    if check is None:\n        return UNCLAIMED, [',
+     '    check = bugbot_check(pr)\n    if check is None:\n        return PENDING, ['),
+    ("the tolerance leaks: a CLAIMED-but-unfinished head stops blocking",
+     '            if verdict == UNCLAIMED:',
+     '            if verdict in WAITABLE:'),
+    ("the tolerance is removed, so a dropped review blocks again",
+     '                _emit(UNCLAIMED, lines)\n                return 0',
+     '                _emit(UNCLAIMED, lines)\n                return 1'),
+    ("UNCLAIMED stops being waitable, so it fails on the first poll",
+     'WAITABLE = frozenset({PENDING, UNCLAIMED})',
+     'WAITABLE = frozenset({PENDING})'),
+    ("the UNREVIEWED banner reads as a pass",
+     '            UNCLAIMED: "Bugbot review gate: UNREVIEWED (not blocked, not clean)",',
+     '            UNCLAIMED: "Bugbot review gate: pass",'),
     ("a still-RUNNING Bugbot counts as a terminal verdict",
      '    if check.get("status") not in TERMINAL_STATUSES:',
      '    if False and check.get("status") not in TERMINAL_STATUSES:'),
