@@ -642,6 +642,32 @@ try:
               rc_unclaimed != rc_pending,
               "both returned %r -- the split is inert" % rc_unclaimed)
 
+        # THE BANNER IS THE ONLY THING A SKIMMER READS, so it is pinned
+        # separately from the exit code. UNCLAIMED exits 0; if its headline
+        # also said "pass", the summary would assert cleanliness about a head
+        # nothing looked at -- and no other assertion here would notice,
+        # because every one of them checks verdicts or exit codes. Measured:
+        # the mutation `the UNREVIEWED banner reads as a pass` came back
+        # UNCAUGHT until this existed.
+        import io as _io, contextlib as _ctx
+
+        def _banner_for(pr_obj):
+            buf = _io.StringIO()
+            with _ctx.redirect_stdout(buf):
+                _main_rc(pr_obj)
+            return buf.getvalue().splitlines()[0] if buf.getvalue() else ""
+
+        _unclaimed_banner = _banner_for(pr(contexts=[]))
+        check("main: the UNCLAIMED headline says UNREVIEWED",
+              "UNREVIEWED" in _unclaimed_banner, "got %r" % _unclaimed_banner)
+        check("main: the UNCLAIMED headline does NOT read as a pass",
+              "pass" not in _unclaimed_banner.lower(), "got %r" % _unclaimed_banner)
+
+        _pass_banner = _banner_for(pr(contexts=[check_run()]))
+        check("main: a genuine pass still says pass",
+              "pass" in _pass_banner.lower() and "UNREVIEWED" not in _pass_banner,
+              "got %r" % _pass_banner)
+
         # A real finding still blocks; tolerance must not have leaked into FAIL.
         rc_fail = _main_rc(pr(contexts=[check_run()],
                               threads=[thread(finding_body("High"), resolved=False)]))
