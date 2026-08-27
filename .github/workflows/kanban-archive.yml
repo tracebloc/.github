@@ -115,7 +115,7 @@ jobs:
               | select(.isArchived == false)
               | select(.fieldValueByName.name == "Prod" or .fieldValueByName.name == "Cancelled" or .fieldValueByName.name == "Done")
               | .id' >> terminal.ids
-            # WHAT THIS READ ACTUALLY SAW, recorded per item (backend#2526). The counts
+            # WHAT THIS READ ACTUALLY SAW, recorded per item (backend#2623). The counts
             # below are the only thing that can tell "the board is clean" apart from
             # "this credential cannot see the board", and for weeks nothing printed
             # them. A null Status means the item was returned but its field value was
@@ -145,7 +145,7 @@ jobs:
           # A NULL Status IS A FINDING, not a shrug. The item exists, the filter cannot
           # judge it, and the run would otherwise report success having skipped it.
           if [ "$nullst" -gt 0 ]; then
-            echo "::warning::$nullst item(s) returned an unreadable Status for this credential. They cannot be judged terminal or not, so they are neither archived nor reported -- this is the silent-skip path backend#2526 exists to close."
+            echo "::warning::$nullst item(s) returned an unreadable Status for this credential. They cannot be judged terminal or not, so they are neither archived nor reported -- this is the silent-skip path backend#2623 exists to close."
           fi
           echo "$total" > seen.total
 
@@ -215,7 +215,7 @@ jobs:
         run: |
           set -euo pipefail
           # ASSERT THE BOARD IS CLEAN, not that the archive did what it saw
-          # (backend#2526). Every guard above answers "did my writes succeed?" and
+          # (backend#2623). Every guard above answers "did my writes succeed?" and
           # every one of them can answer yes while the board is untouched -- which is
           # what happened: on 2026-08-26 this workflow archived 63 of 63 items,
           # reported success, and left 668 un-archived terminal cards (475 Prod, 153
@@ -267,7 +267,7 @@ jobs:
             # FAIL CLOSED ON AN UNREADABLE CONNECTION. `nodes|length` renders a
             # missing or null path as 0, so a query that returned no items at all
             # would read as "nothing left to archive" and pass (Bugbot HIGH,
-            # backend#2528). Check the connection resolved before counting it.
+            # backend#2623). Check the connection resolved before counting it.
             if [ "$(echo "$OUT" | jq -r 'try (.data.organization.projectV2.items.nodes|type) catch "null"')" != "array" ]; then
               echo "::error::the post-archive re-read returned no items array, so this run cannot show the board is clean. Unverified is not verified-clean."
               exit 1
@@ -309,7 +309,7 @@ jobs:
           # with everything else at the end of the step.
           left_bad=0
           if [ "$left" -ne 0 ]; then
-            echo "::error::$left terminal item(s) remain un-archived after this run. The archive succeeded on what it could see, which is NOT the same as the board being clean -- see backend#2526."
+            echo "::error::$left terminal item(s) remain un-archived after this run. The archive succeeded on what it could see, which is NOT the same as the board being clean -- see backend#2623."
             left_bad=1
           fi
           # THE RE-READ IS THE SAME CREDENTIAL, SO IT SHARES THE BLIND SPOT
@@ -326,7 +326,7 @@ jobs:
           #   1. A null Status on an UN-ARCHIVED item. It may be terminal and
           #      this credential cannot tell. "Cannot tell" is not "clean". The
           #      first read only ::warning::-ed on exactly this, which is the
-          #      silent skip backend#2526 exists to close, one layer further in.
+          #      silent skip backend#2623 exists to close, one layer further in.
           #   2. A re-read that saw FEWER items than the first read. Both reads
           #      are this credential's, so this cannot see what neither can; it
           #      does catch a read that degraded mid-run, which would otherwise
@@ -338,7 +338,7 @@ jobs:
           # that does not come from this credential's own view of `nodes` -- was never
           # compared. That comparison is what separates "this credential sees a small
           # board" from "items are being omitted from a large one", which is precisely
-          # the question backend#2526 needs answered, and one short-circuit meant a
+          # the question backend#2623 needs answered, and one short-circuit meant a
           # whole run produced no answer to it. A guard that masks a stronger guard
           # costs a run per diagnosis.
           fail=$left_bad
@@ -349,13 +349,13 @@ jobs:
           # path, which would otherwise land as a LOWER terminal count and read as
           # success.
           if [ "$reread_total" -ne "$declared_total" ]; then
-            echo "::error::the post-archive re-read paginated $reread_total item(s) but the server reports totalCount=$declared_total. Items are being omitted from the read, so a terminal card can exist that this run never judged -- this run cannot show the board is clean (backend#2528)."
+            echo "::error::the post-archive re-read paginated $reread_total item(s) but the server reports totalCount=$declared_total. Items are being omitted from the read, so a terminal card can exist that this run never judged -- this run cannot show the board is clean (backend#2623)."
             fail=1
           else
             echo "Completeness: paginated $reread_total item(s), server totalCount=$declared_total (agree)."
           fi
           if [ "$nullst_after" -gt 0 ]; then
-            echo "::error::$nullst_after un-archived item(s) returned an unreadable Status on the post-archive re-read. They cannot be judged terminal, so this run CANNOT show the board is clean -- unverified is not verified-clean (backend#2526)."
+            echo "::error::$nullst_after un-archived item(s) returned an unreadable Status on the post-archive re-read. They cannot be judged terminal, so this run CANNOT show the board is clean -- unverified is not verified-clean (backend#2623)."
             fail=1
           fi
           first_total=$(cat seen.total)
