@@ -892,10 +892,17 @@ try:
                "main: the report states the audit is complete despite the halt",
                f"report={report.strip()[-300:]!r} -- a count line of "
                f"{len(FLEET)} over a prefix of rows is the overstatement")
-        record("NOT REMEDIATED" in report,
+        # SCOPED TO THE ROW, not the report (Bugbot, .github#368). The footer
+        # this change adds contains the words "NOT REMEDIATED" itself, so a
+        # whole-report search was satisfied before any row was consulted --
+        # `gamma` could be a bare drifted classification and this still passed.
+        # The missing-repo check three lines up already matches `| {r} |` per
+        # target; this one had not been given the same treatment.
+        post_halt = [ln for ln in report.splitlines() if ln.startswith("| gamma |")]
+        record(len(post_halt) == 1 and "NOT REMEDIATED" in post_halt[0],
                "main: repos after the halt are named NOT REMEDIATED",
-               f"report={report.strip()[-300:]!r} -- an unexplained drifted row "
-               "reads as a plain audit nobody asked to remediate")
+               f"gamma row={post_halt!r} -- an unexplained drifted row reads as "
+               "a plain audit nobody asked to remediate")
         record(code == 2,
                "main: a mid-fleet refusal exits 2, not the --create-prs 0",
                f"code={code} -- 0 would claim every drifted repo has a PR open")
