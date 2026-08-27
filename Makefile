@@ -299,6 +299,7 @@ MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-bugbot-gate mutation-closing-ref-gate mutation-bug-to-ready \
                    mutation-branch-owner mutation-reason-citations \
                    mutation-mutation-baseline mutation-standards-sync \
+                   mutation-conflict-gate \
                    mutation-triage-labels
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
@@ -336,6 +337,7 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-bug-to-ready \
                     selftest-branch-owner \
                     selftest-mutation-baseline \
+                    selftest-conflict-gate \
                     selftest-triage-labels
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
@@ -521,6 +523,22 @@ mutation-bugbot-gate:
 
 mutation-bugbot-gate-dry:
 	$(PYTHON) scripts/tests/bugbot-gate-mutations.py --dry
+
+# The merge-conflict gate (backend#2637): a conflicted PR runs NO `pull_request`
+# workflow, so every drift guard is silently inactive and the rollup reads green.
+# guard-pyyaml, mirroring conflict-gate.yml's own `pip install pyyaml` step:
+# conflict-gate.py imports caller-drift.py for the `gh` wrappers and the inventory
+# loader, and that module hard-fails without PyYAML by design.
+.PHONY: selftest-conflict-gate
+selftest-conflict-gate: guard-pyyaml
+	$(PYTHON) scripts/tests/conflict-gate-selftest.py
+
+.PHONY: mutation-conflict-gate mutation-conflict-gate-dry
+mutation-conflict-gate:
+	$(PYTHON) scripts/tests/conflict-gate-mutations.py
+
+mutation-conflict-gate-dry:
+	$(PYTHON) scripts/tests/conflict-gate-mutations.py --dry
 
 # The closing-ref gate (backend#2364): a PR whose TITLE names a ticket must LINK
 # it. NO guard-pyyaml, for the same asserted reason as bugbot-gate above -- the

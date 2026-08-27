@@ -1,0 +1,122 @@
+name: Conflict gate
+
+# A MERGE-CONFLICTED PR RUNS NONE OF ITS `pull_request` WORKFLOWS
+# (tracebloc/backend#2637).
+#
+# GitHub cannot compute a merge ref for a PR whose base has moved incompatibly,
+# and a `pull_request` run is keyed on that merge ref. So a conflicted PR
+# dispatches NO `pull_request` jobs at all -- not the drift guards, not the
+# installer tests, not `Source-of-truth drift`, not `make drift`, not
+# `gen-manifest.sh --check`. All of them are silently inactive, and the PR's
+# rollup shows nothing red, because nothing ran.
+#
+# THIS IS NOT FIXABLE BY ADDING A TRIGGER. It is platform behaviour, and there is
+# no merge commit for those jobs to check out. The only signal that can reach a
+# conflicted PR is one written onto its head sha FROM OUTSIDE, which is what this
+# does: a commit status, via the Statuses API.
+#
+# MEASURED, on `model-zoo#206`, 2026-08-27, while it was DIRTY against develop:
+#   * `actions/runs?head_sha=e7465ea` -> total_count 0. Nothing dispatched.
+#   * its rollup carried ONE entry: `Cursor Bugbot`, SUCCESS. Bugbot reviews the
+#     diff rather than via a `pull_request` trigger, so it is the one voice left,
+#     and it says green.
+#   * `model-zoo/develop` requires SEVEN contexts. None was present.
+#   * PRs #204 and #205, opened either side of it, each got their full matrix.
+#     The conflict was the only difference.
+#
+# THE SECOND SHAPE IS WORSE, and it is why `bricked-prs.py` is not already the
+# answer. `backend#2257`, measured the same day and also CONFLICTING, had EIGHT
+# workflow runs on its head sha and ALL ELEVEN of backend/develop's required
+# contexts present and SUCCESS -- every one of them computed against a merge base
+# that no longer exists. It reads unanimously green while conflicted. That
+# watcher reasons from a required context being ABSENT, so with nothing missing it
+# cannot see this PR at all. Only asking about mergeability directly does.
+#
+# WHY A CRON AND NOT `push`. A conflict is almost always created by a push to the
+# BASE branch -- someone else merging -- which would be the causally exact
+# trigger. But this workflow lives in `tracebloc/.github` and a `push` here fires
+# only for this repo's own pushes; reacting to all 17 repos' pushes would need a
+# caller in each. So the org-wide sweep is scheduled, like `bricked-prs.yml` and
+# `kanban-reconcile.yml`, and a per-repo `push`-triggered caller is available
+# later as a latency improvement rather than a correctness one.
+#
+# WHY NOT `pull_request_target`, which needs no merge ref either: NOTHING in this
+# org uses it. Measured 2026-08-27, `actions/runs?event=pull_request_target`
+# returns total_count 0 fleet-wide, so its behaviour on a conflicted PR is
+# unverified here. Building a fail-closed guard on an unmeasured platform claim is
+# CLAUDE.md rule 8's mistake, so this uses a trigger already proven by the other
+# org-wide crons in this repo.
+#
+# THIS CONTEXT IS NOT REQUIRED ANYWHERE YET, DELIBERATELY (arm while green).
+# It is landing as VISIBILITY: a red row on the PR where a reviewer is looking,
+# instead of a finding in a cron log in another repo. Requiring it needs one more
+# thing first -- a trigger that gives EVERY PR a status promptly. On a 30-minute
+# sweep a PR opened at minute one would sit at "Expected -- waiting for status"
+# until the next run, which is precisely the brick `bricked-prs.py` exists to
+# hunt. Arming it is Lukas's call, and the follow-up is the per-repo caller above.
+#
+# Runs in tracebloc/.github only, like the other org-wide crons.
+
+on:
+  schedule:
+    # Every 30 minutes. The window this closes is measured in hours -- client#847
+    # sat conflicted for ~3 of them with a hard failure invisible the whole time
+    # -- and a conflict is worth knowing about inside the review cycle, not after
+    # it. The sweep is one `gh pr list` per repo, so this is cheap.
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conflict-gate
+  # NOT cancel-in-progress. A cancelled sweep leaves the statuses it had not yet
+  # written stale -- including `success` rows it was about to clear -- so a half
+  # sweep is worse than a late one.
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: Conflicted PRs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Without this the `pip install` below hits PEP 668 on ubuntu-latest
+      # (24.04): the runner's Python is externally managed, pip refuses, the step
+      # fails and THE SWEEP NEVER RUNS. A scheduled guard that cannot start is
+      # worse than none -- nothing reports, and silence reads as "no conflicts".
+      # Same shape as bricked-prs.yml's own note.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML
+        # conflict-gate.py imports caller-drift.py for its `gh` wrappers and the
+        # inventory loader, and that module hard-fails without PyYAML by design.
+        run: pip install --quiet pyyaml
+      # Authenticates as the tracebloc-release-train App (backend#2036) instead of
+      # one human's PAT. `owner:` yields an ORG-scoped installation token, which is
+      # what an org-wide sweep needs. No fallback to a PAT: a fallback would let a
+      # broken App path keep working silently.
+      #
+      # TWO SCOPES, AND NOTHING ELSE. This job does not read branch protection --
+      # unlike bricked-prs.py it does not care what a base REQUIRES, only whether
+      # the PR conflicts -- so it needs neither `administration` nor `checks`, and
+      # it lists PRs without `--base` so it needs no branch list either.
+      #
+      #   pull-requests: read   the open-PR list and its two mergeability fields
+      #   statuses: write       the whole point: writing the context onto the head
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-pull-requests: read
+          permission-statuses: write
+      - name: Sweep
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: python3 scripts/conflict-gate.py
