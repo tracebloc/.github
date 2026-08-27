@@ -229,7 +229,13 @@ def case_stale_idiom(tmp: Path) -> None:
 
     # The label is still written, but with a flag the matcher cannot see. Without
     # this assertion the domain silently loses `priority` and the run stays green.
-    blinded = GOOD_WF.replace("--add-label priority", "--add-label\\\n priority")
+    # The continuation keeps the block scalar's indentation on purpose: a fixture
+    # that merely fails to PARSE would exercise the unreadable path instead, and
+    # pass this case while proving nothing about ADD_LABEL (CLAUDE.md rule 10).
+    blinded = GOOD_WF.replace(
+        '              gh issue edit "$N" --add-label priority\n',
+        '              gh issue edit "$N" --add-label\\\n              priority\n')
+    assert blinded != GOOD_WF, "the blinding fixture did not apply"
     got = chk.stale_idiom(write(tmp, "s-blind.yml", blinded))
     record(any("ADD_LABEL matched nothing" in r for r in got),
            "an `--add-label` the matcher can no longer see is a finding",
@@ -240,6 +246,85 @@ def case_stale_idiom(tmp: Path) -> None:
     record(any("declares no" in r for r in no_inputs),
            "a workflow with no `*-label` input at all is a finding",
            f"stale_idiom={no_inputs}")
+
+    # THE DEFECT BUGBOT FOUND ON .github#364, both halves. The first version of
+    # `stale_idiom` asked whether the strings `-label` and `--add-label` appeared
+    # anywhere in the FILE, which a comment satisfies -- including the comments
+    # that PR added. A guard a comment can satisfy is inert verification of
+    # itself, and the cost is specific: the caller family silently loses
+    # `from:customer`, which NO template applies, so the check goes green over a
+    # dead `bump` rule.
+    commented = chk.stale_idiom(write(tmp, "s-comment.yml", """\
+        # This workflow used to declare a bug-label input and run
+        # `gh issue edit --add-label priority`. Both mentions here are COMMENTS.
+        name: x
+        on:
+          workflow_call:
+            inputs:
+              project-number:
+                type: number
+                default: 2
+        jobs:
+          j:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  # gh issue edit "$N" --add-label priority
+                  echo nothing
+    """))
+    record(any("declares no" in r for r in commented),
+           "a `*-label` mentioned only in a COMMENT does NOT satisfy the guard",
+           f"stale_idiom={commented} — Bugbot, .github#364: the raw-text version "
+           "of this guard was satisfied by the comments the PR itself added")
+
+    # THE OTHER HALF, and it fails in the opposite direction, which is why it
+    # needs its own case. A raw-text `--add-label` guard reports a finding about a
+    # call the workflow does not make -- a bogus red rather than a false green.
+    # Both are how a tier loses credibility, so both are pinned.
+    dangling = chk.stale_idiom(write(tmp, "s-dangling.yml", """\
+        # This job no longer runs `gh issue edit --add-label
+        # (the flag above is a dangling mention in a COMMENT, nothing more).
+        name: x
+        on:
+          workflow_call:
+            inputs:
+              bug-label:
+                type: string
+                default: "work-type:bug"
+        jobs:
+          j:
+            runs-on: ubuntu-latest
+            steps:
+              - run: echo nothing
+    """))
+    record(dangling == [],
+           "an `--add-label` mentioned only in a COMMENT raises no false finding",
+           f"stale_idiom={dangling} — the raw-text version of this guard reports a "
+           "call the workflow does not make, and a guard that cries wolf gets "
+           "switched off")
+
+    # And the derivation must agree with the guard: a commented-out `--add-label`
+    # is not a call the workflow makes, so it must not enter the domain either.
+    doc_labels = chk.caller_labels(write(tmp, "s-comment-derive.yml", """\
+        name: x
+        on:
+          workflow_call:
+            inputs:
+              bug-label:
+                type: string
+                default: "work-type:bug"
+        jobs:
+          j:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  # gh issue edit "$N" --add-label ghost-label
+                  echo nothing
+    """))
+    record(set(doc_labels) == {"work-type:bug"},
+           "a commented-out `--add-label` does not enter the domain",
+           f"derived {sorted(doc_labels)} — a fabricated name under the assertion "
+           "would make every repo in the fleet a finding")
 
     unreadable = chk.stale_idiom(tmp / "s-absent.yml")
     record(any("unreadable" in r for r in unreadable),

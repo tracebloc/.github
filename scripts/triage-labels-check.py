@@ -99,9 +99,11 @@ TEMPLATES = ROOT / ".github" / "ISSUE_TEMPLATE"
 REUSABLE = "customer-priority-bump.yml"
 
 # `gh issue edit ... --add-label priority`. Matched with the flag, so the label
-# the workflow WRITES is derived from the write itself. `$`-containing values are
-# skipped: an interpolated label cannot be known here, and guessing one would
-# put a fabricated name under the assertion.
+# the workflow WRITES is derived from the write itself — and matched over
+# `run_scripts()`, the parsed `run:` bodies with comment lines stripped, never
+# over the file. `$`-containing values are skipped: an interpolated label cannot
+# be known here, and guessing one would put a fabricated name under the
+# assertion.
 ADD_LABEL = re.compile(r"--add-label[= ]+([A-Za-z0-9:_.\-]+)")
 
 # The suffix that marks a `workflow_call` input as naming a label. Deriving over
@@ -159,32 +161,73 @@ def not_enrolled(inv: dict, reusable: str = REUSABLE) -> "list[str]":
     return out
 
 
-def caller_labels(path: "Path | None" = None) -> "dict[str, str]":
-    """The labels the reusable fires on or writes, read from the reusable.
-
-    Returns {label: how it was derived}. Two idioms, both from the workflow:
-    the `*-label` input defaults it KEYS on, and the `--add-label` values it
-    WRITES. A label rule that used neither would be invisible here, which is why
-    `stale_idiom` below asserts the second idiom actually matched.
-    """
-    path = path or (WORKFLOWS / REUSABLE)
+def _parse(path: "Path") -> dict:
     try:
-        text = path.read_text(encoding="utf-8")
-        doc = yaml.safe_load(text)
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as exc:
         raise CannotTell(f"{path.name} could not be read or parsed: {exc}") from exc
 
-    # `on:` parses to the boolean True under YAML 1.1 — the same trap every
-    # workflow parser in this repo has to handle.
+
+def label_inputs(doc: dict, name: str = REUSABLE) -> "dict[str, dict]":
+    """The `workflow_call` inputs that NAME a label, from the parsed document.
+
+    Parsed, never grepped, and this is the correction Bugbot made on .github#364
+    rather than a stylistic preference. The first version of `stale_idiom` asked
+    whether the string `-label` appeared anywhere in the file — which the very
+    COMMENTS this change added satisfy. So the backstop would have stayed quiet
+    after the inputs were renamed away, the domain would have silently lost
+    `from:customer` (no template applies it), and the check would have gone green
+    while the `bump` rule was dead. A guard a comment can satisfy is inert
+    verification, and kanban-columns-check.py's `names_in` carries the same
+    lesson from e2e#176.
+    """
     on = (doc or {}).get("on", (doc or {}).get(True)) or {}
-    inputs = ((on.get("workflow_call") or {}).get("inputs")) or {}
+    # `on: push` parses to a STRING and `on: [push, pull_request]` to a list.
+    # Neither declares a `workflow_call` input, so neither has label inputs —
+    # which `stale_idiom` then reports as a finding rather than crashing on.
+    if not isinstance(on, dict):
+        return {}
+    call = on.get("workflow_call") or {}
+    inputs = (call.get("inputs") if isinstance(call, dict) else None) or {}
     if not isinstance(inputs, dict):
-        raise CannotTell(f"{path.name}: `workflow_call.inputs` is not a mapping")
+        raise CannotTell(f"{name}: `workflow_call.inputs` is not a mapping")
+    return {k: (v or {}) for k, v in sorted(inputs.items())
+            if k.endswith(LABEL_INPUT_SUFFIX)}
+
+
+def run_scripts(doc: dict) -> str:
+    """Every `run:` body in the workflow, with shell comment lines stripped.
+
+    The `--add-label` derivation reads THIS rather than the file, for the same
+    reason `label_inputs` parses: a `--add-label` mentioned in a YAML comment (or
+    in a `#` line inside a run block) is not a call the workflow makes, and a
+    matcher a comment can feed reports a domain the workflow does not have.
+    """
+    bodies: "list[str]" = []
+    for job in ((doc or {}).get("jobs") or {}).values():
+        for step in ((job or {}).get("steps") or []):
+            body = (step or {}).get("run")
+            if isinstance(body, str):
+                bodies.extend(ln for ln in body.splitlines()
+                              if not ln.strip().startswith("#"))
+    return "\n".join(bodies)
+
+
+def caller_labels(path: "Path | None" = None) -> "dict[str, str]":
+    """The labels the reusable fires on or writes, read from the reusable.
+
+    Returns {label: how it was derived}. Two idioms, both parsed out of the
+    workflow: the `*-label` input defaults it KEYS on, and the `--add-label`
+    values its `run:` blocks WRITE. A label rule that used neither would be
+    invisible here, which is why `stale_idiom` below asserts both idioms actually
+    matched — structurally, not by looking for a string in the file.
+    """
+    path = path or (WORKFLOWS / REUSABLE)
+    doc = _parse(path)
+    inputs = label_inputs(doc, path.name)
 
     found: "dict[str, str]" = {}
-    for name, spec in sorted(inputs.items()):
-        if not name.endswith(LABEL_INPUT_SUFFIX):
-            continue
+    for name, spec in inputs.items():
         default = (spec or {}).get("default")
         if not isinstance(default, str) or not default.strip():
             # An input that names a label with no default cannot be derived from
@@ -196,7 +239,7 @@ def caller_labels(path: "Path | None" = None) -> "dict[str, str]":
                              "derived here")
         found[default.strip()] = f"input `{name}` default"
 
-    for label in sorted(set(ADD_LABEL.findall(text))):
+    for label in sorted(set(ADD_LABEL.findall(run_scripts(doc)))):
         if "$" in label:
             continue
         found.setdefault(label, "written by `--add-label`")
@@ -204,24 +247,38 @@ def caller_labels(path: "Path | None" = None) -> "dict[str, str]":
 
 
 def stale_idiom(path: "Path | None" = None) -> "list[str]":
-    """The matchers must still match. A silent zero would audit a subset.
+    """Both matchers must still match, asserted against the PARSED workflow.
 
     kanban-columns-check.py learned this the expensive way: its writer list was
     wrong on day one and the check stayed green, because "found nothing" and
     "there is nothing" are indistinguishable to a regex.
+
+    ASSERTED STRUCTURALLY, NOT TEXTUALLY (Bugbot, .github#364). Both questions
+    are answered from `label_inputs()` and `run_scripts()` — the same functions
+    the derivation itself uses — so no comment anywhere in the file can satisfy
+    either. That matters most for the `*-label` half: the caller family loses
+    `from:customer` when those inputs go, and NO template applies it, so a quiet
+    backstop there is a green run over a dead `bump` rule.
     """
     path = path or (WORKFLOWS / REUSABLE)
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+        doc = _parse(path)
+    except CannotTell as exc:
         return [f"{path.name} is unreadable: {exc}"]
     out = []
-    if "--add-label" in text and not ADD_LABEL.findall(text):
+    try:
+        inputs = label_inputs(doc, path.name)
+    except CannotTell as exc:
+        return [f"{path.name} is unreadable: {exc}"]
+    if not inputs:
+        out.append(f"{path.name} declares no `*{LABEL_INPUT_SUFFIX}` "
+                   "`workflow_call` input any more — either the label rules moved, "
+                   "or the derivation is stale. The caller family cannot lose those "
+                   "inputs quietly: `from:customer` comes from nowhere else")
+    scripts = run_scripts(doc)
+    if "--add-label" in scripts and not ADD_LABEL.findall(scripts):
         out.append(f"{path.name} still runs `--add-label` but ADD_LABEL matched "
                    "nothing — the written label is no longer under this assertion")
-    if LABEL_INPUT_SUFFIX not in text:
-        out.append(f"{path.name} declares no `*{LABEL_INPUT_SUFFIX}` input any more "
-                   "— either the label rules moved, or the derivation is stale")
     return out
 
 

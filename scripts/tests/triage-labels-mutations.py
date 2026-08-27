@@ -87,8 +87,8 @@ MUTATIONS = [
     ("the `*-label` suffix becomes a prefix, so no input contributes and the "
      "domain silently loses the labels the workflow keys on",
      GUARD,
-     '        if not name.endswith(LABEL_INPUT_SUFFIX):',
-     '        if not name.startswith(LABEL_INPUT_SUFFIX):'),
+     '            if k.endswith(LABEL_INPUT_SUFFIX)}',
+     '            if k.startswith(LABEL_INPUT_SUFFIX)}'),
     ("a `*-label` input with no default is skipped instead of refused — rule 6's "
      "vocabulary gap, shrinking the domain to whatever happened to have a default",
      GUARD,
@@ -99,35 +99,74 @@ MUTATIONS = [
     ("the `--add-label` write stops contributing, so the label the workflow "
      "ADDS is not asserted to exist",
      GUARD,
-     '    for label in sorted(set(ADD_LABEL.findall(text))):',
+     '    for label in sorted(set(ADD_LABEL.findall(run_scripts(doc)))):',
      '    for label in []:'),
     ("ADD_LABEL only matches the `=` form, so `--add-label priority` is invisible",
      GUARD,
      r'ADD_LABEL = re.compile(r"--add-label[= ]+([A-Za-z0-9:_.\-]+)")',
      r'ADD_LABEL = re.compile(r"--add-label=([A-Za-z0-9:_.\-]+)")'),
-    ("an unparseable workflow yields an empty domain instead of refusing",
+    ("an unparseable workflow yields an empty document instead of refusing",
      GUARD,
-     '        raise CannotTell(f"{path.name} could not be read or parsed: {exc}") from exc\n'
-     '\n'
-     '    # `on:` parses to the boolean True under YAML 1.1',
-     '        return {}\n'
-     '\n'
-     '    # `on:` parses to the boolean True under YAML 1.1'),
+     '        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}\n'
+     '    except (OSError, yaml.YAMLError) as exc:\n'
+     '        raise CannotTell(f"{path.name} could not be read or parsed: {exc}") from exc',
+     '        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}\n'
+     '    except (OSError, yaml.YAMLError):\n'
+     '        return {}'),
 
     # --- the staleness guard ------------------------------------------------
     ("the stale-idiom guard stops noticing an `--add-label` it can no longer see, "
      "so the check reports a clean sweep of a subset",
      GUARD,
-     '    if "--add-label" in text and not ADD_LABEL.findall(text):',
+     '    if "--add-label" in scripts and not ADD_LABEL.findall(scripts):',
      '    if False:'),
     ("the stale-idiom guard stops noticing that no `*-label` input exists any more",
      GUARD,
-     '    if LABEL_INPUT_SUFFIX not in text:',
-     '    if False:'),
+     '    if not inputs:\n'
+     '        out.append(f"{path.name} declares no',
+     '    if False:\n'
+     '        out.append(f"{path.name} declares no'),
     ("stale_idiom swallows an unreadable workflow and returns no finding",
      GUARD,
-     '        return [f"{path.name} is unreadable: {exc}"]',
-     '        return []'),
+     '    except CannotTell as exc:\n'
+     '        return [f"{path.name} is unreadable: {exc}"]\n'
+     '    out = []',
+     '    except CannotTell:\n'
+     '        return []\n'
+     '    out = []'),
+    # --- the defect Bugbot found on .github#364 -----------------------------
+    # Reverting each half to the RAW-TEXT shape it had. Both are satisfied by a
+    # comment, and this file's own comments contain both strings -- so the guard
+    # would have gone quiet about the real producer while looking identical in a
+    # log. The cost is specific: the caller family loses `from:customer`, which no
+    # template applies, and the check goes green over a dead `bump` rule.
+    ("the `*-label` guard goes back to scanning raw TEXT, which a comment satisfies",
+     GUARD,
+     '        inputs = label_inputs(doc, path.name)\n'
+     '    except CannotTell as exc:\n'
+     '        return [f"{path.name} is unreadable: {exc}"]\n'
+     '    if not inputs:',
+     '        inputs = label_inputs(doc, path.name)\n'
+     '    except CannotTell as exc:\n'
+     '        return [f"{path.name} is unreadable: {exc}"]\n'
+     '    if LABEL_INPUT_SUFFIX not in path.read_text(encoding="utf-8"):'),
+    ("the `--add-label` guard goes back to scanning raw TEXT, which a comment satisfies",
+     GUARD,
+     '    scripts = run_scripts(doc)\n'
+     '    if "--add-label" in scripts and not ADD_LABEL.findall(scripts):',
+     '    scripts = path.read_text(encoding="utf-8")\n'
+     '    if "--add-label" in scripts and not ADD_LABEL.findall(scripts):'),
+    ("the DERIVATION goes back to the raw file, so a commented-out `--add-label` "
+     "puts a label that does not exist under the fleet-wide assertion",
+     GUARD,
+     '    for label in sorted(set(ADD_LABEL.findall(run_scripts(doc)))):',
+     '    for label in sorted(set(ADD_LABEL.findall(\n'
+     '            path.read_text(encoding="utf-8")))):'),
+    ("run_scripts stops stripping shell comment lines",
+     GUARD,
+     '                bodies.extend(ln for ln in body.splitlines()\n'
+     '                              if not ln.strip().startswith("#"))',
+     '                bodies.extend(body.splitlines())'),
 
     # --- the template derivation -------------------------------------------
     ("a missing template directory reports 'no template labels' instead of refusing",
