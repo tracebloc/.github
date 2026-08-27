@@ -52,15 +52,82 @@ ROOT = Path(__file__).resolve().parents[2]
 GATE = ROOT / "scripts" / "bugbot-gate.py"
 SUITE = ROOT / "scripts" / "tests" / "bugbot-gate-selftest.py"
 
+# THE BASELINE THIS RUN MEASURES AGAINST MUST BE VERIFIABLE, NOT ASSUMED
+# (backend#2441). The `finally` below restores the file on a crash; it cannot
+# restore it after SIGKILL, a runner timeout, or a second harness racing this
+# one in the same worktree -- and a mutation left on disk becomes the NEXT run's
+# `pristine`, which then reports `0 uncaught` about a premise nobody typed.
+# See scripts/tests/mutation_baseline.py.
+#
+# dont_write_bytecode BEFORE the import, deliberately: `selftests-cover` rejects
+# anything under scripts/tests/ that is not a suite or a runner, and a
+# `__pycache__/` left by this import is exactly that.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import mutation_baseline  # noqa: E402
+
+
 # (label, old, new)
 MUTATIONS = [
     # --- (A) the load-bearing claim: a TERMINAL verdict on THIS head --------
-    ("a missing Bugbot verdict reports PASS instead of PENDING",
-     '    check = bugbot_check(pr)\n    if check is None:\n        return PENDING, [',
-     '    check = bugbot_check(pr)\n    if check is None:\n        return PASS, ['),
+    ("a missing Bugbot verdict reports PASS instead of UNCLAIMED",
+     '    if check is None:\n        return UNCLAIMED, [',
+     '    if check is None:\n        return PASS, ['),
+
+    # --- (A2) THE SPLIT backend#2284 ADDED, mutated in both directions ------
+    #
+    # `UNCLAIMED` exits 0, so the cheapest way to get this wrong is to let that
+    # tolerance leak onto the case it must not cover -- a review that STARTED
+    # and broke. These two mutations are the collapse, one way each.
+    ("the two absences collapse: a never-claimed head reports as PENDING",
+     '    if check is None:\n        return UNCLAIMED, [',
+     '    if check is None:\n        return PENDING, ['),
+    ("the tolerance leaks: a CLAIMED-but-unfinished head stops blocking",
+     '            if verdict == UNCLAIMED:',
+     '            if verdict in WAITABLE:'),
+    ("the tolerance is removed, so a dropped review blocks again",
+     '                _emit(UNCLAIMED, lines)\n                return 0',
+     '                _emit(UNCLAIMED, lines)\n                return 1'),
+    ("UNCLAIMED stops being waitable, so it fails on the first poll",
+     'WAITABLE = frozenset({PENDING, UNCLAIMED})',
+     'WAITABLE = frozenset({PENDING})'),
+    ("the UNREVIEWED banner reads as a pass",
+     '            UNCLAIMED: "Bugbot review gate: UNREVIEWED (not blocked, not clean)",',
+     '            UNCLAIMED: "Bugbot review gate: pass",'),
     ("a still-RUNNING Bugbot counts as a terminal verdict",
-     '    if check.get("status") not in TERMINAL_STATUSES:',
-     '    if False and check.get("status") not in TERMINAL_STATUSES:'),
+     '    claimed = check is not None and check.get("status") in TERMINAL_STATUSES',
+     '    claimed = check is not None'),
+
+    # --- (A3) THE ORDER, which is the fix Bugbot asked for on #356 ----------
+    #
+    # Every mutation here restores a shape that reads correct and lets a
+    # tolerated absence LAUNDER a finding that had already been filed. They are
+    # what makes the four new selftest cases load-bearing rather than
+    # decorative: without them, "UNCLAIMED + an open High exits 1" could pass on
+    # a gate that reached FAIL for some other reason entirely.
+    ("the head is classified BEFORE the threshold, so a dropped review "
+     "launders an open High",
+     '    if not claimed and blocking:',
+     '    if False and not claimed and blocking:'),
+    ("only the never-claimed absence checks the threshold, leaving PENDING "
+     "with the same hole",
+     '    if not claimed and blocking:',
+     '    if check is None and blocking:'),
+    ("the laundering guard fires on any absence, so the tolerance is gone",
+     '    if not claimed and blocking:',
+     '    if not claimed:'),
+    # `blocking` is the threshold itself. If it collapses to "any open
+    # finding", the split measured in backend#2284 dies -- a Low on an
+    # unreviewed head would block, which is the thing the gate was loosened to
+    # stop doing.
+    ("the threshold is dropped, so any open finding blocks an unreviewed head",
+     '        if not f["resolved"] and SEVERITY_RANK.index(f["severity"]) >= floor',
+     '        if not f["resolved"]'),
+    # And the renderer both paths share. One copy is the point (rule 9); a
+    # silently-empty one would make the FAIL refuse without naming anything.
+    ("the unclaimed FAIL stops naming the findings",
+     '        lines.extend(_finding_lines(found))\n        return FAIL, lines',
+     '        return FAIL, lines'),
     ("every status is treated as terminal",
      'TERMINAL_STATUSES = {"COMPLETED"}',
      'TERMINAL_STATUSES = {"COMPLETED", "IN_PROGRESS", "QUEUED"}'),
@@ -197,6 +264,16 @@ def apply_one(src, old, new):
 
 def main():
     dry = "--dry" in sys.argv
+
+    # Refuse rather than measure against a baseline nothing vouches for. Only the
+    # writing path: `--dry` writes nothing, so it has no restore to lose -- and it
+    # is what `make check` runs on every push, where refusing on an uncommitted
+    # edit would block the pre-push tier for whoever is editing the target.
+    if not dry:
+        rc = mutation_baseline.guard(ROOT, [GATE])
+        if rc:
+            return rc
+
     pristine = GATE.read_text(encoding="utf-8")
     stale, uncaught = [], []
 
