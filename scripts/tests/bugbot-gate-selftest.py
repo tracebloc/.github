@@ -20,8 +20,11 @@ later must be exercised on the day it is added -- a hand-listed set of four
 cannot see a fifth. Mutation coverage cannot see a vocabulary gap; only
 iterating the producer's declared surface can.
 """
+import contextlib
 import importlib.util
+import io
 import json
+import os
 import pathlib
 import sys
 
@@ -610,17 +613,15 @@ check("severity_of returns None on None", gate.severity_of(None) is None)
 #
 # The pairing is the point: same absence-shaped input, opposite exit codes,
 # decided solely by whether Bugbot ever claimed the head.
-import os as _os
-
 _ENV_KEYS = ("REPO", "PR_NUMBER", "WAIT_SECONDS", "POLL_SECONDS",
              "GITHUB_STEP_SUMMARY")
-_env_keep = {k: _os.environ.get(k) for k in _ENV_KEYS}
+_env_keep = {k: os.environ.get(k) for k in _ENV_KEYS}
 try:
-    _os.environ["REPO"] = "tracebloc/demo"
-    _os.environ["PR_NUMBER"] = "1"
-    _os.environ["WAIT_SECONDS"] = "0"
-    _os.environ["POLL_SECONDS"] = "0"
-    _os.environ.pop("GITHUB_STEP_SUMMARY", None)
+    os.environ["REPO"] = "tracebloc/demo"
+    os.environ["PR_NUMBER"] = "1"
+    os.environ["WAIT_SECONDS"] = "0"
+    os.environ["POLL_SECONDS"] = "0"
+    os.environ.pop("GITHUB_STEP_SUMMARY", None)
 
     def _main_rc(pr_obj):
         gate.fetch = lambda *a, **k: pr_obj
@@ -649,11 +650,9 @@ try:
         # because every one of them checks verdicts or exit codes. Measured:
         # the mutation `the UNREVIEWED banner reads as a pass` came back
         # UNCAUGHT until this existed.
-        import io as _io, contextlib as _ctx
-
         def _banner_for(pr_obj):
-            buf = _io.StringIO()
-            with _ctx.redirect_stdout(buf):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
                 _main_rc(pr_obj)
             return buf.getvalue().splitlines()[0] if buf.getvalue() else ""
 
@@ -677,9 +676,9 @@ try:
 finally:
     for k, v in _env_keep.items():
         if v is None:
-            _os.environ.pop(k, None)
+            os.environ.pop(k, None)
         else:
-            _os.environ[k] = v
+            os.environ[k] = v
 
 
 if FAILURES:
