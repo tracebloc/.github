@@ -36,7 +36,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 GATE = ROOT / "scripts" / "conflict-gate.py"
+WORKFLOW = ROOT / ".github" / "workflows" / "conflict-gate.yml"
 SUITE = ROOT / "scripts" / "tests" / "conflict-gate-selftest.py"
+
+# TWO TARGETS, NOT ONE. The script being correct and something ACTUALLY RUNNING it
+# are separate claims, and the second lives in YAML. Rule 5 does not exempt a
+# guarantee for being written in a different language -- if the workflow stops
+# invoking the gate, or acquires a `pull_request` trigger that cannot fire on the
+# PRs it targets, the suite must redden. So the harness mutates both files, and
+# each mutation declares which one it edits.
+TARGETS = {"gate": GATE, "workflow": WORKFLOW}
 
 # See scripts/tests/mutation_baseline.py: the `finally` below restores the file on
 # a crash but cannot after SIGKILL, a runner timeout, or a second harness racing
@@ -177,6 +186,46 @@ MUTATIONS = [
      '        time.sleep(sleep_for)'),
 ]
 
+# --- (H) THE WORKFLOW, which is where "something runs this" is declared -----
+WORKFLOW_MUTATIONS = [
+    # The whole gate, disarmed by one line. Everything else in the suite would
+    # still pass: the script stays perfect and nothing invokes it.
+    ("the workflow stops invoking the gate",
+     '        run: python3 scripts/conflict-gate.py',
+     '        run: echo skipped'),
+
+    # THE REGRESSION MOST LIKELY TO BE MADE IN GOOD FAITH. Someone asks "why
+    # doesn't this run on PRs?", adds the trigger, and the gate is now inert on
+    # exactly the conflicted PRs it exists for -- while looking more thorough.
+    ("the workflow acquires a pull_request trigger it cannot be dispatched by",
+     'on:\n  schedule:',
+     'on:\n  pull_request:\n  schedule:'),
+
+    ("the schedule goes, so nothing fires without a merge ref",
+     '  schedule:\n    # Every 30 minutes.',
+     '  disabled_schedule:\n    # Every 30 minutes.'),
+
+    ("the sweep becomes cancellable, leaving half its statuses stale",
+     '  cancel-in-progress: false',
+     '  cancel-in-progress: true'),
+
+    # Without statuses:write every sweep finds conflicts it cannot report: a green
+    # run, no red row, and the fail-open perfectly intact.
+    ("the mint loses statuses: write, so no finding can ever reach a PR",
+     '          permission-statuses: write',
+     '          permission-statuses: read'),
+
+    ("the mint grows a permission this job has no use for",
+     '          permission-pull-requests: read\n          permission-statuses: write',
+     '          permission-pull-requests: read\n          permission-statuses: write\n'
+     '          permission-contents: write'),
+]
+
+# One flat list of (target, label, old, new). Derived from the two lists rather
+# than hand-written a third time.
+ALL_MUTATIONS = ([("gate", *m) for m in MUTATIONS]
+                 + [("workflow", *m) for m in WORKFLOW_MUTATIONS])
+
 
 def _drop_bytecode_cache():
     """Remove any cached bytecode for the gate. See the header: a stale pyc makes
@@ -207,14 +256,20 @@ def main():
     # is what `make check` runs on every push, where refusing on an uncommitted
     # edit would block the pre-push tier for whoever is editing the target.
     if not dry:
-        rc = mutation_baseline.guard(ROOT, [GATE])
+        # BOTH targets, or a mutation left in the workflow by a killed run becomes
+        # the next run's premise just as silently as one left in the script.
+        rc = mutation_baseline.guard(ROOT, list(TARGETS.values()))
         if rc:
             return rc
 
-    pristine = GATE.read_text(encoding="utf-8")
+    pristine_by_target = {
+        name: path.read_text(encoding="utf-8") for name, path in TARGETS.items()
+    }
     stale, uncaught = [], []
 
-    for label, old, new in MUTATIONS:
+    for target, label, old, new in ALL_MUTATIONS:
+        path = TARGETS[target]
+        pristine = pristine_by_target[target]
         try:
             mutated = apply_one(pristine, old, new)
         except LookupError as exc:
@@ -224,9 +279,9 @@ def main():
             stale.append((label, "NO-OP: the mutation changed nothing"))
             continue
         if dry:
-            print("  anchor ok  %s" % label)
+            print("  anchor ok  [%s] %s" % (target, label))
             continue
-        GATE.write_text(mutated, encoding="utf-8")
+        path.write_text(mutated, encoding="utf-8")
         _drop_bytecode_cache()
         env = dict(os.environ)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -242,7 +297,7 @@ def main():
             # ALWAYS restore, including on a crash. A mutation left on disk makes
             # every later run measure the wrong script, and the tell is a suite
             # that reddens for reasons nobody typed.
-            GATE.write_text(pristine, encoding="utf-8")
+            path.write_text(pristine, encoding="utf-8")
             _drop_bytecode_cache()
         caught = [
             line.strip()[6:].strip()
@@ -253,20 +308,24 @@ def main():
         # bare traceback with no assertion output means the mutation broke the
         # harness rather than being detected by a case, which is not coverage.
         reported = "conflict-gate-selftest:" in run.stdout
+        shown = "[%s] %s" % (target, label)
         if reported and run.returncode != 0:
-            print("  caught     %s\n             by: %s" % (label, ", ".join(caught)[:120]))
+            print("  caught     %s\n             by: %s" % (shown, ", ".join(caught)[:120]))
         elif not reported:
-            uncaught.append((label, "the suite did not report -- mutation broke the harness"))
-            print("  UNCAUGHT   %s (harness broke, not detected)" % label)
+            uncaught.append((shown, "the suite did not report -- mutation broke the harness"))
+            print("  UNCAUGHT   %s (harness broke, not detected)" % shown)
         else:
-            uncaught.append((label, "the suite passed with this broken"))
-            print("  UNCAUGHT   %s" % label)
+            uncaught.append((shown, "the suite passed with this broken"))
+            print("  UNCAUGHT   %s" % shown)
 
-    if GATE.read_text(encoding="utf-8") != pristine:
-        sys.stderr.write("::error::%s was left mutated. Restore it from git.\n" % GATE.name)
-        return 2
+    for name, path in TARGETS.items():
+        if path.read_text(encoding="utf-8") != pristine_by_target[name]:
+            sys.stderr.write(
+                "::error::%s was left mutated. Restore it from git.\n" % path.name)
+            return 2
 
-    print("\n%d mutation(s): %d stale, %d uncaught" % (len(MUTATIONS), len(stale), len(uncaught)))
+    print("\n%d mutation(s) across %d file(s): %d stale, %d uncaught"
+          % (len(ALL_MUTATIONS), len(TARGETS), len(stale), len(uncaught)))
     for label, why in stale:
         sys.stderr.write("::error::STALE mutation `%s`: %s\n" % (label, why))
     for label, why in uncaught:

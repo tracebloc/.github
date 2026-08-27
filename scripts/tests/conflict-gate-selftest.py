@@ -522,6 +522,70 @@ try:
 finally:
     gate.CD.gh = _real_gh
 
+# --- (17) THE WORKFLOW IS ARMED, not merely present -------------------------
+#
+# Everything above proves the SCRIPT is right. None of it proves anything RUNS
+# it. A gate whose workflow does not invoke it is the org's own rule 7 shape --
+# a file that claims a guarantee nothing checks -- and "assert a caller is ARMED,
+# not merely present" is already a rule here (backend#1977).
+#
+# Read as YAML rather than grepped: a `run:` line inside a commented-out block,
+# or under an `if: false`, greps identically to a live one.
+_WF = ROOT / ".github" / "workflows" / "conflict-gate.yml"
+try:
+    import yaml  # noqa: E402
+    _wf = yaml.safe_load(_WF.read_text(encoding="utf-8"))
+except Exception as _exc:  # noqa: BLE001 - unreadable is a finding, not a skip
+    _wf = None
+    check("conflict-gate.yml is readable YAML", False, "got %r" % (_exc,))
+
+if _wf is not None:
+    # `on` is parsed by PyYAML 1.1 semantics as the boolean True, not the string
+    # "on". Both are looked up so this does not silently find nothing and pass.
+    _on = _wf.get("on", _wf.get(True)) or {}
+    _jobs = _wf.get("jobs") or {}
+    _steps = [s for j in _jobs.values() for s in (j.get("steps") or [])]
+    _runs = " ".join(s.get("run", "") for s in _steps)
+
+    check("the workflow actually invokes the gate",
+          "scripts/conflict-gate.py" in _runs, "runs: %r" % (_runs,))
+
+    # THE TRIGGER MUST NOT BE `pull_request`. That is the defect this whole file
+    # works around: a conflicted PR dispatches no `pull_request` run at all, so a
+    # `pull_request`-triggered conflict gate is inert on exactly its target.
+    # Pinning this is what stops a future "why isn't this on PRs?" edit from
+    # quietly reintroducing the bug.
+    check("the workflow is NOT triggered by pull_request",
+          "pull_request" not in _on, "on: %r" % (sorted(_on),))
+    check("the workflow has a trigger that fires without a merge ref",
+          "schedule" in _on, "on: %r" % (sorted(_on),))
+    check("the workflow can be run on demand",
+          "workflow_dispatch" in _on, "on: %r" % (sorted(_on),))
+
+    # A sweep cancelled mid-run leaves the statuses it had not reached stale,
+    # including `success` rows it was about to clear.
+    check("the sweep is not cancelled in progress",
+          (_wf.get("concurrency") or {}).get("cancel-in-progress") is False,
+          "got %r" % (_wf.get("concurrency"),))
+
+    # The token must be able to WRITE statuses, or every sweep reports findings it
+    # cannot act on -- green run, no red row, the fail-open intact.
+    _mint = [s for s in _steps
+             if "create-github-app-token" in (s.get("uses") or "")]
+    check("the workflow mints a token", len(_mint) == 1, "got %d" % (len(_mint),))
+    _with = (_mint[0].get("with") if _mint else {}) or {}
+    check("the mint asks for statuses: write",
+          _with.get("permission-statuses") == "write",
+          "got %r" % (_with.get("permission-statuses"),))
+    check("the mint asks for pull-requests: read",
+          _with.get("permission-pull-requests") == "read",
+          "got %r" % (_with.get("permission-pull-requests"),))
+    # Scoped, not broad: this job reads PRs and writes statuses, nothing else.
+    check("the mint asks for nothing beyond those two permissions",
+          sorted(k for k in _with if k.startswith("permission-"))
+          == ["permission-pull-requests", "permission-statuses"],
+          "got %r" % (sorted(k for k in _with if k.startswith("permission-")),))
+
 if FAILURES:
     print("conflict-gate-selftest: %d/%d FAILED" % (len(FAILURES), COUNT))
     for f in FAILURES:
