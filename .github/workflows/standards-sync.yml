@@ -22,16 +22,37 @@
 # red check there would block every canon change by construction. PRs run the
 # offline selftest, which asserts the splice logic and its fail-closed paths.
 #
-# TOKEN: report-only needs org-wide read. create-prs needs Contents: RW +
-# Pull requests: RW on the target repos. Both are satisfied by the
-# tracebloc-release-train App installation, which this workflow now mints an
-# ORG-scoped token from (backend#2036) — it carries contents:write and
-# pull_requests:write. The former plan here was to mint a separate fine-grained
-# STANDARDS_SYNC_TOKEN if PROJECTS_KANBAN_TOKEN turned out to lack
-# contents-write; that is moot, and a second fleet-wide credential is the thing
-# backend#2036 exists to stop. The script still fails closed (exit 2) on the
-# first refused write, so a short-scoped token cannot produce a silent partial
-# rollout.
+# TOKENS, PLURAL, AND THE SPLIT IS THE POINT (backend#2590).
+#
+# report-only needs org-wide READ, and the App installation token covers it.
+# create-prs needs two different things from two different identities:
+#
+#   * Contents: RW on the target repos, to push the sync branch -- the App,
+#     ORG-scoped, minted below (backend#2036).
+#   * A PR AUTHOR WITH A CURSOR SEAT, to open the PR -- `SYNC_PR_AUTHOR_TOKEN`,
+#     a human PAT. Cursor Bugbot keys its review on the author's seat, and an
+#     App installation token makes the author `tracebloc-release-train[bot]`,
+#     which has none: Bugbot skipped all 14 sync PRs and `bugbot / review`
+#     failed closed on every one.
+#
+# THIS PARAGRAPH USED TO SAY THE APP SATISFIED BOTH, and it no longer does
+# (@saqlainsyed007, #348 -- the step comment below already said so, so the file
+# contradicted itself). It also used to argue that "a second fleet-wide
+# credential is the thing backend#2036 exists to stop". That argument was
+# right about the risk and is now overtaken by a harder constraint: no App
+# token can author a PR Bugbot will look at, so the choice is a second
+# credential or no automated review on the fleet's own standards changes.
+#
+# The debt is real and is written down rather than argued away: the PAT is
+# long-lived, human-owned and fleet-wide, and it wants to be a FINE-GRAINED
+# token scoped to `pull_requests: write` + `contents: read` on the target
+# repos, not a classic `repo` one. Tracked as its own decision rather than
+# smuggled in here.
+#
+# The script still fails closed (exit 2) on the first refused write, and since
+# #348 it validates the PAT -- present, resolvable, and NOT the same identity
+# as `SYNC_REVIEWER` -- before the first branch is pushed, so a bad credential
+# cannot produce a partial rollout.
 #
 # All interpolations reach shell through `env:` and are read as quoted
 # variables, never spliced into a command line. No event-controlled text
@@ -110,9 +131,17 @@ jobs:
       # Authenticates as the tracebloc-release-train App (backend#2036) instead of
       # one human's PAT. `owner:` yields an ORG-scoped installation token; a
       # repo-scoped one cannot read the fleet. The App carries `contents: write`,
-      # which is what `create-prs` mode needs to open the per-repo sync PRs. No
-      # fallback to the PAT: a fallback would let a broken App path keep working
-      # silently.
+      # which is what `create-prs` mode needs to push the per-repo sync branches.
+      # No fallback to the PAT: a fallback would let a broken App path keep
+      # working silently.
+      #
+      # THIS TOKEN NO LONGER OPENS THE PRs, and that is the one thing it may not
+      # do (backend#2590). Cursor Bugbot keys its review on the PR author's Cursor
+      # seat; an App installation token makes the author
+      # `tracebloc-release-train[bot]`, which has none, so Bugbot skipped all 14
+      # sync PRs and `bugbot / review` failed closed on every one. Everything
+      # here still runs as the App -- fleet reads, the CLAUDE.md write, the branch
+      # push -- and `SYNC_PR_AUTHOR_TOKEN` below covers `gh pr create` alone.
       - name: Mint an installation token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -141,6 +170,42 @@ jobs:
         id: audit
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # PR CREATION ONLY -- scripts/standards-sync.py reads this for
+          # `gh pr create` and the reviewer/assignee edit, and for nothing else
+          # (backend#2590). A PAT owned by a seated Cursor user, so the sync PRs
+          # have an author Bugbot will review.
+          #
+          # WHAT IT ACTUALLY NEEDS IS NARROWER THAN WHAT IT HAS
+          # (@saqlainsyed007, #348). This said "needs `repo` scope across the
+          # fleet; `contents: write` alone cannot open a PR", which conflates
+          # two claims. The true one is that the APP's contents:write cannot
+          # open a PR Bugbot reviews -- that is an authorship problem, not a
+          # scope one. A FINE-GRAINED PAT carrying `pull_requests: write` +
+          # `contents: read` on the target repos opens PRs perfectly well, and
+          # is dramatically tighter than a classic `repo` token: no code write,
+          # no issues, no settings, no webhooks, on every repo its owner can
+          # reach.
+          #
+          # The token in use today is the classic kind. Narrowing it is a
+          # re-provisioning decision rather than a code change, so it is
+          # recorded here and tracked rather than asserted as already done.
+          #
+          # NOT GUARDED FOR EMPTINESS HERE, deliberately -- but the guard MOVED
+          # (@saqlainsyed007, #348). An unset secret interpolates to "" and the
+          # check now runs in `main()` BEFORE the first branch is pushed, not
+          # per-repo at PR time: the old placement meant a missing token pushed
+          # CLAUDE.md to every drifted repo and then opened no PRs anywhere. A
+          # `[ -z ]` check here would still be wrong, because it would abort
+          # before the audit and turn "PRs could not be opened" into "fleet
+          # state unknown" -- strictly less information.
+          #
+          # AND THAT ARGUMENT BINDS `main()` TOO (Bugbot, #348). The first
+          # version of the moved guard called `die()`, which is the same abort
+          # this paragraph rejects, one layer in. It now DISARMS remediation
+          # instead: the fleet is still classified and reported, every drifted
+          # row reads NOT REMEDIATED, nothing is pushed, and the run exits 2
+          # naming the credential.
+          SYNC_PR_AUTHOR_TOKEN: ${{ secrets.SYNC_PR_AUTHOR_TOKEN }}
           CREATE_PRS: ${{ github.event_name == 'workflow_dispatch' && inputs.create-prs == true }}
         run: |
           set -uo pipefail

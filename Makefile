@@ -298,7 +298,7 @@ MUTATION_FILES := $(sort $(wildcard scripts/tests/*-mutations.py))
 MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-bugbot-gate mutation-closing-ref-gate mutation-bug-to-ready \
                    mutation-branch-owner mutation-reason-citations \
-                   mutation-mutation-baseline
+                   mutation-mutation-baseline mutation-standards-sync
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -616,6 +616,12 @@ mutation-mutation-baseline:
 
 mutation-mutation-baseline-dry:
 	$(PYTHON) scripts/tests/mutation-baseline-mutations.py --dry
+
+mutation-standards-sync:
+	$(PYTHON) scripts/tests/standards-sync-mutations.py
+
+mutation-standards-sync-dry:
+	$(PYTHON) scripts/tests/standards-sync-mutations.py --dry
 
 # ---- CI steps that need something a working tree does not have ----
 
