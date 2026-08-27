@@ -92,6 +92,34 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          # NARROWED, NOT MADE READ-ONLY (backend#2157). This backstop genuinely
+          # writes: three ProjectV2 mutations, and it CREATES labels
+          # (`POST repos/{o}/{r}/labels`) and applies them
+          # (`POST .../issues/{n}/labels`) for `keep-open` and `sibling-merge`.
+          # Pretending otherwise would break the Monday run.
+          #
+          # THE WIN HERE IS `contents`. It was minting contents:WRITE across
+          # every repo the installation covers -- the capability that can push
+          # code anywhere -- to run a job whose only content access is READING
+          # `.github/workflows/add-to-kanban.yml` and a couple of branch refs.
+          # That drops to read, and administration:read / actions:read /
+          # checks:read go entirely.
+          #
+          # DERIVED FROM THE CALLS:
+          #   contents/.github/workflows/*, branches/{main,master} -> contents: read
+          #   labels create + apply                                -> issues: WRITE
+          #   the same labels applied to PRs                        -> pull-requests: WRITE
+          #   addProjectV2ItemById / updateProjectV2ItemFieldValue /
+          #   archiveProjectV2Item                                  -> projects: WRITE
+          #
+          # `pull-requests: write` is here because the labels land on PRs as well
+          # as issues and the labels endpoint is shared. If a dry-run dispatch
+          # shows `issues: write` alone covers it, this can narrow again -- but
+          # guessing it short would fail on the one path that only runs weekly.
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: write
+          permission-organization-projects: write
 
       - name: Resolve project + field/option IDs
         id: ids
