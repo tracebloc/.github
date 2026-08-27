@@ -671,6 +671,73 @@ try:
         rc_fail = _main_rc(pr(contexts=[check_run()],
                               threads=[thread(finding_body("High"), resolved=False)]))
         check("main: an open finding still exits 1", rc_fail == 1, "got rc=%r" % rc_fail)
+
+        # -------------------------------------------------------------------
+        # THE TOLERANCE MUST NOT LAUNDER A FINDING (Bugbot, #356).
+        #
+        # The dangerous input is the COMBINATION, and neither existing test
+        # holds it: "no check on the head" was only ever paired with no
+        # threads, and "an open High" only ever with a completed check. So the
+        # gate could return on the head question before applying the
+        # threshold, and every assertion above would still pass. The reachable
+        # sequence is ordinary -- Bugbot reviews head A and files a High, the
+        # author pushes head B, Bugbot drops B (which is the measurement this
+        # whole change is built on) -- and the answer must be decided by the
+        # open finding, not by the missing review.
+        rc_unclaimed_open = _main_rc(
+            pr(contexts=[], threads=[thread(finding_body("High"), resolved=False)]))
+        check("main: UNCLAIMED + an open High exits 1, not 0",
+              rc_unclaimed_open == 1, "got rc=%r" % rc_unclaimed_open)
+        check("main: the tolerance is what would have been laundered",
+              rc_unclaimed == 0 and rc_unclaimed_open == 1,
+              "same-shaped absence gave %r clean / %r with an open High"
+              % (rc_unclaimed, rc_unclaimed_open))
+
+        _laundered_banner = _banner_for(
+            pr(contexts=[], threads=[thread(finding_body("High"), resolved=False)]))
+        check("main: that headline does NOT say UNREVIEWED-not-blocked",
+              "UNREVIEWED" not in _laundered_banner,
+              "got %r" % _laundered_banner)
+
+        # SAME HOLE, OTHER ABSENCE. PENDING already exits 1, so the exit code
+        # cannot tell whether the threshold was applied -- the verdict can.
+        # Without this, fixing only the UNCLAIMED branch would read as done.
+        _v_pending_open = ev(
+            pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)],
+               threads=[thread(finding_body("High"), resolved=False)]),
+            "high")
+        check("evaluate: PENDING + an open High is FAIL, not PENDING",
+              _v_pending_open == gate.FAIL, "got %r" % _v_pending_open)
+
+        # A finding BELOW the threshold does not cancel the tolerance: the
+        # split backend#2284 measured has to survive its own fix.
+        _v_low = ev(pr(contexts=[],
+                       threads=[thread(finding_body("Low"), resolved=False)]),
+                    "high")
+        check("evaluate: UNCLAIMED + an open LOW is still UNCLAIMED",
+              _v_low == gate.UNCLAIMED, "got %r" % _v_low)
+
+        # Nor does a RESOLVED one -- otherwise the remedy the FAIL message
+        # tells people to use ("reply with the ticket and resolve") would not
+        # clear it.
+        _v_resolved = ev(pr(contexts=[],
+                            threads=[thread(finding_body("High"), resolved=True)]),
+                         "high")
+        check("evaluate: UNCLAIMED + a RESOLVED High is still UNCLAIMED",
+              _v_resolved == gate.UNCLAIMED, "got %r" % _v_resolved)
+
+        # The FAIL has to NAME the finding, not just refuse. One renderer feeds
+        # both paths for exactly this reason; asserting it here is what keeps
+        # the unclaimed path wired to it.
+        _, _laundered_lines = gate.evaluate(
+            pr(contexts=[], threads=[thread(finding_body("High"), resolved=False)]),
+            "high")
+        # The TITLE and the OPEN marker on one row -- not "OPEN appears
+        # somewhere", which the prose above would satisfy on its own.
+        check("evaluate: the unclaimed FAIL lists the finding as OPEN",
+              any("OPEN" in ln and "A real bug" in ln and "high" in ln
+                  for ln in _laundered_lines),
+              "got %r" % ("\n".join(_laundered_lines)[:400],))
     finally:
         gate.fetch = _real_fetch
 finally:

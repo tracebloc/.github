@@ -470,11 +470,38 @@ def findings(pr):
     return out
 
 
+def _finding_lines(found):
+    """The findings listing, rendered once and used by every verdict.
+
+    ONE renderer, because two would drift: the unclaimed-with-open-findings path
+    and the reviewed path both have to name which finding and how bad it is, and
+    a second copy is how one of them quietly stops saying `OPEN`.
+    """
+    if not found:
+        return ["", "No Bugbot findings on this PR."]
+    lines = ["", "Findings on this PR (%d):" % len(found)]
+    for f in found:
+        lines.append(
+            "  - %-8s %-8s %s %s"
+            % (
+                f["severity"],
+                "resolved" if f["resolved"] else "OPEN",
+                "(outdated)" if f["outdated"] else "          ",
+                f["title"][:90],
+            )
+        )
+    return lines
+
+
 def evaluate(pr, min_severity):
     """Decide the gate.
 
-    Returns (verdict, lines) where verdict is PASS / PENDING / FAIL. Raises
-    Unreadable when the facts could not be established -- never a pass.
+    Returns (verdict, lines) where verdict is PASS / PENDING / UNCLAIMED / FAIL.
+    Raises Unreadable when the facts could not be established -- never a pass.
+
+    The open-finding threshold is applied FIRST, so neither absence verdict can
+    be reached while a finding at or above it is open: see the comment on
+    `blocking` below.
     """
     if min_severity not in SEVERITY_RANK:
         raise Unreadable(
@@ -512,18 +539,63 @@ def evaluate(pr, min_severity):
             )
         )
 
+    # THE THRESHOLD IS APPLIED BEFORE THE HEAD IS CLASSIFIED, and that order is
+    # the whole point (Bugbot, #356). An open High is open whichever head Bugbot
+    # filed it on -- so answering "was this head reviewed?" first, and returning
+    # on the answer, decided the gate from a question the findings do not depend
+    # on. A review that never came would then LAUNDER a finding that had already
+    # come: review head A, get a High, push head B, Bugbot drops B, and the
+    # tolerance built for the drop reports UNREVIEWED-but-not-blocked over an
+    # open High, exit 0. `required_conversation_resolution` would still have
+    # stopped the merge, which is why this was a wrong report rather than a
+    # shipped bug -- and a gate that names the wrong reason is the failure mode
+    # this file exists to avoid.
+    blocking = [
+        f
+        for f in found
+        if not f["resolved"] and SEVERITY_RANK.index(f["severity"]) >= floor
+    ]
+
     check = bugbot_check(pr)
+    claimed = check is not None and check.get("status") in TERMINAL_STATUSES
+    if not claimed and blocking:
+        head = (pr.get("headRefOid") or "?")[:12]
+        lines.append(
+            "Bugbot %s head %s, AND %d open finding(s) at or above %s are "
+            "outstanding from an earlier review."
+            % (
+                "never claimed" if check is None
+                else "has not finished (status %s) on"
+                     % check.get("status"),
+                head,
+                len(blocking),
+                min_severity,
+            )
+        )
+        lines.append(
+            "The absence of a review on THIS head is tolerated; the findings "
+            "are not. Resolve them -- fix, or reply with the ticket and resolve "
+            "-- then re-run. This does not wait for the missing review: the "
+            "answer would not change."
+        )
+        lines.extend(_finding_lines(found))
+        return FAIL, lines
+
     if check is None:
         return UNCLAIMED, [
             "No Bugbot check run on head %s." % (pr.get("headRefOid") or "?")[:12],
             "Bugbot has not claimed this head. Inside the wait window that is "
             "ordinary; at the deadline it means Bugbot never showed up.",
+            "No open finding at or above %s from any earlier review, either -- "
+            "checked before this verdict, not after." % min_severity,
         ]
-    if check.get("status") not in TERMINAL_STATUSES:
+    if not claimed:
         return PENDING, [
             "Bugbot is still running on head %s (status %s)."
             % ((pr.get("headRefOid") or "?")[:12], check.get("status")),
             "A verdict that has not arrived is not a clean one.",
+            "No open finding at or above %s from any earlier review, either -- "
+            "checked before this verdict, not after." % min_severity,
         ]
 
     lines.append(
@@ -541,26 +613,7 @@ def evaluate(pr, min_severity):
         "derived from the threads below (backend#2284)."
     )
 
-    blocking = [
-        f
-        for f in found
-        if not f["resolved"] and SEVERITY_RANK.index(f["severity"]) >= floor
-    ]
-    if found:
-        lines.append("")
-        lines.append("Findings on this PR (%d):" % len(found))
-        for f in found:
-            lines.append(
-                "  - %-8s %-8s %s %s"
-                % (
-                    f["severity"],
-                    "resolved" if f["resolved"] else "OPEN",
-                    "(outdated)" if f["outdated"] else "          ",
-                    f["title"][:90],
-                )
-            )
-    else:
-        lines.append("No Bugbot findings on this PR.")
+    lines.extend(_finding_lines(found))
 
     if blocking:
         lines.append("")
