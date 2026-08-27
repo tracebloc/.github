@@ -225,6 +225,20 @@ def caller_labels(path: "Path | None" = None) -> "dict[str, str]":
     path = path or (WORKFLOWS / REUSABLE)
     doc = _parse(path)
     inputs = label_inputs(doc, path.name)
+    if not inputs:
+        # REFUSES ON ITS OWN, not merely because `stale_idiom` happens to refuse
+        # first (@LukasWodka on .github#364). Without this the function returns
+        # `{"priority": ...}` from the `--add-label` idiom alone -- a domain
+        # missing `from:customer`, which no template applies. `main()` calls
+        # `stale_idiom` before the sweep, so that is unreachable as a SILENT
+        # failure today; "unreachable via its sibling" is a weaker property than
+        # "refuses on its own", and it stops being true the day someone reorders
+        # `main()`. CLAUDE.md rule 7: a claim that it cannot happen belongs in a
+        # machine check where one fits, and here one fits in four lines.
+        raise CannotTell(f"{path.name} declares no `*{LABEL_INPUT_SUFFIX}` "
+                         "`workflow_call` input, so the labels it KEYS on cannot "
+                         "be derived — refusing rather than returning the "
+                         "`--add-label` half as if it were the whole domain")
 
     found: "dict[str, str]" = {}
     for name, spec in inputs.items():

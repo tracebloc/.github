@@ -208,6 +208,28 @@ def case_caller_derivation(tmp: Path) -> None:
     record("sev1" in got3, "a NEW `*-label` input joins the domain automatically",
            f"derived {sorted(got3)}")
 
+    # The residual @LukasWodka recorded on .github#364, now closed: this must
+    # refuse ON ITS OWN, not merely because `stale_idiom` refuses first in
+    # `main()`. Otherwise it returns the `--add-label` half as if it were the
+    # whole domain -- silently dropping `from:customer`, which no template
+    # applies.
+    refuses("zero `*-label` inputs is a refusal in caller_labels itself",
+            lambda: chk.caller_labels(write(tmp, "noinputs-derive.yml", """\
+                name: x
+                on:
+                  workflow_call:
+                    inputs:
+                      project-number:
+                        type: number
+                        default: 2
+                jobs:
+                  j:
+                    runs-on: ubuntu-latest
+                    steps:
+                      - run: gh issue edit "$N" --add-label priority
+            """)),
+            "declares no `*-label`")
+
     refuses("a `*-label` input with no default is a refusal, not a silent skip",
             lambda: chk.caller_labels(write(tmp, "nodefault.yml", GOOD_WF.replace(
                 '          bug-label:\n            type: string\n            '
@@ -377,7 +399,18 @@ def case_live_domain_matches_the_written_rule(tmp: Path) -> None:
                "has nothing independent to be checked against")
         return
     canon_label = m.group(1)
-    live = chk.required_labels()
+    # A REFUSAL HERE IS A FAIL, NOT A CRASH. Letting `CannotTell` escape kills the
+    # suite before it prints its summary line, and the mutation harness reads that
+    # as "the harness broke" rather than "a case caught it" -- which is the one
+    # verdict that cannot be distinguished from a coverage gap. Measured: the
+    # suffix-to-prefix mutation lands here and used to report UNCAUGHT.
+    try:
+        live = chk.required_labels()
+    except chk.CannotTell as exc:
+        record(False, "the label the CANON names is in the derived domain",
+               f"the derivation refused, so the domain could not be compared to "
+               f"the canon at all: {str(exc)[:160]}")
+        return
     record(canon_label in live,
            "the label the CANON names is in the derived domain",
            f"canon says {canon_label!r}; derived domain = {sorted(live)}")
@@ -488,7 +521,18 @@ def main() -> int:
             case_audit_is_fail_closed,
             case_main_refuses_an_empty_scope,
         ):
-            case(tmp)
+            # AN ESCAPING EXCEPTION IS A FAIL, NOT A CRASH. A case that dies
+            # unhandled kills the suite before it prints its summary line, and
+            # `triage-labels-mutations.py` reads a missing summary as "the harness
+            # broke" rather than "a case caught it" -- the one verdict that cannot
+            # be told apart from a coverage gap (its own docstring says so).
+            # Measured: the suffix-to-prefix mutation makes the module refuse on
+            # every positive-path fixture, and reported UNCAUGHT for it.
+            try:
+                case(tmp)
+            except Exception as exc:  # noqa: BLE001 - the point is to record it
+                record(False, f"{case.__name__} raised out of the case body",
+                       f"{type(exc).__name__}: {str(exc)[:200]}")
 
     bad = [n for ok, n, _ in RESULTS if not ok]
     print(f"\ntriage-labels-selftest: {len(RESULTS) - len(bad)}/{len(RESULTS)} passed")

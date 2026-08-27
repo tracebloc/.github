@@ -101,6 +101,13 @@ MUTATIONS = [
      GUARD,
      '    for label in sorted(set(ADD_LABEL.findall(run_scripts(doc)))):',
      '    for label in []:'),
+    ("caller_labels stops refusing on zero `*-label` inputs, so it returns the "
+     "`--add-label` half as if it were the whole domain",
+     GUARD,
+     '    if not inputs:\n'
+     '        # REFUSES ON ITS OWN',
+     '    if False:\n'
+     '        # REFUSES ON ITS OWN'),
     ("ADD_LABEL only matches the `=` form, so `--add-label priority` is invisible",
      GUARD,
      r'ADD_LABEL = re.compile(r"--add-label[= ]+([A-Za-z0-9:_.\-]+)")',
