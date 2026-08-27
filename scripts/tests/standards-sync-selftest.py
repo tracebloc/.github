@@ -834,6 +834,109 @@ try:
 finally:
     sys.stderr = _real_stderr
 
+# --------------- a create that fails MID-LOOP disarms too, it does not truncate
+#
+# Bugbot (High) on the staging->main promotion, .github#363 / backend#2735. The
+# pre-flight refusal above disarms the writes and finishes the audit; this path
+# -- the same condition, found later -- used to `break` the fleet loop, so the
+# table covered only the repos before the failure. Both are "this credential
+# cannot open PRs". Which one fires depends only on WHEN that becomes knowable,
+# and `check_author_identity` cannot know it: a token with the wrong
+# fine-grained scopes, or one never SSO-authorized, passes every read-only check
+# and fails at `pr create`. So the truncating path was the REACHABLE one.
+#
+# The writes must still stop dead -- `remediate()` cuts the branch ref before it
+# creates the PR, so continuing to remediate really would leave a branch on
+# every drifted repo and a PR on none.
+def _run_main_multi(targets, token, calls, raise_on):
+    """`main()` over a multi-repo fleet whose `remediate` fails on `raise_on`."""
+    saved = {n: getattr(sync, n) for n in
+             ("load_canon", "load_targets", "resolve_branch", "fetch_claude_md",
+              "remediate", "check_author_identity")}
+    saved_argv = sys.argv
+    saved_env = os.environ.get(sync.AUTHOR_TOKEN_ENV)
+    saved_summary = os.environ.pop("GITHUB_STEP_SUMMARY", None)
+
+    def _remediate(org, repo, *a, **kw):
+        calls.append(repo)
+        if repo == raise_on:
+            raise sync.AuthorUnusable("cannot open PR: HTTP 403: Resource not "
+                                      "accessible by personal access token")
+        return None
+
+    sync.load_canon = lambda _p: CANON
+    sync.load_targets = lambda _p: ("tracebloc", list(targets))
+    sync.resolve_branch = lambda _o, _r: "develop"
+    sync.fetch_claude_md = lambda _o, _r, _b: "# CLAUDE.md\n\nrepo-owned prose.\n"
+    sync.remediate = _remediate
+    sync.check_author_identity = lambda _t: None      # pre-flight passes
+    os.environ[sync.AUTHOR_TOKEN_ENV] = token
+    sys.argv = ["standards-sync.py", "--create-prs"]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            code = sync.main()
+    except SystemExit as exc:
+        code = exc.code
+    finally:
+        for n, fn in saved.items():
+            setattr(sync, n, fn)
+        sys.argv = saved_argv
+        if saved_env is None:
+            os.environ.pop(sync.AUTHOR_TOKEN_ENV, None)
+        else:
+            os.environ[sync.AUTHOR_TOKEN_ENV] = saved_env
+        if saved_summary is not None:
+            os.environ["GITHUB_STEP_SUMMARY"] = saved_summary
+    return code, buf.getvalue()
+
+
+_real_stderr = sys.stderr
+try:
+    sys.stderr = io.StringIO()
+    FLEET = ["alpha", "bravo", "charlie"]
+    calls: list = []
+    code, report = _run_main_multi(FLEET, "a-pat-that-cannot-create", calls,
+                                   raise_on="alpha")
+
+    # THE AUDIT IS THE POINT. Every target classified, not just the prefix.
+    record(all(f"| {r} |" in report for r in FLEET),
+           "main: a create failure still AUDITS every target, not just the prefix",
+           f"missing={[r for r in FLEET if f'| {r} |' not in report]} "
+           f"report={report.strip()[:200]!r} -- a truncated table reads as a "
+           "complete sweep of a smaller fleet")
+
+    # AND THE WRITES REALLY STOP. Exactly one remediate call: the one that
+    # raised. Continuing would branch every drifted repo and open no PR.
+    record(calls == ["alpha"],
+           "main: a create failure stops the WRITES at the first repo",
+           f"calls={calls} -- remediate() cuts the ref before `pr create`, so a "
+           "second call is a branch pushed with no PR behind it")
+
+    record("REMEDIATION DISARMED at `alpha`" in report,
+           "main: the report names where remediation stopped",
+           f"report={report.strip()[-260:]!r}")
+
+    record("NOT REMEDIATED" in report and "cannot open PRs" in report,
+           "main: the later rows say they were not remediated, and why",
+           f"report={report.strip()[-260:]!r} -- the pre-flight wording "
+           "('refused') would be wrong for this cause")
+
+    record(code == 2,
+           "main: a create failure exits 2",
+           f"code={code} -- 0 would claim every drifted repo has a PR open")
+
+    # NOT VACUOUS. The same fleet with a credential that never fails must
+    # remediate all three and exit 0, or every check above would pass over a
+    # script that had simply stopped remediating anything.
+    calls = []
+    code, report = _run_main_multi(FLEET, "a-usable-pat", calls, raise_on=None)
+    record(code == 0 and calls == FLEET and "NOT REMEDIATED" not in report,
+           "main: the mid-loop disarm is not vacuous -- a usable PAT does all 3",
+           f"code={code} calls={calls}")
+finally:
+    sys.stderr = _real_stderr
+
 # COMPUTED HERE, NOT EARLIER. This sat above the last hundred lines of checks,
 # so anything appended below it PRINTED its FAIL and did not count: the summary
 # read `0 failed` while two checks had failed, and the script exited 0. The

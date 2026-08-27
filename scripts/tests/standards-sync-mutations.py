@@ -135,6 +135,21 @@ MUTATIONS = [
         "a refused PAT still AUDITS the fleet",
     ),
     (
+        # Bugbot (High) on the staging->main promotion, .github#363 /
+        # backend#2735. The SAME condition as the refusal above, found later:
+        # a token with the wrong fine-grained scopes, or never SSO-authorized,
+        # passes every read-only identity check and fails at `pr create`. That
+        # path used to `break`, so the fleet table covered only the repos
+        # before the failure and read as a complete sweep of a smaller fleet.
+        # Restoring the truncation is the regression this pins.
+        "a mid-loop create failure truncates the audit instead of disarming",
+        '''                                 "cannot open PRs anywhere"))
+                    continue''',
+        '''                                 "cannot open PRs anywhere"))
+                    break''',
+        "a create failure still AUDITS every target",
+    ),
+    (
         # The other direction, and the more dangerous one: keeping the report
         # but letting the writes through. The gate would then be pure
         # narration -- a run that says REMEDIATION DISABLED while pushing a

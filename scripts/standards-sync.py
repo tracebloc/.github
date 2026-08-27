@@ -615,10 +615,15 @@ def main() -> int:
             sys.stderr.write("::error::Remediation is disabled for this run; the "
                              "read-only audit below still ran.\n")
     remediating = args.create_prs and not author_refusal
+    # WHY remediation is off, named for the row text. Two causes reach this:
+    # the pre-flight identity refusal above, and a create that fails mid-loop
+    # (below). Both mean "this credential cannot open PRs", so both disarm the
+    # writes and both leave the audit running -- they must not read differently.
+    remediation_off = f"{AUTHOR_TOKEN_ENV} refused" if author_refusal else ""
 
     rows: "list[tuple[str, str, str, str]]" = []
     drifted = unreadable = write_errors = 0
-    aborted_after = ""
+    writes_stopped_at = ""
 
     for repo in targets:
         try:
@@ -641,7 +646,7 @@ def main() -> int:
                 # audit that nobody asked to remediate. Not counted as a write
                 # error: the write was never attempted, and inflating the count
                 # per repo would hide the single cause behind sixteen symptoms.
-                action = f"NOT REMEDIATED: {AUTHOR_TOKEN_ENV} refused (see below)"
+                action = f"NOT REMEDIATED: {remediation_off} (see below)"
             elif remediating:
                 try:
                     error = remediate(org, repo, branch,
@@ -650,19 +655,33 @@ def main() -> int:
                                       file_on_base=(state != NO_FILE),
                                       author_token=author_token)
                 except AuthorUnusable as exc:
-                    # STOP THE FLEET (Bugbot, #348). The credential is the
-                    # same for every repo, so carrying on would push a branch
-                    # to all of them and open a PR on none -- the half-rollout
-                    # the `main()` gate exists to prevent, arriving through the
-                    # one failure mode that gate cannot see: a token that
-                    # resolves but cannot create.
+                    # DISARM THE WRITES, KEEP THE AUDIT (Bugbot, .github#363).
+                    #
+                    # The credential is the same for every repo, so carrying on
+                    # REMEDIATING would push a branch to all of them and open a
+                    # PR on none -- `remediate()` cuts the ref before it calls
+                    # `pr create`, so that half-rollout is real and is why this
+                    # used to `break`. But the classification is a READ. Ending
+                    # the loop stopped both, and #348 already settled what the
+                    # other route through this same condition does: the
+                    # pre-flight refusal above disarms the writes and lets the
+                    # read-only audit finish. Two paths, one condition -- so a
+                    # `break` here made the fleet report depend on WHEN the
+                    # credential was found wanting, and a partial sweep is the
+                    # "fleet state unknown" standards-sync.yml argues against.
+                    #
+                    # Writes still stop at the first failure, so the bound the
+                    # selftest pins holds: at most ONE repo with a branch and
+                    # no PR.
                     write_errors += 1
-                    aborted_after = repo
+                    writes_stopped_at = repo
+                    remediating = False
+                    remediation_off = f"{AUTHOR_TOKEN_ENV} cannot open PRs"
                     rows.append((repo, branch, state,
-                                 f"REMEDIATION FAILED: {exc} -- ABORTING the "
-                                 "remaining repos; this credential cannot open "
-                                 "PRs anywhere"))
-                    break
+                                 f"REMEDIATION FAILED: {exc} -- writes DISARMED "
+                                 "for the remaining repos; this credential "
+                                 "cannot open PRs anywhere"))
+                    continue
                 if error:
                     write_errors += 1
                     action = f"REMEDIATION FAILED: {error}"
@@ -687,13 +706,16 @@ def main() -> int:
         lines.append(f"**REMEDIATION DISABLED** — {author_refusal} The audit "
                      "above is complete and current; no branch was pushed and "
                      "no PR was opened or refreshed.")
-    if aborted_after:
-        # SAID IN THE REPORT, not only in the log. A run that stopped early
-        # and did not say so reads as a complete sweep of a smaller fleet.
+    if writes_stopped_at:
+        # SAID IN THE REPORT, not only in the log. The audit above IS complete
+        # -- every target was classified -- and the reader has to be able to
+        # tell that from a sweep that stopped early, which is why this names
+        # the boundary rather than leaving the table to imply one.
         lines.append("")
-        lines.append(f"**ABORTED at `{aborted_after}`** -- `{AUTHOR_TOKEN_ENV}` "
-                     "resolves but cannot open PRs, so the remaining targets "
-                     "were left untouched rather than given a branch each.")
+        lines.append(f"**REMEDIATION DISARMED at `{writes_stopped_at}`** -- "
+                     f"`{AUTHOR_TOKEN_ENV}` resolves but cannot open PRs. No "
+                     "branch was pushed to any later target; the audit above "
+                     "covers the whole fleet.")
     report = "\n".join(lines)
     print(report)
 
