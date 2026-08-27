@@ -40,6 +40,7 @@ import os
 import pathlib
 import re
 import sys
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -140,7 +141,7 @@ def pr_of(measured):
     return measured["data"]["repository"]["pullRequest"]
 
 
-def pr(title, links=(), is_draft=False, total=None):
+def pr(title, links=(), is_draft=False, total=None, body=None):
     """A payload in the MEASURED shape, with the values a case needs.
 
     Keys spelled as literals on purpose: they are the contract with GitHub, not
@@ -154,6 +155,7 @@ def pr(title, links=(), is_draft=False, total=None):
         "number": 1,
         "title": title,
         "isDraft": is_draft,
+        "body": body,
         "closingIssuesReferences": {
             "totalCount": len(nodes) if total is None else total,
             "nodes": nodes,
@@ -315,6 +317,171 @@ for observed in ("test", "refactor", "perf", "build", "style"):
     )
 
 # ---------------------------------------------------------------------------
+# 2b. THE NON-CLOSING VOCABULARY, derived from org-standards.md
+#     (tracebloc/backend#2616, rule 1). The canon declares the org's partial-work
+#     form; the gate parses it rather than holding a copy. These cases pin the
+#     DERIVATION, including both fail-closed directions -- an accepted form
+#     nothing breaks is an accepted form nobody notices.
+# ---------------------------------------------------------------------------
+
+# THE QUERY MUST ACTUALLY ASK FOR THE BODY. Every `evaluate` case below hands the
+# body in directly, so a query that stopped requesting `body` would leave all of
+# them green while the gate read nothing in production -- inert verification, the
+# exact class backend#1729 exists to catch. Asserted against the real query
+# string, and mutation-pinned.
+check(
+    "the GraphQL query requests the PR body (without it the fix cannot fire live)",
+    re.search(r"^\s*body\s*$", gate.QUERY, re.MULTILINE) is not None,
+    "%r" % (gate.QUERY,),
+)
+
+DERIVED_KEYWORDS = value(gate.reference_keywords)
+check(
+    "the canon's non-closing form is derived from the real org-standards.md "
+    "(the derivation is not vacuous)",
+    isinstance(DERIVED_KEYWORDS, list) and len(DERIVED_KEYWORDS) >= 1,
+    "%r" % (DERIVED_KEYWORDS,),
+)
+# WRITTEN DOWN INDEPENDENTLY OF THE MATCHER (rule 9's corollary): this is the
+# string org-standards.md actually carries today, typed here as a literal rather
+# than read back out of the module. If the canon drops it, this reddens.
+check(
+    "`Part of` is what the canon declares today (backend#2616's remedy exists)",
+    "Part of" in (DERIVED_KEYWORDS or []),
+    "%r" % (DERIVED_KEYWORDS,),
+)
+check(
+    "GitHub's own closing keywords are SUBTRACTED, not offered as a second form",
+    not {word.split()[0].lower() for word in (DERIVED_KEYWORDS or [])}
+    & {"closes", "fixes", "resolves", "close", "fix", "resolve"},
+    "%r" % (DERIVED_KEYWORDS,),
+)
+# The parse itself, against canon text written here as a literal.
+check(
+    "a declared `Part of <owner>/<repo>#N` line is read as a non-closing form",
+    gate.declared_reference_keywords("say `Part of tracebloc/backend#N` in the body")
+    == ["Part of"],
+    "%r" % (gate.declared_reference_keywords("say `Part of tracebloc/backend#N` in the body"),),
+)
+check(
+    "a declared `Closes <owner>/<repo>#N` line is NOT read as a non-closing form",
+    gate.declared_reference_keywords("the body carries `Closes <owner>/<repo>#N`") == [],
+    "%r" % (gate.declared_reference_keywords("the body carries `Closes <owner>/<repo>#N`"),),
+)
+check(
+    "a backticked span with no keyword is not a declaration (`backend#1234`)",
+    gate.declared_reference_keywords("referencing the ticket (`backend#1234`)") == [],
+)
+check(
+    "a backticked span with no `#` is not a declaration (`fix/1234-ingest-timeout`)",
+    gate.declared_reference_keywords("a slug like `fix/1234-ingest-timeout`") == [],
+)
+check(
+    "a form the canon adds LATER is picked up with no code change (rule 1)",
+    gate.declared_reference_keywords(
+        "say `Part of tracebloc/backend#N` or `Refs tracebloc/backend#N`"
+    ) == ["Part of", "Refs"],
+    "%r" % (gate.declared_reference_keywords(
+        "say `Part of tracebloc/backend#N` or `Refs tracebloc/backend#N`"),),
+)
+# FAIL CLOSED, BOTH DIRECTIONS (rule 3). Neither an unreadable canon nor a canon
+# that declares nothing may quietly revert the gate to closing-only -- reverting
+# IS backend#2616, and it would revert it invisibly.
+#
+# THE TWO REFUSALS ARE ASSERTED APART, by their own messages (rule 10). They are
+# easy to conflate -- a missing directory produces BOTH a missing file and an
+# empty vocabulary -- and a case that accepted either could not tell you which
+# path it exercised. So the "declares nothing" case gets a canon that really
+# exists and really declares nothing.
+_TMP_CANON = pathlib.Path(tempfile.mkdtemp(prefix="closing-ref-canon-"))
+(_TMP_CANON / gate.STANDARDS_FILE).write_text(
+    "# standards\n\nCommit subjects are `type(scope): summary`, referencing the "
+    "ticket (`backend#1234`). The body carries `Closes <owner>/<repo>#N`.\n",
+    encoding="utf-8",
+)
+expect_unreadable(
+    "a canon that EXISTS but declares no non-closing form is a cannot-tell, "
+    "never a silent revert to closing-only",
+    lambda: gate.reference_keywords(root=_TMP_CANON),
+    because="declares no non-closing reference form",
+)
+expect_unreadable(
+    "an ABSENT canon is a cannot-tell, and says so as a read failure",
+    lambda: gate.reference_keywords(root=_TMP_CANON / "no-such-dir"),
+    because="could not be read",
+)
+
+# ---------------------------------------------------------------------------
+# 2c. parse_body -- only a DECLARED keyword counts.
+# ---------------------------------------------------------------------------
+
+def body_refs(text, keywords=("Part of",)):
+    parsed = value(lambda: gate.parse_body(text, list(keywords)))
+    if isinstance(parsed, str):
+        return parsed
+    return [(r.owner, r.repo, r.number) for r in parsed]
+
+
+check(
+    "the measured body of .github#356 references backend#2284",
+    body_refs("Part of tracebloc/backend#2284\n\nIt makes arming the required "
+              "context **possible**. It does not make Bugbot reliable.")
+    == [("tracebloc", "backend", 2284)],
+    "%r" % (body_refs("Part of tracebloc/backend#2284"),),
+)
+check(
+    "the repo-without-owner form parses",
+    body_refs("Part of backend#2284") == [(None, "backend", 2284)],
+    "%r" % (body_refs("Part of backend#2284"),),
+)
+check(
+    "a bare `Part of #N` parses as repo-agnostic",
+    body_refs("Part of #2284") == [(None, None, 2284)],
+    "%r" % (body_refs("Part of #2284"),),
+)
+check(
+    "the keyword is case-insensitive, as GitHub's own are",
+    body_refs("part of TRACEBLOC/backend#2284") == [("TRACEBLOC", "backend", 2284)],
+    "%r" % (body_refs("part of TRACEBLOC/backend#2284"),),
+)
+check(
+    "a dotted repo name parses in a body reference too (`.github`)",
+    body_refs("Part of tracebloc/.github#356") == [("tracebloc", ".github", 356)],
+    "%r" % (body_refs("Part of tracebloc/.github#356"),),
+)
+# THE NEGATIVE CASES, and they are the point: an INCIDENTAL mention is not a
+# declaration. Reading GitHub's cross-reference graph instead would have accepted
+# every one of these, which is why this file parses declared keywords.
+check(
+    "a loose `#N` in the body is NOT a reference",
+    body_refs("This reverts the change #2271 made to the detector.") == [],
+    "%r" % (body_refs("This reverts the change #2271 made to the detector."),),
+)
+check(
+    "an undeclared keyword is NOT a reference (`See also`)",
+    body_refs("See also tracebloc/backend#2284") == [],
+    "%r" % (body_refs("See also tracebloc/backend#2284"),),
+)
+check(
+    "the keyword must stand alone, not end another word (`Apart of`)",
+    body_refs("Apart of tracebloc/backend#2284") == [],
+    "%r" % (body_refs("Apart of tracebloc/backend#2284"),),
+)
+check("an absent body references nothing, and is not a malfunction", body_refs(None) == [])
+check("an empty body references nothing", body_refs("") == [])
+check(
+    "the same ticket referenced twice is one reference",
+    body_refs("Part of backend#2284 ... Part of backend#2284") == [(None, "backend", 2284)],
+    "%r" % (body_refs("Part of backend#2284 ... Part of backend#2284"),),
+)
+check(
+    "two different tickets are two references",
+    body_refs("Part of backend#2556 and Part of backend#2616")
+    == [(None, "backend", 2556), (None, "backend", 2616)],
+    "%r" % (body_refs("Part of backend#2556 and Part of backend#2616"),),
+)
+
+# ---------------------------------------------------------------------------
 # 3. classify -- the one comparison, called directly.
 # ---------------------------------------------------------------------------
 Ref = gate.TicketRef
@@ -375,6 +542,66 @@ check(
 check(
     "the three verdicts are distinct values",
     len({gate.LINKED, gate.MISSING, gate.WRONG_REPO}) == 3,
+)
+check(
+    "the four verdicts are distinct values (MENTIONED is its own state)",
+    len({gate.LINKED, gate.MENTIONED, gate.MISSING, gate.WRONG_REPO}) == 4,
+)
+
+# --- classify against BODY references (tracebloc/backend#2616) --------------
+# The measured case: .github#356's title names 2284, it links nothing, and its
+# body says `Part of tracebloc/backend#2284`. Truthful, and it must pass.
+check(
+    "a declared body reference satisfies a bare title number (.github#356, MEASURED)",
+    gate.classify(Ref(None, None, 2284, "scope"), [], [Ref("tracebloc", "backend", 2284, "body")])
+    == gate.MENTIONED,
+)
+check(
+    "a declared body reference satisfies a repo-named title ref",
+    gate.classify(
+        Ref(None, "backend", 2284, "parenthetical"), [], [Ref("tracebloc", "backend", 2284, "body")]
+    ) == gate.MENTIONED,
+)
+check(
+    "a body reference to a DIFFERENT number does not satisfy the title",
+    gate.classify(Ref(None, None, 2284, "scope"), [], [Ref("tracebloc", "backend", 9999, "body")])
+    == gate.MISSING,
+)
+check(
+    "a body reference in a DIFFERENT repo does not satisfy a repo-named title ref",
+    gate.classify(
+        Ref(None, "backend", 304, "parenthetical"), [], [Ref("tracebloc", ".github", 304, "body")]
+    ) == gate.MISSING,
+)
+check(
+    "a bare body reference satisfies a repo-named title ref (it constrains no repo)",
+    gate.classify(
+        Ref(None, "backend", 2284, "parenthetical"), [], [Ref(None, None, 2284, "body")]
+    ) == gate.MENTIONED,
+)
+check(
+    "a closing link still outranks a body reference, so the strong form is reported",
+    gate.classify(
+        Ref(None, "backend", 2364, "parenthetical"),
+        [("tracebloc", "backend", 2364)],
+        [Ref("tracebloc", "backend", 2364, "body")],
+    ) == gate.LINKED,
+)
+# THE ORDERING, and it is the one that matters. A truthful `Part of
+# tracebloc/backend#304` must NOT mask a `Closes #304` that will close
+# `.github#304` on merge: the wrong-repo trap is about a link that FIRES.
+check(
+    "WRONG_REPO is decided BEFORE body references, so a truthful mention cannot "
+    "mask a link that closes the wrong issue",
+    gate.classify(
+        Ref(None, "backend", 304, "parenthetical"),
+        [("tracebloc", ".github", 304)],
+        [Ref("tracebloc", "backend", 304, "body")],
+    ) == gate.WRONG_REPO,
+)
+check(
+    "with no mentions at all, classify behaves exactly as before (default arg)",
+    gate.classify(Ref(None, None, 2256, "scope"), []) == gate.MISSING,
 )
 
 # ---------------------------------------------------------------------------
@@ -776,6 +1003,69 @@ finally:
 # 8. The workflow that runs this checker must actually run it.
 #    A checker nothing invokes is the same dead weight as an unwired selftest.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 7b. END TO END on the measured shape backend#2616 was filed about.
+#     .github#356: title `fix(2284): ...`, no closing link, body `Part of
+#     tracebloc/backend#2284`. Before the fix its only two remedies were a FALSE
+#     `Closes` or deleting `(2284)` from the title.
+# ---------------------------------------------------------------------------
+CHILD_TITLE = "fix(2284): the gate tolerates a review that never came, and says so"
+CHILD_BODY = (
+    "Part of tracebloc/backend#2284\n\n"
+    "It makes arming the required context **possible**. It does not make Bugbot\n"
+    "reliable ... Arming remains a separate, deliberate step.\n"
+)
+
+verdict, lines = gate.evaluate(pr(CHILD_TITLE, body=CHILD_BODY))
+check(
+    "the child PR that truthfully says `Part of` PASSES (.github#356, backend#2616)",
+    verdict == gate.PASS,
+    "%s %r" % (verdict, lines),
+)
+check(
+    "and the pass SAYS it was a body reference, not a promise to close",
+    any("does not close it" in line for line in lines),
+    "%r" % (lines,),
+)
+# The same title with NO reference of either kind is still the defect the gate
+# was built for, and still fails. The fix widened the admissible forms; it did
+# not stop the check firing.
+verdict, lines = gate.evaluate(pr(CHILD_TITLE))
+check(
+    "the same title with NO reference at all still FAILS (the real defect)",
+    verdict == gate.FAIL,
+    "%s" % verdict,
+)
+check(
+    "and the refusal now offers the truthful non-closing remedy, not only `Closes`",
+    any("Part of" in line for line in lines) and any("DOES NOT FINISH" in line for line in lines),
+    "%r" % (lines,),
+)
+# An UNDECLARED keyword must not rescue it -- otherwise any prose would.
+verdict, lines = gate.evaluate(pr(CHILD_TITLE, body="See also tracebloc/backend#2284"))
+check(
+    "an undeclared keyword in the body does NOT satisfy the title",
+    verdict == gate.FAIL,
+    "%s %r" % (verdict, lines),
+)
+# A repo-named title, same shape.
+verdict, lines = gate.evaluate(
+    pr("feat(kanban): a bug-labelled issue lands in Ready (backend#2348)",
+       body="Part of tracebloc/backend#2348")
+)
+check(
+    "a repo-named title satisfied by a body reference passes",
+    verdict == gate.PASS,
+    "%s %r" % (verdict, lines),
+)
+check(
+    "the report names the derived keyword it searched the body for",
+    any("Part of" in line for line in lines),
+    "%r" % (lines,),
+)
+
+# ---------------------------------------------------------------------------
 HOST = (ROOT / ".github" / "workflows" / "set-pr-status.yml").read_text(encoding="utf-8")
 check("the host workflow invokes the checker", "scripts/closing-ref-gate.py" in HOST)
 check("the host job passes REPO", re.search(r"REPO:\s*\$\{\{\s*github\.repository\s*\}\}", HOST) is not None)
@@ -788,6 +1078,90 @@ check(
 check(
     "the PR title is never interpolated into a run: block",
     "github.event.pull_request.title" not in HOST,
+)
+
+# ---------------------------------------------------------------------------
+# 9. THE GATE MUST RE-RUN WHEN THE FIELDS IT READS CHANGE (backend#2556).
+#
+#    This job's verdict comes from the PR TITLE and the PR BODY. `edited` is the
+#    only event GitHub fires when either changes, so without it the two inputs
+#    the gate reads are the two inputs that can change without re-running it --
+#    a bypass, not a gap. DERIVED by parsing the caller as YAML rather than
+#    grepping for the word: `edited` appears in this file's own prose, and a
+#    comment mentioning it is not a trigger (caller-drift.py rule 2, same
+#    reason).
+#
+#    SCOPE, SAID OUT LOUD SO A GREEN RUN IS NOT OVERREAD: this asserts THIS
+#    repo's caller only. The other 18 repos hold their own copies of
+#    set-pr-status-caller.yml and nothing in this suite can see them -- the
+#    fleet-wide assertion would need a network audit, which caller-drift.py
+#    does for `uses:` and for no trigger today. Those 18 need the same one-word
+#    change, tracked on backend#2556.
+# ---------------------------------------------------------------------------
+CALLER_PATH = ROOT / ".github" / "workflows" / "set-pr-status-caller.yml"
+CALLER_TEXT = CALLER_PATH.read_text(encoding="utf-8")
+
+def _caller_pr_types(text):
+    """The caller's real `on.pull_request.types`, parsed, never grepped."""
+    try:
+        import yaml
+    except ImportError:
+        return "PyYAML absent"
+    doc = yaml.safe_load(text)
+    if not isinstance(doc, dict):
+        return "caller did not parse as a mapping"
+    # YAML 1.1 turns a bare `on:` key into the boolean True. Accept either, and
+    # say so rather than silently reading nothing -- an empty list here would
+    # make every assertion below vacuously false in the wrong direction.
+    triggers = doc.get("on", doc.get(True))
+    if not isinstance(triggers, dict) or "pull_request" not in triggers:
+        return "caller declares no pull_request trigger"
+    section = triggers["pull_request"]
+    if not isinstance(section, dict) or "types" not in section:
+        return "caller's pull_request trigger declares no types"
+    return section["types"]
+
+CALLER_TYPES = _caller_pr_types(CALLER_TEXT)
+check(
+    "the caller's pull_request types parse (the derivation is not vacuous)",
+    isinstance(CALLER_TYPES, list) and len(CALLER_TYPES) >= 4,
+    "%r" % (CALLER_TYPES,),
+)
+check(
+    "the caller listens for `edited`, the only event a title or body change fires "
+    "(backend#2556)",
+    isinstance(CALLER_TYPES, list) and "edited" in CALLER_TYPES,
+    "%r" % (CALLER_TYPES,),
+)
+# The triggers that were already there must stay: `edited` is an addition, and a
+# rewrite that dropped one would be a regression this case names.
+for required in ("opened", "reopened", "ready_for_review", "converted_to_draft"):
+    check(
+        "the caller still listens for `%s`" % required,
+        isinstance(CALLER_TYPES, list) and required in CALLER_TYPES,
+        "%r" % (CALLER_TYPES,),
+    )
+
+# THE CONSEQUENCE OF `edited`, guarded (backend#2556). `edited` fires on a MERGED
+# PR too, and `set-status` writes Status unconditionally -- so without this
+# condition, fixing a typo in a shipped PR's description drags its card from
+# `Prod` back to `Code review`. Every OTHER trigger this workflow has is
+# reachable only on an open PR, which is why the guard did not exist before and
+# is mandatory now.
+check(
+    "set-status only writes while the PR is OPEN, so an edit to a merged PR "
+    "cannot demote its card (backend#2556)",
+    re.search(
+        r"^  set-status:\n    if: \$\{\{ github\.event\.pull_request\.state == 'open' \}\}$",
+        HOST,
+        re.MULTILINE,
+    ) is not None,
+    "set-status carries no open-state guard",
+)
+check(
+    "closing-ref also only runs while the PR is OPEN, so a merged PR gets no "
+    "late red X",
+    "inputs.closing-ref-check && github.event.pull_request.state == 'open'" in HOST,
 )
 
 # ---------------------------------------------------------------------------
