@@ -6,9 +6,9 @@ name: Route kanban Status on closure
 #   - PR merged to staging           → FR on staging  (functional review on staging environment)
 #   - PR merged to main/master       → Prod           (shipped to prod)
 #   - PR closed without merging      → Cancelled
-#   - Issue closed as completed:
-#       · by a PR (any base)         → mirror the PR's resulting Status
-#       · manually (no closing PR)   → Done (completed, but nothing deployed)
+#   - Issue closed as completed  → Done (terminal; how it was closed is irrelevant)
+#       (was: mirror the closing PR's Status, which put finished issues in deploy
+#        columns — see the branch below and backend#2722)
 #   - Issue closed as not_planned    → Cancelled
 #   - Issue closed (no state_reason) → Cancelled (default to abandoned)
 #
@@ -59,7 +59,6 @@ jobs:
           # LEAST PRIVILEGE, DERIVED FROM THIS JOB'S OWN CALLS (backend#2157).
           # Four steps share this token; this is the union of what they call:
           #
-          #   repository.issue(n).timelineItems (closer lookup)   issues   read
           #   organization().projectV2 fields/options             projects read
           #   repository.pullRequest|issue(n).projectItems        PRs+issues read
           #   updateProjectV2ItemFieldValue                       projects WRITE
@@ -94,9 +93,12 @@ jobs:
           #
           # contents:write still drops, as do administration/actions/checks read.
           #
-          # `repositories:` STAYS UNNARROWED -- the closer lookup is cross-repo, as
-          # the comment above already says, and `organization-projects` is an
-          # org-level grant regardless.
+          # `repositories:` STAYS UNNARROWED -- the cross-repo callers are the
+          # projectItems reads and the issue comment/label writes listed above (a
+          # client or website PR routinely closes a `backend` issue), and
+          # `organization-projects` is an org-level grant regardless. The closer
+          # lookup used to be cited here too; it was removed with the routing change
+          # (backend#2722) and is no longer a reason for anything.
           #
           # NOT PROVEN BY READING. An under-scoped token fails at the call site, and
           # this workflow's failure mode is a card the built-in "Item closed"
@@ -116,20 +118,19 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           ISSUE_REASON: ${{ github.event.issue.state_reason }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          # ORG + REPO_FULL needed by the "issue closed as completed" branch when
-          # it does the closing-PR-base lookup. Without these, `set -u` aborted
-          # the script before any status= output was written, leaving the
-          # built-in "Item closed" project workflow to set Status=Cancelled.
+          # ORG + REPO_FULL are read by the project lookups, the .kanban.yml
+          # override mapper and the D8 parked-card comment. Keep them exported:
+          # without them `set -u` aborts the script before any status= output is
+          # written, leaving the built-in "Item closed" project workflow to set
+          # Status=Cancelled. (They were originally added for the closing-PR-base
+          # lookup, which backend#2722 removed; the other consumers remain.)
           ORG: ${{ inputs.org }}
           REPO_FULL: ${{ github.repository }}
-          # This step's closer lookup is a `gh api graphql` call and the step had NO
-          # token, so it failed on EVERY invocation -- silently, because a failed lookup
-          # collapsed into "no closer", and "no closer" meant "leave Status unchanged".
-          # The closed-by-PR routing here has therefore never run; kanban-reconcile.yml's
-          # cron has been doing all of it, which is exactly what its own comment says.
-          # Found by Bugbot on .github#126 while reviewing backend#1411, which needs
-          # this lookup to work. Same secret the update step uses -- the lookup is
-          # cross-repo, so it needs the PAT, not the caller's GITHUB_TOKEN.
+          # The PAT rather than the caller's GITHUB_TOKEN: this step's project reads
+          # and the override mapper are cross-repo. (This comment used to explain a
+          # closer lookup that ran tokenless and therefore never worked -- .github#126.
+          # backend#2722 removed the lookup entirely, so that history now describes no
+          # code and is dropped rather than left to mislead.)
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
@@ -223,99 +224,45 @@ jobs:
             fi
           elif [ "$EVENT_NAME" = "issues" ]; then
             if [ "$ISSUE_REASON" = "completed" ]; then
-              # Mirror the Status of whatever CLOSED this issue, read from the
-              # timeline ClosedEvent.closer -- NOT closedByPullRequestsReferences.
-              # That reference field is eventually-consistent and is EMPTY at the
-              # instant the close event fires, so the router used to miss the
-              # closing PR and no-op, leaving completed issues stuck in their
-              # pre-close column (confirmed on backend#979: closer PR present in
-              # the timeline, closedByPullRequestsReferences still empty). The
-              # MOST RECENT ClosedEvent (the close that triggered this run; after a
-              # reopen+reclose it is the current close) exists immediately and names
-              # its closer: a PullRequest (mirror its base), a Commit (a direct
-              # "Closes #N" push -- no base ref, start at On dev), or none (a
-              # genuine manual close).
-              REPO_NAME="${REPO_FULL#*/}"
-              # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
-              CLOSER=$(gh api graphql -f query='
-                query($org: String!, $repo: String!, $num: Int!) {
-                  repository(owner: $org, name: $repo) {
-                    issue(number: $num) {
-                      timelineItems(last: 10, itemTypes: [CLOSED_EVENT]) {
-                        nodes {
-                          ... on ClosedEvent {
-                            closer { __typename ... on PullRequest { baseRefName } }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$ISSUE_NUMBER" \
-                --jq '((.data.repository.issue.timelineItems.nodes // [])
-                       | last) as $e
-                      | if $e == null then "NOEVENT|"
-                        else (($e.closer.__typename // "NONE") + "|" + ($e.closer.baseRefName // "")) end' \
-                2>/dev/null) || CLOSER="ERROR|"
-              CLOSER_TYPE="${CLOSER%%|*}"
-              CLOSING_PR_BASE="${CLOSER#*|}"
-              # A genuinely absent closer is "NONE"; a lookup that FAILED is "ERROR".
-              # Those were the same value until backend#1411, which was harmless while
-              # no-closer meant "leave unchanged" -- but now no-closer means Done, so a
-              # transient GraphQL error would move a PR-closed issue to Done, and
-              # kanban-archive (which now archives Done) would hide it the next day.
-              # Converting a fail-open default into a fail-WRONG one is worse than
-              # either (Bugbot, .github#126). Anything unexpected, including an empty
-              # read, leaves the Status alone.
+              # A COMPLETED ISSUE IS TERMINAL. It goes to Done, and nothing about how it
+              # was closed changes that (backend#2722).
               #
-              # "NOEVENT" is the third distinct answer, and only the jq above can tell
-              # it apart: a ClosedEvent whose closer is null means HAND-CLOSED, while no
-              # ClosedEvent at all means the timeline had nothing to say. Both used to
-              # emit "NONE" -- along with a null `issue` and a null `repository` -- and
-              # five different situations arrived here as one token (Bugbot, .github#127).
-              # Only the first is evidence of a hand-close; the rest are absence of
-              # evidence, and Done now archives what it touches. NOEVENT is deliberately
-              # NOT added to the allowlist below, so it lands in UNREADABLE.
-              case "$CLOSER_TYPE" in
-                PullRequest|Commit|NONE) ;;
-                *) echo "::warning::could not confirm the closer for #$ISSUE_NUMBER (got '${CLOSER_TYPE:-empty}') - leaving Status unchanged rather than assuming a hand-close"
-                   CLOSER_TYPE="UNREADABLE" ;;
-              esac
-
-              if [ "$CLOSER_TYPE" = "UNREADABLE" ]; then
-                : # decided above: no change
-              elif [ "$CLOSER_TYPE" = "PullRequest" ]; then
-                # Same shared mapping as the pull_request arm above.
-                # Same fallback as the pull_request arm, and for the same reason.
-                if ! STATUS=$(python3 .kanban-map/scripts/branch_status_map.py \
-                                "$CLOSING_PR_BASE" "$REPO_FULL" "$CLOSING_PR_BASE" \
-                                | jq -r '.status'); then
-                  # Same holding state, same reason as the pull_request arm --
-                  # including the unknown-Status refusal, and its stderr.
-                  echo "::warning::the .kanban.yml override for $REPO_FULL could not be used (see the error above), so the Status for $CLOSING_PR_BASE is UNKNOWN. Writing the holding state and labelling for the weekly pass."
-                  STATUS="On dev"
-                  UNUSABLE_OVERRIDE="true"
-                fi
-                # Same as the pull_request arm: the mapper's answer wins, and the
-                # floor applies only when it had none.
-                if [ -z "$STATUS" ]; then
-                  # Unrecognised base: mirror the pull_request branch's default so
-                  # the issue and its PR agree.
-                  STATUS="On dev"
-                fi
-              elif [ "$CLOSER_TYPE" = "Commit" ]; then
-                # Direct "Closes #N" push: a commit has no base ref. Start it at
-                # On dev; advance-deploy-env.yml / kanban-reconcile.yml promote it
-                # once the code actually reaches staging/prod.
-                STATUS="On dev"
-              else
-                # No closer -> genuinely closed by hand, so nothing deployed. That is
-                # exactly what Done means (RFC-BACKEND-1405 D8), and it is not a deploy
-                # state, so the old objection to inventing one no longer applies.
-                # Doing it here rather than waiting for kanban-reconcile's cron means
-                # the card is terminal immediately; reconcile stays as the backstop for
-                # anything this event misses.
-                STATUS="Done"
-              fi
+              # This used to mirror the closing PR's Status, so a PR-closed issue landed
+              # in `On dev` / `FR on staging` / `Prod`. That contradicted the board model
+              # -- deploy state is a property of a PR; an issue is either finished or it
+              # is not (RFC-BACKEND-1405 D8) -- and it cost real accuracy: on 2026-08-27
+              # one session cleared 117 closed issues out of deploy columns by hand
+              # (18 + 55 from `FR on staging`, 44 from `On dev`). Two of those passes
+              # were functional-review batches, so the next prod payload would have read
+              # 73 items larger than the work it actually contained.
+              #
+              # WHY THIS RETIRES backend#1600 RATHER THAN FIGHTING IT. #1600 found that
+              # issues parked here by the old mirroring NEVER advanced when the code
+              # shipped, and drifted permanently (2026-08-06: all 20 drifted cards were
+              # closed issues, 0 PRs). It fixed the stranding by teaching
+              # advance-deploy-env to march them onward. It was right that a closed issue
+              # must not be stranded, and wrong about where to put it: `Done` is terminal,
+              # so there is nothing left to drift, and kanban-archive sweeps it off the
+              # board daily instead of it being carried by every hop. The matching
+              # closing-issue block in advance-deploy-env.yml is removed in the same
+              # change -- left in place it drags these cards straight back into the deploy
+              # columns, and a half-fix here would look fixed while doing nothing.
+              #
+              # THE CLOSER LOOKUP GOES WITH IT, which is a second win rather than
+              # collateral. It existed only to tell a hand-close from a PR-close so the
+              # two could route differently; with one destination there is nothing to
+              # tell apart. It was also the source of two fail-wrong defects -- a
+              # transient GraphQL error reading as a hand-close (.github#126), and five
+              # distinct situations collapsing into one "NONE" token (.github#127) -- and
+              # a call that is never made cannot fail. Verified before removing:
+              # CLOSER_TYPE and CLOSING_PR_BASE were read nowhere outside this branch.
+              #
+              # SAFE AGAINST THE FR GATE, checked rather than assumed: fr-gate ranks
+              # `Done` 11 against `On dev` 6, so a terminal card satisfies both the
+              # staging and the prod gate instead of blocking them. Its own comment
+              # records that being learned the hard way, when strict equality meant "a
+              # single Done card blocked every prod" promotion.
+              STATUS="Done"
             else
               # not_planned, or closed with no state_reason at all → abandoned.
               STATUS="Cancelled"
