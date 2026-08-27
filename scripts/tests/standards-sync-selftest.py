@@ -917,10 +917,18 @@ try:
            "main: the report names where remediation stopped",
            f"report={report.strip()[-260:]!r}")
 
-    record("NOT REMEDIATED" in report and "cannot open PRs" in report,
-           "main: the later rows say they were not remediated, and why",
-           f"report={report.strip()[-260:]!r} -- the pre-flight wording "
-           "('refused') would be wrong for this cause")
+    # SCOPED TO THE LATER ROWS, not to the report (Bugbot, .github#366). The
+    # phrase "cannot open PRs" is already in the failed row AND in the footer,
+    # so searching the whole report passed while every later row still said the
+    # pre-flight "refused" -- the check could not fail for its own reason.
+    later = [ln for ln in report.splitlines()
+             if ln.startswith("| bravo |") or ln.startswith("| charlie |")]
+    record(len(later) == 2
+           and all("NOT REMEDIATED" in ln and "cannot open PRs" in ln
+                   and "refused" not in ln for ln in later),
+           "main: the later ROWS name the create-failure cause, not 'refused'",
+           f"later={later!r} -- asserted on the rows themselves; the footer and "
+           "the failed row both carry this phrase already")
 
     record(code == 2,
            "main: a create failure exits 2",
