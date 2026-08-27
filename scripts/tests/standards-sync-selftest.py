@@ -743,8 +743,14 @@ finally:
 # above the secret: aborting before the audit turns "PRs could not be opened"
 # into "fleet state unknown", which is strictly less information. So the run
 # must still classify and report the whole fleet, push nothing, and exit 2.
-def _run_main(argv, token, remediate_calls):
-    """`main()` with the fleet reads stubbed. Returns (exit_code, report)."""
+def _run_main(argv, token, remediate_calls, targets=("alpha",), remediate=None):
+    """`main()` with the fleet reads stubbed. Returns (exit_code, report).
+
+    `targets` and `remediate` are parameters because backend#2690 is a
+    MULTI-REPO property: a write failure on the first of several repos must not
+    stop the others being CLASSIFIED. A one-repo fleet cannot express that --
+    there is no "rest of the fleet" for the abort to have eaten.
+    """
     saved = {name: getattr(sync, name)
              for name in ("load_canon", "load_targets", "resolve_branch",
                           "fetch_claude_md", "remediate")}
@@ -756,12 +762,12 @@ def _run_main(argv, token, remediate_calls):
         return None
 
     sync.load_canon = lambda _p: CANON
-    sync.load_targets = lambda _p: ("tracebloc", ["alpha"])
+    sync.load_targets = lambda _p: ("tracebloc", list(targets))
     sync.resolve_branch = lambda _o, _r: "develop"
     # No markers, so it classifies as drifted -- the only state that reaches
     # the remediation branch at all.
     sync.fetch_claude_md = lambda _o, _r, _b: "# CLAUDE.md\n\nrepo-owned prose.\n"
-    sync.remediate = _remediate
+    sync.remediate = remediate or _remediate
     os.environ[sync.AUTHOR_TOKEN_ENV] = token
     sys.argv = ["standards-sync.py", *argv]
     buf = io.StringIO()
@@ -831,6 +837,81 @@ try:
            "main: report-only runs never consult the PAT",
            f"code={code} calls={calls} -- a read-only audit must not be gated "
            "on a credential it does not use")
+
+    # ------------------------------------------------------------------
+    # backend#2690. A `pr create` refusal used to `break` the target loop, so a
+    # credential that died on repo 1 of 16 left the report covering a PREFIX of
+    # the fleet -- while the summary line went on saying `16 targets`. The write
+    # must stop (#348: the same credential would push a branch to all of them
+    # and open a PR on none); the AUDIT must not, because it is a read that
+    # needs no credential. The `author_refusal` path above has always got this
+    # right, and `standards-sync.yml` argues for it in prose. This path did the
+    # opposite.
+    FLEET = ("alpha", "beta", "gamma")
+
+    def _refuse_on_beta(org, repo, *a, **kw):
+        # A REAL `AuthorUnusable` OUT OF THE REAL FUNCTION'S CONTRACT, raised
+        # mid-fleet rather than on the first repo, so the check distinguishes
+        # "kept going" from "never started".
+        _refuse_on_beta.seen.append(repo)
+        if repo == "beta":
+            raise sync.AuthorUnusable("cannot open PR: HTTP 403 from gh")
+        return None
+    _refuse_on_beta.seen = []
+
+    _real_check = sync.check_author_identity
+    try:
+        sync.check_author_identity = lambda _t: None
+        calls = []
+        code, report = _run_main(["--create-prs"], "a-usable-pat", calls,
+                                 targets=FLEET, remediate=_refuse_on_beta)
+
+        # THE FINDING ITSELF: every target is classified, not just those before
+        # the failure. Asserted per repo rather than by counting rows, so a
+        # report that lost `gamma` cannot pass by gaining a footer line.
+        missing = [r for r in FLEET if f"| {r} |" not in report]
+        record(not missing,
+               "main: a mid-fleet PR refusal still audits EVERY target",
+               f"missing={missing} code={code} -- `break` here made the report "
+               "a prefix of the fleet while the summary said the full count")
+
+        # NO FURTHER WRITES. `beta` is where it died, so `gamma` must never have
+        # been attempted -- that is #348's half, and it must survive this fix.
+        record(_refuse_on_beta.seen == ["alpha", "beta"],
+               "main: the refusal disarms remediation for the REST of the fleet",
+               f"remediate saw {_refuse_on_beta.seen} -- `gamma` being attempted "
+               "is the half-rollout #348 closed; not reaching `beta` would mean "
+               "this case never exercised the raise at all")
+
+        # AND THE REPORT SAYS BOTH HALVES, because "halted" and "audited" are
+        # the two things a reader has to be able to tell apart.
+        record("REMEDIATION HALTED at `beta`" in report,
+               "main: the report names where remediation stopped",
+               f"report={report.strip()[-300:]!r}")
+        record(f"all {len(FLEET)} targets" in report,
+               "main: the report states the audit is complete despite the halt",
+               f"report={report.strip()[-300:]!r} -- a count line of "
+               f"{len(FLEET)} over a prefix of rows is the overstatement")
+        record("NOT REMEDIATED" in report,
+               "main: repos after the halt are named NOT REMEDIATED",
+               f"report={report.strip()[-300:]!r} -- an unexplained drifted row "
+               "reads as a plain audit nobody asked to remediate")
+        record(code == 2,
+               "main: a mid-fleet refusal exits 2, not the --create-prs 0",
+               f"code={code} -- 0 would claim every drifted repo has a PR open")
+
+        # NON-VACUITY. The same fleet with a credential that never refuses must
+        # remediate all three and be green, or every check above would pass over
+        # a script that had simply stopped remediating anything.
+        calls = []
+        code, report = _run_main(["--create-prs"], "a-usable-pat", calls,
+                                 targets=FLEET)
+        record(code == 0 and len(calls) == len(FLEET)
+               and "REMEDIATION HALTED" not in report,
+               "main: the halt is not vacuous -- an unrefused fleet gets three PRs",
+               f"code={code} calls={len(calls)}")
+    finally:
+        sync.check_author_identity = _real_check
 finally:
     sys.stderr = _real_stderr
 
