@@ -91,7 +91,7 @@ SCOPE_PREFIX = "permission-"
 # These rows are the pre-existing state this guard was written to stop growing, not
 # to fix in one commit. Ten became six (advance-deploy-env, customer-priority-bump,
 # fr-pass-comment, kanban-closure-router -- derivable from their call sites), six
-# became four, and four became two.
+# became four, four became two, and two became one.
 #
 # THE TWO JUST BURNT DOWN WERE THE ONES THAT COULD NOT BE DERIVED, and the reason
 # they could not is worth keeping (backend#2157, measured 2026-08-24). Their rows
@@ -117,18 +117,17 @@ SCOPE_PREFIX = "permission-"
 # is the argument for measuring rather than reasoning, and it is why the four below
 # say what they say.
 #
-# The two left are left for a STATED reason, not for lack of time:
+# The ONE left is left for a STATED reason, not for lack of time:
 #
-#   fr-gate, kanban-reconcile -- high exposure (a required check fleet-wide, the
-#     widest board surface). Each needs its own window so one bad scope does not
-#     redden the whole fleet at once. set-pr-status and standards-sync were the
-#     other two of the four and are now scoped; their windows were taken.
+#   fr-gate -- a REQUIRED check on every promotion branch fleet-wide, so a bad
+#     scope here reddens every hop at once rather than one workflow. It needs its
+#     own window, and it is the last of the four: set-pr-status, kanban-reconcile
+#     and standards-sync are now scoped and their windows were taken.
 #
 # The distinction matters because it is the difference between an exemption that is
 # a to-do and one that is a decision. Do not fold them back together.
 EXEMPT = {
     "fr-gate.yml": "REQUIRED check on every promotion branch fleet-wide -- needs its own window",
-    "kanban-reconcile.yml": "the weekly backstop -- widest board surface of the set",
 }
 
 
