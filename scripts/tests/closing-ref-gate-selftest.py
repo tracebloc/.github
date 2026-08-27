@@ -81,6 +81,25 @@ def value(fn):
         return "RAISED %s: %s" % (type(exc).__name__, exc)
 
 
+def ev(payload, **kwargs):
+    """`evaluate`, but an escaped exception becomes a reported FAILURE.
+
+    Exactly `value`'s reason, applied to the call every positive case makes.
+    `evaluate` grew a path that can raise for a NEW reason -- it derives the
+    admissible non-closing forms from org-standards.md and refuses if that
+    derivation comes back empty -- so a mutation to the derivation used to kill
+    the suite mid-run instead of reddening a case. A suite that never prints its
+    tally is scored "harness broke", which is indistinguishable in a log from the
+    mutation not being covered, and the mutation harness says so out loud rather
+    than counting it as coverage. Returning the exception text as the verdict
+    makes the equality assertion fail, by name.
+    """
+    try:
+        return gate.evaluate(payload, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - the point is to report, not to pass
+        return ("RAISED %s: %s" % (type(exc).__name__, exc), [])
+
+
 def expect_unreadable(label, fn, because):
     """Assert the SPECIFIC refusal, never a bare catch-all (CLAUDE.md rule 10)."""
     global COUNT
@@ -608,12 +627,12 @@ check(
 # 4. evaluate -- against the MEASURED payloads.
 # ---------------------------------------------------------------------------
 
-verdict, lines = gate.evaluate(pr_of(MEASURED_CROSS_REPO))
+verdict, lines = ev(pr_of(MEASURED_CROSS_REPO))
 check("the measured cross-repo PR passes", verdict == gate.PASS, "%s %r" % (verdict, lines))
-verdict, lines = gate.evaluate(pr_of(MEASURED_PARENTHETICAL))
+verdict, lines = ev(pr_of(MEASURED_PARENTHETICAL))
 check("the measured parenthetical PR passes", verdict == gate.PASS, "%s %r" % (verdict, lines))
 
-verdict, lines = gate.evaluate(pr_of(MEASURED_UNLINKED))
+verdict, lines = ev(pr_of(MEASURED_UNLINKED))
 check("the measured unlinked PR FAILS (release-train#109)", verdict == gate.FAIL, "%s" % verdict)
 check(
     "the unlinked message says a title reference is inert",
@@ -643,7 +662,7 @@ check(
     "%r" % (lines,),
 )
 
-verdict, lines = gate.evaluate(
+verdict, lines = ev(
     pr("fix(2242): `Done` is a Status an override may name (backend#304)",
        links=[("tracebloc/.github", 304)])
 )
@@ -660,7 +679,7 @@ check(
 # `fix(90)` in `release-train` was advised to add `Closes tracebloc/backend#90`. Follow
 # that and the gate goes GREEN having linked the wrong issue, which merge then closes:
 # a remedy that manufactures the exact defect this gate exists to prevent.
-verdict, lines = gate.evaluate(pr("fix(90): summary"))
+verdict, lines = ev(pr("fix(90): summary"))
 check("a bare title number with no link FAILS", verdict == gate.FAIL, "%s" % verdict)
 _advice = " ".join(lines)
 check(
@@ -676,7 +695,7 @@ check(
 # The repo-qualified branch is unaffected: when the title DOES name a repo, the remedy
 # still names it. Asserted so the fix above cannot be "achieved" by dropping the repo
 # from every message.
-_v2, _l2 = gate.evaluate(pr("fix(2242): summary (backend#304)"))
+_v2, _l2 = ev(pr("fix(2242): summary (backend#304)"))
 check(
     "a repo-qualified title still gets a repo-qualified remedy",
     any("Closes tracebloc/backend#304" in line for line in _l2),
@@ -715,23 +734,23 @@ check(
     "%r" % (_mixed,),
 )
 
-verdict, lines = gate.evaluate(pr("chore(global_model): delete dead TF FLOPS path"))
+verdict, lines = ev(pr("chore(global_model): delete dead TF FLOPS path"))
 check("a title naming no ticket is NOTHING_NAMED, and passes", verdict == gate.NOTHING_NAMED)
-verdict, lines = gate.evaluate(
+verdict, lines = ev(
     pr("chore(global_model): delete dead TF FLOPS path", links=[("tracebloc/backend", 2288)])
 )
 check(
     "a link with no title reference is still NOTHING_NAMED (nothing to assert)",
     verdict == gate.NOTHING_NAMED,
 )
-verdict, lines = gate.evaluate(pr("fix(2364): unlinked", is_draft=True))
+verdict, lines = ev(pr("fix(2364): unlinked", is_draft=True))
 check("a draft is exempt", verdict == gate.DRAFT, "%s" % verdict)
 check(
     "the draft message says when the check applies",
     any("marked ready" in line for line in lines),
     "%r" % (lines,),
 )
-verdict, lines = gate.evaluate(
+verdict, lines = ev(
     pr("fix(2364): two named, one linked (backend#2365)",
        links=[("tracebloc/backend", 2364)])
 )
@@ -1017,7 +1036,7 @@ CHILD_BODY = (
     "reliable ... Arming remains a separate, deliberate step.\n"
 )
 
-verdict, lines = gate.evaluate(pr(CHILD_TITLE, body=CHILD_BODY))
+verdict, lines = ev(pr(CHILD_TITLE, body=CHILD_BODY))
 check(
     "the child PR that truthfully says `Part of` PASSES (.github#356, backend#2616)",
     verdict == gate.PASS,
@@ -1031,7 +1050,7 @@ check(
 # The same title with NO reference of either kind is still the defect the gate
 # was built for, and still fails. The fix widened the admissible forms; it did
 # not stop the check firing.
-verdict, lines = gate.evaluate(pr(CHILD_TITLE))
+verdict, lines = ev(pr(CHILD_TITLE))
 check(
     "the same title with NO reference at all still FAILS (the real defect)",
     verdict == gate.FAIL,
@@ -1043,14 +1062,14 @@ check(
     "%r" % (lines,),
 )
 # An UNDECLARED keyword must not rescue it -- otherwise any prose would.
-verdict, lines = gate.evaluate(pr(CHILD_TITLE, body="See also tracebloc/backend#2284"))
+verdict, lines = ev(pr(CHILD_TITLE, body="See also tracebloc/backend#2284"))
 check(
     "an undeclared keyword in the body does NOT satisfy the title",
     verdict == gate.FAIL,
     "%s %r" % (verdict, lines),
 )
 # A repo-named title, same shape.
-verdict, lines = gate.evaluate(
+verdict, lines = ev(
     pr("feat(kanban): a bug-labelled issue lands in Ready (backend#2348)",
        body="Part of tracebloc/backend#2348")
 )
