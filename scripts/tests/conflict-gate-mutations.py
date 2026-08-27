@@ -165,15 +165,30 @@ MUTATIONS = [
      '        if st["existing"] == st["state"]:',
      '        if st["existing"] != st["state"]:'),
 
-    # GraphQL says SUCCESS, the Statuses API takes success. Unfolded, every status
-    # looks changed and the dedup silently does nothing.
-    ("the case fold goes, so every status looks changed and the cap returns",
+    # REST answers lower case, GraphQL upper. Unfolded, an upper-case state never
+    # matches and the dedup silently does nothing -- invisible, because everything
+    # still works, it just writes every time until the cap.
+    ("the case fold goes, so an upper-case state never matches",
      '            return state.lower() if isinstance(state, str) else None',
      '            return state if isinstance(state, str) else None'),
 
     ("existing_state matches ANY context, so another check's state is read as ours",
      '        if entry.get("context") == CONTEXT:',
      '        if entry.get("context") is not None:'),
+
+    # THE BUGBOT FINDING ON THIS PR (#359, high). The rollup resolves
+    # `commit.status` in GraphQL, which a token without `actions: read` is REFUSED
+    # on a private repo -- so reading the current state that way would break every
+    # private repo in the org while passing every other case here.
+    ("the current state is read from the rollup again, not the REST endpoint",
+     '        combined = CD.gh_json(["api", f"repos/{org}/{name}/commits/{sha}/status"])',
+     '        combined = CD.gh_json(["pr", "view", sha, "--json", "statusCheckRollup"])'),
+
+    # An unreadable current state must produce a WRITE. Turning it into a skip
+    # would silently stop reporting whenever the status read flakes.
+    ("an unreadable current state is treated as agreeing, so no status is written",
+     '    except CD.GhError:\n        return None\n    if not isinstance(combined, dict):',
+     '    except CD.GhError:\n        return "success"\n    if not isinstance(combined, dict):'),
 
     # --- (G) the retry loop -------------------------------------------------
     ("every PR is re-read, not only the ones GitHub would not answer",

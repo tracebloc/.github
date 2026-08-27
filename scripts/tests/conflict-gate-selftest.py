@@ -289,7 +289,12 @@ finally:
 # The failure this file exists to fix, re-armed one level up: the PR still reads
 # empty-green and nothing said so.
 _real_post = gate.post_status
+_real_existing_outer = gate.existing_state
 try:
+    # HERMETIC: every case below writes, and the write decision now consults the
+    # REST combined-status endpoint. Stubbed to "no status yet" so these cases
+    # exercise the write path; the dedup itself is case (13b).
+    gate.existing_state = lambda org, name, sha: None
     gate.open_prs = lambda org, name: [pr(number=11, mergeable="CONFLICTING",
                                           state="DIRTY")]
 
@@ -355,33 +360,78 @@ try:
     # writes a day onto an unchanged head, so a PR left open three weeks would
     # exhaust the cap and every later write would 422 -- the gate going silent on
     # exactly the stalest PRs. So a write happens only when it changes something.
-    def with_rollup(entries, **kw):
-        p = pr(**kw)
-        p["statusCheckRollup"] = entries
-        return p
-
     ours = gate.CONTEXT
+    # THE REAL FUNCTION, not the None-returning stub installed above for the
+    # write-path cases -- calling the stub here would assert nothing at all.
+    _real_existing = _real_existing_outer
+    _real_ghjson = gate.CD.gh_json
 
-    # The case fold is load-bearing: GraphQL reports `SUCCESS`, the Statuses API
-    # takes `success`. Comparing unfolded makes every status look changed.
-    check("existing_state folds GraphQL's upper case to the API's lower",
-          gate.existing_state(with_rollup([{"context": ours, "state": "SUCCESS"}]))
-          == "success",
-          "got %r" % (gate.existing_state(
-              with_rollup([{"context": ours, "state": "SUCCESS"}])),))
-    check("existing_state is None when our context is absent",
-          gate.existing_state(with_rollup([{"context": "other", "state": "SUCCESS"}]))
-          is None,
-          "got %r" % (gate.existing_state(
-              with_rollup([{"context": "other", "state": "SUCCESS"}])),))
-    check("existing_state is None on a rollup-less payload",
-          gate.existing_state(pr()) is None,
-          "got %r" % (gate.existing_state(pr()),))
+    # existing_state reads the REST combined-status endpoint, NOT
+    # `statusCheckRollup` -- the rollup resolves `commit.status` in GraphQL, which
+    # a token without `actions: read` is refused on a private repo (Bugbot, #359).
+    # The endpoint it must call is pinned here, because switching back to the
+    # rollup would break every private repo in the org while passing every other
+    # case in this file.
+    _asked = []
+
+    def _combined(entries):
+        def _fake(args):
+            _asked.append(args)
+            return {"statuses": entries}
+        return _fake
+
+    try:
+        gate.CD.gh_json = _combined([{"context": ours, "state": "success"}])
+        check("existing_state reads our context's state",
+              _real_existing("tracebloc", "x", "abc") == "success",
+              "got %r" % (_real_existing("tracebloc", "x", "abc"),))
+        check("existing_state calls the REST combined-status endpoint on the sha",
+              any("repos/tracebloc/x/commits/abc/status" in " ".join(a)
+                  for a in _asked),
+              "asked %r" % (_asked,))
+        check("existing_state does NOT use statusCheckRollup",
+              not any("statusCheckRollup" in " ".join(a) for a in _asked),
+              "asked %r" % (_asked,))
+
+        # The fold: REST answers lower case, GraphQL upper. Defensive today, but an
+        # unfolded compare silently disables the dedup and everything still works.
+        gate.CD.gh_json = _combined([{"context": ours, "state": "SUCCESS"}])
+        check("existing_state folds case, so an upper-case state still matches",
+              _real_existing("tracebloc", "x", "abc") == "success",
+              "got %r" % (_real_existing("tracebloc", "x", "abc"),))
+
+        gate.CD.gh_json = _combined([{"context": "other", "state": "success"}])
+        check("existing_state is None when our context is absent",
+              _real_existing("tracebloc", "x", "abc") is None,
+              "got %r" % (_real_existing("tracebloc", "x", "abc"),))
+
+        gate.CD.gh_json = _combined([])
+        check("existing_state is None on a head with no statuses",
+              _real_existing("tracebloc", "x", "abc") is None,
+              "got %r" % (_real_existing("tracebloc", "x", "abc"),))
+
+        # AN UNREADABLE CURRENT STATE MUST PRODUCE A WRITE, not a skip. Writing a
+        # status that was already right wastes one of the 1000; skipping one that
+        # was needed leaves the PR reading empty-green.
+        def _read_fails(args):
+            raise gate.CD.GhError(502, "status read exploded")
+
+        gate.CD.gh_json = _read_fails
+        check("an unreadable current state is None, so the write goes ahead",
+              _real_existing("tracebloc", "x", "abc") is None,
+              "got %r" % (_real_existing("tracebloc", "x", "abc"),))
+    finally:
+        gate.CD.gh_json = _real_ghjson
+
+    # From here the lookup is stubbed at the function, so the sweep cases below
+    # exercise the SKIP/WRITE decision rather than the endpoint again.
+    def with_existing(value, **kw):
+        gate.existing_state = lambda org, name, sha: value
+        return pr(**kw)
 
     # unchanged -> no write
-    gate.open_prs = lambda org, name: [with_rollup(
-        [{"context": ours, "state": "FAILURE"}],
-        number=131, mergeable="CONFLICTING", state="DIRTY")]
+    gate.open_prs = lambda org, name: [with_existing(
+        "failure", number=131, mergeable="CONFLICTING", state="DIRTY")]
     seen.clear()
     statuses, errors = gate.sweep_repo("tracebloc", "x", retries=0,
                                        sleep_for=0.0, dry_run=False)
@@ -400,9 +450,8 @@ try:
     # CHANGED -> write. A conflict that has just been resolved must be cleared,
     # which is the direction that matters most: a stale `failure` left on a fixed
     # PR blocks it for no reason.
-    gate.open_prs = lambda org, name: [with_rollup(
-        [{"context": ours, "state": "FAILURE"}],
-        number=132, mergeable="MERGEABLE", state="CLEAN")]
+    gate.open_prs = lambda org, name: [with_existing(
+        "failure", number=132, mergeable="MERGEABLE", state="CLEAN")]
     seen.clear()
     statuses, errors = gate.sweep_repo("tracebloc", "x", retries=0,
                                        sleep_for=0.0, dry_run=False)
@@ -412,13 +461,14 @@ try:
           bool(statuses) and statuses[0]["written"] is True, "got %r" % (statuses,))
 
     # No status yet -> write. `None` must not compare equal to any state.
-    gate.open_prs = lambda org, name: [with_rollup(
-        [], number=133, mergeable="CONFLICTING", state="DIRTY")]
+    gate.open_prs = lambda org, name: [with_existing(
+        None, number=133, mergeable="CONFLICTING", state="DIRTY")]
     seen.clear()
     statuses, errors = gate.sweep_repo("tracebloc", "x", retries=0,
                                        sleep_for=0.0, dry_run=False)
     check("a head with no status of ours yet gets one written",
           seen.get("state") == "failure", "got %r" % (seen,))
+    gate.existing_state = _real_existing
 
     # --- (14) a PR with no head sha cannot be written, and says so ----------
     gate.open_prs = lambda org, name: [
@@ -432,6 +482,7 @@ try:
 finally:
     gate.post_status = _real_post
     gate.open_prs = _real_open
+    gate.existing_state = _real_existing_outer
 
 # --- (15) exit codes ---------------------------------------------------------
 #
@@ -443,6 +494,8 @@ _real_inv = gate.CD.load_inventory
 try:
     gate.CD.load_inventory = lambda path: {"repos": {"x": {}}}
     gate.post_status = lambda *a, **k: None
+    # main() writes, so the dedup lookup would reach the network without this.
+    gate.existing_state = lambda org, name, sha: None
 
     def run(prs):
         gate.open_prs = lambda org, name: prs
@@ -490,6 +543,7 @@ finally:
     gate.open_prs = _real_open
     gate.post_status = _real_post
     gate.CD.load_inventory = _real_inv
+    gate.existing_state = _real_existing_outer
 
 # --- (16) the PR-list cap is a refusal, not a partial sweep ------------------
 _real_gh = gate.CD.gh
