@@ -237,29 +237,41 @@ FAIL = "fail"        # Bugbot reviewed the head and something is open
 # creation while the head had since moved; anchoring on the head COMMIT makes
 # every case ordinary.
 #
-# WHAT SURVIVES RE-MEASUREMENT IS A SINGLE DISCRIMINATOR: THE PR'S AUTHOR.
-# 662 PRs, 20 repos, 2026-08-24..27, plus a 2026-07-01 sweep for the bot rows:
+# WHAT SURVIVES RE-MEASUREMENT: THE ABSENCE TRACKS IDENTITY, NOT CONTENT OR
+# LUCK. Three sweeps, kept separate because they have different windows and
+# different repo sets -- merging them into one tidy table is how the first
+# version of this comment overclaimed:
 #
-#   PR author        head commit author   n     got a `Cursor Bugbot` check
-#   -------------------------------------------------------------------------
-#   human            human                594   yes (all)
-#   human            release-train[bot]     43   yes, 43 of 43
-#   Bot (App)        human                   3   yes, 3 of 3
-#   Bot (App, sync)  release-train[bot]     20   NO, 0 of 20
-#   Bot (dependabot) either                 15   NO, 0 of 15
+#   A. 2026-08-24..27, 20 repos, ALL 662 PRs:
+#        human-authored      635 of 637 reviewed
+#                            (the 2 exceptions are DRAFTS, which this gate
+#                             exempts anyway -- so 635 of 635 non-draft)
+#        Bot-authored          1 of 25 reviewed
+#   B. 2026-07-01.., 10 repos, Bot-authored only:
+#        sync PRs (bot author + bot head commit)      0 of 20 reviewed
+#        dependabot PRs                               0 of 15 reviewed
+#          -- including 2 whose head COMMIT was human-authored
+#        promotion PRs (bot author + HUMAN head commit) 3 of 3 reviewed
+#   C. 2026-08-18.., 7 repos, human-authored PRs whose head commit was authored
+#      by `tracebloc-release-train[bot]`:  43 of 43 reviewed
 #
-# The only PRs with no review are the ones a Bot AUTHORED; the head commit's
-# author does not matter (43 of 43 bot-authored COMMITS on human-opened PRs were
-# reviewed). backend#2114 closed COMPLETED saying "no discriminator survives the
-# data" -- one does, and it is the author. `bugbot run` cannot recover it:
-# Cursor attributes the request to the AUTHOR and answers with a seat refusal.
+# THE RULE THAT FITS ALL OF IT, and no simpler one does: a PR is reviewed when
+# some identity on it has a Cursor seat -- the author or the head commit's author
+# -- and dependabot's are never reviewed either way. Two readings that do NOT
+# survive: "the PR author decides" (B's 3 promotion PRs are Bot-authored and were
+# reviewed) and "the head commit's author decides" (C's 43 are bot-committed and
+# were reviewed). backend#2114 closed COMPLETED saying "no discriminator survives
+# the data"; identity does, even if no single field does.
 #
-# So `UNCLAIMED` is not a general drop. It is, on all evidence, the bot-author
-# case -- which is why the report DERIVES the author instead of restating this
-# paragraph, and why failing on it would block that class forever with no
-# remedy, and (on the corrected numbers) almost nothing else. Whether the HUMAN
-# case should block is the open decision on backend#2586; the exit code is
-# deliberately unchanged here so that decision is made, not smuggled.
+# `bugbot run` cannot recover the unreviewed class: Cursor attributes the request
+# to the AUTHOR and answers with a seat refusal.
+#
+# So `UNCLAIMED` is not a general drop, and failing on it would block the
+# no-human-identity class forever with no remedy and (on the corrected numbers)
+# almost nothing else. The report therefore DERIVES the author rather than
+# restating this paragraph. Whether the human case should block is the open
+# decision on backend#2586; the exit code is deliberately unchanged here so that
+# decision is made, not smuggled.
 #
 # Both are WAITABLE -- an unclaimed head may still be claimed inside the window,
 # and that is the common case for a healthy Bugbot. They differ only at the
@@ -843,16 +855,18 @@ def main(argv=None):
                 lines.append("")
                 if kind == AUTHOR_BOT:
                     lines.append(
-                        "**This PR was opened by a Bot (%s), and Bugbot reviews "
-                        "no PR a Bot authored.** Measured 2026-08-27 across 20 "
-                        "repos: 0 of 20 release-train sync PRs and 0 of 15 "
-                        "dependabot PRs ever received a `Cursor Bugbot` check, "
-                        "while 43 of 43 human-opened PRs whose head COMMIT was "
-                        "bot-authored did -- so it is authorship, not the "
-                        "commits. Re-running will not help: Cursor attributes a "
-                        "`bugbot run` to the AUTHOR and answers with a seat "
-                        "refusal. The remedy is to open the PR as a seated human "
-                        "(backend#2590), not to wait."
+                        "**This PR was opened by a Bot (%s), which is the one "
+                        "case where an absent review is expected and cannot be "
+                        "fixed from here.** Measured: 0 of 20 release-train sync "
+                        "PRs and 0 of 15 dependabot PRs -- bot-authored -- ever "
+                        "received a `Cursor Bugbot` check. Re-running will not "
+                        "help: Cursor attributes a `bugbot run` to the AUTHOR and "
+                        "answers with a seat refusal. The remedy is to open the "
+                        "PR as a seated human (backend#2590), not to wait. (One "
+                        "measured exception: 3 of 3 Bot-opened PRs whose head "
+                        "COMMIT was human-authored -- release-train promotions -- "
+                        "were reviewed. If this is one of those, this absence is "
+                        "not expected either.)"
                         % author_label(pr)
                     )
                 elif kind == AUTHOR_HUMAN:
@@ -860,11 +874,13 @@ def main(argv=None):
                         "**This PR was opened by a user (%s), which makes this "
                         "absence anomalous rather than routine.** Measured "
                         "2026-08-24..27 across 20 repos, every non-draft "
-                        "human-authored PR carried a `Cursor Bugbot` check -- 637 "
-                        "of 637, arriving 8s to 439s after the head commit. Do "
-                        "not read this as \"Bugbot is flaky\": RE-RUN this check, "
-                        "and if it stays unclaimed, say so on backend#2586, "
-                        "because that would be the first measured instance."
+                        "human-authored PR carried a `Cursor Bugbot` check -- 635 "
+                        "of 635, arriving 8s to 439s after the head commit, and "
+                        "43 of those 635 had a bot-authored head COMMIT, so that "
+                        "is not the reason either. Do not read this as \"Bugbot "
+                        "is flaky\": RE-RUN this check, and if it stays "
+                        "unclaimed, say so on backend#2586, because that would be "
+                        "the first measured instance."
                         % author_label(pr)
                     )
                 else:

@@ -825,7 +825,8 @@ try:
         # above and still tell a human author the false thing the retraction
         # above WAITABLE is about.
         check("main: the human report does NOT claim Bugbot skipped it by design",
-              "no PR a Bot authored" not in _human_report,
+              "Re-running will not help" not in _human_report
+              and "cannot be fixed from here" not in _human_report,
               "got %r" % _human_report[-500:])
         check("main: the bot report does NOT tell the reader to re-run",
               "anomalous" not in _bot_report, "got %r" % _bot_report[-500:])
