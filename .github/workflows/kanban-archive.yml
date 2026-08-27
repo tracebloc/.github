@@ -302,9 +302,15 @@ jobs:
             echo ""
             echo "Post-archive re-read: **$left** terminal item(s) still un-archived (of $reread_total read)."
           } >> "$GITHUB_STEP_SUMMARY"
+          # NOTE: this no longer exits here. It is the primary assertion, but exiting
+          # on it skipped the completeness numbers below, and those are what say
+          # whether a non-zero `left` means "archiving missed some" or "this
+          # credential cannot see the board at all". Recorded into `fail` and raised
+          # with everything else at the end of the step.
+          left_bad=0
           if [ "$left" -ne 0 ]; then
             echo "::error::$left terminal item(s) remain un-archived after this run. The archive succeeded on what it could see, which is NOT the same as the board being clean -- see backend#2526."
-            exit 1
+            left_bad=1
           fi
           # THE RE-READ IS THE SAME CREDENTIAL, SO IT SHARES THE BLIND SPOT
           # (Bugbot High, #339). The comment above says a second read avoids
@@ -325,21 +331,45 @@ jobs:
           #      are this credential's, so this cannot see what neither can; it
           #      does catch a read that degraded mid-run, which would otherwise
           #      lower `left` and read as the board having improved.
-          if [ "$nullst_after" -gt 0 ]; then
-            echo "::error::$nullst_after un-archived item(s) returned an unreadable Status on the post-archive re-read. They cannot be judged terminal, so this run CANNOT show the board is clean -- unverified is not verified-clean (backend#2526)."
-            exit 1
-          fi
-          # DID THIS READ SEE THE WHOLE BOARD? `totalCount` is the server's count of
-          # the connection; `reread_total` is what pagination actually yielded. They
-          # disagree exactly when items are being omitted from `nodes` while still
-          # being counted -- which is the credential-blind path, and it would
-          # otherwise land as a LOWER terminal count and read as success.
+          # EVALUATE EVERY COMPLETENESS FINDING BEFORE EXITING, and exit once at the
+          # end. These three answer DIFFERENT questions and the most diagnostic one
+          # was ordered last, so the first to fire hid it: on 2026-08-27 this step
+          # exited on a single null Status while `totalCount` -- the only number here
+          # that does not come from this credential's own view of `nodes` -- was never
+          # compared. That comparison is what separates "this credential sees a small
+          # board" from "items are being omitted from a large one", which is precisely
+          # the question backend#2526 needs answered, and one short-circuit meant a
+          # whole run produced no answer to it. A guard that masks a stronger guard
+          # costs a run per diagnosis.
+          fail=$left_bad
+          # THE SERVER'S OWN COUNT FIRST, because it is the one independent number.
+          # `totalCount` is the server's count of the connection; `reread_total` is
+          # what pagination actually yielded. They disagree exactly when items are
+          # omitted from `nodes` while still being counted -- the credential-blind
+          # path, which would otherwise land as a LOWER terminal count and read as
+          # success.
           if [ "$reread_total" -ne "$declared_total" ]; then
             echo "::error::the post-archive re-read paginated $reread_total item(s) but the server reports totalCount=$declared_total. Items are being omitted from the read, so a terminal card can exist that this run never judged -- this run cannot show the board is clean (backend#2528)."
-            exit 1
+            fail=1
+          else
+            echo "Completeness: paginated $reread_total item(s), server totalCount=$declared_total (agree)."
+          fi
+          if [ "$nullst_after" -gt 0 ]; then
+            echo "::error::$nullst_after un-archived item(s) returned an unreadable Status on the post-archive re-read. They cannot be judged terminal, so this run CANNOT show the board is clean -- unverified is not verified-clean (backend#2526)."
+            fail=1
           fi
           first_total=$(cat seen.total)
           if [ "$reread_total" -lt "$first_total" ]; then
             echo "::error::the post-archive re-read saw $reread_total item(s) but the first read saw $first_total. A read that shrank mid-run lowers the terminal count for a reason that is not archiving, so this run cannot show the board is clean."
-            exit 1
+            fail=1
           fi
+          {
+            echo ""
+            echo "| completeness check | value |"
+            echo "|---|---|"
+            echo "| paginated (re-read) | $reread_total |"
+            echo "| server totalCount | $declared_total |"
+            echo "| first read | $first_total |"
+            echo "| un-archived null Status | $nullst_after |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$fail" -eq 0 ] || exit 1
