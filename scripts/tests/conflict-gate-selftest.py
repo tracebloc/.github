@@ -186,17 +186,25 @@ check("a clear PR is planned a success status, not skipped",
       "got %r" % (_plan,))
 
 # --- (7) drafts are swept too ------------------------------------------------
+#
+# NOTHING BELOW INDEXES A LIST A MUTATION COULD EMPTY. `_plan[0]` on an empty
+# plan raises IndexError, which crashes the suite instead of reporting a FAIL --
+# and the mutation harness scores a crash as "broke the harness", NOT as caught,
+# because a traceback proves nothing about coverage. Both draft mutations landed
+# here first and were correctly refused as non-coverage until this was `.get()`.
 _plan = gate.plan([pr(number=8, mergeable="CONFLICTING", draft=True)])
-check("a draft is swept, not skipped",
-      len(_plan) == 1 and _plan[0]["verdict"] == "conflicted",
-      "got %r" % (_plan,))
-check("the plan records draftness", _plan[0]["isDraft"] is True,
-      "got %r" % (_plan[0].get("isDraft"),))
+check("a draft is swept, not skipped", len(_plan) == 1, "got %r" % (_plan,))
+_first = _plan[0] if _plan else {}
+check("a swept draft is still classified conflicted",
+      _first.get("verdict") == "conflicted", "got %r" % (_first,))
+check("the plan records draftness", _first.get("isDraft") is True,
+      "got %r" % (_first.get("isDraft"),))
 
 # --- (8) plan() carries the head sha through, or nothing can be written ------
 _plan = gate.plan([pr(number=9, sha="cafe1234")])
-check("the plan targets the PR's head sha", _plan[0]["sha"] == "cafe1234",
-      "got %r" % (_plan[0].get("sha"),))
+_first = _plan[0] if _plan else {}
+check("the plan targets the PR's head sha", _first.get("sha") == "cafe1234",
+      "got %r" % (_first.get("sha"),))
 
 # --- (9) retries: an UNKNOWN is re-read, an answered PR is not ---------------
 _calls = []
@@ -267,8 +275,11 @@ try:
           "got %r" % (statuses,))
     check("an unreadable PR list IS an error", len(errors) == 1,
           "got %r" % (errors,))
+    # `.join` rather than `errors[0]`: a mutation that returns no error at all
+    # would make the index crash the suite, and the harness scores a crash as
+    # broke-the-harness rather than as caught.
     check("the error names the repo and the cause",
-          "x" in errors[0] and "upstream exploded" in errors[0],
+          "x" in " ".join(errors) and "upstream exploded" in " ".join(errors),
           "got %r" % (errors,))
 finally:
     gate.open_prs = _real_open
@@ -322,7 +333,8 @@ try:
     statuses, errors = gate.sweep_repo("tracebloc", "x", retries=0,
                                        sleep_for=0.0, dry_run=True)
     check("--dry-run writes no status at all", seen == {}, "got %r" % (seen,))
-    check("--dry-run still classifies", statuses[0]["verdict"] == "conflicted",
+    check("--dry-run still classifies",
+          bool(statuses) and statuses[0]["verdict"] == "conflicted",
           "got %r" % (statuses,))
 
     # --- (13) an UNDETERMINED PR is an error AND gets a pending status ------
