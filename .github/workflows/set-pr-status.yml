@@ -5,7 +5,7 @@ name: Set PR card Status on project
 # so the `closing-ref` job re-runs when the fields it reads change).
 # Moves the PR's card to the right Status:
 #   - draft PR  → In progress
-#   - non-draft → In review
+#   - non-draft → Code review
 #
 # TWO JOBS, and the second one is here on purpose (tracebloc/backend#2364).
 #
