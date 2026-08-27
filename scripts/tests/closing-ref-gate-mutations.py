@@ -203,6 +203,94 @@ MUTATIONS = [
     ("the scope repo class stops admitting a leading dot",
      '^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([A-Za-z0-9.][A-Za-z0-9._-]*)#(\\d+)$',
      '^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([A-Za-z0-9][A-Za-z0-9._-]*)#(\\d+)$'),
+
+    # --- THE SECOND ADMISSIBLE FORM (tracebloc/backend#2616) -----------------
+    # A new accepted form that nothing breaks is a form nobody notices, so each
+    # of these reverts one piece of it and must redden a named case.
+
+    # The whole fix, reverted: stop reading the body at all.
+    ("the body is never read, so a child PR is back to `Closes or nothing`",
+     '    mentions = parse_body(pr.get("body"), keywords)',
+     "    mentions = []"),
+    # The query stops asking for the body. EVERY evaluate case hands the body in
+    # directly, so without the query assertion this is invisible -- which is the
+    # point of pinning it: the gate would read nothing in production and the
+    # suite would stay green.
+    ("the query stops asking for the body, so the fix cannot fire live",
+     "      isDraft\n      body\n",
+     "      isDraft\n"),
+    # The widening is undone at the verdict instead of at the read.
+    ("a MENTIONED ref is counted as a finding again",
+     "    bad = [(ref, verdict) for ref, verdict in results if verdict not in (LINKED, MENTIONED)]",
+     "    bad = [(ref, verdict) for ref, verdict in results if verdict != LINKED]"),
+    # THE ORDERING. A truthful `Part of tracebloc/backend#304` must not mask a
+    # `Closes #304` that closes `.github#304` on merge.
+    ("a body reference is consulted BEFORE the wrong-repo trap, so a truthful "
+     "mention masks a link that closes the wrong issue",
+     "    if number_seen:\n        return WRONG_REPO\n    for mention in mentions:\n"
+     "        if same_ticket(ref, mention):\n            return MENTIONED\n    return MISSING",
+     "    for mention in mentions:\n        if same_ticket(ref, mention):\n"
+     "            return MENTIONED\n    if number_seen:\n        return WRONG_REPO\n    return MISSING"),
+    ("a green run stops saying WHICH form satisfied the ref",
+     '               else "declared body reference (does not close it)")',
+     '               else "closing link")'),
+
+    # --- the derived vocabulary (rule 1) ------------------------------------
+    ("the non-closing vocabulary is hardcoded instead of parsed from the canon",
+     "    keywords = declared_reference_keywords(text)",
+     '    keywords = ["Part of"]'),
+    ("a multi-word declared keyword (`Part of`) stops being parsed",
+     r'    r"^([A-Za-z][A-Za-z]*(?:\s+[A-Za-z]+)*?)\s+[^\s#]+#(?:\d+|N)$"',
+     r'    r"^([A-Za-z][A-Za-z]*)\s+[^\s#]+#(?:\d+|N)$"'),
+    ("GitHub's closing keywords stop being subtracted, so `Closes` reads as a "
+     "non-closing form",
+     '        if keyword.split()[0].lower() in GITHUB_CLOSING_KEYWORDS:',
+     '        if False and keyword.split()[0].lower() in GITHUB_CLOSING_KEYWORDS:'),
+    ("an empty derived vocabulary reverts to closing-only instead of refusing",
+     "    if not keywords:",
+     "    if False and not keywords:"),
+    ("an unreadable canon is folded into `declares nothing`, losing the refusal's name",
+     '    except OSError as exc:\n        raise Unreadable(',
+     '    except OSError as exc:\n        text = ""\n        _ = Unreadable('),
+
+    # --- what counts as a body reference ------------------------------------
+    ("a loose `#N` in the body counts, so any prose mention satisfies the title",
+     '        pattern = re.compile(r"(?<![A-Za-z0-9])" + spaced + r"\\s+" + BODY_TAIL_RE, re.IGNORECASE)',
+     "        pattern = re.compile(BODY_TAIL_RE, re.IGNORECASE)"),
+    ("the keyword no longer has to stand alone, so `Apart of` counts",
+     '        pattern = re.compile(r"(?<![A-Za-z0-9])" + spaced + r"\\s+" + BODY_TAIL_RE, re.IGNORECASE)',
+     '        pattern = re.compile(spaced + r"\\s+" + BODY_TAIL_RE, re.IGNORECASE)'),
+
+    # --- same_ticket: the body-side comparison ------------------------------
+    ("a body reference to a different NUMBER satisfies the title",
+     "    if ref.number != other.number:",
+     "    if False and ref.number != other.number:"),
+    ("a body reference in a different REPO satisfies a repo-named title ref",
+     "    if ref.repo.lower() != other.repo.lower():",
+     "    if False and ref.repo.lower() != other.repo.lower():"),
+]
+
+# MUTATIONS IN THE WORKFLOW FILES, not the checker (tracebloc/backend#2556).
+#
+# Two of this gate's guarantees are declared in YAML rather than in Python: the
+# caller listening for `edited`, and `set-status` writing only while the PR is
+# open. Rule 5 does not exempt a guard for living in a different language -- and
+# these two are the pair most likely to be "tidied" by someone shortening a
+# types: list. So the harness mutates those files too and requires the same
+# suite to redden.
+WORKFLOW_MUTATIONS = [
+    (".github/workflows/set-pr-status-caller.yml",
+     "the caller stops listening for `edited`, restoring the retitle bypass",
+     "    types: [opened, reopened, ready_for_review, converted_to_draft, edited]",
+     "    types: [opened, reopened, ready_for_review, converted_to_draft]"),
+    (".github/workflows/set-pr-status.yml",
+     "set-status loses its open-state guard, so editing a merged PR demotes its card",
+     "  set-status:\n    if: ${{ github.event.pull_request.state == 'open' }}\n",
+     "  set-status:\n"),
+    (".github/workflows/set-pr-status.yml",
+     "closing-ref loses its open-state guard, so a merged PR gets a late red X",
+     "    if: ${{ inputs.closing-ref-check && github.event.pull_request.state == 'open' }}",
+     "    if: ${{ inputs.closing-ref-check }}"),
 ]
 
 
@@ -230,19 +318,33 @@ def apply_one(src, old, new):
 def main():
     dry = "--dry" in sys.argv
 
+    # EVERY FILE THIS RUN REWRITES, in one list. The baseline guard and the
+    # left-mutated check below both read it, so a target added to
+    # WORKFLOW_MUTATIONS cannot be left out of either.
+    targets = [GATE] + [ROOT / rel for rel, _, _, _ in WORKFLOW_MUTATIONS]
+    unique_targets = []
+    for path in targets:
+        if path not in unique_targets:
+            unique_targets.append(path)
+
     # Refuse rather than measure against a baseline nothing vouches for. Only the
     # writing path: `--dry` writes nothing, so it has no restore to lose -- and it
     # is what `make check` runs on every push, where refusing on an uncommitted
     # edit would block the pre-push tier for whoever is editing the target.
     if not dry:
-        rc = mutation_baseline.guard(ROOT, [GATE])
+        rc = mutation_baseline.guard(ROOT, unique_targets)
         if rc:
             return rc
 
-    pristine = GATE.read_text(encoding="utf-8")
+    pristine_of = {path: path.read_text(encoding="utf-8") for path in unique_targets}
     stale, uncaught = [], []
 
-    for label, old, new in MUTATIONS:
+    # (target, label, old, new) for every mutation, the gate's implicitly first.
+    plan = [(GATE, label, old, new) for label, old, new in MUTATIONS]
+    plan += [(ROOT / rel, label, old, new) for rel, label, old, new in WORKFLOW_MUTATIONS]
+
+    for target, label, old, new in plan:
+        pristine = pristine_of[target]
         try:
             mutated = apply_one(pristine, old, new)
         except LookupError as exc:
@@ -254,7 +356,7 @@ def main():
         if dry:
             print("  anchor ok  %s" % label)
             continue
-        GATE.write_text(mutated, encoding="utf-8")
+        target.write_text(mutated, encoding="utf-8")
         _drop_bytecode_cache()
         env = dict(os.environ)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -268,9 +370,9 @@ def main():
             )
         finally:
             # ALWAYS restore, including on a crash. A mutation left on disk makes
-            # every later run measure the wrong script, and the tell is a suite
+            # every later run measure the wrong file, and the tell is a suite
             # that reddens for reasons nobody typed.
-            GATE.write_text(pristine, encoding="utf-8")
+            target.write_text(pristine, encoding="utf-8")
             _drop_bytecode_cache()
         caught = [
             line.strip()[6:].strip()
@@ -290,11 +392,12 @@ def main():
             uncaught.append((label, "the suite passed with this broken"))
             print("  UNCAUGHT   %s" % label)
 
-    if GATE.read_text(encoding="utf-8") != pristine:
-        sys.stderr.write("::error::%s was left mutated. Restore it from git.\n" % GATE.name)
-        return 2
+    for path in unique_targets:
+        if path.read_text(encoding="utf-8") != pristine_of[path]:
+            sys.stderr.write("::error::%s was left mutated. Restore it from git.\n" % path.name)
+            return 2
 
-    print("\n%d mutation(s): %d stale, %d uncaught" % (len(MUTATIONS), len(stale), len(uncaught)))
+    print("\n%d mutation(s): %d stale, %d uncaught" % (len(plan), len(stale), len(uncaught)))
     for label, why in stale:
         sys.stderr.write("::error::STALE mutation `%s`: %s\n" % (label, why))
     for label, why in uncaught:
