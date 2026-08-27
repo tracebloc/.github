@@ -91,7 +91,7 @@ SCOPE_PREFIX = "permission-"
 # These rows are the pre-existing state this guard was written to stop growing, not
 # to fix in one commit. Ten became six (advance-deploy-env, customer-priority-bump,
 # fr-pass-comment, kanban-closure-router -- derivable from their call sites), six
-# became four, and four became two.
+# became four, four became two, and two became one.
 #
 # THE TWO JUST BURNT DOWN WERE THE ONES THAT COULD NOT BE DERIVED, and the reason
 # they could not is worth keeping (backend#2157, measured 2026-08-24). Their rows
@@ -117,17 +117,17 @@ SCOPE_PREFIX = "permission-"
 # is the argument for measuring rather than reasoning, and it is why the four below
 # say what they say.
 #
-# The two left are left for a STATED reason, not for lack of time:
+# The ONE left is left for a STATED reason, not for lack of time:
 #
-#   fr-gate, standards-sync -- high exposure (a required check fleet-wide, a
-#     contents:write sweep). Each needs its own window so one bad scope does not
-#     redden the whole fleet at once. set-pr-status and kanban-reconcile were the
-#     other two of the four and are now scoped; their windows were taken.
+#   standards-sync -- a contents:write sweep across the fleet, and the only one of
+#     the four whose risky mode cannot be rehearsed without opening 19 real PRs.
+#     It needs its own window so one bad scope does not redden the whole fleet at
+#     once. set-pr-status, kanban-reconcile and fr-gate were the other three and
+#     are now scoped; their windows were taken.
 #
 # The distinction matters because it is the difference between an exemption that is
 # a to-do and one that is a decision. Do not fold them back together.
 EXEMPT = {
-    "fr-gate.yml": "REQUIRED check on every promotion branch fleet-wide -- needs its own window",
     "standards-sync.yml": "writes CLAUDE.md across the fleet; contents:write is real here",
 }
 

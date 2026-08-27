@@ -121,6 +121,30 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          # THREE READS AND NOTHING ELSE (backend#2157). Without these it minted
+          # the App's whole set -- contents:write, issues:write,
+          # organization_projects:write, administration:read -- across every repo
+          # the installation covers, to run a gate that writes nothing at all.
+          # A pure reader holding org-wide write is the sharpest mismatch of the
+          # four this ticket found.
+          #
+          # NOT DERIVED FROM A TEMPLATE -- from the three calls the comment above
+          # already names, which is why it could be checked rather than guessed:
+          #   commits/{sha}/pulls      -> contents: read + pull-requests: read
+          #   compare/{base}...{head}  -> contents: read
+          #   ProjectV2 graphql        -> organization-projects: read
+          #
+          # `actions/checkout` above is NOT on this token -- it takes the job's
+          # default GITHUB_TOKEN, so nothing here needs contents:write for the
+          # checkout either.
+          #
+          # IF THIS SCOPE IS SHORT the gate fails closed and blocks promotions,
+          # which is loud, immediate and recoverable with the `skip-fr-gate`
+          # label. That is the failure direction this gate already chose for
+          # itself: "blocking wrongly is far better than passing wrongly".
+          permission-contents: read
+          permission-pull-requests: read
+          permission-organization-projects: read
 
       - name: Discover items in this promotion
         id: items
