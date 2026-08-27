@@ -172,6 +172,20 @@ PR_LIST_LIMIT = 200
 DEFAULT_RETRIES = 3
 DEFAULT_RETRY_SLEEP = 2.0
 
+# GITHUB CAPS STATUSES AT 1000 PER SHA AND CONTEXT. A 30-minute sweep is 48
+# writes a day onto an unchanged head, so a PR left open three weeks would
+# exhaust the cap and every write after that would 422 -- the gate going silent
+# on precisely the stalest PRs, which are the ones most likely to have conflicted.
+#
+# So a status is written only when it would CHANGE something. The current state is
+# read out of `statusCheckRollup`, which the PR list already returns, so this
+# costs no extra API call.
+#
+# WHEN IN DOUBT, WRITE. A rollup truncated by pagination simply omits our context,
+# which reads as "no status yet" and produces a write -- the safe direction. The
+# unsafe direction would be skipping a write we needed.
+ROLLUP_CONTEXT_CAP = 100
+
 
 def _load_caller_drift():
     """Import caller-drift.py for its `gh` wrappers and inventory loader.
@@ -243,6 +257,26 @@ def classify(pr: dict) -> "tuple[str, str]":
     )
 
 
+def existing_state(pr: dict) -> "str | None":
+    """The state our own context already carries on this head, lowercased.
+
+    None when there is none -- including when the rollup was truncated and ours
+    fell off the page, which correctly produces a write rather than a skip.
+
+    GraphQL reports a legacy status's state in UPPER CASE (`SUCCESS`), while the
+    Statuses API takes it in lower (`success`). Comparing them without folding
+    case would make every status look changed and defeat the whole point, so the
+    fold is here and the suite pins it.
+    """
+    for entry in pr.get("statusCheckRollup") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("context") == CONTEXT:
+            state = entry.get("state")
+            return state.lower() if isinstance(state, str) else None
+    return None
+
+
 def plan(prs: "list[dict]") -> "list[dict]":
     """Turn PR payloads into the statuses to write. PURE.
 
@@ -266,6 +300,7 @@ def plan(prs: "list[dict]") -> "list[dict]":
             "why": why,
             "state": STATE_FOR[verdict],
             "description": DESCRIPTION_FOR[verdict],
+            "existing": existing_state(pr),
         })
     return out
 
@@ -280,7 +315,7 @@ def open_prs(org: str, name: str) -> "list[dict]":
     raw = CD.gh([
         "pr", "list", "--repo", f"{org}/{name}", "--state", "open",
         "--limit", str(PR_LIST_LIMIT), "--json",
-        "number,title,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,url",
+        "number,title,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,url,statusCheckRollup",
     ])
     try:
         prs = json.loads(raw)
@@ -302,7 +337,7 @@ def reread(org: str, name: str, number: int) -> "dict | None":
     try:
         return CD.gh_json([
             "pr", "view", str(number), "--repo", f"{org}/{name}", "--json",
-            "number,title,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,url",
+            "number,title,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,url,statusCheckRollup",
         ])
     except CD.GhError:
         return None
@@ -374,6 +409,12 @@ def sweep_repo(org: str, name: str, retries: int, sleep_for: float,
             continue
         if dry_run:
             st["written"] = False
+            continue
+        # Already saying what we would say: writing again would burn one of the
+        # 1000 statuses this sha and context are allowed and change nothing.
+        if st["existing"] == st["state"]:
+            st["written"] = False
+            st["unchanged"] = True
             continue
         try:
             post_status(org, name, st["sha"], st["state"], st["description"], st["url"])

@@ -349,6 +349,77 @@ try:
     check("an undetermined PR is ALSO a run-level error",
           any("NOT judged" in e for e in errors), "got %r" % (errors,))
 
+    # --- (13b) AN UNCHANGED STATUS IS NOT REWRITTEN --------------------------
+    #
+    # GitHub caps statuses at 1000 per sha AND context. A 30-minute sweep is 48
+    # writes a day onto an unchanged head, so a PR left open three weeks would
+    # exhaust the cap and every later write would 422 -- the gate going silent on
+    # exactly the stalest PRs. So a write happens only when it changes something.
+    def with_rollup(entries, **kw):
+        p = pr(**kw)
+        p["statusCheckRollup"] = entries
+        return p
+
+    ours = gate.CONTEXT
+
+    # The case fold is load-bearing: GraphQL reports `SUCCESS`, the Statuses API
+    # takes `success`. Comparing unfolded makes every status look changed.
+    check("existing_state folds GraphQL's upper case to the API's lower",
+          gate.existing_state(with_rollup([{"context": ours, "state": "SUCCESS"}]))
+          == "success",
+          "got %r" % (gate.existing_state(
+              with_rollup([{"context": ours, "state": "SUCCESS"}])),))
+    check("existing_state is None when our context is absent",
+          gate.existing_state(with_rollup([{"context": "other", "state": "SUCCESS"}]))
+          is None,
+          "got %r" % (gate.existing_state(
+              with_rollup([{"context": "other", "state": "SUCCESS"}])),))
+    check("existing_state is None on a rollup-less payload",
+          gate.existing_state(pr()) is None,
+          "got %r" % (gate.existing_state(pr()),))
+
+    # unchanged -> no write
+    gate.open_prs = lambda org, name: [with_rollup(
+        [{"context": ours, "state": "FAILURE"}],
+        number=131, mergeable="CONFLICTING", state="DIRTY")]
+    seen.clear()
+    statuses, errors = gate.sweep_repo("tracebloc", "x", retries=0,
+                                       sleep_for=0.0, dry_run=False)
+    check("a status already saying the same thing is NOT rewritten", seen == {},
+          "got %r" % (seen,))
+    check("an unrewritten status is marked unchanged",
+          bool(statuses) and statuses[0].get("unchanged") is True,
+          "got %r" % (statuses,))
+    check("skipping an unchanged write is not an error", errors == [],
+          "got %r" % (errors,))
+    # ...and the verdict is still reported, so the run still exits 1.
+    check("an unchanged conflicted PR is still a conflict finding",
+          bool(statuses) and statuses[0]["verdict"] == "conflicted",
+          "got %r" % (statuses,))
+
+    # CHANGED -> write. A conflict that has just been resolved must be cleared,
+    # which is the direction that matters most: a stale `failure` left on a fixed
+    # PR blocks it for no reason.
+    gate.open_prs = lambda org, name: [with_rollup(
+        [{"context": ours, "state": "FAILURE"}],
+        number=132, mergeable="MERGEABLE", state="CLEAN")]
+    seen.clear()
+    statuses, errors = gate.sweep_repo("tracebloc", "x", retries=0,
+                                       sleep_for=0.0, dry_run=False)
+    check("a resolved conflict overwrites the stale failure with success",
+          seen.get("state") == "success", "got %r" % (seen,))
+    check("a changed write is recorded as written",
+          bool(statuses) and statuses[0]["written"] is True, "got %r" % (statuses,))
+
+    # No status yet -> write. `None` must not compare equal to any state.
+    gate.open_prs = lambda org, name: [with_rollup(
+        [], number=133, mergeable="CONFLICTING", state="DIRTY")]
+    seen.clear()
+    statuses, errors = gate.sweep_repo("tracebloc", "x", retries=0,
+                                       sleep_for=0.0, dry_run=False)
+    check("a head with no status of ours yet gets one written",
+          seen.get("state") == "failure", "got %r" % (seen,))
+
     # --- (14) a PR with no head sha cannot be written, and says so ----------
     gate.open_prs = lambda org, name: [
         {"number": 14, "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY"}]

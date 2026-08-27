@@ -142,6 +142,30 @@ MUTATIONS = [
      '    return 1 if any(s["verdict"] == CONFLICTED for s in statuses) else 0',
      '    return 1 if any(s["verdict"] == CONFLICTED for s in statuses) else 0'),
 
+    # --- (F2) the 1000-statuses-per-sha-and-context cap ---------------------
+    #
+    # Without the dedup a PR open three weeks exhausts the cap at 48 writes a day
+    # and every later write 422s -- the gate going silent on the stalest PRs.
+    ("the unchanged-status skip is removed, so every sweep burns a write",
+     '        if st["existing"] == st["state"]:',
+     '        if False and st["existing"] == st["state"]:'),
+
+    # The inverse is worse: it writes only when nothing would change, so a
+    # resolved conflict never gets cleared and a new one is never reported.
+    ("the skip is inverted, so the status is only ever written when identical",
+     '        if st["existing"] == st["state"]:',
+     '        if st["existing"] != st["state"]:'),
+
+    # GraphQL says SUCCESS, the Statuses API takes success. Unfolded, every status
+    # looks changed and the dedup silently does nothing.
+    ("the case fold goes, so every status looks changed and the cap returns",
+     '            return state.lower() if isinstance(state, str) else None',
+     '            return state if isinstance(state, str) else None'),
+
+    ("existing_state matches ANY context, so another check's state is read as ours",
+     '        if entry.get("context") == CONTEXT:',
+     '        if entry.get("context") is not None:'),
+
     # --- (G) the retry loop -------------------------------------------------
     ("every PR is re-read, not only the ones GitHub would not answer",
      '        pending = [i for i, pr in enumerate(resolved)\n'
