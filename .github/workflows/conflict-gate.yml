@@ -24,6 +24,14 @@ name: Conflict gate
 #   * PRs #204 and #205, opened either side of it, each got their full matrix.
 #     The conflict was the only difference.
 #
+# THE SECOND SHAPE IS WORSE, and it is why `bricked-prs.py` is not already the
+# answer. `backend#2257`, measured the same day and also CONFLICTING, had EIGHT
+# workflow runs on its head sha and ALL ELEVEN of backend/develop's required
+# contexts present and SUCCESS -- every one of them computed against a merge base
+# that no longer exists. It reads unanimously green while conflicted. That
+# watcher reasons from a required context being ABSENT, so with nothing missing it
+# cannot see this PR at all. Only asking about mergeability directly does.
+#
 # WHY A CRON AND NOT `push`. A conflict is almost always created by a push to the
 # BASE branch -- someone else merging -- which would be the causally exact
 # trigger. But this workflow lives in `tracebloc/.github` and a `push` here fires

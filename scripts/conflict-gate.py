@@ -25,6 +25,28 @@ was `DIRTY` against `develop`:
 So the rollup showed one green check and no red. "Nothing ran" and "everything
 passed" are the same picture, which is the fail-open this file removes.
 
+AND THERE IS A SECOND, WORSE SHAPE -- the one that defeats the watcher. A PR that
+was pushed BEFORE its base moved keeps the checks it already earned, because a
+status is attached to the head sha and the head sha did not change. Measured on
+`backend#2257` the same day, `mergeable=CONFLICTING`:
+
+  * 8 workflow runs on its head sha, and a rollup of SIXTEEN entries;
+  * ALL ELEVEN of backend/develop's required contexts present and SUCCESS.
+
+That PR reads perfectly, unanimously green while being conflicted, and every one
+of those green checks was computed against a merge base that no longer exists. It
+is the `client#847` shape from the ticket: checks that reported before the
+conflict appeared, and a `version-bump-gate` failure that stayed invisible for
+three hours.
+
+THIS IS WHY `bricked-prs.py` IS NOT ALREADY THE ANSWER. That watcher infers a
+problem from a required context being ABSENT (`missing = required - present`).
+Here nothing is missing -- the required set is fully present and green -- so
+`missing` is empty and its `conflicted` cause, which only ever attaches to a
+`missing` finding, cannot fire. A conflicted PR whose checks all pre-date the
+conflict is invisible to it by construction. Only asking about mergeability
+DIRECTLY, as this file does, sees it.
+
 WHAT THIS DOES. It sweeps every open PR in the inventory and writes a commit
 STATUS onto the PR's head sha:
 
@@ -53,13 +75,15 @@ young head, so it must wait 60 minutes. A conflict is an AFFIRMATIVE answer:
 `mergeable == CONFLICTING` is GitHub stating there are conflicts. There is
 nothing to wait for, so a conflict is reported on the first sweep that sees it.
 
-RELATIONSHIP TO `bricked-prs.py`. That file already names the conflicted-PR
-cause and reports it, and this does not replace it. It is a fleet WATCHER: it
-answers "which PRs are stuck?" into a step summary every four hours, for a human
-sweeping the org, and it only sees a conflict at all when the base carries
-required contexts that are consequently absent. This writes a signal onto the PR
-ITSELF, where the reviewer is looking. A finding in a cron log in another repo is
-advice; a red row on the PR is what someone actually reads.
+RELATIONSHIP TO `bricked-prs.py`. That file already names the conflicted-PR cause
+and reports it, and this does not replace it -- they answer different questions
+and neither subsumes the other. That one is a fleet WATCHER reasoning from an
+ABSENT required context, into a step summary every four hours, for a human
+sweeping the org; as shown above it is blind to the green-but-conflicted shape,
+and its necessary 60-minute grace window means it says nothing about a fresh one
+either. This asks GitHub about mergeability directly and writes the answer onto
+the PR ITSELF, where the reviewer is looking. A finding in a cron log in another
+repo is advice; a red row on the PR is what someone actually reads.
 
 WHY `success` MATTERS AS MUCH AS `failure`. A context that only ever appears
 when something is wrong cannot be required, and a required context that never
