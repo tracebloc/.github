@@ -109,6 +109,27 @@ for part, want in (("patch", "1.4.1"), ("minor", "1.5.0"), ("major", "2.0.0")):
     record(r.stdout.strip() == want, f"bump --part {part} -> {want}", f"got {r.stdout.strip()!r}")
 
 print()
+print("cmp - ordered numerically, because != cannot tell ahead from behind")
+# The workflow uses this to separate "already bumped" (green no-op) from "the file
+# is BEHIND the released tag" (fail closed). `!=` reports both as the same thing.
+for left, right, want, why in [
+    ("1.4.0", "1.4.0", "eq", "the bump case"),
+    ("1.4.1", "1.4.0", "gt", "already bumped - the only green no-op"),
+    ("1.3.9", "1.4.0", "lt", "BEHIND the tag - must fail closed, not report success"),
+    # The lexical trap: as strings "1.10.0" sorts BEFORE "1.9.0", so a string
+    # compare calls a newer version older and would bump backwards.
+    ("1.10.0", "1.9.0", "gt", "10 > 9 numerically, even though it sorts first"),
+    ("2.0.0", "1.99.99", "gt", "major dominates"),
+]:
+    r = run(["cmp", "--value", left, "--to", right])
+    record(r.stdout.strip() == want, f"cmp {left} vs {right} -> {want} ({why})",
+           f"got {r.stdout.strip()!r} rc={r.returncode}")
+
+for left, right in [("1.4.0-rc.1", "1.4.0"), ("1.4", "1.4.0"), ("latest", "1.0.0")]:
+    r = run(["cmp", "--value", left, "--to", right])
+    record(r.returncode != 0, f"cmp refuses a non-semver operand ({left})", f"rc={r.returncode}")
+
+print()
 print("--in-place - the ONLY form post-release-bump.yml uses")
 # The workflow never uses the stdin form, so testing only that would leave the
 # release path uncovered. Every format is round-tripped on a real file on disk.

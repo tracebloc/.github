@@ -119,6 +119,16 @@ jobs:
           # The released version comes from the TAG, not from parsing anything:
           # the tag is what was actually published and is the only unambiguous
           # record of it.
+          # THE PAT IS CHECKED BEFORE ANYTHING IS WRITTEN (Bugbot High, #372).
+          # It used to be tested after commit+push, so an absent secret pushed
+          # `chore/bump-$NEXT` and then exited 1 with no PR -- the half-rollout
+          # standards-sync already closed, where the write lands and the reviewable
+          # PR does not. Nothing below this point creates state.
+          if [ -z "${PR_AUTHOR_TOKEN:-}" ]; then
+            echo "::error::SYNC_PR_AUTHOR_TOKEN is not set. An app-authored PR gets no Bugbot review and bugbot-gate can never pass it, so nothing was written. Set the secret and re-run."
+            exit 1
+          fi
+
           RELEASED="${TAG#v}"
           case "$RELEASED" in
             [0-9]*.[0-9]*.[0-9]*) ;;
@@ -128,27 +138,45 @@ jobs:
           CURRENT="$(python3 "$VF" read --file "$VERSION_FILE" --in-place)"
           echo "released=$RELEASED  current on $BASE=$CURRENT"
 
-          # THE ONLY GREEN NO-OP. If the file no longer says what was just
-          # released, someone already bumped it (or the release did not come from
-          # this branch) and there is nothing to close.
-          if [ "$CURRENT" != "$RELEASED" ]; then
-            echo "::notice::$VERSION_FILE is at $CURRENT, not the released $RELEASED - already bumped, nothing to do."
-            exit 0
-          fi
+          # ORDERED NUMERICALLY, not compared as strings (Bugbot Medium, #372).
+          # `!=` cannot tell "already bumped" from "BEHIND the released version",
+          # and reporting the second as a green no-op announces success on a state
+          # nobody expected. Only `gt` is the documented no-op; `lt` fails closed.
+          REL="$(python3 "$VF" cmp --value "$CURRENT" --to "$RELEASED")"
+          case "$REL" in
+            gt) echo "::notice::$VERSION_FILE is at $CURRENT, ahead of the released $RELEASED - already bumped, nothing to do."; exit 0 ;;
+            lt) echo "::error::$VERSION_FILE is at $CURRENT but v$RELEASED was just released, so the file is BEHIND the tag. That is not a state this can bump from - reconcile $VERSION_FILE by hand."; exit 1 ;;
+            eq) ;;
+            *)  echo "::error::could not order $CURRENT against $RELEASED (got '$REL')"; exit 1 ;;
+          esac
 
           NEXT="$(python3 "$VF" bump --value "$CURRENT" --part "$BUMP")"
           BRANCH="chore/bump-$NEXT"
 
-          # Idempotent across re-runs and re-publishes: an existing branch or an
-          # open PR for this exact version means this already ran.
-          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-            echo "::notice::branch $BRANCH already exists - the bump PR is already open."
+          # IDEMPOTENCY ASKS ABOUT A PR, NOT A BRANCH (Bugbot High, #372).
+          # A branch is not evidence of a PR: a push whose `gh pr create` failed, or
+          # a closed-unmerged PR whose branch was left behind, both leave the branch
+          # standing. Reading that as "already open" made the state permanent -- the
+          # bump would never get a PR and every later run would exit 0 saying it had.
+          OPEN_PR="$(gh pr list --repo "$REPO_FULL" --head "$BRANCH" --state open --json number --jq '.[0].number // ""')"
+          if [ -n "$OPEN_PR" ]; then
+            echo "::notice::PR #$OPEN_PR is already open for $BRANCH - nothing to do."
             exit 0
+          fi
+
+          # An orphaned branch is REPAIRED rather than refused: the commit it carries
+          # is the bump, so the missing half is only the PR. Skipping straight to
+          # `gh pr create` is what makes the advertised re-run actually able to fix it.
+          BRANCH_EXISTS=no
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            BRANCH_EXISTS=yes
+            echo "::notice::branch $BRANCH exists with no open PR - opening the PR for it rather than rewriting the branch."
           fi
 
           # --in-place keeps the read and the write inside one process. The shell
           # form (`< file > tmp`) is the SC2094 shape and no reader can prove the
           # two paths differ, so the file I/O lives where it can be verified.
+          if [ "$BRANCH_EXISTS" = no ]; then
           python3 "$VF" write --file "$VERSION_FILE" --to "$NEXT" --in-place
           # Prove the file on disk changed. A write that reported success and
           # left the tree identical would otherwise produce an empty PR.
@@ -165,16 +193,12 @@ jobs:
             -m "v$RELEASED shipped, so that version is taken: the next PR touching a published file is refused by version-bump-gate, and the next hop is refused by the train's version preflight. Both are correct, and neither clears itself." \
             -m "Opened automatically at the moment the version was consumed (backend#2758). Patch is the default - edit this file before merging if the next cycle is a minor or a major."
           git push -q origin "$BRANCH"
+          fi
 
           BODY="\`v$RELEASED\` shipped, so \`$CURRENT\` is taken. This declares **$NEXT** so the next promotion is not refused. Opened automatically by \`post-release-bump.yml\` at the moment the release consumed the version (backend#2758) - the loop that previously stayed open until someone read a refusal mid-hop. **Patch is a default, not a judgement**: if the next cycle is a minor or a major, edit \`$VERSION_FILE\` on this branch before merging. No behaviour change - \`$VERSION_FILE\` is read by the release workflow at tag time and by the train version preflight; nothing in the built artifact reads it at runtime."
 
-          # The PAT opens it so Bugbot reviews it; if the PAT is absent the App
-          # would open a PR that bugbot-gate can never pass, so refuse instead of
-          # creating a dead end.
-          if [ -z "${PR_AUTHOR_TOKEN:-}" ]; then
-            echo "::error::SYNC_PR_AUTHOR_TOKEN is not set. An app-authored PR gets no Bugbot review and bugbot-gate can never pass it, so the branch $BRANCH was pushed but no PR was opened. Open it by hand, or set the secret and re-run."
-            exit 1
-          fi
+          # The PAT opens it so Bugbot reviews it. Its absence was already refused
+          # at the top, before anything was written.
           GH_TOKEN="$PR_AUTHOR_TOKEN" gh pr create --repo "$REPO_FULL" \
             --base "$BASE" --head "$BRANCH" \
             --title "chore(release): declare $NEXT as the next version" \

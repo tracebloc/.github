@@ -156,9 +156,28 @@ def bump(version: str, part: str = "patch") -> str:
     raise SystemExit(f"version_file: unknown bump part '{part}'")
 
 
+def _parts(v: str, what: str):
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", v)
+    if not m:
+        raise SystemExit(f"version_file: {what} '{v}' is not a plain X.Y.Z")
+    return tuple(int(g) for g in m.groups())
+
+
+def compare(left: str, right: str) -> str:
+    """`lt` / `eq` / `gt`, ordered NUMERICALLY (backend#2758).
+
+    String inequality cannot tell "already bumped" from "behind": both are
+    `!=`, and treating the second as a green no-op reports success on a state
+    nobody expected. 1.10.0 vs 1.9.0 is the other half - lexically 1.10.0 sorts
+    FIRST, so a string compare calls a newer version older.
+    """
+    a, b = _parts(left, "left"), _parts(right, "right")
+    return "lt" if a < b else ("gt" if a > b else "eq")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=("read", "write", "bump"))
+    ap.add_argument("mode", choices=("read", "write", "bump", "cmp"))
     ap.add_argument("--file", required=False, help="path, for its extension")
     ap.add_argument("--part", default="patch")
     ap.add_argument("--to", help="write: the new version")
@@ -169,7 +188,10 @@ def main() -> int:
     a = ap.parse_args()
     # Validated BEFORE the bump early-return: an ignored flag is worse than a
     # refused one, because the caller believes it took effect.
-    if a.in_place and a.mode == "bump":
+    if a.mode == "cmp":
+        print(compare(a.value, a.to))
+        return 0
+    if a.in_place and a.mode in ("bump", "cmp"):
         raise SystemExit("version_file: --in-place is not valid for bump")
     if a.mode == "bump":
         print(bump(a.value, a.part))
