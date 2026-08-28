@@ -112,6 +112,7 @@ reusables:
   - version-bump-gate.yml
   - stale-backlog.yml
   - bugbot-gate.yml
+  - post-release-bump.yml
 
 # Copies, not callers: these are duplicated into each repo, so the guard compares
 # content (git blob sha against the checked-out source) instead of looking for a
@@ -341,6 +342,24 @@ shared_reasons:
     it. Requiring it in any repo would land this guard red on day one; the decision to wire it
     up or delete it is backend#1415 follow-up work. Exempt everywhere, deliberately and in
     writing.
+  post_release_bump_parked: &post_release_bump_parked >-
+    post-release-bump has ZERO callers so far, deliberately: the reusable and its
+    selftest land first so the version-file read/write and the PR-authoring path can be
+    reviewed on their own, which is the whole risk surface. The callers are added in the
+    follow-up rollout PR, and THIS ROW MUST BE DELETED at that point -- an exemption that
+    outlives the reason for it is how a parked artifact becomes a permanently unaudited
+    one. Deliberately cites NO ticket number: the ticket this reusable was filed under
+    closed while it was still unmerged, and a reason that defers work to a shut ticket is
+    the exact shape reason-citations exists to catch (it caught an earlier draft of this
+    very text on its first run). The condition is written out instead of delegated, which
+    is what makes it checkable without a live API read. The ticket history lives in the
+    commit and the PR, where a temporary note belongs. It is listed here rather than left
+    out because
+    check_source_reusables die()s on an unlisted workflow_call workflow -- the inventory
+    is the contract, so an artifact it does not mention aborts the whole live audit and
+    reports nothing for the rest of the fleet, instead of recording one finding. Listed
+    and exempt is the shape that keeps the audit running while this is parked; the same
+    two-step blocked-gate used.
   blocked_gate_rollout_pending: &blocked_gate_rollout_pending >-
     blocked-gate has ZERO callers so far, deliberately and for exactly one PR. The
     reusable and its selftest land first so the MATCHING can be reviewed on its own -
@@ -563,6 +582,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -596,6 +617,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -628,6 +651,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -755,6 +780,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -834,6 +861,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -865,6 +894,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -896,6 +927,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -929,6 +962,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -960,6 +995,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -991,6 +1028,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -1059,6 +1098,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -1106,6 +1147,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -1191,6 +1234,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -1230,6 +1275,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -1296,6 +1343,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
       stale-backlog.yml:
         exempt: *stale_backlog_exemption_needs_redeciding
@@ -1448,6 +1497,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
       stale-backlog.yml:
         exempt: *stale_backlog_not_a_backlog
@@ -1487,6 +1538,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -1520,6 +1573,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -1551,6 +1606,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
@@ -1589,6 +1646,8 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
