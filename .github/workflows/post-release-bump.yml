@@ -114,6 +114,25 @@ jobs:
           set -euo pipefail
           VF=".version-tools/scripts/version_file.py"
           [ -f "$VF" ] || { echo "::error::the shared writer is missing at $VF"; exit 1; }
+          # INPUTS ARE REFUSED WHEN EMPTY, BEFORE ANYTHING READS THEM (Bugbot #372).
+          # `required: true` on a workflow_call input does NOT reject "" -- a caller
+          # passing an unset variable satisfies it -- and `default:` is overridden by
+          # an explicit empty string. So each of these can arrive empty, and each
+          # would then be diagnosed as something it is not: an empty version-file is
+          # reported by the check below as "does not exist on $BASE", naming a missing
+          # file rather than a missing input. version-bump-gate.yml already refuses
+          # its inputs this way; this matches it.
+          #
+          # All three are guarded, not only the one that was flagged: the defect is a
+          # property of workflow_call input handling, so every input this job reads is
+          # a member of the same class.
+          for _pair in "version-file:$VERSION_FILE" "bump:$BUMP" "base-branch:$BASE"; do
+            if [ -z "${_pair#*:}" ]; then
+              echo "::error::input '${_pair%%:*}' is empty. workflow_call accepts \"\" for a required input and for one with a default, so this is a caller bug, not a missing file -- nothing was read or written. Pass it explicitly."
+              exit 1
+            fi
+          done
+
           [ -f "$VERSION_FILE" ] || { echo "::error::version-file '$VERSION_FILE' does not exist on $BASE"; exit 1; }
 
           # The released version comes from the TAG, not from parsing anything:
