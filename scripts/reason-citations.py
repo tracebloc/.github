@@ -191,20 +191,34 @@ PREFIX_RE = re.compile(r"\A(?:([A-Za-z0-9][A-Za-z0-9-]*)/)?([A-Za-z0-9.][A-Za-z0
 # and is NOT something this script tries to infer (see mechanism (3) in the
 # header).
 EXEMPT = {
-    "tracebloc/backend#1680": (
-        "PROVENANCE, re-read 2026-08-28 and now true of ALL FOUR citations. The epic "
-        "closed 2026-08-28T07:51:26Z and reddened every open `.github` PR within two "
-        "minutes, because `reason-citations` runs inside the REQUIRED `selftests` job "
-        "-- the guard working, not misfiring. Three of the four citations back STANDING "
-        "facts that remain true and were re-measured: `selftests` really is a required "
-        "context on develop and on staging. The fourth was NOT history -- it deferred a "
-        "step to this epic in the future tense (\"arm it here once staging carries the "
-        "workflow\"), and the epic closed without taking it. That one has been restated "
-        "against what is measurably true today (the workflow is on all three branches, "
-        "so the sequencing blocker it named is gone) and the remaining decision now "
-        "cites backend#2761, which is open. So #1680 is past-tense everywhere it still "
-        "appears. REMOVE THIS ROW if any reason starts deferring to #1680 again -- a "
-        "closed epic cannot carry work, and that is the shape this guard exists to catch."
+    # PINNED TO 2 (see _pinned_count). The pin found this the moment it was
+    # armed: the row said "ALL FOUR" and only TWO reasons cite #1680 today,
+    # because #374 restated the other two out of existence in the same commit
+    # that wrote the sentence. Arming the check on a claim that had already
+    # expired is the whole argument for pinning it.
+    "tracebloc/backend#1680": (2,
+        "PROVENANCE for the TWO citations that remain, re-read 2026-08-28: "
+        "`repos..github.protection.develop.divergent.reason` and "
+        "`...staging.divergent.reason`. Both back a STANDING fact that was "
+        "re-measured rather than asserted -- `selftests` really is a required "
+        "context on `.github`'s develop AND staging, alongside `gate` on develop "
+        "and `gate` + `gate / gate` on staging -- and #1680 is where arming it on "
+        "top of the fleet baseline was DECIDED. Past tense, so the epic closing "
+        "does not touch them.\n\n"
+        "HISTORY, because the count moved under this row. The epic closed "
+        "2026-08-28T07:51:26Z and reddened every open `.github` PR within two "
+        "minutes -- `reason-citations` runs inside the REQUIRED `selftests` job, "
+        "so that was the guard working, not misfiring. FOUR reasons cited #1680 "
+        "then. #374 re-read all four and found the fourth was NOT history: it "
+        "deferred a step to the epic in the FUTURE tense (\"arm it here once "
+        "staging carries the workflow\") and the epic closed without taking it. "
+        "That one was restated against what is measurably true today and its live "
+        "remainder re-homed on backend#2761. Two of the four stopped citing #1680 "
+        "as a result; these two did not.\n\n"
+        "REMOVE THIS ROW if any reason starts deferring to #1680 again -- a closed "
+        "epic cannot carry work, and that is the shape this guard exists to catch. "
+        "The pin above is the machine half of that sentence: a third citation "
+        "makes this row expire instead of silently covering it."
     ),
     "tracebloc/backend#2347": (
         "PROVENANCE, re-read 2026-08-26 and still true. `claude-skills`' fr-gate "
@@ -276,7 +290,45 @@ def _exempt() -> dict:
     """
     if _EXEMPT_OVERRIDE is None:
         return EXEMPT
-    return {c.strip(): "test override" for c in _EXEMPT_OVERRIDE.split(",") if c.strip()}
+    # `key` or `key=n` -- the `=n` form produces the SAME (count, reason) shape
+    # the real map uses, so a suite case exercises `_pinned_count` and the
+    # comparison in `main()` rather than a re-implementation of them.
+    out = {}
+    for c in _EXEMPT_OVERRIDE.split(","):
+        c = c.strip()
+        if not c:
+            continue
+        key, sep, n = c.partition("=")
+        key = key.strip()
+        if sep and n.strip().isdigit():
+            out[key] = (int(n), "test override, pinned")
+        else:
+            out[key] = "test override"
+    return out
+
+
+def _pinned_count(value) -> "int | None":
+    """The citation count an exemption PINS ITSELF TO, if it pins one.
+
+    A row may be written either as a plain reason string, or as
+    `(n, "reason")` -- which additionally asserts that exactly `n` written
+    reasons cite that issue today.
+
+    WHY THIS EXISTS (saadqbal, reviewing .github#374). That row's reason opens
+    "now true of ALL FOUR citations" and then reasons about each of the four.
+    Nothing observed the four-ness. A FIFTH reason citing #1680 -- in particular
+    a new one DEFERRING work to it, which is the shape this guard exists to
+    catch -- would have been admitted silently by an exemption whose own text
+    says it was written about four specific citations.
+
+    That is the docstring-as-guarantee shape: a claim about scope, in prose,
+    that nothing re-checks. Pinning the number makes the row expire on its own
+    the moment the population it describes changes, which is the only version
+    of "I read all of them" that survives the next commit.
+    """
+    if isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], int):
+        return value[0]
+    return None
 
 
 # ------------------------------------------------------------------ parsing ---
@@ -561,6 +613,14 @@ def main() -> int:
                 [m for m in malformed if m[0] not in exempt]
     stale = stale_exemptions(findings)
 
+    # A PINNED row must still describe the population it was written about.
+    # Derived from the citations actually parsed, never from a second list.
+    miscounted = []
+    for key, _why, where in findings:
+        pinned = _pinned_count(exempt.get(key))
+        if pinned is not None and len(where) != pinned:
+            miscounted.append((key, pinned, len(where), where))
+
     print(f"reason-citations: {len(citations)} distinct citation(s) across "
           f"{reasons} written reason(s) in {INVENTORY.name}")
     print(f"  {len(findings)} dead, {len(malformed)} malformed, {len(exempt)} exempted, "
@@ -574,6 +634,17 @@ def main() -> int:
             f"or add {key} to EXEMPT in scripts/reason-citations.py with what it is doing "
             f"there. Cited by: {', '.join(where[:4])}"
             f"{' (+%d more)' % (len(where) - 4) if len(where) > 4 else ''}\n"
+        )
+        rc = 1
+    for key, pinned, actual, where in miscounted:
+        sys.stderr.write(
+            f"::error::{key} is EXEMPT with a pinned count of {pinned}, but {actual} "
+            f"reason(s) cite it now. The row's own text reasons about {pinned} specific "
+            f"citations, so it no longer describes the population it exempts -- and the "
+            f"citation it has not been read against may be the one deferring live work "
+            f"to a closed issue. Re-read all {actual} and update both the reason and the "
+            f"pin. Cited by: {', '.join(where[:5])}"
+            f"{' (+%d more)' % (len(where) - 5) if len(where) > 5 else ''}\n"
         )
         rc = 1
     for key in stale:
