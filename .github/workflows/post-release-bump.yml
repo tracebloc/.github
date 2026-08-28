@@ -1,0 +1,181 @@
+name: Post-release version bump
+
+# CLOSE THE LOOP THE RELEASE OPENS (backend#2758).
+#
+# Shipping a tag-published repo creates the exact condition that blocks its next
+# promotion. The version just released is now taken, so:
+#   - the next PR touching a published file is refused by version-bump-gate, and
+#   - the next hop is refused by the train's own preflight:
+#       "rc NOT tagged - vX.Y.Z already exists and the delta DOES touch published
+#        files (bump <version_file> on develop before the next release)"
+# Both refusals are correct. Nothing bumps the file afterwards, so the repo goes
+# quietly unpromotable until somebody reads a refusal mid-hop -- the most
+# expensive moment to find out, and on someone who did not cause it.
+#
+# MEASURED, three times in five days: `cli` needed the identical one-line bump on
+# 2026-08-24 and again on 2026-08-25; `design-system` needed it after v1.3.0 and
+# again after v1.4.0, where it was the only held repo of six on the 2026-08-28
+# staging hop.
+#
+# This opens the bump PR at the one moment the version is known for certain --
+# immediately after the release that consumed it.
+#
+# WHY A PR AND NOT A PUSH. `develop` is protected and the bump is a judgement
+# call: patch is the safe default, but the person who just shipped may know the
+# next cycle is a minor. A PR is reviewable, and editing the number before merge
+# is the whole point. It also keeps this workflow out of the "writes to a
+# protected branch" class entirely.
+#
+# WHY THE PR IS OPENED BY A PAT, NOT THE APP. An App-authored PR gets no Bugbot
+# review, and `bugbot-gate` is a required check on several repos -- an
+# app-authored PR is a dead end that can never satisfy it (release-train's README
+# says so outright). Same split as standards-sync.yml: the App pushes, the PAT
+# opens.
+#
+# FAIL CLOSED. A tag that is not a plain vX.Y.Z, a version file that cannot be
+# read, a write that does not land, an unexpected current version -- every one
+# exits non-zero rather than opening a PR that says something untrue. The one
+# deliberate green no-op is "the file already moved past the released version",
+# which means a human got there first and there is nothing to do.
+
+on:
+  workflow_call:
+    inputs:
+      version-file:
+        description: >-
+          Path to the file holding the version, exactly as repos.yml spells it
+          (VERSION, package.json, pyproject.toml, client/Chart.yaml,
+          tracebloc_ingestor/__init__.py). The extension selects the parse; the
+          rules live in scripts/version_file.py, which is the same set
+          version-bump-gate.yml declares.
+        type: string
+        required: true
+      bump:
+        description: "patch | minor | major. Patch is the safe default; edit the PR to change it."
+        type: string
+        default: patch
+      base-branch:
+        description: "Branch the bump PR targets. Always develop in this org."
+        type: string
+        default: develop
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: open the next-version PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # A PRERELEASE CONSUMES NOTHING. rc tags are cut per hop and would otherwise
+    # open a bump PR on every one of them.
+    if: github.event.release.prerelease != true
+    steps:
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: read
+
+      - name: Check out the base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.base-branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: true
+
+      # The format rules live in ONE place. Vendoring a copy of the parse into
+      # this workflow is the drift this whole change exists to remove, so the
+      # script is checked out rather than reimplemented.
+      - name: Check out the shared version-file writer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tracebloc/.github
+          ref: main
+          path: .version-tools
+          persist-credentials: false
+
+      - name: Bump, and open the PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # PR CREATION ONLY, so the PR has an author Bugbot will review.
+          PR_AUTHOR_TOKEN: ${{ secrets.SYNC_PR_AUTHOR_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          VERSION_FILE: ${{ inputs.version-file }}
+          BUMP: ${{ inputs.bump }}
+          BASE: ${{ inputs.base-branch }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VF=".version-tools/scripts/version_file.py"
+          [ -f "$VF" ] || { echo "::error::the shared writer is missing at $VF"; exit 1; }
+          [ -f "$VERSION_FILE" ] || { echo "::error::version-file '$VERSION_FILE' does not exist on $BASE"; exit 1; }
+
+          # The released version comes from the TAG, not from parsing anything:
+          # the tag is what was actually published and is the only unambiguous
+          # record of it.
+          RELEASED="${TAG#v}"
+          case "$RELEASED" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::release tag '$TAG' is not a plain vX.Y.Z, so the next version cannot be derived. Bump $VERSION_FILE by hand."; exit 1 ;;
+          esac
+
+          CURRENT="$(python3 "$VF" read --file "$VERSION_FILE" --in-place)"
+          echo "released=$RELEASED  current on $BASE=$CURRENT"
+
+          # THE ONLY GREEN NO-OP. If the file no longer says what was just
+          # released, someone already bumped it (or the release did not come from
+          # this branch) and there is nothing to close.
+          if [ "$CURRENT" != "$RELEASED" ]; then
+            echo "::notice::$VERSION_FILE is at $CURRENT, not the released $RELEASED - already bumped, nothing to do."
+            exit 0
+          fi
+
+          NEXT="$(python3 "$VF" bump --value "$CURRENT" --part "$BUMP")"
+          BRANCH="chore/bump-$NEXT"
+
+          # Idempotent across re-runs and re-publishes: an existing branch or an
+          # open PR for this exact version means this already ran.
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "::notice::branch $BRANCH already exists - the bump PR is already open."
+            exit 0
+          fi
+
+          # --in-place keeps the read and the write inside one process. The shell
+          # form (`< file > tmp`) is the SC2094 shape and no reader can prove the
+          # two paths differ, so the file I/O lives where it can be verified.
+          python3 "$VF" write --file "$VERSION_FILE" --to "$NEXT" --in-place
+          # Prove the file on disk changed. A write that reported success and
+          # left the tree identical would otherwise produce an empty PR.
+          git diff --quiet -- "$VERSION_FILE" && { echo "::error::$VERSION_FILE is unchanged after the bump to $NEXT"; exit 1; }
+
+          git config user.name "tracebloc-release-train[bot]"
+          git config user.email "tracebloc-release-train[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add -- "$VERSION_FILE"
+          # Repeated -m rather than an embedded newline: a multi-line string
+          # inside `run: |` has to stay indented or it stops being YAML.
+          git commit -q \
+            -m "chore(release): declare $NEXT as the next version" \
+            -m "v$RELEASED shipped, so that version is taken: the next PR touching a published file is refused by version-bump-gate, and the next hop is refused by the train's version preflight. Both are correct, and neither clears itself." \
+            -m "Opened automatically at the moment the version was consumed (backend#2758). Patch is the default - edit this file before merging if the next cycle is a minor or a major."
+          git push -q origin "$BRANCH"
+
+          BODY="\`v$RELEASED\` shipped, so \`$CURRENT\` is taken. This declares **$NEXT** so the next promotion is not refused. Opened automatically by \`post-release-bump.yml\` at the moment the release consumed the version (backend#2758) - the loop that previously stayed open until someone read a refusal mid-hop. **Patch is a default, not a judgement**: if the next cycle is a minor or a major, edit \`$VERSION_FILE\` on this branch before merging. No behaviour change - \`$VERSION_FILE\` is read by the release workflow at tag time and by the train version preflight; nothing in the built artifact reads it at runtime."
+
+          # The PAT opens it so Bugbot reviews it; if the PAT is absent the App
+          # would open a PR that bugbot-gate can never pass, so refuse instead of
+          # creating a dead end.
+          if [ -z "${PR_AUTHOR_TOKEN:-}" ]; then
+            echo "::error::SYNC_PR_AUTHOR_TOKEN is not set. An app-authored PR gets no Bugbot review and bugbot-gate can never pass it, so the branch $BRANCH was pushed but no PR was opened. Open it by hand, or set the secret and re-run."
+            exit 1
+          fi
+          GH_TOKEN="$PR_AUTHOR_TOKEN" gh pr create --repo "$REPO_FULL" \
+            --base "$BASE" --head "$BRANCH" \
+            --title "chore(release): declare $NEXT as the next version" \
+            --body "$BODY"

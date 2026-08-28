@@ -326,7 +326,8 @@ mutations-dry: $(addsuffix -dry,$(MUTATION_TARGETS))
 # it into `make check` and brings it under the coverage guard.
 SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-standards-sync \
 	selftest-stale-backlog \
-                    selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns \
+                    selftest-version-bump-gate selftest-version-file \
+                    selftest-bricked-prs selftest-kanban-columns \
                     selftest-kanban-deploy-state selftest-git-reap \
                     selftest-mint-scope selftest-house-rules \
                     selftest-reason-citations \
@@ -436,6 +437,11 @@ selftest-standards-sync: guard-pyyaml
 .PHONY: selftest-version-bump-gate
 selftest-version-bump-gate: guard-pyyaml
 	bash scripts/tests/version-bump-gate-selftest.sh
+
+# No guard-pyyaml: version_file.py is stdlib-only on purpose, so the writer the
+# release path depends on cannot be broken by a dependency resolution (backend#2758).
+selftest-version-file:
+	python3 scripts/tests/version-file-selftest.py
 
 # guard-pyyaml, mirroring bricked-prs-selftest.yml's `pip install pyyaml` step:
 # bricked-prs.py imports caller-drift.py for the protection reader, and that
