@@ -299,7 +299,8 @@ MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-bugbot-gate mutation-closing-ref-gate mutation-bug-to-ready \
                    mutation-branch-owner mutation-reason-citations \
                    mutation-mutation-baseline mutation-standards-sync \
-                   mutation-conflict-gate
+                   mutation-conflict-gate \
+                   mutation-triage-labels
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -337,7 +338,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-bug-to-ready \
                     selftest-branch-owner \
                     selftest-mutation-baseline \
-                    selftest-conflict-gate
+                    selftest-conflict-gate \
+                    selftest-triage-labels
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -600,6 +602,25 @@ mutation-bug-to-ready: guard-pyyaml
 
 mutation-bug-to-ready-dry: guard-pyyaml
 	$(PYTHON) scripts/tests/bug-to-ready-mutations.py --dry
+
+# Triage-label existence across the fleet (backend#2598). guard-pyyaml: both the
+# check and its suite parse the two PRODUCERS the label domain is derived from --
+# `customer-priority-bump.yml`'s `workflow_call` inputs and every
+# `.github/ISSUE_TEMPLATE/*.yml` -- as YAML rather than by grep. The suite needs
+# no token: it stubs `gh` on PATH and drives `audit()` with an injected reader.
+.PHONY: selftest-triage-labels
+selftest-triage-labels: guard-pyyaml
+	$(PYTHON) scripts/tests/triage-labels-selftest.py
+
+# NOT in `selftests`: each mutation re-runs the suite. `--dry` resolves every
+# anchor in milliseconds and rides `lint`, which catches the way this really
+# breaks -- a refactor moving a line an anchor matched on.
+.PHONY: mutation-triage-labels mutation-triage-labels-dry
+mutation-triage-labels: guard-pyyaml
+	$(PYTHON) scripts/tests/triage-labels-mutations.py
+
+mutation-triage-labels-dry: guard-pyyaml
+	$(PYTHON) scripts/tests/triage-labels-mutations.py --dry
 
 .PHONY: selftest-git-reap
 selftest-git-reap:
