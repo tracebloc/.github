@@ -291,6 +291,19 @@ WORKFLOW_MUTATIONS = [
      "closing-ref loses its open-state guard, so a merged PR gets a late red X",
      "    if: ${{ inputs.closing-ref-check && github.event.pull_request.state == 'open' }}",
      "    if: ${{ inputs.closing-ref-check }}"),
+    # backend#2731. The card fallback is the fix for a check that went red on a
+    # board it had already made correct; deleting it restores that, and softening
+    # the refusal restores the ORIGINAL backend#2037 defect (a green check over a
+    # card left at No Status). Both are one-line edits to YAML, which is exactly
+    # what the note above says rule 5 does not exempt.
+    (".github/workflows/set-pr-status.yml",
+     "set-status stops adding the missing card, so it loses the race again",
+     "addProjectV2ItemById(input: {projectId: $p, contentId: $c}) { item { id } }",
+     "clientMutationId"),
+    (".github/workflows/set-pr-status.yml",
+     "a card that could not be added reports success instead of failing closed",
+     '"added to it. The board write cannot proceed; this is not a race."\n            exit 1',
+     '"added to it. The board write cannot proceed; this is not a race."\n            exit 0'),
 ]
 
 

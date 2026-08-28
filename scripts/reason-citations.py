@@ -191,6 +191,21 @@ PREFIX_RE = re.compile(r"\A(?:([A-Za-z0-9][A-Za-z0-9-]*)/)?([A-Za-z0-9.][A-Za-z0
 # and is NOT something this script tries to infer (see mechanism (3) in the
 # header).
 EXEMPT = {
+    "tracebloc/backend#1680": (
+        "PROVENANCE, re-read 2026-08-28 and now true of ALL FOUR citations. The epic "
+        "closed 2026-08-28T07:51:26Z and reddened every open `.github` PR within two "
+        "minutes, because `reason-citations` runs inside the REQUIRED `selftests` job "
+        "-- the guard working, not misfiring. Three of the four citations back STANDING "
+        "facts that remain true and were re-measured: `selftests` really is a required "
+        "context on develop and on staging. The fourth was NOT history -- it deferred a "
+        "step to this epic in the future tense (\"arm it here once staging carries the "
+        "workflow\"), and the epic closed without taking it. That one has been restated "
+        "against what is measurably true today (the workflow is on all three branches, "
+        "so the sequencing blocker it named is gone) and the remaining decision now "
+        "cites backend#2761, which is open. So #1680 is past-tense everywhere it still "
+        "appears. REMOVE THIS ROW if any reason starts deferring to #1680 again -- a "
+        "closed epic cannot carry work, and that is the shape this guard exists to catch."
+    ),
     "tracebloc/backend#2347": (
         "PROVENANCE, re-read 2026-08-26 and still true. `claude-skills`' fr-gate "
         "reason cites it for WHY the caller was removed -- #2347 decided the three "

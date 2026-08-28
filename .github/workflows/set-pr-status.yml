@@ -208,14 +208,53 @@ jobs:
           # invariant was broken by the workflow that reports it upheld. backend#1950
           # lost that race by four seconds and sat unnoticed.
           #
-          # The retry budget is deliberately UNCHANGED at 5 x 5s. Widening it in the
-          # same change would hide how often the race is actually lost, and the point
-          # of failing closed is to find that out. If this turns out to be noisy, the
-          # measurement tells us what the window should be -- guessing does not.
+          # THE MEASUREMENT THAT BUDGET WAS HELD OPEN FOR HAS ARRIVED (backend#2731).
+          # The previous note kept the retry budget at 5 x 5s on purpose -- "widening
+          # it would hide how often the race is actually lost, and the point of
+          # failing closed is to find that out." The answer came back on 2026-08-27:
+          # `.github#361` and `#362` both lost it within seconds, and on `#362` the
+          # board ended in the exact state this job would have written. So the job's
+          # PURPOSE was achieved and only its VERDICT was wrong -- the worst shape a
+          # check can fail in, because nothing is broken and the habit it teaches is
+          # to merge past red.
+          #
+          # So END the race rather than widen the window. A bigger number would still
+          # be a guess, and a longer wait is still a wait on a sibling workflow that
+          # may simply never have run. This job already holds a token with
+          # `organization-projects: write`, and `addProjectV2ItemById` is IDEMPOTENT
+          # -- adding an item already on the board returns the existing item id -- so
+          # there is nothing here that add-to-kanban would duplicate. That workflow
+          # does exactly one thing (an `actions/add-to-project` step and nothing
+          # else), which is what makes taking it over in the missing case safe.
+          #
+          # STILL FAIL-CLOSED. "The card is missing" stays a real finding when it is
+          # real: if the PR cannot be resolved to a node, or the add does not come
+          # back with an item id, this goes RED exactly as before. What changed is
+          # only that "not yet" no longer reports as "missing".
           if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
-            echo "::error::PR #$PR_NUMBER is not on project $PROJECT_NUMBER after 5 retries." \
-                 "add-to-kanban should have added it; it did not, or it lost the race." \
-                 "Re-run this job once the card exists."
+            echo "card absent after 5 retries - adding it here rather than waiting on add-to-kanban"
+            # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
+            PR_NODE_ID=$(gh api graphql -f query='
+              query($org: String!, $repo: String!, $num: Int!) {
+                repository(owner: $org, name: $repo) { pullRequest(number: $num) { id } }
+              }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$PR_NUMBER" \
+              | jq -r '.data.repository.pullRequest.id // empty')
+            if [ -z "$PR_NODE_ID" ]; then
+              echo "::error::PR #$PR_NUMBER could not be resolved to a node id, so its card" \
+                   "cannot be added. Refusing to report a status nobody wrote."
+              exit 1
+            fi
+            # shellcheck disable=SC2016  # the $names here are GraphQL variables, not shell - keep literal
+            ITEM_ID=$(gh api graphql -f query='
+              mutation($p: ID!, $c: ID!) {
+                addProjectV2ItemById(input: {projectId: $p, contentId: $c}) { item { id } }
+              }' -F p="$PROJECT_ID" -F c="$PR_NODE_ID" \
+              | jq -r '.data.addProjectV2ItemById.item.id // empty')
+          fi
+
+          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
+            echo "::error::PR #$PR_NUMBER is not on project $PROJECT_NUMBER and could not be" \
+                 "added to it. The board write cannot proceed; this is not a race."
             exit 1
           fi
 

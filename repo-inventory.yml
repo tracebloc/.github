@@ -508,12 +508,16 @@ repos:
             - quality / house-rules
             - quality / action-pins
             - selftests
-      # NOT YET on prod, deliberately, and this is a sequencing fact rather than
-      # a decision against it. `selftests.yml` reaches `staging` only when the
-      # promotion carrying it merges; until then a staging -> main PR's head
-      # cannot report the context, and a required check that never reports
-      # leaves the PR waiting forever (client#665, `pii-gate/pii-check`). Arm it
-      # here once staging carries the workflow -- backend#1680 carries the step.
+      # NOT YET on prod, and the SEQUENCING REASON THIS USED TO GIVE HAS EXPIRED.
+      # It said `selftests.yml` reaches `staging` only when the promotion carrying
+      # it merges, so until then a staging -> main PR's head cannot report the
+      # context, and a required check that never reports leaves the PR waiting
+      # forever (client#665, `pii-gate/pii-check`). That was true when written.
+      # Measured 2026-08-28: the workflow is present on develop, staging AND main,
+      # and `selftests` is a required context on develop and staging but not main.
+      # So the blocker named above is gone and arming prod is now a DECISION nobody
+      # has taken, not a step waiting on a promotion. backend#1680 carried that
+      # step and closed without it; backend#2761 carries it now and says so.
       prod: required
     rulesets:
       promotion_merge_commit_only: required
