@@ -155,17 +155,64 @@ r = subprocess.run([sys.executable, str(SCRIPT), "bump", "--value", "1.0.0", "--
                    capture_output=True, text=True)
 record(r.returncode != 0, "--in-place is refused for bump", f"rc={r.returncode}")
 
+# AND FOR cmp, which had no test and so was silently ignoring the flag (Bugbot).
+# The guard listed "cmp" but sat BELOW the cmp early-return, making its own arm
+# unreachable; the refusal text said only "bump". An ignored flag is worse than a
+# refused one, because the caller believes it took effect -- the exact defect this
+# change closed for bump, still open one line above the fix.
+r = subprocess.run([sys.executable, str(SCRIPT), "cmp", "--value", "1.0.0",
+                    "--to", "1.0.1", "--in-place"], capture_output=True, text=True)
+record(r.returncode != 0, "--in-place is refused for cmp", f"rc={r.returncode}")
+# The message must NAME the mode. It was hardcoded to "bump", so a cmp refusal --
+# once reachable -- would have told the caller the wrong thing.
+record("cmp" in (r.stderr or ""), "the cmp refusal names cmp, not bump",
+       f"stderr={r.stderr!r}")
+# The control: cmp WITHOUT the flag still answers, so the guard did not simply
+# break the mode it was widened to cover.
+r = subprocess.run([sys.executable, str(SCRIPT), "cmp", "--value", "1.0.0",
+                    "--to", "1.0.1"], capture_output=True, text=True)
+record(r.returncode == 0 and r.stdout.strip() == "lt",
+       "cmp still works without --in-place (control)",
+       f"rc={r.returncode} stdout={r.stdout!r}")
+
 print()
 print("agreement with the gate - the format list is DERIVED, not restated")
 # The gate declares its parses in its own header, one line per suffix. Reading
 # that list here is what makes a format added to one and not the other fail.
 gate = GATE.read_text()
+# `anything else` IS ONE OF THE DECLARED FORMATS (Bugbot). The gate spells the
+# bare-VERSION rule that way instead of naming a suffix -- "anything else  first
+# ^X.Y.Z at the START of a line - bare VERSION file" -- so a pattern looking only
+# for `*.ext` or a literal `VERSION` captured FIVE formats and silently dropped
+# the sixth. `declared` stayed non-empty from the others, so the locator below
+# passed, the `"version": "VERSION"` probe went unused, and dropping bare-VERSION
+# support from version_file.py would have left this guard green. A check that
+# covers five of six while claiming "every format" is the backend#1729 shape.
+# THE TAIL IS "label, space, anything", and both narrower forms were wrong.
+# `\s{2,}` skipped `anything else` -- the longest label, padded with a SINGLE
+# space -- which is the row Bugbot caught. Anchoring on the `first` column
+# instead then dropped `*.json`, whose rule reads `jq '.version'`. Requiring
+# only a following non-space matches all five rows and still cannot match the
+# continuation lines, whose first token is prose rather than a label.
+_DECLARED_ROW = r"^#\s+(\*\.\w+(?:\|\*\.\w+)*|VERSION|anything else)\s+\S"
 declared = set()
-for suf in re.findall(r"^#\s+(\*\.\w+(?:\|\*\.\w+)*|VERSION)\s{2,}", gate, re.M):
+for suf in re.findall(_DECLARED_ROW, gate, re.M):
+    if suf == "anything else":
+        # The gate's own words for the bare-VERSION rule; `version` is the key the
+        # probe map below uses for it.
+        declared.add("version")
+        continue
     for part in suf.split("|"):
         declared.add(part.replace("*.", "").lower())
 record(bool(declared), "the gate's declared suffix list was located",
        f"parsed {declared!r} - if empty, this check is vacuous and must be fixed")
+# AND THAT THE SIXTH IS AMONG THEM. Without this, a future rewording of the
+# header drops bare-VERSION back out and the only symptom is a quietly smaller
+# number in the message above -- which is exactly how it went unnoticed.
+record("version" in declared,
+       "the bare-VERSION rule is one of the declared formats",
+       f"the gate spells it 'anything else'; if this fails, the header wording "
+       f"changed and the probe for it went dead. declared={sorted(declared)!r}")
 if declared:
     probe = {"json": "package.json", "yaml": "a.yaml", "yml": "a.yml",
              "toml": "a.toml", "py": "a.py", "version": "VERSION"}
@@ -183,6 +230,18 @@ if declared:
     record(not unknown,
            f"the script handles every format the gate declares ({len(declared)})",
            f"unsupported by version_file.py: {unknown}")
+    # AND THE REVERSE DIRECTION, which is what catches a parse that silently
+    # stops seeing a row. Fixing the `anything else` miss above by anchoring on
+    # the `first` column dropped `*.json` (its rule reads `jq '.version'`) -- the
+    # set went from 5 to a DIFFERENT 5, so neither the count in the message above
+    # nor a `"version" in declared` check noticed. Every format this test knows
+    # how to probe must be one the gate declares; if it is not, either the gate
+    # dropped it or our parse of the gate did.
+    stale = sorted(set(probe) - declared)
+    record(not stale,
+           "every format this test probes is still one the gate declares",
+           f"probed but not found in the gate's header: {stale} - the header "
+           f"changed, or _DECLARED_ROW stopped matching its row")
 
 failed = [r for r in RESULTS if not r[0]]
 print(f"\n{len(RESULTS) - len(failed)} passed, {len(failed)} failed")

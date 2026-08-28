@@ -186,13 +186,22 @@ def main() -> int:
                     help="use --file as the source: read it from disk (read), or "
                          "read and rewrite it (write), instead of stdin->stdout")
     a = ap.parse_args()
-    # Validated BEFORE the bump early-return: an ignored flag is worse than a
-    # refused one, because the caller believes it took effect.
+    # Validated BEFORE EVERY early-return: an ignored flag is worse than a refused
+    # one, because the caller believes it took effect.
+    #
+    # IT USED TO SIT BETWEEN THE TWO RETURNS (Bugbot), which covered `bump` and
+    # let `cmp --in-place` sail past the arm that names it -- so the `"cmp"` in
+    # this very tuple was unreachable, and the refusal text said only "bump". The
+    # same ignored-flag defect this change closed for bump, reintroduced one line
+    # above the fix.
+    #
+    # The message names `a.mode` rather than restating a mode list, so it cannot
+    # go stale the way the hardcoded "bump" did.
+    if a.in_place and a.mode in ("bump", "cmp"):
+        raise SystemExit(f"version_file: --in-place is not valid for {a.mode}")
     if a.mode == "cmp":
         print(compare(a.value, a.to))
         return 0
-    if a.in_place and a.mode in ("bump", "cmp"):
-        raise SystemExit("version_file: --in-place is not valid for bump")
     if a.mode == "bump":
         print(bump(a.value, a.part))
         return 0
