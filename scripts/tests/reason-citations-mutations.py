@@ -49,6 +49,23 @@ import mutation_baseline  # noqa: E402
 
 # (label, old, new)
 MUTATIONS = [
+    # --- the PIN: an exemption must still describe its own population -------
+    #
+    # saadqbal on .github#374: the #1680 row asserts a scope ("ALL FOUR
+    # citations") that nothing observed, so a FIFTH -- in particular a new one
+    # DEFERRING work to the closed epic -- would be admitted silently by a row
+    # written about four others. These three mutations each disarm one half of
+    # the pin, and each must redden.
+    ("a pinned exemption stops being counted, so its stated scope is unobserved again",
+     '        pinned = _pinned_count(exempt.get(key))\n        if pinned is not None and len(where) != pinned:',
+     '        pinned = _pinned_count(exempt.get(key))\n        if False:'),
+    ("_pinned_count never recognises a pin, so every pinned row silently unpins",
+     '    if isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], int):\n        return value[0]',
+     '    if False:\n        return value[0]'),
+    ("the count is compared loosely, so a citation may appear or vanish unread",
+     '        if pinned is not None and len(where) != pinned:',
+     '        if pinned is not None and len(where) < pinned:'),
+
     # --- the load-bearing claim: a CLOSED issue is a finding ----------------
     ("a CLOSED issue counts as live, so backend#2449 case 1 goes unreported",
      'LIVE = {\n    ("Issue", "OPEN"),',
