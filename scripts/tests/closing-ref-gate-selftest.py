@@ -1106,6 +1106,38 @@ check(
     "github.event.pull_request.title" not in HOST,
 )
 
+# THE CARD FALLBACK (backend#2731). Asserted here because this file already owns the
+# assertions about `set-pr-status.yml`, and nothing covered its status-write block.
+#
+# SCOPE, said plainly so a green run is not overread: these read the workflow SOURCE.
+# They cannot prove the fallback works against the real API -- and this repo's own
+# caller pins `@main`, so the PR that lands the fix does not exercise it either. What
+# they catch is the regression that matters: deleting the fallback, or softening the
+# refusal back to a pass.
+#
+# EACH ONE PINS THE CALL, NEVER A BARE TOKEN. `"addProjectV2ItemById" in HOST` would
+# pass under the mutation that DELETES the call, because the identifier also appears
+# in the comment above it explaining that the add is idempotent -- documenting the fix
+# keeping the assertion green, the mirror of the backend#2632 trap. A bare
+# `"exit 1" in HOST` is satisfied by any of this file's other refusals, so the
+# fail-closed check pins the refusal and its exit as one sequence.
+check(
+    "set-status adds the card itself when it is absent, rather than waiting",
+    "addProjectV2ItemById(input: {projectId:" in HOST,
+)
+check(
+    "the add is fed the PR's own node id, not the item id it is creating",
+    "pullRequest(number: $num) { id }" in HOST,
+)
+check(
+    "an unresolvable PR node still refuses, rather than writing nothing quietly",
+    "could not be resolved to a node id" in HOST,
+)
+check(
+    "a failed add still FAILS CLOSED (backend#2037's guarantee is unchanged)",
+    re.search(r'this is not a race\."\s*\n\s*exit 1', HOST) is not None,
+)
+
 # ---------------------------------------------------------------------------
 # 9. THE GATE MUST RE-RUN WHEN THE FIELDS IT READS CHANGE (backend#2556).
 #

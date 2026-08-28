@@ -26,40 +26,47 @@ name: Label-driven issue triage
 # still say "customer priority bump", so a bug-label run shows up in each repo's
 # Actions tab under that name. The workflow's own `name:` above is the half that
 # could be fixed without touching 16 repos, so it was. Renaming the file is a
-# caller rollout (BUGBOT.md property 1: land the callee first) and is left for
-# whoever does the `.github`/`release-train`/`rfcs` wiring below.
+# caller rollout (BUGBOT.md property 1: land the callee first) and is still open
+# work -- it no longer waits on anything, since the wiring below is complete.
 #
-# NOT WIRED EVERYWHERE -- but the REASON HAS MOVED, so do not trust the anchor
-# this comment used to cite. Every repo now has a caller (`.github`'s landed under
-# backend#2396), and `customer_priority_bump_caller_missing` is GONE from
-# `repo-inventory.yml` -- no repo carries that key any more, so the old text sent
-# the reader to a lookup that cannot answer. (The STRING still appears elsewhere in
-# the repo, in `scripts/reason-citations.py` and in this comment; it is the
-# INVENTORY that no longer records it. @aptracebloc on #350.)
+# WIRED EVERYWHERE NOW. Every repo has a caller (`.github`'s landed under
+# backend#2396) and `customer_priority_bump_caller_missing` is GONE from
+# `repo-inventory.yml` -- no repo carries that key any more, so any text sending a
+# reader to that lookup is describing a key that cannot answer. (The STRING still
+# appears elsewhere in the repo, in `scripts/reason-citations.py` and in this
+# comment; it is the INVENTORY that no longer records it. @aptracebloc on #350.)
 #
-# What remains is narrower and invisible. THREE of the twenty repos that declare
-# this caller -- `design-system-v2`, `release-train`, `rfcs` -- have no
-# `work-type:*` labels AT ALL, and GitHub silently DROPS a template label the
-# target repo lacks. None has its own `.github/ISSUE_TEMPLATE`, so all three inherit
-# the org Bug template, which asks for `work-type:bug` -- nothing is added, the
-# `bug-to-ready` job below never sees its label, and the card sits in `Backlog`,
-# the refinement queue nobody pulls from. That is the exact miss backend#2348 was
-# filed to close, surviving in the three repos a caller-presence check calls done.
+# THE LABEL GAP IS CLOSED, AND NOW ASSERTED (backend#2598). This block used to
+# record a live defect: repos carrying this caller with no `work-type:*` labels at
+# all. GitHub silently DROPS a template label the target repo lacks -- no error, no
+# annotation, no run -- so the issue was filed unlabelled, `bug-to-ready` never saw
+# its label, and the card sat in `Backlog`, the refinement queue nobody pulls from.
+# The exact miss backend#2348 was filed to close, surviving in the repos a
+# caller-presence check calls done.
 #
-# THE LIST IS DERIVED, NOT REMEMBERED. `repo-inventory.yml` declares
-# `customer-priority-bump.yml: required` for TWENTY repos and exempts none; these
-# three are the ones whose label set is empty. An earlier version of this comment
-# named two, because it checked the repos the previous prose happened to name
-# instead of the domain the inventory declares -- the vocabulary gap CLAUDE.md
-# rule 6 describes, in the comment arguing against restating. (@aptracebloc, #350.)
+# Measured 2026-08-27 before the fix: `design-system-v2`, `release-train` and `rfcs`
+# had ZERO of the seven triage labels, and `e2e-test-agent` had TWO of seven. All
+# twenty now have all seven, and `.github/workflows/triage-labels.yml` runs daily to
+# keep it that way -- it derives the label domain from the two producers (this file's
+# `*-label` input defaults plus its `--add-label` writes, and every
+# `.github/ISSUE_TEMPLATE/*.yml` `labels:` entry) and asserts each label exists in
+# every repo the inventory declares. So a label deleted in a repo's Settings UI is a
+# red run rather than a silent stop.
 #
-# A CALLER WITHOUT THE LABEL IS WIRED IN EXACTLY THE WAY THAT DOES NOTHING, and
-# today nothing can tell -- caller-drift.py asserts presence of the caller, not of
-# the vocabulary it fires on. backend#2598 creates the labels and weighs asserting
-# them alongside. Until it lands, a bug filed in those three needs a hand. The other
-# 17 -- including `backend` and `frontend-app`, where all seven of backend#2348's
-# measured misses were filed -- are covered. 20 declared - 3 unlabelled = 17; the
-# earlier 17 was right by coincidence, being 19 minus two.
+# TWO LESSONS WORTH MORE THAN THE FIX, both about the DOMAIN and not the answer:
+#
+#   * `e2e-test-agent` was invisible to backend#2598 as filed, because that ticket
+#     derived over the `work-type:*` PREFIX. That repo had `work-type:bug` and
+#     `priority` and none of the other five, so a prefix sweep called it covered
+#     while four labels its templates apply were being dropped. Deriving from a
+#     prefix rather than from the producers is CLAUDE.md rule 6's vocabulary gap --
+#     committed by the ticket that was written to close it.
+#   * An earlier version of this comment named TWO repos, because it checked the
+#     repos the previous prose happened to name instead of the domain the inventory
+#     declares (@aptracebloc, #350).
+#
+# Both are why the check parses the producers and the inventory and holds no list of
+# its own. Do not reintroduce one here.
 
 on:
   workflow_call:
@@ -129,6 +136,28 @@ jobs:
           # D5: priority is a binary "priority" label, not a project field. The
           # label is visible on the issue itself and filterable everywhere; the
           # Priority single-select field has been removed from the board.
+          #
+          # THE TRIGGER LABEL'S OWN DESCRIPTION NOW SAYS SO TOO, and for months it
+          # said the opposite (backend#2743). All twenty enrolled repos advertised
+          # `from:customer` as "auto-bumps Priority to P1" -- an outcome D5 deleted
+          # and this step stopped producing -- so the label that fires the rule
+          # promised a board value nobody would ever see. It was uniformly wrong
+          # because .github#364 created the labels four repos lacked by faithfully
+          # copying names, colours and descriptions off the repos that had them.
+          # Swept across all twenty on 2026-08-27, byte-identical, to:
+          #
+          #   Filed from a customer request — automation adds the binary `priority` label
+          #
+          # Derived, not chosen: the sweep refused any text that did not name the
+          # label the `gh issue edit` line below actually writes, and refused the
+          # removed vocabulary outright. Change one, change the other.
+          #
+          # NOT UNDER A CHECK YET, said plainly rather than left to be assumed:
+          # `triage-labels-check.py` (.github#364) asserts a triage label EXISTS in
+          # every enrolled repo, not that its description still describes this step
+          # -- which is exactly how the stale text survived D5 with a green fleet.
+          # backend#2744 closes that, on top of #364 rather than beside it, because
+          # the file it extends is not on `develop` yet.
           gh issue edit "$ISSUE_NUMBER" --repo "$REPO_FULL" --add-label priority
           echo "-> Issue #$ISSUE_NUMBER labelled 'priority'"
 

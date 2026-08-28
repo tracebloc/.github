@@ -299,7 +299,8 @@ MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-bugbot-gate mutation-closing-ref-gate mutation-bug-to-ready \
                    mutation-branch-owner mutation-reason-citations \
                    mutation-mutation-baseline mutation-standards-sync \
-                   mutation-conflict-gate
+                   mutation-conflict-gate \
+                   mutation-triage-labels
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -326,7 +327,8 @@ mutations-dry: $(addsuffix -dry,$(MUTATION_TARGETS))
 # it into `make check` and brings it under the coverage guard.
 SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-standards-sync \
 	selftest-stale-backlog \
-                    selftest-version-bump-gate selftest-bricked-prs selftest-kanban-columns \
+                    selftest-version-bump-gate selftest-version-file \
+                    selftest-bricked-prs selftest-kanban-columns \
                     selftest-kanban-deploy-state selftest-git-reap \
                     selftest-mint-scope selftest-house-rules \
                     selftest-reason-citations \
@@ -336,7 +338,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-bug-to-ready \
                     selftest-branch-owner \
                     selftest-mutation-baseline \
-                    selftest-conflict-gate
+                    selftest-conflict-gate \
+                    selftest-triage-labels
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -436,6 +439,11 @@ selftest-standards-sync: guard-pyyaml
 .PHONY: selftest-version-bump-gate
 selftest-version-bump-gate: guard-pyyaml
 	bash scripts/tests/version-bump-gate-selftest.sh
+
+# No guard-pyyaml: version_file.py is stdlib-only on purpose, so the writer the
+# release path depends on cannot be broken by a dependency resolution (backend#2758).
+selftest-version-file:
+	python3 scripts/tests/version-file-selftest.py
 
 # guard-pyyaml, mirroring bricked-prs-selftest.yml's `pip install pyyaml` step:
 # bricked-prs.py imports caller-drift.py for the protection reader, and that
@@ -594,6 +602,25 @@ mutation-bug-to-ready: guard-pyyaml
 
 mutation-bug-to-ready-dry: guard-pyyaml
 	$(PYTHON) scripts/tests/bug-to-ready-mutations.py --dry
+
+# Triage-label existence across the fleet (backend#2598). guard-pyyaml: both the
+# check and its suite parse the two PRODUCERS the label domain is derived from --
+# `customer-priority-bump.yml`'s `workflow_call` inputs and every
+# `.github/ISSUE_TEMPLATE/*.yml` -- as YAML rather than by grep. The suite needs
+# no token: it stubs `gh` on PATH and drives `audit()` with an injected reader.
+.PHONY: selftest-triage-labels
+selftest-triage-labels: guard-pyyaml
+	$(PYTHON) scripts/tests/triage-labels-selftest.py
+
+# NOT in `selftests`: each mutation re-runs the suite. `--dry` resolves every
+# anchor in milliseconds and rides `lint`, which catches the way this really
+# breaks -- a refactor moving a line an anchor matched on.
+.PHONY: mutation-triage-labels mutation-triage-labels-dry
+mutation-triage-labels: guard-pyyaml
+	$(PYTHON) scripts/tests/triage-labels-mutations.py
+
+mutation-triage-labels-dry: guard-pyyaml
+	$(PYTHON) scripts/tests/triage-labels-mutations.py --dry
 
 .PHONY: selftest-git-reap
 selftest-git-reap:
