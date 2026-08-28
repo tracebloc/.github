@@ -197,6 +197,10 @@ base() {
   export REPO_FULL=tracebloc/tracebloc-py-package
   export VERSION_FILE=pyproject.toml
   export PUBLISH_PATHS='tracebloc/* pyproject.toml'
+  # Reset like the rest: an exclusion leaking from a previous case would make a
+  # later one pass for the wrong reason, which is the failure mode this whole
+  # file exists to catch.
+  export EXCLUDE_PATHS=''
   export SOFT_FAIL=false
   export PR_BASE_SHA=basesha PR_HEAD_SHA=headsha PR_HEAD_REF=feat/some-work
   export PR_BASE_REF=develop IS_FORK=false
@@ -429,5 +433,61 @@ mktags 1.0.0-rc.1
 check "a prerelease suffix survives the parse (backend#1427)" 1 "still says 1.0.0-rc.1"
 
 echo
+echo
+echo "exclude-paths - files inside a published tree that do not ship (backend#2758)"
+
+# THE CASE THAT SENT design-system#272 THROUGH skip-version-gate. A stories-only
+# PR under `src/*`, at a version that is already released. Without an exclusion
+# the gate refuses; the only way past it was the audited override, which then
+# left the version stale and refused the NEXT promotion at the hop.
+base; REPO_FULL=tracebloc/design-system; VERSION_FILE=package.json
+PUBLISH_PATHS='src/*'; EXCLUDE_PATHS='src/**/*.stories.tsx src/**/*.test.tsx src/**/*.test.ts'
+mkcompare "src/components/organisms/Menubar/Menubar.stories.tsx"
+mkversion head '{"version":"1.4.0"}'
+mkversion base '{"version":"1.4.0"}'
+mktags 1.4.0
+check "a stories-only PR does not need a bump" 0 "were treated as not shipping"
+
+# THE SAME PR WITH NO EXCLUSION, and this is the control: it proves the previous
+# case passes BECAUSE of the exclusion and not because the fixture was harmless.
+base; REPO_FULL=tracebloc/design-system; VERSION_FILE=package.json
+PUBLISH_PATHS='src/*'; EXCLUDE_PATHS=''
+mkcompare "src/components/organisms/Menubar/Menubar.stories.tsx"
+mkversion head '{"version":"1.4.0"}'
+mkversion base '{"version":"1.4.0"}'
+mktags 1.4.0
+check "the same PR still refuses with no exclusion (control)" 1 "package.json still says 1.4.0"
+
+# EXCLUSION MUST NOT OVER-APPLY. Real component source in the same tree, with the
+# same exclusion list, still refuses. An exclusion that swallowed this would be a
+# gate that never fires.
+base; REPO_FULL=tracebloc/design-system; VERSION_FILE=package.json
+PUBLISH_PATHS='src/*'; EXCLUDE_PATHS='src/**/*.stories.tsx src/**/*.test.tsx src/**/*.test.ts'
+mkcompare "src/components/atoms/Badge/Badge.tsx"
+mkversion head '{"version":"1.4.0"}'
+mkversion base '{"version":"1.4.0"}'
+mktags 1.4.0
+check "real component source still refuses despite the exclusions" 1 "package.json still says 1.4.0"
+
+# A MIXED PR IS PUBLISHABLE. One story and one component: the component decides.
+base; REPO_FULL=tracebloc/design-system; VERSION_FILE=package.json
+PUBLISH_PATHS='src/*'; EXCLUDE_PATHS='src/**/*.stories.tsx'
+mkcompare "src/components/atoms/Badge/Badge.stories.tsx" "src/components/atoms/Badge/Badge.tsx"
+mkversion head '{"version":"1.4.0"}'
+mkversion base '{"version":"1.4.0"}'
+mktags 1.4.0
+check "a story plus a component is still publishable" 1 "package.json still says 1.4.0"
+
+# RENAMED OUT OF THE PACKAGE STILL COUNTS. A shipping file moved to an excluded
+# path left the package, which is a published change even though its NEW path is
+# excluded. This is the half a naive per-file exclusion gets wrong.
+base; REPO_FULL=tracebloc/design-system; VERSION_FILE=package.json
+PUBLISH_PATHS='src/*'; EXCLUDE_PATHS='src/**/*.stories.tsx'
+mkcompare "src/components/atoms/Badge/Badge.stories.tsx:src/components/atoms/Badge/Badge.tsx"
+mkversion head '{"version":"1.4.0"}'
+mkversion base '{"version":"1.4.0"}'
+mktags 1.4.0
+check "a shipping file renamed INTO an excluded path still counts" 1 "package.json still says 1.4.0"
+
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

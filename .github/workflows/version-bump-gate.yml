@@ -245,6 +245,31 @@ on:
           (backend#1439), so this is required rather than defaulted to empty.
         type: string
         required: true
+      exclude-paths:
+        description: >-
+          Space-separated globs naming files INSIDE `publish-paths` that do NOT
+          ship, checked before the positive match. Optional; empty means "every
+          path under publish-paths ships", which is the old behaviour.
+
+          WHY THIS EXISTS (backend#2758). `publish-paths` is a coarse tree, and
+          for several repos the tree contains files the package never carries:
+          `design-system` declares `src/*` while its package.json ships
+          `files: [build, dist, tokens]`, so its 24 stories and 25 unit tests are
+          source, not product. A stories-only PR therefore tripped a gate whose
+          own header says a "test-only PR ... matches no publish path", and the
+          only way past it was the `skip-version-gate` label -- an audited
+          override spent on a false positive, which then left the version stale
+          and refused the NEXT promotion at the hop (design-system#272, 2026-08-28).
+
+          Excluding is deliberately narrower than re-deriving from each
+          ecosystem's manifest (package.json `files`, pyproject, .helmignore).
+          Those are the real producers and reading them would be rule 1 done
+          properly, but they disagree in shape and a wrong read here fails the
+          wrong way. An explicit exclusion list is auditable, and it is printed
+          in the summary next to what it removed.
+        type: string
+        required: false
+        default: ""
       soft-fail:
         description: >-
           Report the verdict but exit 0. Migration setting - flip to false to
@@ -274,6 +299,7 @@ jobs:
           REPO_FULL: ${{ github.repository }}
           VERSION_FILE: ${{ inputs.version-file }}
           PUBLISH_PATHS: ${{ inputs.publish-paths }}
+          EXCLUDE_PATHS: ${{ inputs.exclude-paths }}
           SOFT_FAIL: ${{ inputs.soft-fail }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -589,8 +615,33 @@ jobs:
             while IFS= read -r _; do FILE_COUNT=$((FILE_COUNT + 1)); done <<EOF
           $FILES
           EOF
+            # EXCLUDED FIRST, and only ever narrowing (backend#2758). A path that
+            # matches an exclude glob is not published, so it cannot make the delta
+            # publishable no matter which publish path it also matches. Empty
+            # EXCLUDE_PATHS makes this a no-op and the behaviour is exactly as before.
+            #
+            # Checked per FILE rather than per (file, pattern): once a file is
+            # excluded it is excluded for every publish path, and doing it inside the
+            # pattern loop would re-answer the same question N times and let a file
+            # slip through on the pattern where the exclusion was not consulted.
+            is_excluded() {
+              [ -n "${EXCLUDE_PATHS:-}" ] || return 1
+              local _f="$1" _x
+              for _x in $EXCLUDE_PATHS; do
+                # shellcheck disable=SC2254  # $_x is a glob on purpose
+                case "$_f" in $_x) EXCLUDED_HIT="$_f (excluded by '$_x')"; return 0 ;; esac
+              done
+              return 1
+            }
+
             for pat in $PUBLISH_PATHS; do
               while IFS="$(printf '\t')" read -r f prev; do
+                # A file that does not ship cannot make the delta publishable. Both
+                # the current and the pre-rename path are tested, mirroring the
+                # positive match below: a story renamed within src/ is still a story.
+                if is_excluded "$f" && { [ -z "${prev:-}" ] || is_excluded "$prev"; }; then
+                  continue
+                fi
                 # shellcheck disable=SC2254  # $pat is a glob on purpose
                 case "$f" in $pat) MATCHED="$f (matches '$pat')"; return 0 ;; esac
                 # The pre-rename path counts too: a file moved OUT of a published
@@ -629,7 +680,15 @@ jobs:
           fi
 
           if [ "$pd" = "1" ]; then
-            verified "No publishable delta - $FILE_COUNT file(s) in this PR, none matching [$PUBLISH_PATHS]. $VERSION_FILE stays at $HEAD_VER, and that is correct: docs, CI, tests and scripts are not part of what this repo ships, so the train promotes them and cuts no tag (backend#1439)."
+            # NAME THE EXCLUSION WHEN IT IS WHAT DECIDED THIS. A green check that
+            # says only "none matching" hides the reason on exactly the PRs the
+            # exclusion exists for, and an unexplained pass is how a wrong
+            # exclude-paths list would survive review (backend#2758).
+            EXCL_NOTE=""
+            if [ -n "${EXCLUDE_PATHS:-}" ]; then
+              EXCL_NOTE=" Files matching [$EXCLUDE_PATHS] were treated as not shipping${EXCLUDED_HIT:+ - e.g. $EXCLUDED_HIT}."
+            fi
+            verified "No publishable delta - $FILE_COUNT file(s) in this PR, none matching [$PUBLISH_PATHS].$EXCL_NOTE $VERSION_FILE stays at $HEAD_VER, and that is correct: docs, CI, tests and scripts are not part of what this repo ships, so the train promotes them and cuts no tag (backend#1439)."
           fi
 
           # --- is that version already released ---------------------------------
