@@ -297,7 +297,9 @@ SELFTEST_FILES := $(sort $(wildcard scripts/tests/*-selftest.py scripts/tests/*-
 MUTATION_FILES := $(sort $(wildcard scripts/tests/*-mutations.py))
 MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-bugbot-gate mutation-closing-ref-gate mutation-bug-to-ready \
-                   mutation-branch-owner mutation-reason-citations
+                   mutation-branch-owner mutation-reason-citations \
+                   mutation-mutation-baseline mutation-standards-sync \
+                   mutation-conflict-gate
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -332,7 +334,9 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-bugbot-gate \
                     selftest-closing-ref-gate \
                     selftest-bug-to-ready \
-                    selftest-branch-owner
+                    selftest-branch-owner \
+                    selftest-mutation-baseline \
+                    selftest-conflict-gate
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -363,6 +367,8 @@ selftests-cover:
 	  case "$$path" in \
 	    *-selftest.py|*-selftest.sh) ;; \
 	    *-mutations.py) ;; \
+	    scripts/tests/mutation_baseline.py) ;; \
+	    scripts/tests/__pycache__) ;; \
 	    *) echo "$$path does not match '*-selftest.{py,sh}' or '*-mutations.py', so no wildcard can see it."; \
 	       echo "  Rename it, or teach the wildcards about the new convention — do NOT"; \
 	       echo "  leave it unmatched: assertion 2 below would then pass without covering it."; \
@@ -516,6 +522,22 @@ mutation-bugbot-gate:
 mutation-bugbot-gate-dry:
 	$(PYTHON) scripts/tests/bugbot-gate-mutations.py --dry
 
+# The merge-conflict gate (backend#2637): a conflicted PR runs NO `pull_request`
+# workflow, so every drift guard is silently inactive and the rollup reads green.
+# guard-pyyaml, mirroring conflict-gate.yml's own `pip install pyyaml` step:
+# conflict-gate.py imports caller-drift.py for the `gh` wrappers and the inventory
+# loader, and that module hard-fails without PyYAML by design.
+.PHONY: selftest-conflict-gate
+selftest-conflict-gate: guard-pyyaml
+	$(PYTHON) scripts/tests/conflict-gate-selftest.py
+
+.PHONY: mutation-conflict-gate mutation-conflict-gate-dry
+mutation-conflict-gate:
+	$(PYTHON) scripts/tests/conflict-gate-mutations.py
+
+mutation-conflict-gate-dry:
+	$(PYTHON) scripts/tests/conflict-gate-mutations.py --dry
+
 # The closing-ref gate (backend#2364): a PR whose TITLE names a ticket must LINK
 # it. NO guard-pyyaml, for the same asserted reason as bugbot-gate above -- the
 # checker imports only the standard library, and its job in `set-pr-status.yml`
@@ -593,6 +615,31 @@ mutation-branch-owner:
 
 mutation-branch-owner-dry:
 	$(PYTHON) scripts/tests/branch-owner-mutations.py --dry
+
+# The BASELINE every runner above measures against (backend#2441). Each of them
+# overwrites a tracked file and restores it in a `finally`, which SIGKILL, a
+# runner timeout and a concurrent run all skip -- and the mutation left on disk
+# becomes the next run's `pristine`, which then reports `0 uncaught` about a
+# premise nobody typed. `mutation_baseline.guard()` refuses instead, and this is
+# the tier that keeps the refusal honest. NO guard-pyyaml: the module imports
+# only the standard library and the suite builds real throwaway git repos, so
+# there is nothing to install.
+.PHONY: selftest-mutation-baseline
+selftest-mutation-baseline:
+	$(PYTHON) scripts/tests/mutation-baseline-selftest.py
+
+.PHONY: mutation-mutation-baseline mutation-mutation-baseline-dry
+mutation-mutation-baseline:
+	$(PYTHON) scripts/tests/mutation-baseline-mutations.py
+
+mutation-mutation-baseline-dry:
+	$(PYTHON) scripts/tests/mutation-baseline-mutations.py --dry
+
+mutation-standards-sync:
+	$(PYTHON) scripts/tests/standards-sync-mutations.py
+
+mutation-standards-sync-dry:
+	$(PYTHON) scripts/tests/standards-sync-mutations.py --dry
 
 # ---- CI steps that need something a working tree does not have ----
 

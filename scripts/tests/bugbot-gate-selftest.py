@@ -20,8 +20,11 @@ later must be exercised on the day it is added -- a hand-listed set of four
 cannot see a fifth. Mutation coverage cannot see a vocabulary gap; only
 iterating the producer's declared surface can.
 """
+import contextlib
 import importlib.util
+import io
 import json
+import os
 import pathlib
 import sys
 
@@ -170,18 +173,43 @@ def pr(contexts=None, threads=None, head=HEAD, ctx_total=None, thread_total=None
 v = ev(pr(contexts=[check_run()]), "high")
 check("clean head with a terminal Bugbot run passes", v == gate.PASS, "got %r" % v)
 
+# THE FOUR "NOTHING CLAIMED IT" CASES ARE `UNCLAIMED` SINCE backend#2284, and
+# what each one asserts is that it is NOT `PASS`. That is the property worth
+# pinning: `UNCLAIMED` exits 0 so the context can be required, so a test that
+# only checked the exit code would stop distinguishing "clean" from "nobody
+# looked". The verdict is the thing that still tells them apart.
 v = ev(pr(contexts=[]), "high")
-check("no checks at all on the head is PENDING, not PASS", v == gate.PENDING, "got %r" % v)
+check("no checks at all on the head is UNCLAIMED, not PASS",
+      v == gate.UNCLAIMED and v != gate.PASS, "got %r" % v)
 
 v = ev(pr(contexts=[], rollup=False), "high")
-check("a null rollup is PENDING, not PASS", v == gate.PENDING, "got %r" % v)
+check("a null rollup is UNCLAIMED, not PASS",
+      v == gate.UNCLAIMED and v != gate.PASS, "got %r" % v)
 
 other = check_run(slug="github-actions", name="Unit tests", conclusion="SUCCESS")
 v = ev(pr(contexts=[other]), "high")
-check("a head full of OTHER green checks is still PENDING", v == gate.PENDING, "got %r" % v)
+check("a head full of OTHER green checks is still UNCLAIMED",
+      v == gate.UNCLAIMED and v != gate.PASS, "got %r" % v)
 
 v = ev(pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)]), "high")
 check("a still-running Bugbot is PENDING, not PASS", v == gate.PENDING, "got %r" % v)
+
+# THE SPLIT IS THE WHOLE CHANGE, so it is asserted in both directions. A claimed
+# head that never finishes is a review that BROKE and still blocks; a head
+# nothing ever claimed is a review that never happened and does not. Collapsing
+# them back into one verdict -- in either direction -- reddens here.
+check("a CLAIMED but unfinished head is not UNCLAIMED",
+      ev(pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)]), "high")
+      != gate.UNCLAIMED, "a running check must not read as never-claimed")
+check("an UNCLAIMED head is not PENDING",
+      ev(pr(contexts=[]), "high") != gate.PENDING,
+      "an absent check must not read as a running one")
+check("both absences are waitable, so neither fails early",
+      gate.PENDING in gate.WAITABLE and gate.UNCLAIMED in gate.WAITABLE,
+      "WAITABLE=%r" % (gate.WAITABLE,))
+check("PASS and FAIL are NOT waitable",
+      gate.PASS not in gate.WAITABLE and gate.FAIL not in gate.WAITABLE,
+      "WAITABLE=%r" % (gate.WAITABLE,))
 
 v = ev(pr(contexts=[check_run(status="QUEUED", conclusion=None)]), "high")
 check("a queued Bugbot is PENDING, not PASS", v == gate.PENDING, "got %r" % v)
@@ -196,7 +224,7 @@ check("a RENAMED Bugbot check still counts (matched on app slug)", v == gate.PAS
 v = ev(pr(contexts=[check_run(slug="impostor", name="Cursor Bugbot")]), "high")
 check(
     "a check named 'Cursor Bugbot' from another app does NOT satisfy the gate",
-    v == gate.PENDING,
+    v == gate.UNCLAIMED and v != gate.PASS,
     "got %r" % v,
 )
 
@@ -574,6 +602,152 @@ check("severity_of returns None on empty input", gate.severity_of("") is None)
 check("severity_of returns None on None", gate.severity_of(None) is None)
 
 # --------------------------------------------------------------------------
+# --- THE EXIT CODES, WHICH ARE THE ACTUAL BEHAVIOUR CHANGE -------------------
+#
+# `evaluate` returning UNCLAIMED is only half of backend#2284; what the gate
+# DOES with it at the deadline is the half that decides whether a PR merges.
+# Asserted through `main` with WAIT_SECONDS=0, so the deadline is already past
+# on the first pass and no test sleeps. NOTE `main` takes its budget from the
+# ENVIRONMENT, not argv -- passing `--wait-seconds 0` is silently ignored and
+# the test then polls for the real 900s. Measured the slow way.
+#
+# The pairing is the point: same absence-shaped input, opposite exit codes,
+# decided solely by whether Bugbot ever claimed the head.
+_ENV_KEYS = ("REPO", "PR_NUMBER", "WAIT_SECONDS", "POLL_SECONDS",
+             "GITHUB_STEP_SUMMARY")
+_env_keep = {k: os.environ.get(k) for k in _ENV_KEYS}
+try:
+    os.environ["REPO"] = "tracebloc/demo"
+    os.environ["PR_NUMBER"] = "1"
+    os.environ["WAIT_SECONDS"] = "0"
+    os.environ["POLL_SECONDS"] = "0"
+    os.environ.pop("GITHUB_STEP_SUMMARY", None)
+
+    def _main_rc(pr_obj):
+        gate.fetch = lambda *a, **k: pr_obj
+        return gate.main([])
+
+    _real_fetch = gate.fetch
+    try:
+        rc_unclaimed = _main_rc(pr(contexts=[]))
+        check("main: an UNCLAIMED head at the deadline exits 0 (not blocked)",
+              rc_unclaimed == 0, "got rc=%r" % rc_unclaimed)
+
+        rc_pending = _main_rc(pr(contexts=[check_run(status="IN_PROGRESS",
+                                                     conclusion=None)]))
+        check("main: a CLAIMED-but-unfinished head at the deadline exits 1 (blocked)",
+              rc_pending == 1, "got rc=%r" % rc_pending)
+
+        # And the two must not have collapsed into the same answer.
+        check("main: the two absences produce DIFFERENT exit codes",
+              rc_unclaimed != rc_pending,
+              "both returned %r -- the split is inert" % rc_unclaimed)
+
+        # THE BANNER IS THE ONLY THING A SKIMMER READS, so it is pinned
+        # separately from the exit code. UNCLAIMED exits 0; if its headline
+        # also said "pass", the summary would assert cleanliness about a head
+        # nothing looked at -- and no other assertion here would notice,
+        # because every one of them checks verdicts or exit codes. Measured:
+        # the mutation `the UNREVIEWED banner reads as a pass` came back
+        # UNCAUGHT until this existed.
+        def _banner_for(pr_obj):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _main_rc(pr_obj)
+            return buf.getvalue().splitlines()[0] if buf.getvalue() else ""
+
+        _unclaimed_banner = _banner_for(pr(contexts=[]))
+        check("main: the UNCLAIMED headline says UNREVIEWED",
+              "UNREVIEWED" in _unclaimed_banner, "got %r" % _unclaimed_banner)
+        check("main: the UNCLAIMED headline does NOT read as a pass",
+              "pass" not in _unclaimed_banner.lower(), "got %r" % _unclaimed_banner)
+
+        _pass_banner = _banner_for(pr(contexts=[check_run()]))
+        check("main: a genuine pass still says pass",
+              "pass" in _pass_banner.lower() and "UNREVIEWED" not in _pass_banner,
+              "got %r" % _pass_banner)
+
+        # A real finding still blocks; tolerance must not have leaked into FAIL.
+        rc_fail = _main_rc(pr(contexts=[check_run()],
+                              threads=[thread(finding_body("High"), resolved=False)]))
+        check("main: an open finding still exits 1", rc_fail == 1, "got rc=%r" % rc_fail)
+
+        # -------------------------------------------------------------------
+        # THE TOLERANCE MUST NOT LAUNDER A FINDING (Bugbot, #356).
+        #
+        # The dangerous input is the COMBINATION, and neither existing test
+        # holds it: "no check on the head" was only ever paired with no
+        # threads, and "an open High" only ever with a completed check. So the
+        # gate could return on the head question before applying the
+        # threshold, and every assertion above would still pass. The reachable
+        # sequence is ordinary -- Bugbot reviews head A and files a High, the
+        # author pushes head B, Bugbot drops B (which is the measurement this
+        # whole change is built on) -- and the answer must be decided by the
+        # open finding, not by the missing review.
+        rc_unclaimed_open = _main_rc(
+            pr(contexts=[], threads=[thread(finding_body("High"), resolved=False)]))
+        check("main: UNCLAIMED + an open High exits 1, not 0",
+              rc_unclaimed_open == 1, "got rc=%r" % rc_unclaimed_open)
+        check("main: the tolerance is what would have been laundered",
+              rc_unclaimed == 0 and rc_unclaimed_open == 1,
+              "same-shaped absence gave %r clean / %r with an open High"
+              % (rc_unclaimed, rc_unclaimed_open))
+
+        _laundered_banner = _banner_for(
+            pr(contexts=[], threads=[thread(finding_body("High"), resolved=False)]))
+        check("main: that headline does NOT say UNREVIEWED-not-blocked",
+              "UNREVIEWED" not in _laundered_banner,
+              "got %r" % _laundered_banner)
+
+        # SAME HOLE, OTHER ABSENCE. PENDING already exits 1, so the exit code
+        # cannot tell whether the threshold was applied -- the verdict can.
+        # Without this, fixing only the UNCLAIMED branch would read as done.
+        _v_pending_open = ev(
+            pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)],
+               threads=[thread(finding_body("High"), resolved=False)]),
+            "high")
+        check("evaluate: PENDING + an open High is FAIL, not PENDING",
+              _v_pending_open == gate.FAIL, "got %r" % _v_pending_open)
+
+        # A finding BELOW the threshold does not cancel the tolerance: the
+        # split backend#2284 measured has to survive its own fix.
+        _v_low = ev(pr(contexts=[],
+                       threads=[thread(finding_body("Low"), resolved=False)]),
+                    "high")
+        check("evaluate: UNCLAIMED + an open LOW is still UNCLAIMED",
+              _v_low == gate.UNCLAIMED, "got %r" % _v_low)
+
+        # Nor does a RESOLVED one -- otherwise the remedy the FAIL message
+        # tells people to use ("reply with the ticket and resolve") would not
+        # clear it.
+        _v_resolved = ev(pr(contexts=[],
+                            threads=[thread(finding_body("High"), resolved=True)]),
+                         "high")
+        check("evaluate: UNCLAIMED + a RESOLVED High is still UNCLAIMED",
+              _v_resolved == gate.UNCLAIMED, "got %r" % _v_resolved)
+
+        # The FAIL has to NAME the finding, not just refuse. One renderer feeds
+        # both paths for exactly this reason; asserting it here is what keeps
+        # the unclaimed path wired to it.
+        _, _laundered_lines = gate.evaluate(
+            pr(contexts=[], threads=[thread(finding_body("High"), resolved=False)]),
+            "high")
+        # The TITLE and the OPEN marker on one row -- not "OPEN appears
+        # somewhere", which the prose above would satisfy on its own.
+        check("evaluate: the unclaimed FAIL lists the finding as OPEN",
+              any("OPEN" in ln and "A real bug" in ln and "high" in ln
+                  for ln in _laundered_lines),
+              "got %r" % ("\n".join(_laundered_lines)[:400],))
+    finally:
+        gate.fetch = _real_fetch
+finally:
+    for k, v in _env_keep.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+
 if FAILURES:
     print("bugbot-gate-selftest: %d/%d FAILED" % (len(FAILURES), COUNT))
     for f in FAILURES:

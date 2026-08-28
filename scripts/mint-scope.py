@@ -90,8 +90,8 @@ SCOPE_PREFIX = "permission-"
 #
 # These rows are the pre-existing state this guard was written to stop growing, not
 # to fix in one commit. Ten became six (advance-deploy-env, customer-priority-bump,
-# fr-pass-comment, kanban-closure-router -- derivable from their call sites), and
-# six became four.
+# fr-pass-comment, kanban-closure-router -- derivable from their call sites), six
+# became four, four became two, and two became one.
 #
 # THE TWO JUST BURNT DOWN WERE THE ONES THAT COULD NOT BE DERIVED, and the reason
 # they could not is worth keeping (backend#2157, measured 2026-08-24). Their rows
@@ -117,21 +117,20 @@ SCOPE_PREFIX = "permission-"
 # is the argument for measuring rather than reasoning, and it is why the four below
 # say what they say.
 #
-# The four left are left for a STATED reason, not for lack of time:
+# NONE ARE LEFT, and that is a burn-down completing rather than a list being
+# deleted. The last two were the two that needed their own window, and each got
+# one: fr-gate (#352) because it is a REQUIRED check on every promotion branch
+# fleet-wide, so a bad scope there reddens every hop at once rather than one
+# workflow; standards-sync (#355) because it is a contents:write sweep whose risky
+# mode cannot be rehearsed without opening 19 real PRs. They were scoped in
+# separate PRs for exactly that reason, and landing both is what empties this.
 #
-#   fr-gate, set-pr-status, standards-sync, kanban-reconcile -- high exposure
-#     (a required check fleet-wide, a caller in every repo, a contents:write sweep,
-#     the widest board surface). Each needs its own window so one bad scope does not
-#     redden the whole fleet at once.
-#
-# The distinction matters because it is the difference between an exemption that is
-# a to-do and one that is a decision. Do not fold them back together.
-EXEMPT = {
-    "fr-gate.yml": "REQUIRED check on every promotion branch fleet-wide -- needs its own window",
-    "kanban-reconcile.yml": "the weekly backstop -- widest board surface of the set",
-    "set-pr-status.yml": "runs fleet-wide from every repo; largest exposure of the set",
-    "standards-sync.yml": "writes CLAUDE.md across the fleet; contents:write is real here",
-}
+# AN EMPTY MAP IS NOT AN INERT ONE. `stale_exemptions` compares against the live
+# unscoped set, so the guard keeps working from here in the only direction left:
+# a re-introduced full-grant mint has no row to hide behind and is reported the
+# first time it appears. Do not add a row back to make a red run green -- scope
+# the workflow, which is what every row above was eventually replaced by.
+EXEMPT: dict = {}
 
 
 def _exempt() -> dict:

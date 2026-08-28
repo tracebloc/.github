@@ -30,6 +30,21 @@ ROOT = Path(__file__).resolve().parents[2]
 MOD = ROOT / "scripts" / "branch_owner.py"
 SUITE = ROOT / "scripts" / "tests" / "branch-owner-selftest.py"
 
+# THE BASELINE THIS RUN MEASURES AGAINST MUST BE VERIFIABLE, NOT ASSUMED
+# (backend#2441). The `finally` below restores the file on a crash; it cannot
+# restore it after SIGKILL, a runner timeout, or a second harness racing this
+# one in the same worktree -- and a mutation left on disk becomes the NEXT run's
+# `pristine`, which then reports `0 uncaught` about a premise nobody typed.
+# See scripts/tests/mutation_baseline.py.
+#
+# dont_write_bytecode BEFORE the import, deliberately: `selftests-cover` rejects
+# anything under scripts/tests/ that is not a suite or a runner, and a
+# `__pycache__/` left by this import is exactly that.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import mutation_baseline  # noqa: E402
+
+
 # (label, old, new)
 MUTATIONS = [
     # --- THE TICKET'S OWN BUG: the PR author stops winning -----------------
@@ -199,6 +214,16 @@ def apply_one(src: str, old: str, new: str) -> "str | None":
 
 def main() -> int:
     dry = "--dry" in sys.argv
+
+    # Refuse rather than measure against a baseline nothing vouches for. Only the
+    # writing path: `--dry` writes nothing, so it has no restore to lose -- and it
+    # is what `make check` runs on every push, where refusing on an uncommitted
+    # edit would block the pre-push tier for whoever is editing the target.
+    if not dry:
+        rc = mutation_baseline.guard(ROOT, [MOD])
+        if rc:
+            return rc
+
     pristine = MOD.read_text(encoding="utf-8")
     stale, uncaught = [], []
 

@@ -1,9 +1,11 @@
 name: Set PR card Status on project
 
-# Reusable workflow. Called from each active repo on PR open / reopen / draft-toggle.
+# Reusable workflow. Called from each active repo on PR open / reopen /
+# draft-toggle / title-or-body edit (`edited`, added under tracebloc/backend#2556
+# so the `closing-ref` job re-runs when the fields it reads change).
 # Moves the PR's card to the right Status:
 #   - draft PR  → In progress
-#   - non-draft → In review
+#   - non-draft → Code review
 #
 # TWO JOBS, and the second one is here on purpose (tracebloc/backend#2364).
 #
@@ -76,7 +78,25 @@ on:
         default: "main"
 
 jobs:
+  # ONLY WHILE THE PR IS OPEN (tracebloc/backend#2556). This condition is a
+  # DIRECT CONSEQUENCE of adding `edited` to the callers, and it is not optional.
+  #
+  # Before `edited`, every trigger this workflow had -- opened, reopened,
+  # ready_for_review, converted_to_draft -- was reachable only on an OPEN PR, so
+  # an unconditional write to `Code review` was always correct. `edited` is not:
+  # GitHub fires it when a MERGED PR's title or body is edited, and this job
+  # writes Status unconditionally. Editing a typo in a shipped PR's description
+  # would therefore drag its card from `Prod` back to `Code review` -- a
+  # DEMOTION, in the one file in the fleet whose board writes are not already
+  # monotonic (`advance-deploy-env.yml` compares pipeline rank; this job does
+  # not, because until now it could not need to).
+  #
+  # Guarded by state rather than by event name on purpose: `if: github.event.action
+  # != 'edited'` would have kept the demotion out but also disabled the board write
+  # for a DRAFT toggled by an edit, and it states the exception instead of the rule.
+  # The rule is that this job describes an open PR's review state.
   set-status:
+    if: ${{ github.event.pull_request.state == 'open' }}
     runs-on: ubuntu-latest
     steps:
       - name: Determine target Status
@@ -108,6 +128,28 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          # SCOPED TO WHAT THIS JOB ACTUALLY DOES (backend#2157). Without these
+          # it minted the App's ENTIRE permission set -- contents:write,
+          # issues:write, administration:read and the rest -- across every repo
+          # the installation covers, on every PR event in the fleet. Of the four
+          # mints backend#2157 left, this one has the largest exposure purely
+          # because of how often it runs.
+          #
+          # DERIVED FROM THE CALLS BELOW rather than copied from a template:
+          #   organization.projectV2 { fields }     -> projects, read
+          #   repository.pullRequest.projectItems   -> pull-requests, read
+          #   updateProjectV2ItemFieldValue         -> projects, WRITE
+          #
+          # NO `issues` SCOPE: this job is PR-only (`github.event.pull_request`).
+          # The second mint in this file already carries `permission-issues:
+          # read` because the closing-ref job reads the linked ISSUE -- the two
+          # differ because their calls differ, not by oversight.
+          #
+          # A PASSING MINT IS NOT THE PROOF. `release-train/add-to-kanban.yml`
+          # records why: "a mint can succeed with a scope the board write then
+          # needs and lacks". The evidence is a card that actually moves.
+          permission-pull-requests: read
+          permission-organization-projects: write
 
       - name: Update PR Status on project
         env:
@@ -214,7 +256,13 @@ jobs:
   # ------------------------------------------------------------------------
   closing-ref:
     name: closing-ref
-    if: ${{ inputs.closing-ref-check }}
+    # Open PRs only, for the same reason as `set-status` above but a smaller
+    # consequence: on a merged PR this would be advice about a merge that already
+    # happened, and a red X arriving on a shipped PR hours later is noise that
+    # teaches people to ignore the check (rule 4). The case `edited` exists to
+    # catch -- a retitle -- happens while the PR is open, which is exactly when
+    # this still runs.
+    if: ${{ inputs.closing-ref-check && github.event.pull_request.state == 'open' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

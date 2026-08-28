@@ -100,8 +100,79 @@ STUB = (
 )
 
 
+# WHO OPENS THE SYNC PRs, AND WHY IT CANNOT BE THE APP (tracebloc/backend#2590).
+# Cursor Bugbot keys its review on the PR AUTHOR's Cursor seat. Authenticating
+# `gh pr create` with the tracebloc-release-train installation token makes the
+# author `tracebloc-release-train[bot]` (type: Bot), which has no seat -- so
+# Bugbot never reviews, and `bugbot / review` fails closed on every sync PR.
+# Measured 2026-08-26: zero `Cursor Bugbot` check runs across all 14 open sync
+# PRs, while every human-authored PR that day got a verdict. Cursor attributes an
+# explicit `bugbot run` to the author too, so commenting on the PR cannot rescue
+# it -- it answers "Bugbot is not enabled for your user on this team".
+#
+# So PR CREATION -- and only PR creation -- runs as a human PAT. The fleet reads
+# and the branch push keep the App token: `owner:`-scoped, short-lived, and not
+# tied to one person's account, which is the whole of backend#2036.
+#
+# NO FALLBACK TO THE APP TOKEN. An empty PAT is a hard per-repo error, not a
+# quiet downgrade, because the downgrade IS the bug: it opens a bot-authored PR
+# that looks identical to a working one and that Bugbot silently skips.
+# `standards-sync.yml` already refuses a fallback in the other direction for the
+# same reason.
+AUTHOR_TOKEN_ENV = "SYNC_PR_AUTHOR_TOKEN"
+
+# Reviewer AND assignee on every sync PR. The two are ordinarily distinct roles
+# (RFC-BACKEND-0008 D31: the assignee owns landing it, the reviewer owns judging
+# it) and they are deliberately collapsed here: nobody "does the work" on a
+# machine-generated prose sync, so one person owning both is the honest reading.
+#
+# It CANNOT be the author. GitHub refuses an approving review from a PR's own
+# author, and LukasWodka was the requested reviewer on 4 of the 14 open sync PRs
+# (docs#143, release-train#130, .github#344, claude-skills#39) -- authoring as
+# LukasWodka without moving those would deadlock them permanently: a required
+# review nobody eligible can give.
+SYNC_REVIEWER = "saqlainsyed007"
+
+
+def author_login(token: str) -> "str | None":
+    """Who `token` actually is, asked of GitHub rather than assumed.
+
+    THE INVARIANT IS reviewer != AUTHOR, AND ONLY ONE HALF OF IT WAS DERIVED
+    (@saqlainsyed007, #348). `SYNC_REVIEWER` is a literal here and the selftest
+    pinned the other side as a literal too -- so if `SYNC_PR_AUTHOR_TOKEN` is
+    ever re-provisioned to saqlainsyed007's PAT, author == reviewer, every
+    `--add-reviewer` 422s, and the backend#2590 deadlock this whole change
+    exists to remove comes back **with the tests still green**.
+
+    A credential's owner is a fact about the credential, so it is read from the
+    credential. Returns None when the token cannot be resolved at all, which is
+    its own refusal rather than a guess.
+    """
+    code, out, _ = gh("api", "user", "--jq", ".login", token=token)
+    login = out.strip()
+    return login if code == 0 and login else None
+
+
 class Unreadable(Exception):
     """A read that produced neither a value nor a clean 404."""
+
+
+class AuthorUnusable(Exception):
+    """`pr create` failed as the PAT -- a FLEET-WIDE fact, not a per-repo one.
+
+    RAISED RATHER THAN RETURNED, because it has to stop the loop (Bugbot,
+    #348). `check_author_identity` proves the token EXISTS, RESOLVES, and is
+    not the reviewer; none of that proves it can open a PR in this org. A
+    token with the wrong fine-grained permissions, or one never SSO-authorized,
+    passes every one of those checks and then fails at `pr create` -- by which
+    point `remediate` has pushed a branch and a commit to every drifted repo,
+    which is exactly the half-rollout that gate was added to prevent.
+
+    Nothing read-only can fully prove "this token can open a PR"; the only
+    proof is opening one. So the guarantee is BOUNDED instead of claimed: the
+    first failed creation aborts the fleet, leaving at most ONE repo with a
+    branch and no PR rather than all of them.
+    """
 
 
 def die(message: str) -> "None":
@@ -110,8 +181,21 @@ def die(message: str) -> "None":
     raise SystemExit(2)
 
 
-def gh(*args: str) -> "tuple[int, str, str]":
-    proc = subprocess.run(["gh", *args], capture_output=True, text=True)
+def gh(*args: str, token: "str | None" = None) -> "tuple[int, str, str]":
+    """Run `gh`. With `token`, run it as THAT identity instead of the ambient one.
+
+    Every call but PR creation wants the App installation token the workflow
+    already exports as GH_TOKEN, so `token` defaults to None and nothing about
+    the fleet reads changes. `_ensure_pr` is the one caller that passes it --
+    see AUTHOR_TOKEN_ENV for why the PR author has to be a human.
+    """
+    env = None
+    if token is not None:
+        # BOTH names, because `gh` reads GITHUB_TOKEN too and whichever the
+        # workflow happens to export would otherwise win over this argument --
+        # silently restoring the App identity this exists to displace.
+        env = dict(os.environ, GH_TOKEN=token, GITHUB_TOKEN=token)
+    proc = subprocess.run(["gh", *args], capture_output=True, text=True, env=env)
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -304,7 +388,8 @@ def _write_head_file(full: str, head: str, desired: str, head_sha: "str | None",
     return f"cannot write CLAUDE.md on {head}: exhausted retries"
 
 
-def remediate(org: str, repo: str, base: str, desired: str, issue: int, file_on_base: bool) -> "str | None":
+def remediate(org: str, repo: str, base: str, desired: str, issue: int,
+              file_on_base: bool, author_token: str) -> "str | None":
     """Push the sync branch and open/refresh the PR. Returns an error string or None."""
     head = f"docs/{issue}-org-standards-sync"
     full = f"{org}/{repo}"
@@ -336,22 +421,89 @@ def remediate(org: str, repo: str, base: str, desired: str, issue: int, file_on_
     if rerr:
         return rerr
     if current is not None and current == desired:
-        return _ensure_pr(full, head, base, issue)  # content already pushed; just ensure the PR
+        return _ensure_pr(full, head, base, issue, author_token)  # content pushed; ensure the PR
 
     werr = _write_head_file(full, head, desired, head_sha, issue)
     if werr:
         return werr
 
-    return _ensure_pr(full, head, base, issue)
+    return _ensure_pr(full, head, base, issue, author_token)
 
 
-def _ensure_pr(full: str, head: str, base: str, issue: int) -> "str | None":
+def check_author_identity(token: str) -> "str | None":
+    """Why the PAT cannot be used, or None. Called BEFORE any repo is written.
+
+    EXTRACTED SO IT CAN BE TESTED (@saqlainsyed007, #348). Inline in `main()`
+    this was unreachable from the selftest, and the mutation harness said so
+    out loud: "SYNC_REVIEWER becomes the account that authors the PRs" came
+    back UNCAUGHT once the old literal-vs-literal check was retired. A guard
+    nothing can exercise is the shape this repo keeps removing, so the gate is a
+    function and the three refusals are pinned individually.
+
+    ORDER MATTERS. Emptiness first, because an empty token cannot be resolved;
+    resolution second, because an unresolvable one cannot be compared; the
+    identity comparison last. Each says what it could not establish rather than
+    collapsing into one message.
+    """
+    if not token:
+        return (f"{AUTHOR_TOKEN_ENV} is empty. Opening these PRs as the App is "
+                "the defect backend#2590 removed -- Bugbot never reviews them. "
+                "Refusing before any branch is pushed.")
+    login = author_login(token)
+    if login is None:
+        return (f"{AUTHOR_TOKEN_ENV} is set but GitHub will not say who it "
+                "belongs to, so the reviewer-is-not-the-author invariant cannot "
+                "be checked. Refusing before any branch is pushed.")
+    if login.lower() == SYNC_REVIEWER.lower():
+        return (f"{AUTHOR_TOKEN_ENV} belongs to @{login}, who is also "
+                f"SYNC_REVIEWER. GitHub refuses a review request on one's own "
+                "PR, so every sync PR would open un-reviewable and unmergeable "
+                "-- the backend#2590 deadlock, restored. Re-provision the token "
+                "or move SYNC_REVIEWER.")
+    return None
+
+
+def _ensure_pr(full: str, head: str, base: str, issue: int,
+               author_token: str) -> "str | None":
+    # THE AUTHOR IS READ, NOT ASSUMED (Bugbot, #348). The number alone was
+    # enough while every open PR on this branch was one this code had just
+    # opened. It is not enough now: the sync PRs already open were opened as
+    # `tracebloc-release-train[bot]`, and **a PR's author cannot be changed
+    # after the fact**. Repairing the roles and returning None reported those
+    # repos as ensured while leaving them exactly as unreviewable as before --
+    # so the first green `--create-prs` run after this change would have landed
+    # the author split on none of the fourteen PRs it was written for.
+    # `is_bot` is asked of GitHub rather than pattern-matched off the login,
+    # whose shape varies (`app/<slug>` from `pr list`, `<slug>[bot]` elsewhere).
     code, out, err = gh("pr", "list", "-R", full, "--head", head, "--base", base,
-                        "--state", "open", "--json", "number", "--jq", ".[0].number // empty")
+                        "--state", "open", "--json", "number,author",
+                        "--jq", r'.[0] | select(.) | "\(.number)\t\(.author.login)\t\(.author.is_bot)"')
     if code != 0:
         return f"cannot list PRs: {err.strip()}"
     if out.strip():
-        return None  # open PR already tracks the branch; the push above refreshed it
+        row = out.strip().split("\t")
+        if len(row) != 3:
+            # CANNOT TELL IS A FINDING (design rule 1). An unparseable row is
+            # not evidence that the author is human, and reporting the repo as
+            # ensured off one is the same all-clear-from-a-failed-read this
+            # script refuses everywhere else.
+            return (f"an open PR tracks {head} but its author could not be read "
+                    f"from {out.strip()!r}. Refusing to report it as ensured.")
+        number, login, is_bot = row
+        if is_bot != "false":
+            return (f"#{number} tracks {head} but was opened by @{login} "
+                    f"(is_bot={is_bot}), and GitHub cannot reassign a PR's "
+                    "author. Bugbot keys its review on the author, so this PR "
+                    "stays unreviewable however its roles are repaired "
+                    f"(backend#2590). Close #{number}; the next run reopens it "
+                    f"as {AUTHOR_TOKEN_ENV}'s owner.")
+        # AN EXISTING PR STILL NEEDS ITS ROLES CHECKED (@saqlainsyed007, #348).
+        # This returned here, so a PR whose `--add-reviewer` failed on an
+        # earlier run was never repaired on any later one -- and since the
+        # reviewer is what makes it mergeable, it would sit un-mergeable for
+        # ever while every subsequent run reported success. Self-healing is the
+        # difference between a warning and a permanent state.
+        return _assign_roles(full, number, author_token)
 
     body = (
         "Managed sync of the org-standards block into this repo's `CLAUDE.md` — canonical\n"
@@ -360,19 +512,61 @@ def _ensure_pr(full: str, head: str, base: str, issue: int) -> "str | None":
         f"Part of tracebloc/backend#{issue} (org-wide engineering standards).\n\n"
         "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"
     )
-    code, out, err = gh("pr", "create", "-R", full, "--base", base, "--head", head,
-                        "--title", f"docs(claude): sync org-standards block (backend#{issue})",
-                        "--body", body)
-    if code != 0:
-        return f"cannot open PR: {err.strip()}"
+    # THE PAT IS VALIDATED IN `main()` NOW, before any branch is pushed
+    # (@saqlainsyed007, #348) -- the check used to live here, which is after
+    # `remediate()` has already written to every drifted repo. Belt-and-braces
+    # only: an empty token reaching this point means the caller skipped the
+    # gate, and opening the PR as the App is the defect backend#2590 removed.
+    if not author_token:
+        return (f"{AUTHOR_TOKEN_ENV} is empty, so this PR could only be opened as the "
+                "App, whose PRs Bugbot never reviews (backend#2590). Refusing to open it.")
 
-    # Assignee = whoever dispatched the sync (D31: the person doing the work).
-    # Non-fatal: a missing assignee is visible on the PR and cheap to add by hand.
-    actor = os.environ.get("GITHUB_ACTOR", "").strip()
-    if actor:
-        code, _, err = gh("pr", "edit", out.strip() or head, "-R", full, "--add-assignee", actor)
-        if code != 0:
-            sys.stderr.write(f"::warning::{full}: could not assign @{actor}: {err.strip()}\n")
+    code, out, err = gh("pr", "create", "-R", full, "--base", base, "--head", head,
+                        # NO TICKET IN THIS TITLE, deliberately. closing-ref-gate.py requires every
+                        # ticket a title names to appear in the PR's closingIssuesReferences,
+                        # and these PRs must NOT close #1602 -- one sync PR per repo, all
+                        # naming the same epic, means the first to merge closes it and the
+                        # rest re-close it. The body carries "Part of ..." instead, which is
+                        # traceability without a closing link. Pinned by the selftest.
+                        "--title", "docs(claude): sync the org-standards block",
+                        "--body", body,
+                        # As the human, so the PR has an author Bugbot can see.
+                        token=author_token)
+    if code != 0:
+        # FLEET-WIDE BY CONSTRUCTION: the same credential opens every one of
+        # these, so a refusal here will refuse the next repo too (Bugbot, #348).
+        raise AuthorUnusable(f"cannot open PR: {err.strip()}")
+
+    return _assign_roles(full, out.strip() or head, author_token)
+
+
+def _assign_roles(full: str, pr_ref: str, author_token: str) -> "str | None":
+    """Reviewer and assignee on a sync PR. The reviewer half is FATAL.
+
+    Reviewer AND assignee = SYNC_REVIEWER, never the dispatcher. That used to be
+    GITHUB_ACTOR, which was right while a Bot opened the PR and is wrong now: the
+    dispatcher IS the author, and GitHub will not take an approving review from a
+    PR's own author. See SYNC_REVIEWER.
+
+    ASYMMETRIC ON PURPOSE, and the asymmetry moved (@saqlainsyed007, #348). A
+    missing assignee is cosmetic, so it stays a warning. A missing REVIEWER
+    means a PR that CANNOT MERGE -- branch protection requires one -- so
+    reporting it as a warning let a reviewer-less, un-mergeable PR ship on a
+    green run, which is the same class of silent failure this whole change
+    exists to kill. It is an error now, and the run reports the repo as a failed
+    write.
+    """
+    code, _, err = gh("pr", "edit", pr_ref, "-R", full, "--add-reviewer",
+                      SYNC_REVIEWER, token=author_token)
+    if code != 0:
+        return (f"opened, but could not request @{SYNC_REVIEWER} as reviewer: "
+                f"{err.strip()}. Branch protection needs one, so the PR cannot "
+                "merge until it is added by hand.")
+    code, _, err = gh("pr", "edit", pr_ref, "-R", full, "--add-assignee",
+                      SYNC_REVIEWER, token=author_token)
+    if code != 0:
+        sys.stderr.write(f"::warning::{full}: could not set @{SYNC_REVIEWER} as "
+                         f"assignee (cosmetic): {err.strip()}\n")
     return None
 
 
@@ -395,8 +589,36 @@ def main() -> int:
             die(f"--repo names {unknown}, which are not sync targets")
         targets = sorted(set(args.repo))
 
+    # BEFORE ANY WRITE, NOT AT THE FIRST PR (@saqlainsyed007, #348). The
+    # PAT-empty guard used to live inside `_ensure_pr`, which runs AFTER
+    # `remediate()` has already created the branch and pushed CLAUDE.md -- so a
+    # missing token produced a fleet-wide half-rollout: branches pushed
+    # everywhere, no PRs anywhere, and nothing to review the change through.
+    # Fail closed before the first repo is touched.
+    #
+    # IT DISARMS THE WRITES, IT DOES NOT ABORT THE RUN (Bugbot, #348). `die()`
+    # here contradicted the reasoning written twenty lines up in
+    # standards-sync.yml, which rejects a `[ -z ]` check in the workflow
+    # precisely because aborting "before the audit ... would turn 'PRs could
+    # not be opened' into 'fleet state unknown' -- strictly less information".
+    # The gate exists to stop WRITES, and the audit is a read. So a refusal
+    # switches remediation off, the fleet is still classified and reported, and
+    # the run exits 2 naming the credential. No branch is pushed either way,
+    # which is the whole of what the move to `main()` bought.
+    author_token = ""
+    author_refusal = ""
+    if args.create_prs:
+        author_token = os.environ.get(AUTHOR_TOKEN_ENV, "").strip()
+        author_refusal = check_author_identity(author_token) or ""
+        if author_refusal:
+            sys.stderr.write(f"::error::{author_refusal}\n")
+            sys.stderr.write("::error::Remediation is disabled for this run; the "
+                             "read-only audit below still ran.\n")
+    remediating = args.create_prs and not author_refusal
+
     rows: "list[tuple[str, str, str, str]]" = []
     drifted = unreadable = write_errors = 0
+    aborted_after = ""
 
     for repo in targets:
         try:
@@ -414,9 +636,33 @@ def main() -> int:
             action = "unpaired/duplicated markers — repair by hand, never auto-spliced"
         elif state != IN_SYNC:
             drifted += 1
-            if args.create_prs:
-                error = remediate(org, repo, branch, build_desired(text, canon, state),
-                                  args.issue, file_on_base=(state != NO_FILE))
+            if args.create_prs and not remediating:
+                # NAMED PER ROW, so the report cannot be mistaken for a plain
+                # audit that nobody asked to remediate. Not counted as a write
+                # error: the write was never attempted, and inflating the count
+                # per repo would hide the single cause behind sixteen symptoms.
+                action = f"NOT REMEDIATED: {AUTHOR_TOKEN_ENV} refused (see below)"
+            elif remediating:
+                try:
+                    error = remediate(org, repo, branch,
+                                      build_desired(text, canon, state),
+                                      args.issue,
+                                      file_on_base=(state != NO_FILE),
+                                      author_token=author_token)
+                except AuthorUnusable as exc:
+                    # STOP THE FLEET (Bugbot, #348). The credential is the
+                    # same for every repo, so carrying on would push a branch
+                    # to all of them and open a PR on none -- the half-rollout
+                    # the `main()` gate exists to prevent, arriving through the
+                    # one failure mode that gate cannot see: a token that
+                    # resolves but cannot create.
+                    write_errors += 1
+                    aborted_after = repo
+                    rows.append((repo, branch, state,
+                                 f"REMEDIATION FAILED: {exc} -- ABORTING the "
+                                 "remaining repos; this credential cannot open "
+                                 "PRs anywhere"))
+                    break
                 if error:
                     write_errors += 1
                     action = f"REMEDIATION FAILED: {error}"
@@ -432,6 +678,22 @@ def main() -> int:
     lines.append("")
     lines.append(f"{len(targets)} targets: {drifted} drifted, {unreadable} unreadable/malformed, "
                  f"{write_errors} failed writes, {len(EXEMPT)} exempt.")
+    if author_refusal:
+        # IN THE REPORT, not only on stderr. The report is what lands in the
+        # step summary and in report.md; a refusal that lived only in the log
+        # would leave a reader of the table wondering why every drifted repo
+        # says NOT REMEDIATED.
+        lines.append("")
+        lines.append(f"**REMEDIATION DISABLED** — {author_refusal} The audit "
+                     "above is complete and current; no branch was pushed and "
+                     "no PR was opened or refreshed.")
+    if aborted_after:
+        # SAID IN THE REPORT, not only in the log. A run that stopped early
+        # and did not say so reads as a complete sweep of a smaller fleet.
+        lines.append("")
+        lines.append(f"**ABORTED at `{aborted_after}`** -- `{AUTHOR_TOKEN_ENV}` "
+                     "resolves but cannot open PRs, so the remaining targets "
+                     "were left untouched rather than given a branch each.")
     report = "\n".join(lines)
     print(report)
 
@@ -443,7 +705,10 @@ def main() -> int:
         with open(args.report_file, "w", encoding="utf-8") as handle:
             handle.write(report + "\n")
 
-    if unreadable or write_errors:
+    if unreadable or write_errors or author_refusal:
+        # `author_refusal` is exit 2 -- "could not remediate" -- and NOT the
+        # `drifted` path below, which returns 0 under --create-prs on the
+        # premise that every drifted repo now has a PR open. Here none does.
         return 2
     if drifted:
         # With --create-prs every drifted repo now has a sync PR open: the run

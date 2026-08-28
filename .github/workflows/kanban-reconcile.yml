@@ -92,6 +92,34 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          # NARROWED, NOT MADE READ-ONLY (backend#2157). This backstop genuinely
+          # writes: three ProjectV2 mutations, and it CREATES labels
+          # (`POST repos/{o}/{r}/labels`) and applies them
+          # (`POST .../issues/{n}/labels`) for `keep-open` and `sibling-merge`.
+          # Pretending otherwise would break the Monday run.
+          #
+          # THE WIN HERE IS `contents`. It was minting contents:WRITE across
+          # every repo the installation covers -- the capability that can push
+          # code anywhere -- to run a job whose only content access is READING
+          # `.github/workflows/add-to-kanban.yml` and a couple of branch refs.
+          # That drops to read, and administration:read / actions:read /
+          # checks:read go entirely.
+          #
+          # DERIVED FROM THE CALLS:
+          #   contents/.github/workflows/*, branches/{main,master} -> contents: read
+          #   labels create + apply                                -> issues: WRITE
+          #   the same labels applied to PRs                        -> pull-requests: WRITE
+          #   addProjectV2ItemById / updateProjectV2ItemFieldValue /
+          #   archiveProjectV2Item                                  -> projects: WRITE
+          #
+          # `pull-requests: write` is here because the labels land on PRs as well
+          # as issues and the labels endpoint is shared. If a dry-run dispatch
+          # shows `issues: write` alone covers it, this can narrow again -- but
+          # guessing it short would fail on the one path that only runs weekly.
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: write
+          permission-organization-projects: write
 
       - name: Resolve project + field/option IDs
         id: ids
@@ -370,10 +398,14 @@ jobs:
           DONE_OPT="${{ steps.ids.outputs.done_opt }}"
           CANCELLED_OPT="${{ steps.ids.outputs.cancelled_opt }}"
           BACKLOG_OPT="${{ steps.ids.outputs.backlog_opt }}"
-          # Needed by the router-miss backstop below: when the closure router failed to
-          # set a stage, this step derives it from the closing PR's base branch.
-          ON_DEV_OPT="${{ steps.ids.outputs.on_dev_opt }}"
-          FR_STAGING_OPT="${{ steps.ids.outputs.fr_staging_opt }}"
+          # `ON_DEV_OPT` AND `FR_STAGING_OPT` USED TO BE RESOLVED HERE, and the
+          # comment said they were "needed by the router-miss backstop below:
+          # when the closure router failed to set a stage, this step derives it
+          # from the closing PR's base branch". backend#2722 removed that
+          # derivation -- a completed issue is terminal, not a deploy state -- so
+          # both became dead here and shellcheck said so (SC2034). They are still
+          # resolved in the step that sweeps drifted PR cards, which is the only
+          # place a deploy column is a legitimate destination.
           # The board's Status columns IN ORDER, resolved in the `ids` step --
           # `$PROJ` does not survive into this shell (Bugbot, .github#252).
           STATUS_ORDER="${{ steps.ids.outputs.status_order }}"
@@ -563,92 +595,34 @@ jobs:
                           printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$DONE_OPT" "$REPO#$NUM closed issue completed, no closer ($COL -> Done)" "closed-issue-terminalized" >> moves.tsv
                           ;;
                         PullRequest|Commit)
-                          # It shipped somewhere, and the card is NOT in a deploy column --
-                          # exactly the router-miss this job exists to backstop.
+                          # TERMINAL, NOT A DEPLOY STATE (backend#2722). This arm used
+                          # to derive a stage from the closer's base branch and write
+                          # `On dev` / `FR on staging` / `Prod`, mirroring the router.
+                          # The router no longer does that for ISSUES, and a backstop
+                          # that still did would be the slower job silently undoing the
+                          # faster one -- the exact failure .github#295's comment above
+                          # was written to prevent, arriving from the other direction
+                          # (Bugbot, High).
                           #
-                          # Skipping was wrong: the card is closed, sitting in an active
-                          # column, and archive only takes terminal ones -- so it stayed
-                          # there permanently. That is the invariant this job enforces,
-                          # broken by the job itself (Bugbot, .github#127).
+                          # A deploy column is a property of a PR. A finished ISSUE
+                          # belongs in `Done` whether or not its fix shipped, and
+                          # leaving issue cards in deploy columns is what stopped
+                          # `kanban-archive` clearing them: on 2026-08-25, 16 closed
+                          # issues sat in `Ready for prod` whose fixes were only on
+                          # `develop`, which is three columns of overstated progress
+                          # that nothing swept.
                           #
-                          # So do what the router failed to do: derive the stage from the
-                          # closer -- THROUGH THE SAME MAPPING THE ROUTER USES
-                          # (Bugbot, .github#295). This used to be a hand-kept copy,
-                          # justified by "identical, deliberately -- when the two disagree
-                          # the faster one wins and the slower one silently undoes it"
-                          # (.github#126). backend#2243 made that justification unsafe: the
-                          # router now honours a per-repo `.kanban.yml`, so an identical
-                          # copy here is no longer identical, and this weekly sweep would
-                          # move an overridden card BACK onto a deploy column -- the slower
-                          # one silently undoing the faster one, exactly as predicted, via
-                          # the mechanism that comment was written to prevent.
+                          # Having a closer is still what distinguishes this from the
+                          # NONE arm in the LOG, so the reason stays legible -- but both
+                          # now reach the same column, which is the whole point of the
+                          # rule.
                           #
-                          # `branch_status_map.py` is local: this job only ever runs in
-                          # tracebloc/.github.
-                          # SOFT-FAILS, BECAUSE THIS IS A SWEEP (Bugbot, .github#295).
-                          # `read_override` REFUSES on an unreadable `.kanban.yml`
-                          # (403, 5xx, rate limit, bad YAML) and `resolve` refuses on
-                          # one naming a Status the mapping does not declare
-                          # (backend#2324) -- correct for a single card, wrong here: a
-                          # bare command substitution under `set -euo pipefail` would
-                          # let ONE bad repo truncate the whole weekly backstop
-                          # mid-loop, while the sibling closer lookups beside it
-                          # already soft-fail.
-                          #
-                          # And it SKIPS rather than defaulting. Falling back to the
-                          # default mapping would be the fail-open this PR removed,
-                          # one layer out: the router already moved that card
-                          # correctly, and this sweep exists to fix MISSES, not to
-                          # overrule with a guess.
-                          #
-                          # STDERR IS KEPT (backend#2324). The skip line below says a
-                          # card was left alone; only the mapper's own message says
-                          # which repo's `.kanban.yml` to go and fix.
-                          if ! DEST=$(python3 scripts/branch_status_map.py \
-                                        "$CLOSER_BASE" "$ORG/$REPO" "$CLOSER_BASE" \
-                                        | jq -r '.status'); then
-                            echo "  $REPO#$NUM: the branch->Status mapping could not be resolved (closer base '$CLOSER_BASE'; see the error above) - leaving it alone rather than guessing a column"
-                            continue
-                          fi
-                          # A Commit closer carries no base ref, and an unrecognised base
-                          # takes the router's same default: start at On dev and let a
-                          # later deploy signal promote it.
-                          [ -n "$DEST" ] || DEST="On dev"
-                          # Status NAME -> the project's option id. NOT a second copy of
-                          # the branch mapping -- a different relation entirely, and the
-                          # only place these ids are known.
-                          case "$DEST" in
-                            "Prod")           OPT="$PROD_OPT" ;;
-                            "FR on staging")  OPT="$FR_STAGING_OPT" ;;
-                            "On dev")         OPT="$ON_DEV_OPT" ;;
-                            # A `.kanban.yml` may now map a branch to `Done` -- a repo
-                            # that deploys nothing (backend#2242). Without this arm the
-                            # backstop SKIPPED exactly the repos the override exists for:
-                            # a router miss left the card in an active column forever,
-                            # which is the invariant .github#127 fixed for every other
-                            # mapping. `$DONE_OPT` was already in scope and already
-                            # written by the no-closer arm above, so the skip was an
-                            # omission rather than a limit (Bugbot, .github#304).
-                            #
-                            # SAFE HERE FOR THE SAME REASON THAT ARM IS: the enclosing
-                            # `_skip` guard has already run `classify_column "$COL"` and
-                            # required `no`, so the card is in neither a deploy state nor
-                            # a column this board cannot place. Writing Done from inside
-                            # this branch cannot erase a deployment.
-                            "Done")           OPT="$DONE_OPT" ;;
-                            # `Staging (agent review)` and `Ready for prod` are
-                            # DELIBERATELY absent, not missed: nothing writes rank 7 yet
-                            # (RFC-BACKEND-1552 D5 -- read-only until backend#1578) and
-                            # `Ready for prod` is a human `/fr-pass` act (D6). This job
-                            # resolves no option id for either, and the selftest keys on
-                            # exactly that: an arm is required where the id exists.
-                            # An override naming a column this job has no option id for
-                            # cannot be written. Skip it rather than writing the wrong
-                            # column: the router already moved the card correctly, and
-                            # this sweep exists to fix MISSES, not to overrule.
-                            *) echo "  $REPO#$NUM: closer base '$CLOSER_BASE' maps to '$DEST', which this job has no option id for - leaving it alone" ; continue ;;
-                          esac
-                          printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$OPT" "$REPO#$NUM closed by $CLOSER (base=${CLOSER_BASE:-none}), router missed it ($COL -> $DEST)" "closed-issue-stage-derived" >> moves.tsv
+                          # SAFE FOR THE SAME REASON THE NONE ARM IS: the enclosing
+                          # `_skip` guard already required `classify_column "$COL"` to
+                          # be `no`, so this card is in neither a deploy state nor a
+                          # column the board cannot place. Writing Done here cannot
+                          # erase a deployment.
+                          printf '%s\t%s\t%s\t%s\n' "$ITEM_ID" "$DONE_OPT" "$REPO#$NUM closed issue completed, closed by $CLOSER (base=${CLOSER_BASE:-none}) ($COL -> Done)" "closed-issue-terminalized" >> moves.tsv
                           ;;
                         NOEVENT)
                           # The read succeeded and the timeline carried no ClosedEvent at

@@ -352,29 +352,28 @@ _rec = (WF / "kanban-reconcile.yml").read_text()
 _arms, _ids = reconcile_dest_arms(_rec), reconcile_option_ids(_rec)
 # FAIL CLOSED ON A PARSE THIS NO LONGER DESCRIBES (rule 3): two empty sets satisfy
 # the assertion below and look exactly like a clean tree.
-eq("reconcile's DEST arms parsed, with the anchor they must contain",
-   ("Prod" in _arms, len(_arms) >= 3), (True, True))
-# THE ANCHOR NAMES THE HARD CASE ON PURPOSE. `Done` alone satisfied the old, broken
-# extractor; `FR on staging` is reachable only through `opt_either`, whose argument
-# list is the one containing a `)`. An anchor that a broken parser can pass is not an
-# anchor (Bugbot, .github#304).
-eq("reconcile's resolved option ids parsed, including the one only `opt_either` "
-   "reaches, whose argument list contains a `)`",
-   ("Done" in _ids, "FR on staging" in _ids, "Staging (human review)" in _ids,
-    len(_ids) >= 8), (True, True, True, True))
-eq("every declared Status reconcile has an option id for has a DEST arm, so the "
-   "weekly backstop cannot silently skip an overridden repo",
-   armless(ENV_FOR_STATUS, _arms, _ids), [])
-# BOTH DIRECTIONS. A predicate returning [] for every input is indistinguishable
-# from a satisfied invariant (rule 5).
-eq("the guard fires when an id exists and the arm does not",
-   armless(ENV_FOR_STATUS, _arms - {"Done"}, _ids), ["Done"])
-eq("the guard stays silent when there is no id to write -- the deliberate case",
-   armless(ENV_FOR_STATUS, _arms - {"Done"}, _ids - {"Done"}), [])
-# AND IT FIRES ON THE `opt_either` NAME TOO, which is the case the broken extractor
-# could not see: with only `Done` mutated, this whole guard was vacuous for it.
-eq("the guard fires for the id that only `opt_either` resolves",
-   armless(ENV_FOR_STATUS, _arms - {"FR on staging"}, _ids), ["FR on staging"])
+# THE ARMS ARE GONE, AND THAT IS NOW THE INVARIANT (backend#2722).
+#
+# This used to assert the opposite: every Status reconcile had an option id for
+# needed a `case "$DEST"` arm, or the weekly backstop silently skipped exactly the
+# repos an override exists for (.github#304). That was right while reconcile
+# DERIVED a deploy column for a closed completed issue. It no longer does -- the
+# card goes to `Done` whatever branch closed it -- so there is no `$DEST` to look
+# up and no arm to omit.
+#
+# Asserted as an absence rather than deleted, because "no arms" and "the extractor
+# stopped working" look identical otherwise. `reconcile_dest_arms` is proven to
+# still find arms in a fixture below, so an empty result here means the arms are
+# gone rather than the reader.
+eq("reconcile derives no $DEST at all, so no arm can be silently missing",
+   reconcile_dest_arms(_rec), set())
+eq("...and the extractor that says so can still see an arm when one exists",
+   reconcile_dest_arms('            "Done")           OPT="$DONE_OPT" ;;'),
+   {"Done"})
+eq("reconcile resolves no branch through the mapper for a closed issue",
+   "branch_status_map.py" in "\n".join(
+       ln for ln in _rec.splitlines() if not ln.strip().startswith("#")),
+   False)
 
 # --- `--no-override` answers without consulting anything -------------------
 # The router needs a safe fallback: publishing NO Status leaves the built-in
@@ -412,8 +411,24 @@ eq("without the flag, an unreachable override refuses", _r.returncode != 0, True
 # because the failure is a MISSING argument and no unit call can show that.
 _WF = pathlib.Path(__file__).resolve().parent.parent.parent / ".github" / "workflows"
 for _f, _n in (("advance-deploy-env.yml", 1),
-               ("kanban-closure-router.yml", 2),
-               ("kanban-reconcile.yml", 1)):
+               # ONE call site in the router, not two, since backend#2722. The second
+               # was in the "issue closed as completed" arm, which mirrored the closing
+               # PR's base and therefore had to consult the override. A completed issue
+               # now goes straight to `Done`, so it consults nothing and the arm is gone.
+               # Kept as an exact count rather than `>= 1`: this assertion exists to
+               # catch a call site that forgets the ref, and a floor would let a new
+               # unchecked one hide behind an old good one.
+               ("kanban-closure-router.yml", 1),
+               # ZERO IN RECONCILE, since backend#2722 -- the same reasoning as the
+               # router's, one job later. Its only call site was the router-miss arm
+               # for a closed COMPLETED ISSUE, which mirrored the closing PR's base
+               # and therefore had to consult the override. A completed issue is now
+               # terminal, so that arm writes `Done` and consults nothing.
+               #
+               # The merged-PR lookback further down still places PR cards in deploy
+               # columns, but it always mapped its branches INLINE and never called
+               # the mapper -- so this count did not move because of it.
+               ("kanban-reconcile.yml", 0)):
     _txt = (_WF / _f).read_text()
     _lines = _txt.splitlines()
     _calls = []
@@ -464,8 +479,12 @@ _adv = (_WF / "advance-deploy-env.yml").read_text()
 # labels the card. Writing the default would claim a promotion happened on a read
 # that failed; writing nothing lets the built-in Item-closed automation set
 # `Cancelled`, and it acts on the close independently of this workflow.
+# ONE holding-state write, not two, since backend#2722 -- same reason as the call-site
+# count above: the completed-issue arm no longer maps a base, so it has no override to
+# find unusable. The pull_request arm still must write the holding state rather than the
+# default mapping.
 eq("the router writes the holding state on an unusable override",
-   _router.count('UNUSABLE_OVERRIDE="true"'), 2)
+   _router.count('UNUSABLE_OVERRIDE="true"'), 1)
 eq("the router does NOT fall back to the default mapping",
    "--no-override" in _router, False)
 eq("the router labels the card for the weekly pass",
@@ -487,10 +506,16 @@ eq("that scan would catch a reinstated 'unreadable' identifier",
    bool([ln for ln in ['          UNREADABLE_OVERRIDE="true"']
          if "UNREADABLE_OVERRIDE" in ln]), True)
 
-# RECONCILE: skips the item. It fixes MISSES, so a guessed column would overrule a
-# router that already got it right -- and nothing else acts on its silence.
-eq("reconcile skips rather than writing anything",
-   "leaving it alone rather than guessing a column" in _recon, True)
+# RECONCILE: has no override to find unusable any more (backend#2722). Its only
+# consumer was the closed-completed-issue arm, and that arm now writes `Done`
+# without asking any branch anything. The no-write path it used to guard -- "skip
+# rather than guess a column" -- guarded a guess that is no longer possible.
+#
+# What replaces it is stronger, not weaker: there is no path from a closed issue to
+# a deploy column at all, which `kanban-deploy-state-selftest.py` asserts directly
+# against the arm.
+eq("reconcile consults no override for a closed issue",
+   "leaving it alone rather than guessing a column" in _recon, False)
 
 # ADVANCE-DEPLOY-ENV: no fallback at all. A push has no competing automation, so a
 # failed run is a failed run and the card keeps whatever it had.
@@ -502,8 +527,12 @@ eq("advance-deploy-env has no fallback path", "--no-override" in _adv, False)
 # refusal is different: it names the branch, the bad value and the accepted
 # vocabulary, and that message is the ONLY thing that tells an operator which
 # `.kanban.yml` line to fix. Swallowed, the card is parked with no reason anywhere.
+# TWO CONSUMERS NOW, NOT THREE. `kanban-reconcile.yml` left this list in
+# backend#2722: its only mapper call site was the closed-completed-issue arm, and a
+# completed issue is terminal, so it maps no branch and has no stderr to preserve.
+# It is asserted to have NO call site above rather than dropped silently -- a
+# consumer that vanishes from a list is indistinguishable from one the loop forgot.
 for _f, _txt in (("kanban-closure-router.yml", _router),
-                 ("kanban-reconcile.yml", _recon),
                  ("advance-deploy-env.yml", _adv)):
     _lines = _txt.splitlines()
     _sites = [" ".join(_lines[_i:_i + 3]) for _i, _ln in enumerate(_lines)

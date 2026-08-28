@@ -355,35 +355,13 @@ shared_reasons:
     then, not a justification. That comparison used to name version_bump_pr_never_wired
     too; version-bump-pr.yml was DELETED under backend#1563 rather than wired, which is
     the other way this ends and the better one when nothing is calling it.
-    Arming is a briefing decision rather than a silent flip because two live PRs go red
-    the moment it is on - client#490 ("HOLD until v0.8.0 image") and client-runtime#192
-    ("DO NOT MERGE") - which is the gate working as intended (backend#1752,
-    data-ingestors#468).
-
-  bugbot_gate_rollout_pending: &bugbot_gate_rollout_pending >-
-    bugbot-gate had ZERO callers anywhere in the org when this anchor was written (measured
-    2026-08-23, immediately after .github#305 landed the reusable). THAT IS NO LONGER TRUE:
-    `claude-skills` took the first caller on 2026-08-25 (claude-skills#36, the backend#2284
-    pilot) and its row is now `required`, leaving this anchor cited by the OTHER repos only.
-    Re-derive the roster rather than trusting a count here:
-        grep -nE '^\s*exempt: \*bugbot_gate_rollout_pending\s*$' repo-inventory.yml
-    anchored deliberately -- the bare identifier also matches this paragraph (backend#2507). The reusable, its selftest and its mutation suite land
-    first so the DERIVATION can be reviewed on its own - deriving the verdict from Bugbot's
-    FINDINGS rather than trusting a status we do not control is the whole risk surface
-    (backend#2284). The callers follow in the rollout PR.
-    Same two-step blocked-gate was forced into, for the reason this file's header states:
-    .github's caller state is read from its audit branch over the API, so adding a caller and
-    flipping its entry to `required` in one PR fails on a caller not yet on the audit branch.
-    STAGED, NOT PARKED. If this anchor is still here once the rollout PR has merged, it has
-    become the same finding as wip_limit_check_has_no_callers: a reusable that shipped, was
-    never wired up, and had a written excuse for it. Treat it as a defect then, not a
-    justification.
-    Recorded because the omission was not free: with bugbot-gate.yml present as a reusable and
-    absent from this list, the org audit on develop went red at 2026-08-23T12:06Z with exit 2
-    and "Refusing to report on caller drift from an incomplete read" - failing closed before it
-    evaluated ANY per-repo state, including the stale-sweep flip that had merged 26 seconds
-    earlier. A reusable checked against no repo is reported by nothing, and the harness treats
-    that as a finding rather than a silence. It was right to.
+    Arming was a briefing decision rather than a silent flip: at the time this was
+    written two live PRs would have gone red the moment it was on, which is the gate
+    working as intended (backend#1752, data-ingestors#468). Neither is live now -
+    client#490 ("HOLD until v0.8.0 image") merged, and client-runtime#192 ("DO NOT
+    MERGE") was closed unmerged on 2026-08-26 - so treat those two as history rather
+    than as a standing reason to delay. Re-measure which blocked PRs are actually open
+    before arming; do not trust this sentence to still describe the fleet.
 
   no_staging_branch_no_hop_to_gate: &no_staging_branch_no_hop_to_gate >-
     fr-gate gates the staging -> prod hop. This repo has no `staging` branch, so there is no hop
@@ -581,8 +559,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -615,8 +592,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -648,8 +624,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -670,29 +645,105 @@ repos:
   # first branch, which is the correct order: the inventory records measured reality,
   # and there was nothing to measure.
   #
-  # Every cell below is measured on `develop`, this repo's DEFAULT and only branch.
+  # ON THE TRAIN SINCE 2026-08-26T12:12:21Z -- release-train/repos.yml commit
+  # 8330f408, "feat(train): design-system-v2 joins the train", onboarded under
+  # backend#2547. `release_train: false` survived that hop by one day, and that
+  # single cell failed the repo-conformance audit -> the required `gate` context
+  # -> `.github`'s OWN promotion to staging (backend#2653). The guard was right
+  # to refuse: it cannot tell a bookkeeping disagreement from a repo that joined
+  # the train with no fr-gate caller, and must not guess. (The caller is present
+  # here -- `fr-gate-caller.yml`, measured on develop 2026-08-27 -- so nothing
+  # was ever actually ungated.)
+  #
+  # THE ONE-BRANCH MEASUREMENT THIS BLOCK WAS WRITTEN ON IS GONE. Joining the
+  # train created the promotion lane: re-measured 2026-08-27, the repo has
+  # `develop` (default), `staging` and `main`. Every cell below is measured on
+  # `develop`, which is now the develop-first audit branch BECAUSE the repo is
+  # on the train (caller-drift.py:1216), not because it is the only branch.
   design-system-v2:
     visibility: private
-    release_train: false
+    release_train: true
     protection:
+      # ALL THREE ROLES NOW EXIST AND NOT ONE OF THEM IS PROTECTED. Measured
+      # 2026-08-27: `develop`, `staging` and `main` each return "Branch not
+      # protected" from the classic endpoint AND the repo has ZERO rulesets, so
+      # neither protection system covers any of them. Joining the train created
+      # the branches; it did not arm them.
+      #
+      # WHY THESE STAY `exempt` RATHER THAN FLIPPING TO `required` WITH THE FLAG
+      # ABOVE: `required` over an unarmed branch is a RED gate on merge, and
+      # nothing in this file may land red (CLAUDE.md rule 4 -- arm while green).
+      # The order is branch first, cell after, the same order the callers block
+      # below states for exemptions. Arming is the open half of backend#2547.
+      #
+      # STALENESS STILL BITES, which is what keeps these honest: the moment any
+      # of the three gains protection of either kind, caller-drift flags the
+      # exemption as stale (caller-drift.py evaluate_protection) and the cell
+      # must be promoted. An unprotected branch is the ONE state these rows can
+      # describe without the guard objecting -- see `no_develop_branch_single_branch_repo`.
       develop:
-        exempt: *develop_unprotected_non_train
+        exempt: "`develop` exists and carries NO protection of either kind (classic endpoint 404s `Branch not protected`; repo has zero rulesets - measured 2026-08-27). This repo is ON the train since 2026-08-26, so protection_policy.develop DOES apply here: this is a real, UNREMEDIATED gap rather than a structural one, and arming it is the open half of backend#2547. Deliberately not `required` yet - see the block comment above on arming before asserting."
       staging:
-        exempt: *no_staging_branch_not_on_train
+        exempt: "`staging` was created by the train onboarding and carries NO protection of either kind (measured 2026-08-27). Same case as `develop` above: on-train policy applies, nothing is armed, UNREMEDIATED under backend#2547. Recorded rather than aliased to `no_staging_branch_not_on_train`, whose premise - no train, no staging branch - is false here in both halves as of 2026-08-26."
       prod:
-        exempt: "No prod branch exists. `develop` is the DEFAULT and the only branch (measured 2026-08-25) - this repo has neither `staging` nor `main`, so there is no prod role for a policy to describe. Structural, not a gap."
+        exempt: "`main` exists (measured 2026-08-27) and carries NO protection of either kind, so the fleet's strictest role - enforce_admins closed, fr-gate required - is enforced by nothing. Same case as the two rows above: on-train policy applies, arming is UNREMEDIATED under backend#2547. This row previously read \"No prod branch exists ... structural, not a gap\"; the branch now exists, so that reading is retired."
     rulesets:
       promotion_merge_commit_only:
-        exempt: "Not on the release train: no staging or prod branch, so there are no promotion branches for a merge-method rule to protect."
+        exempt: "The repo has ZERO rulesets of any kind (measured 2026-08-27) while `staging` and `main` now exist and the train promotes through them - so nothing stops a promotion PR being squash-merged, which collapses the merge-commit ancestry promote-repo.sh reads and jams the next prepare. UNREMEDIATED, tracked with the protection arming in backend#2547. Not `required`, for the same arm-before-asserting reason as the protection rows above."
       tag_trust_root:
-        exempt: "Publishes nothing from a `v*` tag today - no tag-triggered workflow and no v* tags cut (measured 2026-08-25). Revisit if `publish.yml` gains a tag trigger."
+        exempt: "The repo has ZERO rulesets (measured 2026-08-27). The previous reason here - \"publishes nothing from a `v*` tag today - no tag-triggered workflow and no v* tags cut\" - is now false in BOTH halves: `publish.yml` triggers on `push: tags: ['v*']` and publishes to GitHub Packages, and `v0.1.0-rc.1` is cut. So the trust root is MISSING rather than inapplicable. UNREMEDIATED, tracked in backend#2547."
     callers:
+      # THE QUESTION THIS NOTE ANSWERED HAS EXPIRED, and the answer is kept
+      # because the measurements in it are the record. It asked why an OFF-TRAIN
+      # repo carried on-train promotion cells (Bugbot Medium, backend#2512,
+      # deferred from the .github#334 hop): this block was created 2026-08-25 by
+      # copying ON-TRAIN `design-system`, so all three promotion-shaped rows
+      # arrived `required` while `claude-skills`, `release-train` and `rfcs`
+      # exempt version-bump and fr-gate. Since 2026-08-26 this repo IS on the
+      # train, so `design-system` is simply the right template and the three
+      # non-train repos are no longer the comparison class.
+      # RE-MEASURED 2026-08-27, AFTER THE REPO JOINED THE TRAIN (backend#2653).
+      # The 2026-08-26 measurement this note was written on said "ONE branch,
+      # `develop`", and the whole dormancy argument below rested on it. The
+      # onboarding created `staging` and `main`, so it no longer holds:
+      #
+      #   version-bump-gate  fires on `branches: [develop]` -- ACTIVE on every PR
+      #                      here, and now applicable through the train too: the
+      #                      repo declares `version_file: package.json`.
+      #   fr-gate            fires on `branches: [staging, main, master]`. `staging`
+      #                      and `main` NOW EXIST, so this is LIVE, not dormant --
+      #                      it is the gate on every promotion into them.
+      #   fr-pass-comment    fires on `issue_comment` with NO branch filter, so it
+      #                      CAN fire. See its own note.
+      #
+      # WHY ALL THREE STAY `required`: they are what an on-train repo is meant to
+      # carry, and independently all three callers EXIST here -- an `exempt` row
+      # whose caller is present is the stale-exemption finding
+      # (caller-drift.py:2309). Exempting anything here would mean DELETING the
+      # caller first -- caller first, entry after -- and there is now no reason
+      # to want that. backend#2512's open half was whether a component library
+      # nobody promotes should carry them; the train answered it by promoting one.
       version-bump-gate.yml: required   # version-bump-gate-caller.yml
       advance-deploy-env.yml: required   # advance-deploy-env.yml
       code-quality.yml: required   # code-quality-caller.yml
       customer-priority-bump.yml: required   # customer-priority-bump.yml
+      # LIVE AS OF 2026-08-26, and it was DORMANT when this row was written --
+      # the note here said so, on the then-true measurement that staging/main
+      # did not exist. Joining the train created both, so the caller's
+      # `branches: [staging, main, master]` now matches real promotion PRs and
+      # this row asserts an enforcing gate, not merely a present file.
       fr-gate.yml: required   # fr-gate-caller.yml
       stale-backlog.yml: required   # stale-backlog-caller.yml
+      # THE MISFIRE THIS NOTE DESCRIBED IS GONE, and the reason is worth keeping:
+      # its caller triggers on `issue_comment` with no branch filter, so a
+      # `/fr-pass` typed here always reached the reusable -- which, in a repo with
+      # no `staging`, had no `FR on staging` card to advance. Since 2026-08-26 the
+      # repo is on the train and HAS a `staging`, so the comment now means exactly
+      # what it means everywhere else. `release-train` also keeps this `required` while
+      # exempting the other two, which is the sibling split Bugbot flagged; that
+      # is deliberate there, because the train's own cards do get functionally
+      # reviewed. Whether the reasoning transfers to a component library nobody
+      # promotes is the open half of backend#2512 and is NOT settled here.
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
       set-pr-status.yml: required   # set-pr-status.yml
@@ -700,8 +751,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -761,13 +811,16 @@ repos:
           entry already asserts. The fr-gate only reports on a PR targeting staging/main/master
           as a promotion, so there is nothing here for it to gate. Structural, the same shape as
           release-train's fr-gate reason.
-          WAS `required` until .github#335. The audit began reporting "MISSING required caller
-          for fr-gate.yml on develop" mid-review, and the caller is genuinely absent from the
-          repo. Flipping the row rather than restoring the caller is the call: a required caller
-          that cannot report leaves the row permanently red, and requiring a context nothing
-          produces is the client#665 defect this file warns about two entries up. If the caller
-          was removed by mistake, restore it and flip this back -- the remedy runs both ways and
-          the audit will say so either way.
+          WAS `required` until .github#335, and the caller's absence is DELIBERATE, not a
+          discovery. claude-skills#38 removed `fr-gate-caller.yml` on purpose (+0/-15) as the
+          remainder of backend#2347: this repo does not ride the train, so it was carrying a
+          train caller it cannot use. The audit reporting "MISSING required caller" mid-review
+          was that removal surfacing, not a caller going astray.
+          DO NOT RESTORE IT. An earlier revision of this reason ended "if the caller was removed
+          by mistake, restore it and flip this back", which reads as an open question and invites
+          undoing a deliberate change; the remedy does NOT run both ways here (saadqbal via
+          saadqbal via Bugbot on the .github#334 staging hop). Restoring it would require a context nothing produces, which is
+          the client#665 defect this file warns about two entries up.
       stale-backlog.yml: required   # stale-backlog-caller.yml
       fr-pass-comment.yml:
         exempt: *fr_pass_comment_caller_missing
@@ -808,8 +861,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -840,8 +892,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -874,8 +925,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -906,8 +956,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -938,8 +987,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1007,8 +1055,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1055,8 +1102,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1141,8 +1187,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1181,8 +1226,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1248,8 +1292,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
       stale-backlog.yml:
         exempt: *stale_backlog_exemption_needs_redeciding
     copies:
@@ -1333,8 +1376,20 @@ repos:
           # every `rfcs` PR, `main` COULD require them -- `rfcs/develop` already does,
           # which makes develop stricter than main here and backwards from the fleet.
           # That is a protection change rather than an inventory correction, so it is a
-          # ticket: naming it in a comment is the same mechanism that just failed, and
-          # `reason-citations.py` can at least check that a cited issue is still open.
+          # ticket.
+          #
+          # THIS CITATION IS NOT COVERED BY THE CITATION GUARD, and an earlier revision
+          # of this comment claimed it was (Bugbot, backend#2517). `reason-citations.py`
+          # collects keys in REASON_KEYS whose value is a STRING -- it never reads YAML
+          # comments, deliberately, because a commented-out example is not a citation.
+          # `backend#2501` is named only here, in a comment, so the guard cannot see it
+          # and this follow-up CAN go stale behind a green run.
+          #
+          # Moving it into a scanned string is not the fix: the only reason-bearing field
+          # in this cell is `reason:`, which is an ALIAS to a shared anchor, so putting a
+          # repo-specific ticket in it would either duplicate that anchor inline or leak
+          # this note into every other cell citing it. The honest statement is that the
+          # ticket tracks itself and this comment does not pretend otherwise.
           required_checks: []
     rulesets:
       promotion_merge_commit_only:
@@ -1389,8 +1444,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
       stale-backlog.yml:
         exempt: *stale_backlog_not_a_backlog
     copies:
@@ -1429,8 +1483,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1463,8 +1516,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1495,8 +1547,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1534,8 +1585,7 @@ repos:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
-      bugbot-gate.yml:
-        exempt: *bugbot_gate_rollout_pending
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:

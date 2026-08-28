@@ -11,7 +11,9 @@ Exit 0 when every path behaves the way it is supposed to.
 from __future__ import annotations
 
 import base64
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -179,12 +181,25 @@ class GhScript:
     def __init__(self, steps):
         self.steps = list(steps)
         self.calls = []
+        self.kwargs = []          # parallel to .calls; records the identity each ran as
 
-    def __call__(self, *args):
+    def __call__(self, *args, **kwargs):
+        # KWARGS ARE RECORDED, not swallowed. `gh(..., token=...)` is how PR
+        # creation runs as the human instead of the App (backend#2590), and a stub
+        # that accepted **kwargs and dropped them would let that argument vanish
+        # while every assertion here still passed.
         self.calls.append(args)
+        self.kwargs.append(kwargs)
         if not self.steps:
             raise AssertionError("gh called more often than scripted")
         return self.steps.pop(0)
+
+    def kwargs_for(self, needle):
+        """The kwargs of the first call containing `needle`, or None."""
+        for args, kw in zip(self.calls, self.kwargs):
+            if needle in args:
+                return kw
+        return None
 
 
 OK_PAYLOAD = json.dumps({"sha": "abc123", "content": base64.b64encode(b"hello").decode()})
@@ -259,12 +274,20 @@ try:
         (1, "", "gh: Reference already exists (HTTP 422)"),   # branch REUSED, not fresh
         NOT_FOUND, NOT_FOUND,                          # absence, confirmed by one re-read
         (0, "{}", ""),                                 # sha-less PUT creates it
-        (0, "[]", ""),                                 # pr list
+        # EMPTY, not "[]" -- `--jq '.[0].number // empty'` returns an empty
+        # string when there is no open PR, and "[]" is TRUTHY. With the
+        # existing-PR path now also making two edit calls (#348), a "[]" here
+        # would send this test down that branch while still consuming the same
+        # number of stub entries -- passing while exercising the opposite case.
+        (0, "", ""),                                   # pr list -- none yet
         (0, "https://x/pull/1", ""),                   # pr create
+        (0, "", ""),                                   # pr edit --add-reviewer
+        (0, "", ""),                                   # pr edit --add-assignee
     ])
     sync.gh = stub
     try:
-        err = sync.remediate("o", "r", "develop", "content", 1602, file_on_base=True)
+        err = sync.remediate("o", "r", "develop", "content", 1602, file_on_base=True,
+                             author_token="pat-for-the-human")
         reads = [c for c in stub.calls if any("contents/CLAUDE.md?ref=" in str(a) for a in c)]
         record(err is None and len(reads) == 2,
                "reused branch: a genuine 404 is absence after ONE re-read, not a retry storm",
@@ -278,7 +301,544 @@ try:
 finally:
     sync.gh, sync.time.sleep = _real_gh, _real_sleep
 
+# ------------------------------------------------- _ensure_pr(): the PR title
+# WHY: the title had no coverage at all, and that is how it shipped naming
+# backend#1602 parenthetically. closing-ref-gate.py then refused every sync PR
+# the remediation opened -- 19 repos, all red, none of them mergeable. The rule
+# is not restated here: parse_title is imported from the REAL gate, so if the
+# gate's notion of "names a ticket" changes, this test moves with it.
+_gate_path = os.path.join(HERE, os.pardir, "closing-ref-gate.py")
+_gspec = importlib.util.spec_from_file_location("closing_ref_gate", _gate_path)
+if _gspec is None or _gspec.loader is None:
+    sys.exit(f"cannot import {_gate_path}")
+gate = importlib.util.module_from_spec(_gspec)
+_gspec.loader.exec_module(gate)
+
+try:
+    stub = GhScript([
+        (0, "", ""),                    # pr list -> no open PR
+        (0, "https://x/pull/7", ""),    # pr create
+        (0, "", ""),                    # pr edit --add-reviewer
+        (0, "", ""),                    # pr edit --add-assignee
+    ])
+    sync.gh = stub
+    os.environ[sync.AUTHOR_TOKEN_ENV] = "pat-for-the-human"
+    sync._ensure_pr("o/r", "head", "develop", 1602, "pat-for-the-human")
+    created = [c for c in stub.calls if "create" in c]
+    title = created[0][created[0].index("--title") + 1] if created else ""
+    body = created[0][created[0].index("--body") + 1] if created else ""
+
+    named = gate.parse_title(title)
+    record(bool(created) and not named,
+           "_ensure_pr: the PR title names no ticket the PR does not close",
+           f"title={title!r} -> closing-ref-gate.parse_title found {len(named)} ref(s); "
+           "any ref here would demand a closing link to an epic 19 PRs share")
+
+    # ALL THREE KEYWORD FAMILIES, not just "Closes". GitHub honours close/closes/
+    # closed, fix/fixes/fixed and resolve/resolves/resolved, case-insensitively, and
+    # any one of them creates the closing link. Asserting only "Closes" left the door
+    # this whole PR exists to shut: `Fixes tracebloc/backend#1602` would have passed
+    # and closed the epic on the first of nineteen merges (Asad, .github#345).
+    # Written here rather than imported because closing-ref-gate.py has no such
+    # constant to import -- it delegates to GitHub's computed
+    # closingIssuesReferences and never scans text. If it ever grows one, import it
+    # the way parse_title is imported above and delete this tuple.
+    CLOSING_KEYWORDS = (
+        "close", "closes", "closed",
+        "fix", "fixes", "fixed",
+        "resolve", "resolves", "resolved",
+    )
+
+    def closing_keyword_in(text: str) -> "str | None":
+        low = text.lower()
+        return next((k for k in CLOSING_KEYWORDS if f"{k} " in low), None)
+
+    found = closing_keyword_in(body)
+    record("backend#1602" in body and found is None,
+           "_ensure_pr: the body keeps traceability WITHOUT any closing keyword",
+           f"'Part of ...#1602' is a reference (mentions 1602={'backend#1602' in body}); "
+           f"closing keyword found={found!r} — any of {len(CLOSING_KEYWORDS)} forms would "
+           "close the epic on the first of nineteen merges")
+
+    # Mutation anchor for the check above: the scan must catch a family it is not
+    # named after, or it is just the old "Closes"-only assertion wearing a tuple.
+    _fx = closing_keyword_in("Fixes tracebloc/backend#1602")
+    _rs = closing_keyword_in("Resolves tracebloc/backend#1602")
+    _cl = closing_keyword_in("Closed tracebloc/backend#1602")
+    _pt = closing_keyword_in("Part of tracebloc/backend#1602")
+    record(bool(_fx) and _fx.startswith("fix")
+           and bool(_rs) and _rs.startswith("resolve")
+           and bool(_cl) and _cl.startswith("clos")
+           and _pt is None,
+           "_ensure_pr: the keyword scan catches all three families, not only close/",
+           f"Fixes -> {_fx!r}, Resolves -> {_rs!r}, Closed -> {_cl!r}, 'Part of' -> {_pt!r} "
+           "(stem-prefix, not equality: the trailing space in the probe means the "
+           "inflected form matches, so 'Fixes' resolves to 'fixes' and not 'fix')")
+
+    # Mutation anchor: prove the assertion above is live rather than vacuous.
+    # If parse_title cannot see a ticket in a title that plainly has one, the
+    # check would pass for the wrong reason and the bug would return unseen.
+    record(bool(gate.parse_title("docs(claude): sync org-standards block (backend#1602)")),
+           "_ensure_pr: the title assertion is not vacuous",
+           "the pre-fix title IS seen as naming a ticket, so a regression reddens")
+finally:
+    sync.gh = _real_gh
+    os.environ.pop(sync.AUTHOR_TOKEN_ENV, None)
+
+# ------------------------------------- _ensure_pr(): WHO the PR is opened as
+# WHY: the author is the whole of backend#2590. An App installation token makes
+# the author `tracebloc-release-train[bot]`, Cursor Bugbot keys its review on the
+# author's seat, and a Bot has none -- so Bugbot reviewed 0 of 14 sync PRs and
+# `bugbot / review` failed closed on every one. The identity is invisible on the
+# resulting PR (same title, same body, same diff), so nothing but an assertion on
+# the CALL can tell the two apart.
+try:
+    _real_gh = sync.gh
+
+    # -- the PAT reaches `pr create`, and the ambient identity does not ----------
+    stub = GhScript([
+        (0, "", ""),                    # pr list -> no open PR
+        (0, "https://x/pull/9", ""),    # pr create
+        (0, "", ""),                    # pr edit --add-reviewer
+        (0, "", ""),                    # pr edit --add-assignee
+    ])
+    sync.gh = stub
+    os.environ[sync.AUTHOR_TOKEN_ENV] = "pat-for-the-human"
+    err = sync._ensure_pr("o/r", "head", "develop", 1602, "pat-for-the-human")
+
+    create_kw = stub.kwargs_for("create")
+    list_kw = stub.kwargs_for("list")
+    record(err is None and (create_kw or {}).get("token") == "pat-for-the-human",
+           "_ensure_pr: `pr create` runs as the author PAT, not the ambient App token",
+           f"err={err} create kwargs={create_kw} -- without token= the author is "
+           "tracebloc-release-train[bot] and Bugbot skips the PR")
+
+    # The OTHER half of the split, and the half a careless fix breaks: passing the
+    # PAT everywhere would work for Bugbot and quietly undo backend#2036's
+    # org-scoped read. `pr list` must still run as the ambient App identity.
+    record(list_kw == {},
+           "_ensure_pr: only PR creation changes identity -- `pr list` stays the App",
+           f"list kwargs={list_kw} (want {{}}: a token= here would mean the PAT "
+           "leaked onto the fleet-read path, reverting backend#2036)")
+
+    # -- reviewer AND assignee, both SYNC_REVIEWER ------------------------------
+    edits = [c for c in stub.calls if "edit" in c]
+    reviewer_edit = [c for c in edits if "--add-reviewer" in c]
+    assignee_edit = [c for c in edits if "--add-assignee" in c]
+    record(len(reviewer_edit) == 1 and sync.SYNC_REVIEWER in reviewer_edit[0]
+           and len(assignee_edit) == 1 and sync.SYNC_REVIEWER in assignee_edit[0],
+           "_ensure_pr: requests review from SYNC_REVIEWER and assigns the same person",
+           f"reviewer={reviewer_edit} assignee={assignee_edit}")
+
+    # THE REVIEWER MAY NOT BE THE AUTHOR. GitHub refuses an approving review from
+    # a PR's own author, so a sync PR authored by X and reviewed by X can never
+    # merge -- precisely the state 4 of the 14 open PRs were in before they were
+    # reassigned (docs#143, release-train#130, .github#344, claude-skills#39).
+    #
+    # THIS USED TO READ `SYNC_REVIEWER != "LukasWodka"` (@saqlainsyed007, #348).
+    # Two literals, in two files, agreeing with each other and with nothing
+    # else: re-provision SYNC_PR_AUTHOR_TOKEN to saqlainsyed007's PAT and
+    # author == reviewer, every --add-reviewer 422s, the deadlock returns, and
+    # this check stays GREEN because neither literal moved. The invariant is
+    # about the TOKEN's owner, so it is now asked of the token.
+
+    # -- fail closed with no PAT ------------------------------------------------
+    # The important direction. A fallback to the App token would open a PR that
+    # looks identical and that Bugbot silently skips, so "no PAT" must produce NO
+    # PR at all -- not a bot-authored one.
+    # THE HAPPY PATH IS FULLY SCRIPTED, on purpose. Scripting only `pr list` also
+    # "catches" a fallback -- but by over-running the stub and raising out of the
+    # suite, which is a crash, not a verdict. Then the run is red with no FAIL line
+    # naming this behaviour, and a mutation harness that greps for one records
+    # UNCAUGHT (measured: it did). Give the fallback every step it would need to
+    # SUCCEED, so what reddens is this assertion and not the scaffolding (rule 10:
+    # assert the specific failure).
+    stub = GhScript([
+        (0, "", ""),                    # pr list -> no open PR
+        (0, "https://x/pull/13", ""),   # pr create -- MUST NOT be reached
+        (0, "", ""),                    # pr edit --add-reviewer
+        (0, "", ""),                    # pr edit --add-assignee
+    ])
+    sync.gh = stub
+    os.environ[sync.AUTHOR_TOKEN_ENV] = ""
+    # THE EMPTY TOKEN IS THE INPUT, so it is passed as one. `main()` now refuses
+    # before any write (#348), and this pins the belt-and-braces refusal that
+    # remains here for a caller that skipped that gate.
+    err = sync._ensure_pr("o/r", "head", "develop", 1602, "")
+    created = [c for c in stub.calls if "create" in c]
+    record(err is not None and not created and sync.AUTHOR_TOKEN_ENV in err,
+           "_ensure_pr: an empty PAT opens NO PR and says which variable is missing",
+           f"err={(err or '')[:80]!r} create calls={len(created)} (want 0: a "
+           "bot-authored PR here is the backend#2590 defect reappearing)")
+
+    # Mutation anchor for the two checks above: prove the stub can actually SEE a
+    # token argument and an absent one, so neither assertion is passing vacuously.
+    probe = GhScript([(0, "", "")])
+    probe("pr", "create", token="sentinel")
+    record(probe.kwargs_for("create") == {"token": "sentinel"}
+           and probe.kwargs_for("nonexistent-verb") is None,
+           "_ensure_pr: the identity assertions are not vacuous",
+           f"stub observed {probe.kwargs_for('create')} for a scripted token= call, and "
+           "None for a call that never happened -- so token= going missing reddens")
+finally:
+    sync.gh = _real_gh
+    os.environ.pop(sync.AUTHOR_TOKEN_ENV, None)
+
 # ---------------------------------------------------------------------- tally
+
+# --------------------------------- the reviewer-is-not-the-author invariant,
+# --------------------------------- asked of the TOKEN rather than of a literal
+#
+# @saqlainsyed007 on #348. The old form compared two hardcoded logins, so the
+# one re-provisioning that breaks it -- pointing SYNC_PR_AUTHOR_TOKEN at
+# SYNC_REVIEWER's own PAT -- was invisible to the suite. `author_login` asks
+# GitHub who the credential is, and `main()` refuses before any write.
+_real_gh = sync.gh
+try:
+    stub = GhScript([(0, "saqlainsyed007", "")])
+    sync.gh = stub
+    record(sync.author_login("pat") == "saqlainsyed007",
+           "author_login: resolves the credential's owner from GitHub",
+           f"got {sync.author_login!r}")
+
+    stub = GhScript([(1, "", "gh: Bad credentials (HTTP 401)")])
+    sync.gh = stub
+    record(sync.author_login("pat") is None,
+           "author_login: an unresolvable token is None, not a guess",
+           "a token GitHub will not identify must not be treated as anybody")
+
+    # AND IT ASKS AS THE TOKEN, not as the ambient App identity -- otherwise it
+    # would resolve the App's login and compare the wrong pair.
+    stub = GhScript([(0, "someone", "")])
+    sync.gh = stub
+    sync.author_login("the-pat")
+    record(stub.kwargs_for("user") == {"token": "the-pat"},
+           "author_login: asks as the PAT, not as the ambient identity",
+           f"kwargs={stub.kwargs_for('user')} (the App's login would be the wrong pair)")
+finally:
+    sync.gh = _real_gh
+
+# ------------------------- the gate that runs BEFORE any repo is written
+#
+# @saqlainsyed007 on #348, F3 + F4. The three refusals are pinned individually
+# because each says something different about what could not be established --
+# and because the mutation harness reported "SYNC_REVIEWER becomes the account
+# that authors the PRs" as UNCAUGHT once the old literal-vs-literal check was
+# retired. This is what catches it.
+_real_gh, _real_login = sync.gh, sync.author_login
+try:
+    record(sync.check_author_identity("") is not None
+           and sync.AUTHOR_TOKEN_ENV in sync.check_author_identity(""),
+           "check_author_identity: an empty PAT refuses, naming the variable",
+           "an empty token must stop the run before the first branch is pushed")
+
+    sync.author_login = lambda _t: None
+    refusal = sync.check_author_identity("pat")
+    record(refusal is not None and "will not say who it belongs to" in refusal,
+           "check_author_identity: an UNRESOLVABLE token refuses rather than guessing",
+           f"got {refusal!r} -- 'cannot tell' must not read as 'fine'")
+
+    sync.author_login = lambda _t: sync.SYNC_REVIEWER
+    refusal = sync.check_author_identity("pat")
+    record(refusal is not None and sync.SYNC_REVIEWER in refusal,
+           "check_author_identity: author == SYNC_REVIEWER is refused",
+           f"got {refusal!r} -- this is the backend#2590 deadlock, and the old "
+           "literal-vs-literal check could not see it")
+
+    # CASE-INSENSITIVELY, because GitHub logins are.
+    sync.author_login = lambda _t: sync.SYNC_REVIEWER.upper()
+    record(sync.check_author_identity("pat") is not None,
+           "check_author_identity: the identity comparison ignores case",
+           "GitHub logins are case-insensitive, so a differently-cased owner is "
+           "the same person and the same deadlock")
+
+    sync.author_login = lambda _t: "somebody-else"
+    record(sync.check_author_identity("pat") is None,
+           "check_author_identity: a DIFFERENT owner passes",
+           "the gate must not refuse the configuration it exists to permit")
+finally:
+    sync.gh, sync.author_login = _real_gh, _real_login
+
+# ------------------- a PAT that RESOLVES but cannot CREATE stops the fleet
+#
+# Bugbot on #348. `check_author_identity` proves the token exists, resolves and
+# is not the reviewer. None of that proves it can open a PR: the wrong
+# fine-grained permissions, or a token never SSO-authorized for the org, passes
+# every one of those checks and fails at `pr create` -- after `remediate` has
+# pushed a branch and a commit to every drifted repo.
+#
+# Nothing read-only can fully prove "this token can open a PR"; the only proof
+# is opening one. So the guarantee is BOUNDED rather than claimed: the first
+# failed creation aborts, leaving at most ONE repo with a branch and no PR.
+_real_gh = sync.gh
+try:
+    stub = GhScript([
+        (0, "", ""),                                  # pr list -- none yet
+        (1, "", "HTTP 403: Resource not accessible by personal access token"),
+    ])
+    sync.gh = stub
+    raised = None
+    try:
+        sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+    except sync.AuthorUnusable as exc:
+        raised = exc
+    record(raised is not None and "cannot open PR" in str(raised),
+           "_ensure_pr: a PAT that cannot CREATE raises rather than returning",
+           f"raised={raised!r} -- returning a string lets the loop carry on to "
+           "the next repo, which is the fleet-wide half-rollout")
+
+    # AND IT IS A DIFFERENT TYPE FROM THE ORDINARY PER-REPO ERROR, because the
+    # loop has to tell "this repo failed" from "this credential fails
+    # everywhere". A shared string would need matching on prose.
+    record(issubclass(sync.AuthorUnusable, Exception)
+           and not issubclass(sync.AuthorUnusable, sync.Unreadable),
+           "AuthorUnusable is its own type, not a flavour of Unreadable",
+           "the loop must distinguish a fleet-wide credential failure from a "
+           "per-repo read problem without matching on message text")
+finally:
+    sync.gh = _real_gh
+
+# ---------------------------------- an existing PR still gets its roles repaired
+#
+# @saqlainsyed007 on #348, F1. `_ensure_pr` returned as soon as an open PR
+# tracked the branch, so a PR whose --add-reviewer failed once was never
+# repaired -- and the reviewer is what makes it mergeable, so it sat
+# un-mergeable for ever while every later run reported success.
+_real_gh = sync.gh
+try:
+    stub = GhScript([
+        # THREE TAB-SEPARATED FIELDS, because the real call now carries
+        # `--json number,author` and a jq that renders number/login/is_bot. A
+        # bare "42" is what the previous stub returned, and it now means "the
+        # author could not be read" -- so leaving it would have this case
+        # asserting the fail-closed path under the name of the happy one.
+        (0, "42\tLukasWodka\tfalse", ""),   # pr list -- an open, human-authored PR
+        (0, "", ""),        # pr edit --add-reviewer
+        (0, "", ""),        # pr edit --add-assignee
+    ])
+    sync.gh = stub
+    err = sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+    edits = [c for c in stub.calls if "edit" in c]
+    record(err is None and any("--add-reviewer" in c for c in edits),
+           "_ensure_pr: an EXISTING PR still gets its reviewer re-requested",
+           f"err={err} edits={edits} (returning early leaves a reviewer-less PR "
+           "un-mergeable for ever)")
+finally:
+    sync.gh = _real_gh
+
+# ------------------- an existing BOT-authored PR is refused, not "ensured"
+#
+# Bugbot on #348. The case above is the whole reason this one is needed: the
+# existing-PR path repairs roles and returns None, which is right for a PR this
+# code opened as the human and WRONG for the fourteen already open as
+# `tracebloc-release-train[bot]`. An author cannot be reassigned, so no amount
+# of role repair makes those reviewable -- and reporting them ensured would
+# land this change on exactly none of the PRs it was written for.
+#
+# THE ROLE EDITS MUST NOT HAPPEN EITHER. Returning an error while still editing
+# would leave the run reporting a failure it had half-performed.
+_real_gh = sync.gh
+try:
+    stub = GhScript([
+        (0, "848\tapp/tracebloc-release-train\ttrue", ""),   # pr list
+        # THE ROLE EDITS ARE SCRIPTED THOUGH THEY MUST NOT RUN. Without them a
+        # regression over-runs the stub and raises out of the suite: red, but
+        # with no assertion naming the behaviour -- scaffolding, not a verdict
+        # (CLAUDE.md rule 10). Scripting them makes `not edits` below the thing
+        # that goes red.
+        (0, "", ""),        # pr edit --add-reviewer  (must NOT be reached)
+        (0, "", ""),        # pr edit --add-assignee  (must NOT be reached)
+    ])
+    sync.gh = stub
+    err = sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+    edits = [c for c in stub.calls if "edit" in c]
+    record(err is not None and "848" in err and not edits,
+           "_ensure_pr: an existing BOT-authored PR is an ERROR, not a repair",
+           f"err={err!r} edits={edits} -- a PR's author cannot be changed, so "
+           "repairing its roles reports an unreviewable PR as ensured")
+
+    # AND IT NAMES THE REMEDY. The operator has to know that closing it is what
+    # lets the next run reopen it as the human; "failed" alone strands the repo.
+    record(err is not None and "close" in err.lower(),
+           "_ensure_pr: the bot-author refusal says what to do about it",
+           f"err={err!r} -- an error nobody can act on stalls the whole fleet")
+
+    # NOT VACUOUS: the same path with is_bot=false must go through.
+    stub = GhScript([
+        (0, "848\tLukasWodka\tfalse", ""),
+        (0, "", ""),
+        (0, "", ""),
+    ])
+    sync.gh = stub
+    ok = sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+    record(ok is None,
+           "_ensure_pr: the bot-author check is not vacuous",
+           f"err={ok!r} -- is_bot=false must still be repaired and reported ensured")
+finally:
+    sync.gh = _real_gh
+
+# ------------------------- an unreadable author is a finding, not an all-clear
+#
+# Design rule 1, one layer in. A row that does not parse says nothing about who
+# opened the PR, and "not provably a bot" is not "human". Fail closed: three
+# states, and only the one that reads `false` proceeds.
+_real_gh = sync.gh
+try:
+    for row, why in (("42", "the old number-only shape"),
+                     ("42\tsomebody\tnull", "is_bot absent from the payload")):
+        # The role edits are scripted for the same reason as above: a
+        # regression must redden the assertion, not over-run the stub.
+        stub = GhScript([(0, row, ""), (0, "", ""), (0, "", "")])
+        sync.gh = stub
+        err = sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+        record(err is not None and not [c for c in stub.calls if "edit" in c],
+               f"_ensure_pr: an unreadable author fails closed ({why})",
+               f"row={row!r} err={err!r} -- reporting ensured off a read that "
+               "failed is the all-clear-from-a-failed-read design rule 1 refuses")
+finally:
+    sync.gh = _real_gh
+
+# ------------------------------------- a reviewer that cannot be set is FATAL
+#
+# @saqlainsyed007 on #348, F2. Combined with F1 this was the silent shape: a
+# warning, no self-heal, and a green run over a PR that could never merge.
+_real_gh = sync.gh
+try:
+    stub = GhScript([
+        # EMPTY, not "[]": the real call carries `--jq '.[0].number // empty'`,
+        # so "no open PR" is an empty string. "[]" is truthy and would send this
+        # down the existing-PR path instead -- which is how the first version of
+        # this stub tested something other than what it names.
+        (0, "", ""),                        # pr list -- none yet
+        (0, "https://x/pull/7", ""),        # pr create
+        (1, "", "HTTP 422: reviewer is the author"),   # --add-reviewer FAILS
+    ])
+    sync.gh = stub
+    err = sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+    record(err is not None and "reviewer" in err.lower(),
+           "_ensure_pr: a reviewer that cannot be requested is an ERROR, not a warning",
+           f"err={err!r} -- a warning here ships an un-mergeable PR on a green run")
+
+    # THE OTHER HALF STAYS COSMETIC. Making both fatal would fail the run over
+    # an assignee, which blocks nothing.
+    stub = GhScript([
+        (0, "", ""),                        # pr list -- none yet
+        (0, "https://x/pull/8", ""),
+        (0, "", ""),                        # --add-reviewer succeeds
+        (1, "", "HTTP 422: assignee"),      # --add-assignee fails
+    ])
+    sync.gh = stub
+    err = sync._ensure_pr("o/r", "head", "develop", 1602, "pat")
+    record(err is None,
+           "_ensure_pr: a failed ASSIGNEE stays cosmetic",
+           f"err={err!r} -- an assignee blocks no merge, so it must not fail the run")
+finally:
+    sync.gh = _real_gh
+
+# --------------- a refused credential DISARMS the writes, it does not abort
+#
+# Bugbot on #348. Moving the PAT gate into `main()` was right -- it stops the
+# half-rollout -- but it was implemented with `die()`, which also skipped the
+# read-only audit. standards-sync.yml argues against exactly that twenty lines
+# above the secret: aborting before the audit turns "PRs could not be opened"
+# into "fleet state unknown", which is strictly less information. So the run
+# must still classify and report the whole fleet, push nothing, and exit 2.
+def _run_main(argv, token, remediate_calls):
+    """`main()` with the fleet reads stubbed. Returns (exit_code, report)."""
+    saved = {name: getattr(sync, name)
+             for name in ("load_canon", "load_targets", "resolve_branch",
+                          "fetch_claude_md", "remediate")}
+    saved_argv, saved_env = sys.argv, os.environ.get(sync.AUTHOR_TOKEN_ENV)
+    saved_summary = os.environ.pop("GITHUB_STEP_SUMMARY", None)
+
+    def _remediate(*a, **kw):
+        remediate_calls.append((a, kw))
+        return None
+
+    sync.load_canon = lambda _p: CANON
+    sync.load_targets = lambda _p: ("tracebloc", ["alpha"])
+    sync.resolve_branch = lambda _o, _r: "develop"
+    # No markers, so it classifies as drifted -- the only state that reaches
+    # the remediation branch at all.
+    sync.fetch_claude_md = lambda _o, _r, _b: "# CLAUDE.md\n\nrepo-owned prose.\n"
+    sync.remediate = _remediate
+    os.environ[sync.AUTHOR_TOKEN_ENV] = token
+    sys.argv = ["standards-sync.py", *argv]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            code = sync.main()
+    except SystemExit as exc:
+        # A `die()` anywhere in main() is a RESULT here, not a crash. Letting
+        # it propagate would take the whole suite down with no FAIL line --
+        # red without a verdict, which the mutation harness cannot tell from a
+        # vacuous test (CLAUDE.md rule 10). Aborting IS the regression these
+        # checks are about, so it has to be observable as one.
+        code = exc.code
+    finally:
+        for name, fn in saved.items():
+            setattr(sync, name, fn)
+        sys.argv = saved_argv
+        if saved_env is None:
+            os.environ.pop(sync.AUTHOR_TOKEN_ENV, None)
+        else:
+            os.environ[sync.AUTHOR_TOKEN_ENV] = saved_env
+        if saved_summary is not None:
+            os.environ["GITHUB_STEP_SUMMARY"] = saved_summary
+    return code, buf.getvalue()
+
+
+_real_stderr = sys.stderr
+try:
+    sys.stderr = io.StringIO()          # the ::error:: annotations are not the subject
+    calls: list = []
+    code, report = _run_main(["--create-prs"], "", calls)
+
+    record("| alpha |" in report,
+           "main: a refused PAT still AUDITS the fleet and prints the table",
+           f"code={code} report={report.strip()[:160]!r} -- `die()` here made "
+           "'PRs could not be opened' read as 'fleet state unknown'")
+    record(not calls,
+           "main: a refused PAT pushes nothing -- remediate() is never called",
+           f"calls={calls} -- disarming the writes is the whole point of the gate")
+    record("NOT REMEDIATED" in report and "REMEDIATION DISABLED" in report,
+           "main: the report says the writes were skipped, and why",
+           f"report={report.strip()[-200:]!r} -- a table of drifted repos with "
+           "no explanation reads as a plain audit nobody asked to remediate")
+    record(code == 2,
+           "main: a refused PAT exits 2, not the --create-prs 0",
+           f"code={code} -- 0 would claim every drifted repo has a PR open")
+
+    # NOT VACUOUS. The same call with a usable credential must remediate and
+    # be green, or the four checks above would pass over a script that has
+    # simply stopped remediating.
+    _real_check = sync.check_author_identity
+    try:
+        sync.check_author_identity = lambda _t: None
+        calls = []
+        code, report = _run_main(["--create-prs"], "a-usable-pat", calls)
+        record(code == 0 and len(calls) == 1 and "NOT REMEDIATED" not in report,
+               "main: the disarm is not vacuous -- a usable PAT still remediates",
+               f"code={code} calls={len(calls)}")
+    finally:
+        sync.check_author_identity = _real_check
+
+    # AND WITHOUT --create-prs the refusal path must not fire at all: the token
+    # is irrelevant to a report-only run, so drift must still exit 1.
+    calls = []
+    code, report = _run_main([], "", calls)
+    record(code == 1 and not calls and "NOT REMEDIATED" not in report,
+           "main: report-only runs never consult the PAT",
+           f"code={code} calls={calls} -- a read-only audit must not be gated "
+           "on a credential it does not use")
+finally:
+    sys.stderr = _real_stderr
+
+# COMPUTED HERE, NOT EARLIER. This sat above the last hundred lines of checks,
+# so anything appended below it PRINTED its FAIL and did not count: the summary
+# read `0 failed` while two checks had failed, and the script exited 0. The
+# mutation harness is what surfaced it -- a gate mutation came back UNCAUGHT
+# because the suite it was measured against could not go red (#348).
 failed = [name for ok, name, _ in RESULTS if not ok]
 print(f"\n{len(RESULTS)} checks, {len(failed)} failed.")
 if failed:
