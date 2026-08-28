@@ -129,6 +129,28 @@ jobs:
           # D5: priority is a binary "priority" label, not a project field. The
           # label is visible on the issue itself and filterable everywhere; the
           # Priority single-select field has been removed from the board.
+          #
+          # THE TRIGGER LABEL'S OWN DESCRIPTION NOW SAYS SO TOO, and for months it
+          # said the opposite (backend#2743). All twenty enrolled repos advertised
+          # `from:customer` as "auto-bumps Priority to P1" -- an outcome D5 deleted
+          # and this step stopped producing -- so the label that fires the rule
+          # promised a board value nobody would ever see. It was uniformly wrong
+          # because .github#364 created the labels four repos lacked by faithfully
+          # copying names, colours and descriptions off the repos that had them.
+          # Swept across all twenty on 2026-08-27, byte-identical, to:
+          #
+          #   Filed from a customer request — automation adds the binary `priority` label
+          #
+          # Derived, not chosen: the sweep refused any text that did not name the
+          # label the `gh issue edit` line below actually writes, and refused the
+          # removed vocabulary outright. Change one, change the other.
+          #
+          # NOT UNDER A CHECK YET, said plainly rather than left to be assumed:
+          # `triage-labels-check.py` (.github#364) asserts a triage label EXISTS in
+          # every enrolled repo, not that its description still describes this step
+          # -- which is exactly how the stale text survived D5 with a green fleet.
+          # backend#2744 closes that, on top of #364 rather than beside it, because
+          # the file it extends is not on `develop` yet.
           gh issue edit "$ISSUE_NUMBER" --repo "$REPO_FULL" --add-label priority
           echo "-> Issue #$ISSUE_NUMBER labelled 'priority'"
 
