@@ -163,9 +163,9 @@ jobs:
               # before any Status is published -- so the update step's non-empty
               # guard skips and the project's built-in "Item closed" automation sets
               # `Cancelled`, archiving shipped-via-parent work (.github#157). That is
-              # the no-write path this file already documents, reached by a new door,
-              # and it fires exactly when the first repo adopts the override this
-              # change exists to unblock.
+              # the no-write path this file already documents, reached by a new
+              # door -- and the door opens on any repo whose override cannot be
+              # read, which is not a hypothetical population.
               #
               # `resolve` REFUSES HERE TOO NOW (backend#2324), on an override naming
               # a Status the mapping does not declare. That case used to succeed and hand

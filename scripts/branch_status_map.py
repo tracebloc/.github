@@ -238,9 +238,10 @@ def read_override(repo: str, ref: str = "HEAD") -> dict:
     closing PR's base), which persists after a merge -- so passing it is safe even
     though a merged head may be gone.
 
-    EXACTLY ONE OUTCOME IS AN EMPTY OVERRIDE: a 404. The file is optional by design
-    and no repo has one, so "absent" has to be ordinary. Every other way this can go
-    wrong REFUSES, loudly, with a reason:
+    EXACTLY ONE OUTCOME IS AN EMPTY OVERRIDE: a 404. The file is OPTIONAL BY DESIGN
+    -- which is the whole reason "absent" has to be ordinary, and it stays true
+    whatever the adoption looks like. Every other way this can go wrong REFUSES,
+    loudly, with a reason:
 
         404 ................................ empty override, no message
         any other fetch failure ............ refuse (403, 5xx, rate limit)
