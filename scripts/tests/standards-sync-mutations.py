@@ -188,6 +188,36 @@ MUTATIONS = [
         '''    return login or "unknown"''',
         "an unresolvable token is None, not a guess",
     ),
+    # --- (C) backend#2690: the write stops, the audit does not ----------------
+    (
+        # THE ORIGINAL DEFECT, restored verbatim in behaviour: a `break` out of
+        # the target loop. It reads as the conservative choice, which is what
+        # made it survive review -- but it throws away a READ that needed no
+        # credential, and leaves the `len(targets)` summary describing a prefix.
+        "a PR refusal aborts the whole loop again, so the audit stops at the failure",
+        '''                    remediating = False
+                    action = (f"REMEDIATION FAILED: {exc} -- remediation is "
+                              "DISABLED from here on; this credential cannot "
+                              "open PRs anywhere. The audit below is still "
+                              "complete.")
+                    rows.append((repo, branch, state, action))
+                    continue''',
+        '''                    rows.append((repo, branch, state,
+                                 f"REMEDIATION FAILED: {exc} -- ABORTING"))
+                    break''',
+        "a mid-fleet PR refusal still audits EVERY target",
+    ),
+    (
+        # THE OTHER HALF, and it must be mutated separately. Keeping the audit
+        # while letting `remediating` stay on would push a branch to every
+        # remaining repo -- #348's half-rollout, reintroduced by #2690's fix.
+        # One mutation cannot prove both properties, so there are two.
+        "the audit continues but remediation is never disarmed",
+        '''                    halted_at = repo
+                    remediating = False''',
+        '''                    halted_at = repo''',
+        "the refusal disarms remediation for the REST of the fleet",
+    ),
 ]
 
 

@@ -192,17 +192,19 @@ PREFIX_RE = re.compile(r"\A(?:([A-Za-z0-9][A-Za-z0-9-]*)/)?([A-Za-z0-9.][A-Za-z0
 # header).
 EXEMPT = {
     "tracebloc/backend#1680": (
-        "PROVENANCE, re-read 2026-08-28 and still true. `.github`'s develop and "
-        "staging protection reasons cite it for WHY this repo requires MORE than "
-        "the fleet baseline -- #1680 is where arming `selftests` on top of it was "
-        "decided. The epic was CLOSED COMPLETED at 07:51Z on 2026-08-28, which is "
-        "what this guard flags, and that is right for a citation that might be a "
-        "live dependency. This one is not: it is past-tense history, and the claim "
-        "it supports is independently verifiable -- `selftests` IS a required "
-        "context on BOTH branches today (measured, alongside `gate` on develop and "
-        "`gate` + `gate / gate` on staging). Recorded here rather than reworded out "
-        "of the reasons, because dropping the number to silence the guard would "
-        "lose the traceability the reasons exist to give."
+        "PROVENANCE, re-read 2026-08-28 and now true of ALL FOUR citations. The epic "
+        "closed 2026-08-28T07:51:26Z and reddened every open `.github` PR within two "
+        "minutes, because `reason-citations` runs inside the REQUIRED `selftests` job "
+        "-- the guard working, not misfiring. Three of the four citations back STANDING "
+        "facts that remain true and were re-measured: `selftests` really is a required "
+        "context on develop and on staging. The fourth was NOT history -- it deferred a "
+        "step to this epic in the future tense (\"arm it here once staging carries the "
+        "workflow\"), and the epic closed without taking it. That one has been restated "
+        "against what is measurably true today (the workflow is on all three branches, "
+        "so the sequencing blocker it named is gone) and the remaining decision now "
+        "cites backend#2761, which is open. So #1680 is past-tense everywhere it still "
+        "appears. REMOVE THIS ROW if any reason starts deferring to #1680 again -- a "
+        "closed epic cannot carry work, and that is the shape this guard exists to catch."
     ),
     "tracebloc/backend#2347": (
         "PROVENANCE, re-read 2026-08-26 and still true. `claude-skills`' fr-gate "

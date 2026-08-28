@@ -1,0 +1,131 @@
+# Triage-label existence guard (tracebloc/backend#2598).
+#
+# WHY THIS EXISTS: a caller without its label is wired in exactly the way that
+# does nothing, and nothing could tell. `caller-drift.py` asserts that a repo
+# CARRIES `customer-priority-bump.yml`; it says nothing about whether the labels
+# that workflow fires on exist there — and GitHub silently DROPS a template label
+# the target repo lacks, with no error, no annotation and no run.
+#
+# Measured 2026-08-27, the day before this landed: `design-system-v2`,
+# `release-train` and `rfcs` had ZERO of the seven triage labels, and
+# `e2e-test-agent` had two of seven. All four carried the caller and all four
+# passed the conformance audit. A bug filed in any of them landed unlabelled in
+# `Backlog`, the refinement queue nobody pulls from — the exact miss backend#2348
+# was filed to close, surviving in the repos a caller-presence check calls done.
+#
+# `e2e-test-agent` is why this is not scoped to `work-type:*`: backend#2598 was
+# derived over that prefix and reported three repos, while a fourth was dropping
+# four of the labels its templates apply. Deriving a domain from a prefix rather
+# than from the producers is CLAUDE.md rule 6's vocabulary gap.
+#
+# Runs on PRs that touch either producer or the check itself, AND daily —
+# because a label can be deleted in the repo's Settings UI at any time, with no
+# PR to hang a check on. That is the failure this is really for, the same shape
+# as kanban-columns.yml's board rename.
+#
+# NOT A REQUIRED STATUS CONTEXT, deliberately: it reads twenty repos over the
+# API, so a rate limit would block every merge in this repo. It is an audit in
+# the caller-drift / kanban-columns tier — red here is a finding to fix that day,
+# per the org's own rule that a guard in a non-required job is advice.
+name: Triage label conformance
+
+on:
+  pull_request:
+    paths:
+      # THE TWO PRODUCERS the domain is derived from. A PR that changes a label
+      # default, adds a `*-label` input, or edits a template's `labels:` must run
+      # this check rather than waiting for the daily cron — otherwise a new label
+      # can merge and be missing fleet-wide for up to a day.
+      - ".github/workflows/customer-priority-bump.yml"
+      - ".github/ISSUE_TEMPLATE/**"
+      # The fleet scope.
+      - "repo-inventory.yml"
+      - ".github/workflows/triage-labels.yml"
+      - "scripts/triage-labels-check.py"
+      - "scripts/tests/triage-labels-selftest.py"
+      - "scripts/tests/triage-labels-mutations.py"
+  schedule:
+    # 06:20 UTC, between kanban-columns (06:15) and caller-drift (Mon 06:30). A
+    # deleted label breaks defect triage silently, so it belongs in the same
+    # morning sweep as a renamed column.
+    - cron: "20 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: triage-labels
+  cancel-in-progress: false
+
+jobs:
+  selftest:
+    name: Selftest the checker
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet --disable-pip-version-check 'pyyaml==6.0.2'
+      # Guard the guard: a checker that cannot fail is worse than no checker,
+      # because its green is read as conformance.
+      - run: python scripts/tests/triage-labels-selftest.py
+
+  check:
+    name: Every enrolled repo has every triage label
+    # Gate on selftest, for the reason kanban-columns.yml states: a conformance
+    # PASS emitted by a checker whose failure paths have regressed is a false
+    # green — the checker cannot fail, so its success means nothing.
+    needs: selftest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML
+        # The check parses the producers as YAML rather than grepping them, so
+        # there is no degraded mode worth having. If this step fails the check
+        # step is skipped, and a skipped step is a failed job here — never green.
+        run: python -m pip install --quiet --disable-pip-version-check 'pyyaml==6.0.2'
+
+      # Authenticates as the tracebloc-release-train App (backend#2036) rather
+      # than a human's PAT. `owner:` yields an ORG-scoped installation token,
+      # which is what lets one mint read twenty repos' label lists.
+      - name: Mint an installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          # LEAST PRIVILEGE, DERIVED FROM THE ONE CALL THIS JOB MAKES
+          # (backend#2157). `triage-labels-check.py` runs
+          # `GET /repos/{owner}/{repo}/labels` and nothing else — no board, no
+          # PR, no contents, no write anywhere. GitHub gates that endpoint on the
+          # Issues permission, so `issues: read` is the whole requirement.
+          permission-issues: read
+          # `repositories:` is deliberately NOT narrowed: the whole point is to
+          # read the OTHER nineteen repos, so a token scoped to this one would
+          # 404 on all of them — and this check reports a 404 as UNKNOWN, so the
+          # narrowing would turn every run red rather than quietly wrong.
+          #
+          # THAT THE APP CAN READ ALL TWENTY IS EVIDENCED, not assumed:
+          # `add-to-kanban.yml` is a per-repo COPY living in every enrolled repo
+          # and mints `permission-issues: read` from each of them (backend#2166),
+          # so the installation covers the fleet at exactly this scope.
+      - name: Check
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::the App token is empty. Every label read would fail," \
+                 "which this check reports as UNKNOWN — but say so here rather" \
+                 "than spending twenty API calls to discover it." >&2
+            exit 1
+          fi
+          python scripts/triage-labels-check.py

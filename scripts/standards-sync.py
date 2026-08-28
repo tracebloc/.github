@@ -618,7 +618,7 @@ def main() -> int:
 
     rows: "list[tuple[str, str, str, str]]" = []
     drifted = unreadable = write_errors = 0
-    aborted_after = ""
+    halted_at = ""
 
     for repo in targets:
         try:
@@ -641,7 +641,14 @@ def main() -> int:
                 # audit that nobody asked to remediate. Not counted as a write
                 # error: the write was never attempted, and inflating the count
                 # per repo would hide the single cause behind sixteen symptoms.
-                action = f"NOT REMEDIATED: {AUTHOR_TOKEN_ENV} refused (see below)"
+                #
+                # TWO WAYS TO GET HERE, and they are different bugs: the token
+                # was refused BEFORE the sweep (`author_refusal`), or it opened
+                # PRs until GitHub stopped taking them (`halted_at`). Both point
+                # the reader below; saying which one saves them the guess.
+                cause = ("cannot open PRs (see below)" if halted_at
+                         else "refused (see below)")
+                action = f"NOT REMEDIATED: {AUTHOR_TOKEN_ENV} {cause}"
             elif remediating:
                 try:
                     error = remediate(org, repo, branch,
@@ -650,19 +657,37 @@ def main() -> int:
                                       file_on_base=(state != NO_FILE),
                                       author_token=author_token)
                 except AuthorUnusable as exc:
-                    # STOP THE FLEET (Bugbot, #348). The credential is the
-                    # same for every repo, so carrying on would push a branch
-                    # to all of them and open a PR on none -- the half-rollout
-                    # the `main()` gate exists to prevent, arriving through the
-                    # one failure mode that gate cannot see: a token that
-                    # resolves but cannot create.
+                    # STOP THE WRITES, NOT THE AUDIT (Bugbot, backend#2690).
+                    #
+                    # The credential is the same for every repo, so carrying on
+                    # REMEDIATING would push a branch to all of them and open a
+                    # PR on none -- the half-rollout the `main()` gate exists to
+                    # prevent, arriving through the one failure mode that gate
+                    # cannot see: a token that resolves but cannot create. That
+                    # much was #348's finding and it still holds, which is why
+                    # `remediating` goes off and never comes back on.
+                    #
+                    # But this used to `break`, which threw away the AUDIT too --
+                    # and the audit is a READ that needs no credential at all.
+                    # `standards-sync.yml` rejects a `[ -z ]` precheck in the
+                    # workflow for exactly this reason, twenty lines above the
+                    # secret: aborting before the audit "would turn 'PRs could
+                    # not be opened' into 'fleet state unknown' -- strictly less
+                    # information". The `author_refusal` path above already obeys
+                    # that; this path contradicted it. Worse, the summary line
+                    # below still counted `len(targets)`, so a run that
+                    # classified three of sixteen repos reported as a full sweep
+                    # of the fleet -- a mechanism reporting a result it never
+                    # established.
                     write_errors += 1
-                    aborted_after = repo
-                    rows.append((repo, branch, state,
-                                 f"REMEDIATION FAILED: {exc} -- ABORTING the "
-                                 "remaining repos; this credential cannot open "
-                                 "PRs anywhere"))
-                    break
+                    halted_at = repo
+                    remediating = False
+                    action = (f"REMEDIATION FAILED: {exc} -- remediation is "
+                              "DISABLED from here on; this credential cannot "
+                              "open PRs anywhere. The audit below is still "
+                              "complete.")
+                    rows.append((repo, branch, state, action))
+                    continue
                 if error:
                     write_errors += 1
                     action = f"REMEDIATION FAILED: {error}"
@@ -687,13 +712,19 @@ def main() -> int:
         lines.append(f"**REMEDIATION DISABLED** — {author_refusal} The audit "
                      "above is complete and current; no branch was pushed and "
                      "no PR was opened or refreshed.")
-    if aborted_after:
-        # SAID IN THE REPORT, not only in the log. A run that stopped early
-        # and did not say so reads as a complete sweep of a smaller fleet.
+    if halted_at:
+        # SAID IN THE REPORT, not only in the log. The distinction this wording
+        # has to carry is the one backend#2690 was about: the WRITES stopped at
+        # `halted_at`, the AUDIT did not. The old text said "ABORTED ... the
+        # remaining targets were left untouched", which was true of the branches
+        # and false of the classification -- and the count line above it still
+        # said `len(targets)`, so the two together read as a full sweep.
         lines.append("")
-        lines.append(f"**ABORTED at `{aborted_after}`** -- `{AUTHOR_TOKEN_ENV}` "
-                     "resolves but cannot open PRs, so the remaining targets "
-                     "were left untouched rather than given a branch each.")
+        lines.append(f"**REMEDIATION HALTED at `{halted_at}`** -- "
+                     f"`{AUTHOR_TOKEN_ENV}` resolves but cannot open PRs, so no "
+                     "further branch was pushed and every repo after it reads "
+                     "NOT REMEDIATED. The audit above still covers all "
+                     f"{len(targets)} targets; the drift counts are complete.")
     report = "\n".join(lines)
     print(report)
 
