@@ -611,5 +611,95 @@ try:
 finally:
     _m.subprocess.run = _real
 
+# --- NO FILE MAY ASSERT HOW WIDELY `.kanban.yml` IS ADOPTED (backend#2801) ----
+#
+# THE DEFECT THIS REPLACES. `branch_status_map.py`'s header stated "No repo has a
+# `.kanban.yml` today", and `kanban-closure-router.yml` repeated it to support a
+# different conclusion. True when written; false by 2026-08-28, when THREE repos
+# carried one. Both sentences were load-bearing -- the first was the stated reason
+# the pre-#2243 divergence never fired, so a reader trusting it concluded the
+# override feature was unexercised while repos depended on it.
+#
+# WHY A BAN AND NOT A COUNT. Deriving the live adopter set is the other candidate
+# fix, and it is the wrong one HERE: it needs an org-wide API sweep, and this suite
+# is offline and deterministic by design -- `make selftests` is the same target the
+# pre-push hook and CI run, 34 seconds, no network. Making one case reach GitHub
+# would put a required check behind the API's availability to restate a fact the
+# prose does not need. So the rule is: the mechanism may be described, the FLEET may
+# not. A count nobody writes is a count that cannot go stale.
+#
+# The needles are written from the CLASS -- absence claims and first-adopter claims
+# -- not copied from the sentences removed, so this does not test a list against
+# itself (rule 9's corollary). The mutation below re-inserts the ORIGINAL wording,
+# which none of the needles were derived from, and proves each is reachable.
+_ADOPTION_CLAIMS = [
+    r"no repo (?:has|carries|uses)[^.]{0,40}\.kanban\.yml",
+    # "does not exist" was here and was TOO LOOSE: it matched
+    # advance-deploy-env.yml's "a `.kanban.yml` naming a column that does not
+    # exist", which is about the COLUMN, not about adoption. A needle that fires
+    # on correct prose gets the whole suite skipped (rule 4), so it is narrowed
+    # to the phrasing that can only be an absence-across-the-fleet claim.
+    r"\.kanban\.yml[^.]{0,40}exists nowhere",
+    r"(?:the )?first (?:repo|adopter)[^.]{0,40}(?:to adopt|\'s `?\.kanban)",
+    r"(?:no|zero) (?:repo|repos)[^.]{0,30}(?:adopted|adopt) (?:it|the override)",
+]
+_SCANNED = {
+    "scripts/branch_status_map.py": None,
+    ".github/workflows/kanban-closure-router.yml": None,
+    ".github/workflows/advance-deploy-env.yml": None,
+}
+
+
+def adoption_claims(text: str) -> "list[str]":
+    """Every fleet-adoption claim in `text`. ONE function, called by the assertion
+    AND by the mutation below, so breaking it cannot leave the mutation green
+    (rule 9)."""
+    flat = " ".join(text.lower().split())
+    return [m.group(0) for pat in _ADOPTION_CLAIMS
+            for m in re.finditer(pat, flat)]
+
+
+_root = pathlib.Path(__file__).resolve().parent.parent.parent
+for _rel in _SCANNED:
+    _f = _root / _rel
+    if not _f.is_file():
+        bad(f"{_rel} is missing -- cannot tell, which is a finding")
+        continue
+    _SCANNED[_rel] = _f.read_text()
+
+if any(v is None for v in _SCANNED.values()):
+    pass                       # already reported; the loop below would be vacuous
+elif not _SCANNED:
+    bad("scanned ZERO files for adoption claims -- fail closed")
+else:
+    for _rel, _text in _SCANNED.items():
+        _hits = adoption_claims(_text)
+        if _hits:
+            bad(f"{_rel} asserts how widely `.kanban.yml` is adopted: {_hits!r}")
+        else:
+            ok(f"{_rel} states the mechanism, not the fleet")
+
+    # MUTATION (rule 5), asserted to apply: re-insert the exact sentence that
+    # shipped stale and prove the detector reaches it. An inert mutation and a
+    # working detector produce identical logs, so the anchor is checked first.
+    _victim = _SCANNED["scripts/branch_status_map.py"]
+    _anchor = "consolidated both writers onto THIS mapper"
+    if _victim.count(_anchor) != 1:
+        bad(f"mutation anchor matched {_victim.count(_anchor)} times, not 1 -- "
+            "the case below would be vacuous")
+    else:
+        _mutated = _victim.replace(
+            _anchor,
+            "No repo has a `.kanban.yml` today, which is the only reason this has "
+            "never fired: the documented feature has never executed, and the first "
+            "repo to adopt it inherits the bug. It also "
+            "consolidated both writers onto THIS mapper")
+        _caught = adoption_claims(_mutated)
+        if len(_caught) >= 2:
+            ok(f"the original stale sentence is caught, on {len(_caught)} needles")
+        else:
+            bad("re-inserting the ORIGINAL stale sentence was not caught -- the "
+                f"detector is vacuous (hits: {_caught!r})")
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

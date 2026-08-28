@@ -11,10 +11,27 @@ backend#2243 they each held their own copy of the rule:
 
 Both write `Status`, and a PR merged to `develop` fires both -- the router on
 `pull_request: closed`, advance on the `push`. So with a `.kanban.yml` in place they
-would write DIFFERENT statuses for the same merge, and which one stuck depended on
-run ordering. No repo has a `.kanban.yml` today, which is the only reason this has
-never fired: the documented feature has never executed, and the first repo to adopt
-it inherits the bug.
+would have written DIFFERENT statuses for the same merge, and which one stuck
+depended on run ordering. It never fired, and it cannot fire now: backend#2243
+consolidated both writers onto THIS mapper, which is the whole reason this file
+exists.
+
+THIS PARAGRAPH DELIBERATELY DOES NOT SAY HOW WIDELY THE OVERRIDE IS ADOPTED
+(backend#2801). It used to, in a sentence asserting that the fleet had no adopters
+at all -- true when written, and false by 2026-08-28. That sentence was
+load-bearing rather than decorative: it was the stated reason the divergence never
+fired, so a reader trusting it concluded the feature was unexercised at exactly the
+moment repos had begun to depend on it.
+
+The fix is not a fresher count. A count is a fact about the ORG, which this module
+cannot keep true and no reader can date; the adopter set is discoverable by
+enumerating `.kanban.yml` across the org, and that is where it belongs. So this
+header describes the MECHANISM and says nothing about who uses it. The stale
+sentence is deliberately not quoted anywhere above -- reproducing a false claim
+verbatim leaves it findable by grep with nothing to mark it historical, which is the
+same defect one step removed. `scripts/tests/branch-status-map-selftest.py` refuses
+any re-introduced fleet-adoption claim in this file, the closure router and
+advance-deploy-env, so the class cannot come back by hand.
 
 The router could not have honoured the override even in principle -- it never checks
 out the repo. That is why the fix is one shared mapping rather than a second copy of
@@ -60,7 +77,7 @@ DEFAULT_MAP = {
 #
 # AND MEMBERSHIP HERE IS THE ACCEPT LIST (backend#2324). `resolve` used to return an
 # override's Status verbatim and fall back to the default env for a name it did not
-# know -- so a typo or a retired column name in the first adopter's `.kanban.yml`
+# know -- so a typo or a retired column name in an adopter's `.kanban.yml`
 # travelled all the way to the board write, where it cannot resolve to an option id
 # and the write is abandoned. A closure that writes nothing is not a no-op: the
 # project's built-in "Item closed" automation decides instead, sets `Cancelled`, and
