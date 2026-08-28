@@ -191,6 +191,19 @@ PREFIX_RE = re.compile(r"\A(?:([A-Za-z0-9][A-Za-z0-9-]*)/)?([A-Za-z0-9.][A-Za-z0
 # and is NOT something this script tries to infer (see mechanism (3) in the
 # header).
 EXEMPT = {
+    "tracebloc/backend#1680": (
+        "PROVENANCE, re-read 2026-08-28 and still true. `.github`'s develop and "
+        "staging protection reasons cite it for WHY this repo requires MORE than "
+        "the fleet baseline -- #1680 is where arming `selftests` on top of it was "
+        "decided. The epic was CLOSED COMPLETED at 07:51Z on 2026-08-28, which is "
+        "what this guard flags, and that is right for a citation that might be a "
+        "live dependency. This one is not: it is past-tense history, and the claim "
+        "it supports is independently verifiable -- `selftests` IS a required "
+        "context on BOTH branches today (measured, alongside `gate` on develop and "
+        "`gate` + `gate / gate` on staging). Recorded here rather than reworded out "
+        "of the reasons, because dropping the number to silence the guard would "
+        "lose the traceability the reasons exist to give."
+    ),
     "tracebloc/backend#2347": (
         "PROVENANCE, re-read 2026-08-26 and still true. `claude-skills`' fr-gate "
         "reason cites it for WHY the caller was removed -- #2347 decided the three "
