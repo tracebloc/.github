@@ -489,5 +489,36 @@ mkversion base '{"version":"1.4.0"}'
 mktags 1.4.0
 check "a shipping file renamed INTO an excluded path still counts" 1 "package.json still says 1.4.0"
 
+# ...AND THE MIRROR CASE, which the first version got wrong (Bugbot, backend#2758).
+# An EXCLUDED file renamed OUT of the published tree entirely: a story becoming a
+# docs page. Nothing that ships changed, so no bump is owed.
+#
+# The bug was in the shape of the test, not just the code: the exclusion was asked
+# as `is_excluded "$f" && is_excluded "$prev"`, then `$prev` was matched against
+# $PUBLISH_PATHS with no exclusion check at all. Here `$f` (docs/) is not excluded,
+# so the conjunction short-circuited, `$f` did not match `src/*`, and the excluded
+# `$prev` then matched and tripped the gate the exclusion exists to silence. The
+# five cases above could not see it: not one of them renames a file OUT of the tree,
+# so the whole `$prev`-is-excluded half of the input domain went untested (rule 6).
+base; REPO_FULL=tracebloc/design-system; VERSION_FILE=package.json
+PUBLISH_PATHS='src/*'; EXCLUDE_PATHS='src/**/*.stories.tsx'
+mkcompare "docs/Badge.mdx:src/components/atoms/Badge/Badge.stories.tsx"
+mkversion head '{"version":"1.4.0"}'
+mkversion base '{"version":"1.4.0"}'
+mktags 1.4.0
+check "an EXCLUDED file renamed OUT of the tree does not need a bump" 0 "were treated as not shipping"
+
+# THE CONTROL FOR IT. Same rename shape, but the pre-rename path is real component
+# source rather than a story: that DID leave the package, so it must still refuse.
+# Without this, the case above could be satisfied by an exclusion that swallowed
+# every rename-out, which is the opposite defect.
+base; REPO_FULL=tracebloc/design-system; VERSION_FILE=package.json
+PUBLISH_PATHS='src/*'; EXCLUDE_PATHS='src/**/*.stories.tsx'
+mkcompare "docs/Badge.mdx:src/components/atoms/Badge/Badge.tsx"
+mkversion head '{"version":"1.4.0"}'
+mkversion base '{"version":"1.4.0"}'
+mktags 1.4.0
+check "a SHIPPING file renamed OUT of the tree still refuses (control)" 1 "package.json still says 1.4.0"
+
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

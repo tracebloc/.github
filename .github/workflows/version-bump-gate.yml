@@ -636,18 +636,32 @@ jobs:
 
             for pat in $PUBLISH_PATHS; do
               while IFS="$(printf '\t')" read -r f prev; do
-                # A file that does not ship cannot make the delta publishable. Both
-                # the current and the pre-rename path are tested, mirroring the
-                # positive match below: a story renamed within src/ is still a story.
-                if is_excluded "$f" && { [ -z "${prev:-}" ] || is_excluded "$prev"; }; then
-                  continue
+                # EACH PATH IS GATED BY ITS OWN EXCLUSION, not by both together
+                # (Bugbot, backend#2758). There are two independent ways a file entry
+                # can make the delta publishable -- the new path being in a published
+                # tree, or the pre-rename path having been in one -- and a file that
+                # does not ship cannot do either. So the exclusion is asked once per
+                # path, right where that path is about to be matched.
+                #
+                # The first version skipped only when `is_excluded "$f"` AND the prev
+                # path was excluded too, then matched `$prev` against $pat with no
+                # exclusion check at all. A rename OUT of the tree -- an excluded
+                # story becoming `docs/Foo.mdx` -- left `$f` unexcluded, so the skip
+                # short-circuited away, `$f` did not match, and then the excluded
+                # `$prev` matched and tripped the very gate the exclusion exists to
+                # silence.
+                #
+                # A story renamed WITHIN src/ is still a story: both paths are
+                # excluded, neither branch fires, and the delta stays unpublishable --
+                # the behaviour the conjunction was reaching for, now reached per path.
+                if ! is_excluded "$f"; then
+                  # shellcheck disable=SC2254  # $pat is a glob on purpose
+                  case "$f" in $pat) MATCHED="$f (matches '$pat')"; return 0 ;; esac
                 fi
-                # shellcheck disable=SC2254  # $pat is a glob on purpose
-                case "$f" in $pat) MATCHED="$f (matches '$pat')"; return 0 ;; esac
                 # The pre-rename path counts too: a file moved OUT of a published
                 # tree left the package, and GitHub reports only its NEW path in
                 # the file entry.
-                if [ -n "${prev:-}" ]; then
+                if [ -n "${prev:-}" ] && ! is_excluded "$prev"; then
                   # shellcheck disable=SC2254  # $pat is a glob on purpose
                   case "$prev" in $pat) MATCHED="$prev (renamed to $f, matches '$pat')"; return 0 ;; esac
                 fi
