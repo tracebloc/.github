@@ -53,15 +53,37 @@ jobs:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          # LEAST PRIVILEGE, DERIVED FROM WHAT THIS RUNS (backend#2157). The only
-          # mutation is `archiveProjectV2Item`, so `organization-projects: write` is
-          # the whole requirement -- no issues, no pull-requests, no contents.
+          # LEAST PRIVILEGE, DERIVED FROM WHAT THIS RUNS (backend#2157) -- and the
+          # WRITE half is still exactly that: `archiveProjectV2Item` is the only
+          # mutation, so `organization-projects: write` remains the whole write
+          # requirement. No contents, no metadata, nothing else.
           #
-          # `repositories:` narrows the repo-level half to this repo; the board write
-          # is an ORG permission and is unaffected by it (measured, backend#2181 run
-          # 32255581084).
-          repositories: ${{ github.event.repository.name }}
+          # THE READ HALF WAS WRONG, AND SILENTLY (backend#2623). Projects v2 filters
+          # `items.nodes` by whether the credential can read each item's CONTENT, so a
+          # token that cannot read issues and pull requests does not get a permission
+          # error -- it gets a SHORTER LIST. The archiver reported success over a
+          # board it could barely see. Isolated by controlled A/B:
+          #
+          #   pinned `repositories:` + no content reads ....... 102 items
+          #   `repositories:` removed ......................... 155 items  (+53)
+          #   + issues:read and pull-requests:read ........... 1626 items  (+1471)
+          #
+          # So BOTH changes are load-bearing: the org-wide scope lets it see items
+          # whose content lives in other repos, and the content reads stop the API
+          # filtering those items back out. Dropping either one re-narrows it.
+          #
+          # WHY NOT THE PAT INSTEAD. `PROJECTS_KANBAN_TOKEN` also widens the read, but
+          # only to ~742 items -- fewer than this -- and it is a PERSON's credential
+          # (the shape backend#2087 is open about). App + read scopes sees more and
+          # stays a machine identity, so it is better on both axes.
+          #
+          # READ-ONLY, AND THAT IS THE POINT: `issues` and `pull-requests` are `read`,
+          # never `write`. This widens what the archiver can SEE, not what it can
+          # touch. A credential that cannot see the board cannot archive it, and a
+          # guard that silently sees 7% of its input is the class backend#1729 named.
           permission-organization-projects: write
+          permission-issues: read
+          permission-pull-requests: read
 
       - name: Resolve project id
         id: ids
