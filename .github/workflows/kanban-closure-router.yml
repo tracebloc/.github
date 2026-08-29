@@ -163,9 +163,9 @@ jobs:
               # before any Status is published -- so the update step's non-empty
               # guard skips and the project's built-in "Item closed" automation sets
               # `Cancelled`, archiving shipped-via-parent work (.github#157). That is
-              # the no-write path this file already documents, reached by a new door,
-              # and it fires exactly when the first repo adopts the override this
-              # change exists to unblock.
+              # the no-write path this file already documents, reached by a new
+              # door -- and the door opens on any repo whose override cannot be
+              # read, which is not a hypothetical population.
               #
               # `resolve` REFUSES HERE TOO NOW (backend#2324), on an override naming
               # a Status the mapping does not declare. That case used to succeed and hand
@@ -485,8 +485,17 @@ jobs:
           # `override-unusable`, not `override-unreadable` (backend#2324): the label
           # is the operator's entry point, and a card can now reach this state with a
           # `.kanban.yml` that read perfectly and named a column that does not exist.
-          # No card has ever carried the old name -- no repo has a `.kanban.yml` --
-          # so there is nothing to migrate.
+          #
+          # NOTHING TO MIGRATE, AND THE REASON IS MEASURED RATHER THAN INFERRED
+          # (backend#2801). This used to rest on a claim that the fleet had no
+          # adopters of the override at all, which stopped being true. The
+          # CONCLUSION survives on its own evidence: `override-unreadable` is
+          # carried by ZERO issues or PRs org-wide (measured 2026-08-28), so there
+          # is still nothing to migrate. Do not reintroduce a clause about how many
+          # repos adopt the override -- it is a fact about the org that no comment
+          # can keep true, it was load-bearing for a different conclusion in
+          # scripts/branch_status_map.py, and that file's selftest now refuses it
+          # here too.
           #
           # KEEP THE DESCRIPTION UNDER 100 CHARACTERS (Bugbot, #302). That is the
           # label API's cap; over it the create 422s, `set -euo pipefail` aborts the
