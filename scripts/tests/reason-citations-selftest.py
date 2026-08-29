@@ -121,8 +121,17 @@ def run(inventory: str, *, states: "dict | None" = None, exempt: "str | None" = 
 
 
 def inv(reason: str, *, org: str = "tracebloc", source_repo: str = ".github",
-        head: str = "") -> str:
-    """One inventory carrying exactly one written reason."""
+        head: str = "", second: str = "") -> str:
+    """One inventory carrying exactly one written reason.
+
+    `second` adds a SECOND reason, under its own caller, so a case can author an
+    inventory that cites the same issue a known number of times -- which the
+    pinned-count cases need and could not otherwise express.
+    """
+    extra = f"""      other.yml:
+        exempt: >-
+          {second}
+""" if second else ""
     return f"""org: {org}
 source_repo: {source_repo}
 {head}repos:
@@ -131,7 +140,7 @@ source_repo: {source_repo}
       thing.yml:
         exempt: >-
           {reason}
-"""
+{extra}"""
 
 
 OPEN_ISSUE = ["Issue", "OPEN"]
@@ -376,6 +385,41 @@ rc, out, err = run(inv("blocked on backend#1408"),
                    exempt="tracebloc/backend#1408")
 record(rc == 1 and "no longer a finding" in err,
        "a STALE exemption is a finding too",
+       f"rc={rc} err={err.strip()[:150]!r}")
+
+# --- the PIN: an exemption must still describe its own population ------------
+# saadqbal on .github#374. A row whose reason reasons about N specific citations
+# must expire when N changes, or a NEW citation -- possibly one deferring live
+# work to the closed issue -- is covered by prose written about different ones.
+# Counts here are written down independently of the matcher (rule 9's corollary):
+# each inventory below is authored to cite the issue a known number of times.
+
+rc, out, err = run(inv("blocked on backend#1408"),
+                   states={"tracebloc/backend#1408": CLOSED_ISSUE},
+                   exempt="tracebloc/backend#1408=1")
+record(rc == 0,
+       "a pinned exemption whose count MATCHES is not a finding",
+       f"rc={rc} err={err.strip()[:150]!r}")
+
+rc, out, err = run(inv("blocked on backend#1408", second="also backend#1408"),
+                   states={"tracebloc/backend#1408": CLOSED_ISSUE},
+                   exempt="tracebloc/backend#1408=1")
+record(rc == 1 and "pinned count" in err and "2 reason(s) cite it" in err,
+       "a pinned exemption EXPIRES when a citation is ADDED (pinned 1, now 2)",
+       f"rc={rc} err={err.strip()[:200]!r}")
+
+rc, out, err = run(inv("blocked on backend#1408"),
+                   states={"tracebloc/backend#1408": CLOSED_ISSUE},
+                   exempt="tracebloc/backend#1408=2")
+record(rc == 1 and "pinned count" in err and "1 reason(s) cite it" in err,
+       "a pinned exemption EXPIRES when a citation is REMOVED too (pinned 2, now 1)",
+       f"rc={rc} err={err.strip()[:200]!r}")
+
+rc, out, err = run(inv("blocked on backend#1408"),
+                   states={"tracebloc/backend#1408": CLOSED_ISSUE},
+                   exempt="tracebloc/backend#1408")
+record(rc == 0,
+       "an UNPINNED exemption still works -- the pin is opt-in per row",
        f"rc={rc} err={err.strip()[:150]!r}")
 
 # --- only the offender is named ----------------------------------------------

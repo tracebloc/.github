@@ -141,9 +141,22 @@ def check_run(slug="cursor", name="Cursor Bugbot", status="COMPLETED", conclusio
     }
 
 
-def pr(contexts=None, threads=None, head=HEAD, ctx_total=None, thread_total=None, rollup=True):
+# THE AUTHOR SHAPES ARE LITERALS, written down independently of the module's own
+# constants (rule 9's corollary). `BOT_AUTHOR`/`HUMAN_AUTHOR` are imported by
+# nothing here: if someone typoes `"Bot"` in the gate, iterating the gate's
+# constants would carry the typo into the fixture and stay green, whereas these
+# spellings come from GitHub's schema and from the measured payloads
+# (`app/tracebloc-release-train` reads back as `__typename: "Bot"`).
+AUTHOR_HUMAN_FIXTURE = {"__typename": "User", "login": "LukasWodka"}
+AUTHOR_BOT_FIXTURE = {"__typename": "Bot", "login": "tracebloc-release-train"}
+AUTHOR_ODD_FIXTURE = {"__typename": "Organization", "login": "tracebloc"}
+
+
+def pr(contexts=None, threads=None, head=HEAD, ctx_total=None, thread_total=None,
+       rollup=True, author=None):
     contexts = [] if contexts is None else contexts
     threads = [] if threads is None else threads
+    author = AUTHOR_HUMAN_FIXTURE if author is None else author
     commit = {"oid": head}
     commit["statusCheckRollup"] = (
         {
@@ -159,6 +172,7 @@ def pr(contexts=None, threads=None, head=HEAD, ctx_total=None, thread_total=None
         "number": 1,
         "isDraft": False,
         "headRefOid": HEAD,
+        "author": author,
         "commits": {"nodes": [{"commit": commit}]},
         "reviewThreads": {
             "totalCount": len(threads) if thread_total is None else thread_total,
@@ -738,6 +752,100 @@ try:
               any("OPEN" in ln and "A real bug" in ln and "high" in ln
                   for ln in _laundered_lines),
               "got %r" % ("\n".join(_laundered_lines)[:400],))
+        # -------------------------------------------------------------------
+        # THE AUTHOR IS THE DISCRIMINATOR (backend#2586).
+        #
+        # An unclaimed head means two opposite things, and the tolerance is only
+        # defensible for one of them: a Bot-authored PR can never be reviewed
+        # (0 of 35 measured) and nothing here can change that, while a
+        # human-authored PR going unreviewed is unprecedented (637 of 637 were)
+        # and the reader should re-run rather than shrug. The exit code is 0 for
+        # both -- that is deliberate and unchanged -- so the REPORT is the whole
+        # behaviour, and it is what these assertions hold.
+        # -------------------------------------------------------------------
+        def _report_for(pr_obj):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _main_rc(pr_obj)
+            return buf.getvalue()
+
+        check("author_kind: a User author is human",
+              gate.author_kind(pr(author=AUTHOR_HUMAN_FIXTURE)) == gate.AUTHOR_HUMAN,
+              "got %r" % gate.author_kind(pr(author=AUTHOR_HUMAN_FIXTURE)))
+        check("author_kind: a Bot author is a bot",
+              gate.author_kind(pr(author=AUTHOR_BOT_FIXTURE)) == gate.AUTHOR_BOT,
+              "got %r" % gate.author_kind(pr(author=AUTHOR_BOT_FIXTURE)))
+        # THE TWO MUST NOT COLLAPSE. A discriminator that answers the same thing
+        # for both is inert, and every message assertion below would still pass
+        # if only one of them were checked in isolation.
+        check("author_kind: the two kinds are DIFFERENT answers",
+              gate.author_kind(pr(author=AUTHOR_HUMAN_FIXTURE))
+              != gate.author_kind(pr(author=AUTHOR_BOT_FIXTURE)),
+              "both read as %r" % gate.author_kind(pr(author=AUTHOR_BOT_FIXTURE)))
+        # A deleted account returns `author: null`; an actor type this gate has
+        # not measured returns something else. Neither may be filed under a
+        # branch that then tells the reader something specific and wrong.
+        _null_author_pr = pr(contexts=[])
+        _null_author_pr["author"] = None  # what GitHub returns for a deleted account
+        check("author_kind: a null author is 'cannot tell', not human",
+              gate.author_kind(_null_author_pr) is None,
+              "got %r" % gate.author_kind(_null_author_pr))
+        check("author_kind: an unmeasured actor type is 'cannot tell'",
+              gate.author_kind(pr(author=AUTHOR_ODD_FIXTURE)) is None,
+              "got %r" % gate.author_kind(pr(author=AUTHOR_ODD_FIXTURE)))
+        check("author_kind: a missing author key is 'cannot tell'",
+              gate.author_kind({}) is None)
+
+        # The guard on the query, both directions, with the inputs written here
+        # rather than taken from the module (rule 9's corollary).
+        check("the live query DOES ask for author.__typename",
+              gate.query_lacks_author_kind() is False)
+        check("a query that asks only for the login is caught",
+              gate.query_lacks_author_kind("{ pullRequest { author { login } } }")
+              is True)
+        check("a query that asks for __typename is not caught",
+              gate.query_lacks_author_kind(
+                  "{ pullRequest { author { __typename login } } }") is False)
+
+        _bot_report = _report_for(pr(contexts=[], author=AUTHOR_BOT_FIXTURE))
+        _human_report = _report_for(pr(contexts=[], author=AUTHOR_HUMAN_FIXTURE))
+        _unknown_report = _report_for(pr(contexts=[], author=AUTHOR_ODD_FIXTURE))
+
+        check("main: an UNCLAIMED Bot-authored head names the Bot as the cause",
+              "Bot" in _bot_report and "tracebloc-release-train" in _bot_report,
+              "got %r" % _bot_report[-500:])
+        check("main: it names the remedy (open it as a human), not a re-run",
+              "2590" in _bot_report and "Re-running will not help" in _bot_report,
+              "got %r" % _bot_report[-500:])
+        check("main: an UNCLAIMED human-authored head reads as anomalous",
+              "anomalous" in _human_report and "RE-RUN" in _human_report,
+              "got %r" % _human_report[-500:])
+        # THE CROSS-CHECK IS THE POINT: without it, a report that emitted the
+        # bot paragraph for everyone would satisfy every positive assertion
+        # above and still tell a human author the false thing the retraction
+        # above WAITABLE is about.
+        check("main: the human report does NOT claim Bugbot skipped it by design",
+              "Re-running will not help" not in _human_report
+              and "cannot be fixed from here" not in _human_report,
+              "got %r" % _human_report[-500:])
+        check("main: the bot report does NOT tell the reader to re-run",
+              "anomalous" not in _bot_report, "got %r" % _bot_report[-500:])
+        check("main: the three author cases produce THREE distinct reports",
+              len({_bot_report, _human_report, _unknown_report}) == 3)
+        check("main: an unreadable author kind says so",
+              "cannot tell" in _unknown_report,
+              "got %r" % _unknown_report[-500:])
+        # And the tolerance itself is unchanged by any of this: still exit 0,
+        # still UNREVIEWED, for every author kind.
+        for _label, _author in (("bot", AUTHOR_BOT_FIXTURE),
+                                ("human", AUTHOR_HUMAN_FIXTURE),
+                                ("unknown", AUTHOR_ODD_FIXTURE)):
+            _rc = _main_rc(pr(contexts=[], author=_author))
+            check("main: UNCLAIMED still exits 0 for a %s author" % _label,
+                  _rc == 0, "got rc=%r" % _rc)
+        check("main: every author kind still reads UNREVIEWED",
+              all("UNREVIEWED" in r
+                  for r in (_bot_report, _human_report, _unknown_report)))
     finally:
         gate.fetch = _real_fetch
 finally:

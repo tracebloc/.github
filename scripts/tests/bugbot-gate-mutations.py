@@ -139,6 +139,39 @@ MUTATIONS = [
      '        slug = node.get("name")\n'
      '        if slug == "Cursor Bugbot":'),
 
+    # --- (A4) THE AUTHOR DISCRIMINATOR (backend#2586) ----------------------
+    #
+    # The exit code is 0 for every author kind, so NOTHING here is pinned by an
+    # exit-code assertion -- the report IS the behaviour, and these mutations
+    # are the only thing standing between it and the false paragraph the
+    # retraction above WAITABLE is about. Each one leaves a gate that runs, exits
+    # 0, prints UNREVIEWED, and tells the next reader the wrong thing.
+    ("every author reads as human, so a Bot-authored PR is called anomalous",
+     '    if typename == BOT_AUTHOR:\n        return AUTHOR_BOT',
+     '    if typename == BOT_AUTHOR:\n        return AUTHOR_HUMAN'),
+    ("every author reads as a Bot, so a human is told Bugbot skipped them by design",
+     '    if typename == HUMAN_AUTHOR:\n        return AUTHOR_HUMAN',
+     '    if typename == HUMAN_AUTHOR:\n        return AUTHOR_BOT'),
+    # "Cannot tell" is the branch that decays quietest: folding it into either
+    # neighbour produces a confident sentence about an actor nobody measured.
+    ("an unmeasured actor type is filed as human instead of 'cannot tell'",
+     '    if typename == HUMAN_AUTHOR:\n        return AUTHOR_HUMAN\n    return None',
+     '    if typename == HUMAN_AUTHOR:\n        return AUTHOR_HUMAN\n    return AUTHOR_HUMAN'),
+    ("the bot paragraph is emitted for every author kind",
+     '                if kind == AUTHOR_BOT:',
+     '                if True or kind == AUTHOR_BOT:'),
+    ("the human and bot cases collapse into one paragraph",
+     '                elif kind == AUTHOR_HUMAN:',
+     '                elif False and kind == AUTHOR_HUMAN:'),
+    # And the two guards that keep the discriminator from going INERT: a query
+    # that stopped asking, and a checker that stopped noticing.
+    ("the query stops asking what kind of actor opened the PR",
+     '      author { __typename login }\n',
+     '      author { login }\n'),
+    ("the query guard is disarmed, so an inert discriminator runs green",
+     '    return re.search(r"author\\s*\\{[^}]*__typename", query) is None',
+     '    return False'),
+
     # --- a sibling check must not stand in for the review (.github#305) ----
     ("the first check from the app wins again, so Autofix can stand in",
      "    if len(candidates) == 1:",
