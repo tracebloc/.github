@@ -25,6 +25,11 @@ on:
 
 permissions:
   contents: read
+  # Lets the completeness check below download the PREVIOUS run's recorded board
+  # size. That number is the only one in this job that THIS run's credential did
+  # not produce, which is what makes it able to answer a question no
+  # single-read check can (backend#2802).
+  actions: read
 
 concurrency:
   group: kanban-archive
@@ -179,6 +184,10 @@ jobs:
             fi
           done < terminal.ids
           echo "=== Archived: $ok ok, $fail failed ==="
+          # Handed to the completeness check as the ONLY legitimate reason the
+          # board may be smaller than it was yesterday. Written before the
+          # fail-closed exit below so it exists whatever the archive did.
+          echo "$ok" > archived.count
           {
             echo "## Kanban archive"
             echo ""
@@ -196,6 +205,52 @@ jobs:
             exit 1
           fi
 
+
+      # THE ONE NUMBER THIS RUN DID NOT PRODUCE ITSELF (backend#2802).
+      #
+      # Every completeness check below this line compares two figures that come
+      # out of the SAME credential's SAME view of the board -- `reread_total`
+      # against `declared_total`, and the re-read against the first read. Both
+      # pairs shrink together, so all of them agree while the view itself is
+      # partial. Measured 2026-08-28: two runs two minutes apart reported
+      # "paginated 93, totalCount=93 (agree)" and "paginated 30, totalCount=30
+      # (agree)" with ONE item archived between them, while a PAT saw 742. Each
+      # run was internally consistent and both were wrong. A board cannot lose
+      # 63 cards to a single archive, but nothing in a single run could say so,
+      # because the disagreement is BETWEEN runs and every number was inside one.
+      #
+      # So carry yesterday's count forward as an artifact and compare across the
+      # boundary. Cards leave this board exactly one way -- being archived -- so
+      # `previous - archived_this_run` is a hard floor on today's size, and a
+      # total below it is a shrunken view, not a smaller board.
+      - name: Recall the previous run's board size
+        if: env.DRY_RUN != 'true'
+        env:
+          # The DEFAULT token, not the App token: this reads run artifacts in
+          # this repo, which is what `actions: read` above grants it. The App
+          # token is scoped for the project board and is the very credential
+          # under suspicion here -- reading the baseline with it would put both
+          # sides of the comparison back inside one view.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          : > prev.total
+          # Walk back through recent successful runs rather than taking only the
+          # latest: a dry run succeeds without uploading a baseline, and so does
+          # any run predating this artifact. The first one carrying a baseline
+          # wins; `|| true` keeps a barren history from failing the step here,
+          # because "no baseline" is judged in the assert step where it belongs.
+          for rid in $(gh run list --workflow kanban-archive.yml --status success \
+                         --limit 10 --json databaseId --jq '.[].databaseId' || true); do
+            if gh run download "$rid" -n board-baseline -D prev >/dev/null 2>&1; then
+              if [ -s prev/board.total ]; then
+                cp prev/board.total prev.total
+                echo "Baseline: run $rid saw $(cat prev.total) item(s)."
+                break
+              fi
+            fi
+          done
+          [ -s prev.total ] || echo "No previous baseline found; the assert step will say so."
 
       # A SEPARATE STEP, AND THAT IS THE FIX (Bugbot High, #339). This block used
       # to sit at the bottom of "Archive them", BELOW `if [ "$n" = "0" ]; then
@@ -363,6 +418,40 @@ jobs:
             echo "::error::the post-archive re-read saw $reread_total item(s) but the first read saw $first_total. A read that shrank mid-run lowers the terminal count for a reason that is not archiving, so this run cannot show the board is clean."
             fail=1
           fi
+          # ACROSS THE RUN BOUNDARY, which is the only axis the three checks
+          # above cannot see (backend#2802). Archiving is the sole way a card
+          # leaves this board, so yesterday's total minus what this run archived
+          # is a FLOOR on today's. Below it, the board did not shrink -- this
+          # credential's view of it did.
+          # `if`, not `[ -s f ] && v=$(cat f)`: the short-circuit leaves the
+          # absent-file case with a non-zero `$?`, which is harmless HERE and
+          # becomes a failed step the moment anything is appended after it or
+          # this block moves to the end of the step. Measured, so the comment
+          # does not overstate it: `set -e` exempts every command of an AND-OR
+          # list but the last, so the short-circuit does NOT exit mid-step
+          # today. The `if` is what makes that independent of position.
+          archived_now=0
+          if [ -s archived.count ]; then archived_now=$(cat archived.count); fi
+          prev_total=""
+          if [ -s prev.total ]; then prev_total=$(cat prev.total); fi
+          if [ -n "$prev_total" ]; then
+            floor=$((prev_total - archived_now))
+            if [ "$declared_total" -lt "$floor" ]; then
+              echo "::error::the board reports totalCount=$declared_total, but the previous run saw $prev_total and this run archived only $archived_now -- so at least $((floor - declared_total)) item(s) stopped being visible for a reason that is not archiving. This is a shrunken view, not a smaller board (backend#2802)."
+              fail=1
+            else
+              echo "Cross-run: totalCount=$declared_total against a floor of $floor (previous $prev_total - $archived_now archived)."
+            fi
+          else
+            # NOT A PASS, and said out loud. With no baseline the cross-run
+            # comparison did not run, so this is the one shape it exists to
+            # catch going unchecked -- rule 3, "cannot tell" is a finding. It is
+            # a warning rather than a failure only because a first run, and the
+            # run after any retention lapse, legitimately has nothing to compare
+            # against; a red there would be a red nobody could ever clear.
+            echo "::warning::no previous board size was available, so this run could NOT rule out a shrunken view (backend#2802). Its own counts agreeing proves only that they came from the same read."
+          fi
+          echo "$declared_total" > board.total
           {
             echo ""
             echo "| completeness check | value |"
@@ -371,5 +460,21 @@ jobs:
             echo "| server totalCount | $declared_total |"
             echo "| first read | $first_total |"
             echo "| un-archived null Status | $nullst_after |"
+            echo "| previous run totalCount | ${prev_total:-none} |"
+            echo "| archived this run | $archived_now |"
           } >> "$GITHUB_STEP_SUMMARY"
           [ "$fail" -eq 0 ] || exit 1
+
+      # ONLY ON A PASS -- no `if: always()`. A run whose view shrank must not
+      # write its own shrunken total forward as tomorrow's baseline, or the
+      # floor ratchets down to meet the defect and the check quietly stops
+      # being able to fire. Failing leaves the last TRUSTED count in place, so
+      # the comparison keeps pointing at the real board until it is fixed.
+      - name: Record this run's board size for the next one
+        if: env.DRY_RUN != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: board-baseline
+          path: board.total
+          if-no-files-found: error
+          retention-days: 30
