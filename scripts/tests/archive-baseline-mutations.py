@@ -109,9 +109,16 @@ MUTATIONS = [
     # download-failed path rejoining the warning, which is the same bug with a
     # smaller blast radius and no way to notice it.
     (
-        "only one of the two lookup failure paths marks itself unreadable",
+        "one of the lookup failure paths stops marking itself unreadable",
         "                printf 'a live board-baseline artifact exists (run %s) but could not be downloaded\\n' \"$rid\" > prev.error",
         '                echo "could not download the baseline"',
+    ),
+    # The marker/write pairing that lets the suite DERIVE how many failure paths
+    # exist. Drop a marker and the counts diverge; that is the whole mechanism.
+    (
+        "a failure path is written but not marked, so the derived count goes stale",
+        "            # selftest:unreadable-path\n            printf 'the artifact listing failed:",
+        "            printf 'the artifact listing failed:",
     ),
     # --- (D) the wiring that makes tomorrow's comparison possible ----------
     #
@@ -120,12 +127,39 @@ MUTATIONS = [
     # can never fire again. The guard would still be present, still green, and
     # permanently blind.
     (
-        "the baseline is recorded even on a failed run, ratcheting the floor down "
-        "to meet the defect",
-        """      - name: Record this run's board size for the next one
-        if: env.DRY_RUN != 'true'""",
-        """      - name: Record this run's board size for the next one
-        if: always()""",
+        "the upload is gated on the assert step succeeding, making one failure permanent",
+        "        if: ${{ !cancelled() && env.DRY_RUN != 'true' }}",
+        "        if: ${{ success() && env.DRY_RUN != 'true' }}",
+    ),
+    (
+        "a deliberately-unrecorded run is reported as a missing-file error",
+        "          if-no-files-found: ignore",
+        "          if-no-files-found: error",
+    ),
+    # --- (E) the two Highs from the first review ---------------------------
+    #
+    # The recording gate. Enshrining an incoherent count ratchets the floor down
+    # to meet the defect until the check can never fire again -- present, green,
+    # permanently blind.
+    (
+        "an incoherent read still records its count as tomorrow's floor",
+        '          if [ "$view_bad" -eq 0 ]; then',
+        "          if true; then",
+    ),
+    # The other-archiver branch. kanban-reconcile archives too, so without this
+    # the check goes red every Monday for a reason that is not a defect.
+    (
+        "a Monday reconcile is treated as a shrunken view, reddening on the calendar",
+        "          elif [ -s prev.otherarchiver ]; then",
+        '          elif [ -n "${NEVER_SET:-}" ]; then',
+    ),
+    # The exact within-run identity, which needs no baseline at all and is what
+    # catches a view collapsing BETWEEN this job's own two reads.
+    (
+        "the within-run identity is a bound rather than an equality, so a view that "
+        "shrank mid-run passes",
+        '          if [ "$reread_total" -ne "$expected" ]; then',
+        '          if [ "$reread_total" -gt "$expected" ]; then',
     ),
     # The producer half of the pair. No upload, no baseline, ever -- every
     # future run takes the cannot-tell branch and the comparison is dead code.
