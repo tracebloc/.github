@@ -235,22 +235,42 @@ jobs:
         run: |
           set -uo pipefail
           : > prev.total
-          # Walk back through recent successful runs rather than taking only the
-          # latest: a dry run succeeds without uploading a baseline, and so does
-          # any run predating this artifact. The first one carrying a baseline
-          # wins; `|| true` keeps a barren history from failing the step here,
-          # because "no baseline" is judged in the assert step where it belongs.
-          for rid in $(gh run list --workflow kanban-archive.yml --status success \
-                         --limit 10 --json databaseId --jq '.[].databaseId' || true); do
-            if gh run download "$rid" -n board-baseline -D prev >/dev/null 2>&1; then
-              if [ -s prev/board.total ]; then
+          : > prev.error
+          # ASK WHETHER A BASELINE EXISTS BEFORE ASKING FOR ITS CONTENT, because
+          # those are the two answers this step must never conflate (Bugbot,
+          # #383). The first draft walked `gh run list ... || true` and let an
+          # empty result mean "no baseline" -- so an API failure, an expired
+          # token or a rate limit rendered as the benign first-run warning and
+          # the job still passed. That is the ticket's own defect reproduced one
+          # layer inside its fix: a check reporting clean having compared
+          # nothing, because it could not tell "absent" from "unreadable".
+          #
+          # The artifacts endpoint answers it unambiguously: it FAILS on a
+          # broken lookup and returns an empty list when there is genuinely
+          # nothing yet. It also carries `workflow_run.id`, so the run listing
+          # is not needed at all -- one call, and no second way to be wrong.
+          if ! arts=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" 2>&1); then
+            printf 'the artifact listing failed: %s\n' "$(printf '%s' "$arts" | tail -1)" > prev.error
+            echo "::warning::could not list the board-baseline artifacts; the assert step will refuse."
+          else
+            live=$(printf '%s' "$arts" | jq '[.artifacts[] | select(.expired == false)] | length')
+            if [ "$live" = "0" ]; then
+              echo "No unexpired board-baseline artifact exists yet (first run, or retention lapsed)."
+            else
+              rid=$(printf '%s' "$arts" \
+                | jq -r '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id')
+              if gh run download "$rid" -n board-baseline -D prev >/dev/null 2>&1 && [ -s prev/board.total ]; then
                 cp prev/board.total prev.total
                 echo "Baseline: run $rid saw $(cat prev.total) item(s)."
-                break
+              else
+                # The listing SAW a live artifact and the fetch still failed, so
+                # this is a broken read, not an empty history. Refusing is the
+                # whole point of having asked the two questions separately.
+                printf 'a live board-baseline artifact exists (run %s) but could not be downloaded\n' "$rid" > prev.error
+                echo "::warning::the baseline exists but could not be read; the assert step will refuse."
               fi
             fi
-          done
-          [ -s prev.total ] || echo "No previous baseline found; the assert step will say so."
+          fi
 
       # A SEPARATE STEP, AND THAT IS THE FIX (Bugbot High, #339). This block used
       # to sit at the bottom of "Archive them", BELOW `if [ "$n" = "0" ]; then
@@ -434,7 +454,16 @@ jobs:
           if [ -s archived.count ]; then archived_now=$(cat archived.count); fi
           prev_total=""
           if [ -s prev.total ]; then prev_total=$(cat prev.total); fi
-          if [ -n "$prev_total" ]; then
+          # UNREADABLE FIRST, and it is a REFUSAL rather than the warning below.
+          # The two look identical from here -- both leave `prev_total` empty --
+          # and collapsing them is what this ticket is about. An empty history is
+          # a bounded cannot-tell with no remedy, so it warns; a failed read is
+          # actionable, and a cron job's warnings are exactly what went unread
+          # for weeks while this defect ran.
+          if [ -s prev.error ]; then
+            echo "::error::the previous board size could not be read ($(cat prev.error)), so this run made NO cross-run comparison. An unread baseline is not an absent one -- refusing rather than reporting the first-run warning (backend#2802)."
+            fail=1
+          elif [ -n "$prev_total" ]; then
             floor=$((prev_total - archived_now))
             if [ "$declared_total" -lt "$floor" ]; then
               echo "::error::the board reports totalCount=$declared_total, but the previous run saw $prev_total and this run archived only $archived_now -- so at least $((floor - declared_total)) item(s) stopped being visible for a reason that is not archiving. This is a shrunken view, not a smaller board (backend#2802)."

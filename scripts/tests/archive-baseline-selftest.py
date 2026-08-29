@@ -85,12 +85,21 @@ def extract() -> str:
 BLOCK = extract()
 
 
-def run_case(declared: int, previous, archived: int):
-    """Run the REAL block with the files it reads, and report what it decided."""
+def run_case(declared: int, previous, archived: int, unreadable: str = ""):
+    """Run the REAL block with the files it reads, and report what it decided.
+
+    `unreadable` writes the `prev.error` marker the recall step leaves when the
+    baseline LOOKUP broke, as opposed to there being no baseline. Both leave
+    `prev.total` empty, which is exactly why the block has to be handed the
+    difference rather than inferring it.
+    """
     work = tempfile.mkdtemp()
     if previous is not None:
         with open(os.path.join(work, "prev.total"), "w") as fh:
             fh.write(str(previous))
+    if unreadable:
+        with open(os.path.join(work, "prev.error"), "w") as fh:
+            fh.write(unreadable)
     with open(os.path.join(work, "archived.count"), "w") as fh:
         fh.write(str(archived))
     # `set -euo pipefail` exactly as the step runs it: the absent-baseline case
@@ -106,23 +115,31 @@ def run_case(declared: int, previous, archived: int):
     return proc.returncode, proc.stdout + proc.stderr
 
 
-# (name, declared_total, previous_total, archived_this_run, must_refuse)
+# (name, declared_total, previous_total, archived_this_run, must_refuse, unreadable)
 CASES = [
     # THE MEASURED ONE. 93 -> 30 with a single item archived is the incident
     # this check was filed for, and the shape every same-run check called clean.
-    ("the measured 93 -> 30 with one archive", 30, 93, 1, True),
+    ("the measured 93 -> 30 with one archive", 30, 93, 1, True, ""),
     # The same arithmetic when the archive REALLY did remove them: not a finding.
     # Without this case the check could be "always refuse a smaller board", which
     # would redden every productive run and be switched off within a week.
-    ("a legitimate shrink: 63 archived", 30, 93, 63, False),
+    ("a legitimate shrink: 63 archived", 30, 93, 63, False, ""),
     # Growth is normal -- cards are added freely and only leave by archiving.
-    ("the board grew", 742, 93, 0, False),
+    ("the board grew", 742, 93, 0, False, ""),
     # First run / retention lapse: cannot tell, must not refuse, must SAY SO.
-    ("no baseline available", 30, None, 1, False),
+    ("no baseline available", 30, None, 1, False, ""),
     # The boundary, both sides. An off-by-one here silently widens or narrows the
     # floor by one card, which no coarser case can see.
-    ("exactly on the floor", 92, 93, 1, False),
-    ("one card below the floor", 91, 93, 1, True),
+    ("exactly on the floor", 92, 93, 1, False, ""),
+    ("one card below the floor", 91, 93, 1, True, ""),
+    # THE LOOKUP BROKE, which is NOT an empty history (Bugbot, .github#383).
+    # Both states leave `prev.total` empty, so without this case the block can
+    # report the benign first-run warning and pass on a run that compared
+    # nothing -- this ticket's own defect, one layer inside its fix.
+    ("the baseline lookup failed", 30, None, 1, True, "the artifact listing failed: HTTP 403"),
+    # And it must refuse EVEN WHEN the numbers would otherwise have been fine,
+    # or the refusal is really just the floor check wearing a different message.
+    ("the lookup failed on an unremarkable board", 742, None, 0, True, "HTTP 500"),
 ]
 
 
@@ -143,8 +160,33 @@ def wiring_failures() -> list:
     if len(recall) != 1:
         bad.append("no single step recalls the previous run's board size, so the "
                    "comparison can never have a baseline to use")
-    elif "board-baseline" not in recall[0].get("run", ""):
-        bad.append("the recall step no longer names the `board-baseline` artifact")
+    else:
+        body = recall[0].get("run", "")
+        if "board-baseline" not in body:
+            bad.append("the recall step no longer names the `board-baseline` artifact")
+        # THE PRODUCER OF THE DISTINCTION, checked against its consumer
+        # (Bugbot, .github#383). "no baseline yet" and "the lookup broke" both
+        # leave `prev.total` empty, so the assert step can only tell them apart
+        # if the recall step MARKS the second -- on every path it can take. Drop
+        # one marker and that path silently rejoins the benign warning, which is
+        # this ticket's defect reproduced inside its own fix. Two failure paths
+        # exist: the listing failing, and a live artifact that will not download.
+        # The `: > prev.error` initialiser is EXCLUDED, and finding that out is
+        # why this comment exists: counting every `> prev.error` made the
+        # initialiser stand in for a real write, so deleting one of the two
+        # failure paths still counted two and the mutation went UNCAUGHT. A
+        # guard that a truncation satisfies is not counting failure paths.
+        writes = sum(
+            1 for line in body.splitlines()
+            if "> prev.error" in line and not line.strip().startswith(":")
+        )
+        if writes < 2:
+            bad.append(
+                f"the recall step marks an unreadable baseline on {writes} path(s), but it "
+                "has two ways to fail -- the artifact listing, and downloading an artifact "
+                "the listing already saw. An unmarked path reports the first-run warning "
+                "and passes, having compared nothing"
+            )
 
     upload = [s for s in steps if "upload-artifact" in str(s.get("uses", ""))]
     if len(upload) != 1:
@@ -178,8 +220,8 @@ def main() -> int:
     # coverage and must never be logged as a catch.
     print("archive-baseline-selftest: %d case(s)" % len(CASES))
     failures = 0
-    for name, declared, previous, archived, must_refuse in CASES:
-        rc, out = run_case(declared, previous, archived)
+    for name, declared, previous, archived, must_refuse, unreadable in CASES:
+        rc, out = run_case(declared, previous, archived, unreadable)
         # THE BLOCK MUST NEVER EXIT ON ITS OWN. It records its verdict in
         # `fail`; the step decides at the end. A non-zero exit here means the
         # shell died mid-block -- which under `set -e` is what an absent
@@ -200,7 +242,7 @@ def main() -> int:
             print(f"FAIL {name}: the block {verb}, expected it to {want}")
             print("     " + out.strip().replace("\n", "\n     "))
             continue
-        if previous is None and "::warning::" not in out:
+        if previous is None and not unreadable and "::warning::" not in out:
             failures += 1
             print(
                 f"FAIL {name}: no baseline and no warning. The run would report clean "

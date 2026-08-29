@@ -93,7 +93,27 @@ MUTATIONS = [
     # requirement is not there; here it is not there, and the `if` is a
     # position-independence habit rather than a behaviour. Kept as a note so the
     # next reader does not re-add the case and re-discover this the same way.
-    # --- (C) the wiring that makes tomorrow's comparison possible ----------
+    # --- (C) unreadable is not absent (Bugbot, .github#383) ----------------
+    #
+    # The finding that came back on the first push, and the one worth the most:
+    # a failed lookup and an empty history both leave `prev.total` empty, so
+    # collapsing them lets an API failure render as the benign first-run
+    # warning -- a run that compared nothing, reporting clean. That is this
+    # ticket's own defect, one layer inside its fix.
+    (
+        "an unreadable baseline falls through to the benign first-run warning",
+        'if [ -s prev.error ]; then',
+        'if [ -n "${NEVER_SET:-}" ]; then',
+    ),
+    # The producer half. Marking only the listing failure leaves the
+    # download-failed path rejoining the warning, which is the same bug with a
+    # smaller blast radius and no way to notice it.
+    (
+        "only one of the two lookup failure paths marks itself unreadable",
+        "                printf 'a live board-baseline artifact exists (run %s) but could not be downloaded\\n' \"$rid\" > prev.error",
+        '                echo "could not download the baseline"',
+    ),
+    # --- (D) the wiring that makes tomorrow's comparison possible ----------
     #
     # `if: always()` here would write a SHRUNKEN total forward as the new
     # baseline, ratcheting the floor down to meet the defect until the check
