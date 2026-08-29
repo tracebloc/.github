@@ -155,6 +155,14 @@ MUTATIONS = [
     ),
     # The exact within-run identity, which needs no baseline at all and is what
     # catches a view collapsing BETWEEN this job's own two reads.
+    # The premise-free correction. Dropping it re-hardcodes "archiving always
+    # shrinks the connection" -- true on this board today, and a permanent red
+    # firing on every productive run if that ever changes (Bugbot High, #383).
+    (
+        "the identity re-assumes archived items always leave the connection",
+        "          expected=$((first_total - archived_now + arch_seen - arch_first))",
+        "          expected=$((first_total - archived_now))",
+    ),
     (
         "the within-run identity is a bound rather than an equality, so a view that "
         "shrank mid-run passes",

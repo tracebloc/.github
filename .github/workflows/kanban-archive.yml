@@ -335,6 +335,9 @@ jobs:
           # evidence of a clean board, so an empty result with a non-zero total is a
           # finding, not a pass.
           left=0; reread_total=0; nullst_after=0; declared_total=""; cursor="null"
+          # Counted so the identity below need not ASSUME whether this connection
+          # returns archived items -- see the comment there.
+          arch_seen=0
           while :; do
             if [ "$cursor" = "null" ]; then
               # shellcheck disable=SC2016  # $names are GraphQL variables, not shell - keep literal
@@ -386,6 +389,8 @@ jobs:
             [ -z "$declared_total" ] && declared_total="$page_tc"
             n=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.nodes|length')
             reread_total=$((reread_total + n))
+            arch_seen=$((arch_seen + $(echo "$OUT" | jq -r '[.data.organization.projectV2.items.nodes[]
+              | select(.isArchived == true)] | length')))
             left=$((left + $(echo "$OUT" | jq -r '[.data.organization.projectV2.items.nodes[]
               | select(.isArchived == false)
               | select(.fieldValueByName.name == "Prod" or .fieldValueByName.name == "Cancelled" or .fieldValueByName.name == "Done")]
@@ -490,16 +495,33 @@ jobs:
           prev_total=""
           if [ -s prev.total ]; then prev_total=$(cat prev.total); fi
           # THE EXACT IDENTITY, and it needs no baseline and no other workflow.
-          # Two reads bracket this job's own archiving, so `first_total - ok` is
-          # what the re-read MUST return -- not a bound, an equality. Nothing
-          # else archives inside the seconds between them (reconcile runs an hour
-          # earlier), so any other number is a view that moved under this run.
-          # This is what catches the measured 93 -> 30: a first read of 93, one
-          # item archived, and a re-read of 30 is off by 62 against an exact
-          # expectation, with no cross-run state involved at all.
-          expected=$((first_total - archived_now))
+          # Two reads bracket this job's own archiving, so the re-read's size is
+          # determined -- not bounded, determined. Nothing else archives inside
+          # the seconds between them (reconcile runs an hour earlier), so any
+          # other number is a view that moved under this run. This is what
+          # catches the measured 93 -> 30 with no cross-run state at all.
+          #
+          # WHETHER ARCHIVING SHRINKS THE CONNECTION IS DERIVED, NOT ASSUMED
+          # (Bugbot High, .github#383). The obvious form, `first_total -
+          # archived_now`, is right only if `ProjectV2.items` omits archived
+          # items -- and if that ever stopped being true the identity would fire
+          # on EVERY productive run, a permanent red produced by the check being
+          # wrong. Measured on this board, it does omit them: run 33084151778
+          # read `1626 (un-archived: 1626)` -- a full read with zero archived
+          # items present, weeks after 83+ had been archived, and nothing calls
+          # `deleteProjectV2Item` anywhere in this repo.
+          #
+          # But the reads themselves already carry the answer, so the arithmetic
+          # asks instead of trusting that measurement. `arch_seen - arch_first`
+          # is how many items became archived BETWEEN the two reads:
+          #   - connection omits archived  -> both are 0, expected = first - ok
+          #   - connection keeps archived  -> the difference is `ok`, expected = first
+          # Exact either way, and it stops depending on a fact about someone
+          # else's API that no test here can pin.
+          arch_first=$(awk -F"\t" '$1=="true"' seen.tsv | wc -l | tr -d " ")
+          expected=$((first_total - archived_now + arch_seen - arch_first))
           if [ "$reread_total" -ne "$expected" ]; then
-            echo "::error::this run read $first_total item(s), archived $archived_now, and then read $reread_total -- but archiving $archived_now of $first_total must leave exactly $expected. The view moved under this run, so its counts describe no single board (backend#2802)."
+            echo "::error::this run read $first_total item(s), archived $archived_now, and then read $reread_total -- but that must leave exactly $expected (archived items in the two reads: $arch_first then $arch_seen). The view moved under this run, so its counts describe no single board (backend#2802)."
             fail=1
             view_bad=1
           fi

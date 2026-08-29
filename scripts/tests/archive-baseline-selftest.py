@@ -87,7 +87,8 @@ BLOCK = extract()
 
 def run_case(declared: int, previous, archived: int, unreadable: str = "",
              other_archiver: str = "", view_bad: int = 0,
-             first_total=None, reread_total=None):
+             first_total=None, reread_total=None,
+             arch_first: int = 0, arch_seen: int = 0):
     """Run the REAL block with the files it reads, and report what it decided.
 
     `unreadable` writes the `prev.error` marker the recall step leaves when the
@@ -105,6 +106,13 @@ def run_case(declared: int, previous, archived: int, unreadable: str = "",
     if other_archiver:
         with open(os.path.join(work, "prev.otherarchiver"), "w") as fh:
             fh.write(other_archiver)
+    # seen.tsv is the FIRST read's per-item record; field 1 is `isArchived`. The
+    # identity reads `arch_first` off it rather than being told, so this fixture
+    # has to be the real file shape.
+    with open(os.path.join(work, "seen.tsv"), "w") as fh:
+        for i in range(arch_first):
+            fh.write("true\tProd\n")
+        fh.write("false\tReady\n")
     with open(os.path.join(work, "archived.count"), "w") as fh:
         fh.write(str(archived))
     # `set -euo pipefail` exactly as the step runs it: the absent-baseline case
@@ -121,6 +129,7 @@ def run_case(declared: int, previous, archived: int, unreadable: str = "",
         # the identity supply their own pair.
         f"first_total={declared + archived if first_total is None else first_total}\n"
         f"reread_total={declared if reread_total is None else reread_total}\n"
+        f"arch_seen={arch_seen}\n"
         f"declared_total={declared}\n" + BLOCK
     )
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
@@ -175,15 +184,29 @@ CASES = [
 # transition -- 93 read, one archived, 30 re-read -- with no cross-run state at
 # all, and it is the one check a steady-state blind credential cannot satisfy by
 # being consistently wrong.
-# (name, first_total, archived, reread_total, must_refuse)
+# WHETHER ARCHIVING SHRINKS THE CONNECTION IS DERIVED (Bugbot High, .github#383),
+# so both worlds are exercised. Measured on this board it OMITS archived items
+# (run 33084151778 read `1626 (un-archived: 1626)` weeks after 83+ archives, and
+# nothing calls deleteProjectV2Item) -- but the identity must not depend on that
+# staying true, or a change to someone else's API turns it into a permanent red
+# that fires on every productive run.
+# (name, first_total, archived, reread_total, arch_first, arch_seen, must_refuse)
 IDENTITY_CASES = [
-    ("the view collapsed between this run's two reads", 93, 1, 30, True),
-    ("an ordinary run: 93 read, 63 archived, 30 left", 93, 63, 30, False),
-    ("nothing archived and nothing changed", 700, 0, 700, False),
+    # --- the world this board is in: archived items leave the connection ---
+    ("the view collapsed between this run's two reads", 93, 1, 30, 0, 0, True),
+    ("an ordinary run: 93 read, 63 archived, 30 left", 93, 63, 30, 0, 0, False),
+    ("nothing archived and nothing changed", 700, 0, 700, 0, 0, False),
     # A view that GREW mid-run is equally incoherent -- a bound would wave it
     # through, and it means the two counts describe different boards just as much.
-    ("the view grew between the two reads", 93, 1, 150, True),
-    ("one item short of the identity", 93, 1, 91, True),
+    ("the view grew between the two reads", 93, 1, 150, 0, 0, True),
+    ("one item short of the identity", 93, 1, 91, 0, 0, True),
+    # --- the other world: archived items STAY, so the size does not move ------
+    # This is the case Bugbot argued we were already in. We are not, but if the
+    # API ever changes the identity self-corrects instead of reddening forever.
+    ("archived items are retained, so 93 stays 93", 93, 28, 93, 0, 28, False),
+    ("retained, with a board that already held archived items", 700, 41, 700, 12, 53, False),
+    # ...and it must still catch a genuine collapse in THAT world.
+    ("retained, but the view collapsed anyway", 93, 28, 30, 0, 28, True),
 ]
 
 
@@ -331,14 +354,16 @@ def main() -> int:
             continue
         print(f"ok   {name}")
 
-    for name, first, archived, reread, must_refuse in IDENTITY_CASES:
+    for (name, first, archived, reread, arch_first, arch_seen,
+         must_refuse) in IDENTITY_CASES:
         rc, out, _ = run_case(reread, None, archived,
-                              first_total=first, reread_total=reread)
+                              first_total=first, reread_total=reread,
+                              arch_first=arch_first, arch_seen=arch_seen)
         if rc != 0:
             failures += 1
             print(f"FAIL identity/{name}: the block exited {rc}")
             continue
-        refused = "must leave exactly" in out
+        refused = "that must leave exactly" in out
         if refused != must_refuse:
             failures += 1
             verb = "refused" if refused else "passed"
