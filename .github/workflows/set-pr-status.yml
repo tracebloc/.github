@@ -77,6 +77,34 @@ on:
         type: string
         default: "main"
 
+# ONE RUN PER PR WINS, AND IT IS THE NEWEST (backend#2767).
+#
+# Every trigger this file answers can fire twice in quick succession -- a
+# title fixed straight after a body edit, a ready_for_review immediately
+# after an edit -- and `edited` made that ordinary rather than rare: the
+# 19-PR sweep for backend#2756 armed `edited` on all 20 callers, so what
+# was latent on one repo is now live fleet-wide.
+#
+# Without a group the runs race and the LOSER writes last: an older
+# evaluation of the title/body overwrites a newer one, and the card (or the
+# closing-ref verdict) settles on stale input. Nothing errors; the board is
+# simply wrong, which is the failure mode this whole workflow exists to
+# prevent one level down.
+#
+# `github.ref` is `refs/pull/<n>/merge` on these events, so the group is
+# already per-PR; `github.workflow` is the CALLER's workflow name, which
+# keeps two different callers in one repo apart. Same shape as
+# `rfcs`'s code-quality-caller.yml, deliberately -- one house pattern.
+#
+# CANCELLING IS SAFE HERE, and that is measured rather than assumed: an
+# `edited` event does NOT change the head sha, so the cancelled run and the
+# winner report to the SAME commit under the same check names, and GitHub
+# surfaces the newest per context. Neither job is a required context in any
+# repo (stated above and unchanged), so a cancelled older run blocks nothing.
+concurrency:
+  group: set-pr-status-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ONLY WHILE THE PR IS OPEN (tracebloc/backend#2556). This condition is a
   # DIRECT CONSEQUENCE of adding `edited` to the callers, and it is not optional.
