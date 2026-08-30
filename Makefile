@@ -300,7 +300,8 @@ MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-branch-owner mutation-reason-citations \
                    mutation-mutation-baseline mutation-standards-sync \
                    mutation-conflict-gate \
-                   mutation-triage-labels
+                   mutation-triage-labels \
+                   mutation-archive-baseline
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -339,7 +340,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-branch-owner \
                     selftest-mutation-baseline \
                     selftest-conflict-gate \
-                    selftest-triage-labels
+                    selftest-triage-labels \
+                    selftest-archive-baseline
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -538,6 +540,21 @@ mutation-bugbot-gate-dry:
 .PHONY: selftest-conflict-gate
 selftest-conflict-gate: guard-pyyaml
 	$(PYTHON) scripts/tests/conflict-gate-selftest.py
+
+# The archive's cross-run floor (backend#2802). guard-pyyaml: the suite parses
+# kanban-archive.yml -- it extracts the comparison's shell out of the assert step
+# and runs it verbatim, and reads the upload step's wiring from the same document.
+# No token and no network: every case is files in a temp dir.
+.PHONY: selftest-archive-baseline
+selftest-archive-baseline: guard-pyyaml
+	$(PYTHON) scripts/tests/archive-baseline-selftest.py
+
+.PHONY: mutation-archive-baseline mutation-archive-baseline-dry
+mutation-archive-baseline:
+	$(PYTHON) scripts/tests/archive-baseline-mutations.py
+
+mutation-archive-baseline-dry:
+	$(PYTHON) scripts/tests/archive-baseline-mutations.py --dry
 
 .PHONY: mutation-conflict-gate mutation-conflict-gate-dry
 mutation-conflict-gate:
