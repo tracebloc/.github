@@ -476,13 +476,30 @@ jobs:
             echo "::error::$nullst_after un-archived item(s) returned an unreadable Status on the post-archive re-read. They cannot be judged terminal, so this run CANNOT show the board is clean -- unverified is not verified-clean (backend#2623)."
             fail=1
           fi
-          first_total=$(cat seen.total)
-          if [ "$reread_total" -lt "$first_total" ]; then
-            echo "::error::the post-archive re-read saw $reread_total item(s) but the first read saw $first_total. A read that shrank mid-run lowers the terminal count for a reason that is not archiving, so this run cannot show the board is clean."
-            fail=1
-            view_bad=1
-          fi
           # selftest:xrun-begin
+          first_total=$(cat seen.total)
+          # THE BARE SHRINK CHECK IS GONE, and it was RED ON EVERY PRODUCTIVE RUN
+          # (backend#2820, found in FR on staging). It compared the re-read
+          # against the PRE-archive count while both reads filter
+          # `isArchived == false` -- so archiving N shrinks the second read by
+          # exactly N and the guard fired on precisely the runs that did their
+          # job. Measured on develop after #380 restored the credential's sight:
+          # 749 read, 253 archived, 496 re-read, and it failed with "a reason
+          # that is not archiving" about arithmetic it never performed.
+          #
+          # Its own error text named the subtraction it was missing. The identity
+          # below IS that subtraction, so this is a strict replacement rather
+          # than a deletion: every shrink the old check could catch is a
+          # `reread_total != first_total - archived` too, and the identity also
+          # catches a shrink the old one could not see (one exactly cancelled by
+          # an archive count) and a GROWTH, which it ignored entirely.
+          #
+          # Leaving both was this PR's own bug: the description claimed the
+          # identity "replaces the weaker bound" while the code kept both, so
+          # #383 would have shipped the red-on-success the ticket describes.
+          # Rule 4 -- never land a red gate; a daily cron that fails whenever it
+          # works is one nobody reads, which is how the original blindness
+          # survived in the first place.
           # `if`, not `[ -s f ] && v=$(cat f)`: the short-circuit leaves the
           # absent-file case with a non-zero `$?`, which is harmless HERE and
           # becomes a failed step the moment anything is appended after it or

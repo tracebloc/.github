@@ -113,6 +113,13 @@ def run_case(declared: int, previous, archived: int, unreadable: str = "",
         for i in range(arch_first):
             fh.write("true\tProd\n")
         fh.write("false\tReady\n")
+    # `first_total` is READ from seen.total inside the block now, not injected --
+    # the extraction was widened to cover the line that assigns it, because the
+    # bare shrink check that lived just above it was invisible to this suite and
+    # shipped red-on-success (backend#2820).
+    ft = (declared + archived) if first_total is None else first_total
+    with open(os.path.join(work, "seen.total"), "w") as fh:
+        fh.write(str(ft))
     with open(os.path.join(work, "archived.count"), "w") as fh:
         fh.write(str(archived))
     # `set -euo pipefail` exactly as the step runs it: the absent-baseline case
@@ -127,7 +134,6 @@ def run_case(declared: int, previous, archived: int, unreadable: str = "",
         # is the PRE-archive read and `declared`/`reread_total` the post-archive
         # one, so a consistent default is `declared + archived`. Cases that target
         # the identity supply their own pair.
-        f"first_total={declared + archived if first_total is None else first_total}\n"
         f"reread_total={declared if reread_total is None else reread_total}\n"
         f"arch_seen={arch_seen}\n"
         f"declared_total={declared}\n" + BLOCK
@@ -207,6 +213,16 @@ IDENTITY_CASES = [
     ("retained, with a board that already held archived items", 700, 41, 700, 12, 53, False),
     # ...and it must still catch a genuine collapse in THAT world.
     ("retained, but the view collapsed anyway", 93, 28, 30, 0, 28, True),
+    # THE MEASURED PRODUCTIVE RUN (backend#2820). After #380 restored the
+    # credential's sight, the daily cron read 749, archived 253 and re-read 496 --
+    # and the run FAILED, because a bare `reread < first` check compared against
+    # the PRE-archive count while both reads filter `isArchived == false`. The
+    # guard fired on exactly the runs that did their job.
+    #
+    # This case is the anchor for that check staying gone. It is not hypothetical
+    # arithmetic: these are the three numbers from the 13:37 UTC dispatch.
+    ("the measured productive run: 749 read, 253 archived, 496 left",
+     749, 253, 496, 0, 0, False),
 ]
 
 
