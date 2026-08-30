@@ -292,6 +292,43 @@ def wiring_failures() -> list:
     if with_.get("path") != "board.total":
         bad.append(f"the baseline uploads {with_.get('path')!r}, not the "
                    "`board.total` the assert step writes")
+    # THE WHOLE PRODUCER CHAIN MUST SURVIVE A FAILED ARCHIVE (Bugbot High, #383).
+    # `board.total` is written by the assert step and read by the recall step, and
+    # BOTH were gated on the implicit `success()` while only the upload carried
+    # `!cancelled()`. So a run whose archive failed after archiving `ok` cards
+    # recorded nothing, and the next run met a floor above the real board — a red
+    # that clears only by accident. Asserting the upload alone left that half
+    # untested, which is how it shipped: the mechanism is three steps, not one.
+    for name in ("Recall the previous run's board size", "Assert the board is clean"):
+        matches = [s for s in steps if s.get("name") == name]
+        if len(matches) != 1:
+            bad.append(f"expected exactly one {name!r} step, found {len(matches)}")
+            continue
+        cond = str(matches[0].get("if", ""))
+        if "cancelled" not in cond and "always" not in cond:
+            bad.append(
+                f"{name!r} is gated on {cond!r}, which is an implicit success() — a "
+                "failed archive skips it, so the cards it DID archive never reach "
+                "board.total and the next run's floor sits above the real board"
+            )
+        if "DRY_RUN" not in cond:
+            bad.append(f"{name!r} is gated on {cond!r}; a dry run must not set the floor")
+
+    # A RECONCILE THAT ARCHIVED AND THEN FAILED STILL ARCHIVED (Bugbot, #383).
+    # Its apply loop counts each archive and fails closed at the end, so filtering
+    # the probe to `status=success` hid exactly the runs whose cards are missing
+    # from the board — and the floor then read them as a shrunken view.
+    recall_body = ""
+    r = [s for s in steps if s.get("name") == "Recall the previous run's board size"]
+    if r:
+        recall_body = r[0].get("run", "")
+    if "kanban-reconcile.yml/runs" in recall_body and "status=completed" not in recall_body:
+        bad.append(
+            "the other-archiver probe does not ask for `status=completed`; a "
+            "reconcile run that archived cards and then failed is invisible to it, "
+            "and its cards read as a shrunken view"
+        )
+
     # THE ANTI-RATCHET GUARD MOVED INTO THE SHELL (`view_bad`), so this step must
     # do the opposite of what an earlier revision asserted: it has to run even
     # when the assert step fails, or a run that archived legitimately and then

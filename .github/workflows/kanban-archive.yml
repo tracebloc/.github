@@ -224,7 +224,20 @@ jobs:
       # `previous - archived_this_run` is a hard floor on today's size, and a
       # total below it is a shrunken view, not a smaller board.
       - name: Recall the previous run's board size
-        if: env.DRY_RUN != 'true'
+        # `!cancelled()`, NOT the implicit `success()` (Bugbot High, #383). A
+        # non-zero `fail` exits `Archive them` -- and that exit is deliberate,
+        # because a Job left un-archived is what this workflow exists to prevent.
+        # But the run has usually archived `ok` cards BEFORE the one that failed,
+        # so the board really is smaller. Skipping this step and the assert below
+        # meant those archives never reached `board.total`, and the next run's
+        # `previous - archived_now` sat above the real board: a red that clears
+        # only if the next run happens to archive the difference by accident.
+        #
+        # The upload step already carried `!cancelled()` for exactly this reason.
+        # Leaving the two steps that PRODUCE board.total on `success()` armed one
+        # half of the mechanism: the upload survived the failure and found
+        # nothing to upload.
+        if: ${{ !cancelled() && env.DRY_RUN != 'true' }}
         env:
           # The DEFAULT token, not the App token: this reads run artifacts in
           # this repo, which is what `actions: read` above grants it. The App
@@ -278,7 +291,15 @@ jobs:
                 # instead of refusing. Every other day the floor is exact.
                 cut=$(printf '%s' "$arts" \
                   | jq -r '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .created_at')
-                if ! rec=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/kanban-reconcile.yml/runs?status=success&per_page=1" 2>&1); then
+                # `completed`, NOT `success` (Bugbot, #383). Reconcile archives
+                # inside a counted-then-fail-closed apply loop, so a run that
+                # archived cards and THEN failed did archive them -- and filtering
+                # to successes made exactly those runs invisible here. The floor
+                # then read their cards as a shrunken view and `view_bad` withheld
+                # the baseline, which is the same red-that-cannot-clear this whole
+                # block exists to avoid. What matters is whether reconcile RAN
+                # since the baseline, not whether it finished happy.
+                if ! rec=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/kanban-reconcile.yml/runs?status=completed&per_page=1" 2>&1); then
                   # selftest:unreadable-path
                   printf 'could not tell whether kanban-reconcile archived since the baseline: %s\n' "$(printf '%s' "$rec" | tail -1)" > prev.error
                 else
@@ -310,7 +331,12 @@ jobs:
       # preview into a permanent red that teaches people to ignore it. The
       # assertion is about whether a REAL run left the board clean.
       - name: Assert the board is clean
-        if: env.DRY_RUN != 'true'
+        # `!cancelled()` for the reason the recall step above gives: this is where
+        # `board.total` is written, so gating it on the archive succeeding makes a
+        # partial archive unrecordable and its red permanent. Running here after a
+        # failed archive is also the more honest verdict -- it re-reads the board
+        # and says what is actually left, rather than declining to look.
+        if: ${{ !cancelled() && env.DRY_RUN != 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |

@@ -126,10 +126,42 @@ MUTATIONS = [
     # baseline, ratcheting the floor down to meet the defect until the check
     # can never fire again. The guard would still be present, still green, and
     # permanently blind.
+    # --- (F) the producer chain, and the other archiver's failed runs (#383) --
+    # REPLACES the condition rather than inserting a second `if:` -- the first
+    # attempt did the latter, which gives the step DUPLICATE KEYS, and PyYAML
+    # keeps the last one. The step was therefore unchanged, the suite passed, and
+    # the mutation reported UNCAUGHT for a reason about the mutation rather than
+    # about the coverage. An invalid mutation is not a finding.
+    (
+        "the assert step goes back to implicit success(), so a failed archive records nothing",
+        "        if: ${{ !cancelled() && env.DRY_RUN != 'true' }}\n"
+        "        env:\n"
+        "          GH_TOKEN: ${{ steps.app-token.outputs.token }}\n"
+        "        run: |\n"
+        "          set -euo pipefail\n"
+        "          # ASSERT THE BOARD IS CLEAN",
+        "        if: env.DRY_RUN != 'true'\n"
+        "        env:\n"
+        "          GH_TOKEN: ${{ steps.app-token.outputs.token }}\n"
+        "        run: |\n"
+        "          set -euo pipefail\n"
+        "          # ASSERT THE BOARD IS CLEAN",
+    ),
+    (
+        "the other-archiver probe filters to successful reconcile runs again",
+        "runs?status=completed&per_page=1",
+        "runs?status=success&per_page=1",
+    ),
     (
         "the upload is gated on the assert step succeeding, making one failure permanent",
-        "        if: ${{ !cancelled() && env.DRY_RUN != 'true' }}",
-        "        if: ${{ success() && env.DRY_RUN != 'true' }}",
+        # ANCHORED ON THE STEP, not on the condition alone: all three steps in
+        # the producer chain now carry the same `!cancelled()` guard, so the bare
+        # condition matches three times and the mutation would land on an
+        # arbitrary one -- reporting a result about a step nobody chose.
+        "        if: ${{ !cancelled() && env.DRY_RUN != 'true' }}\n"
+        "        uses: actions/upload-artifact@",
+        "        if: ${{ success() && env.DRY_RUN != 'true' }}\n"
+        "        uses: actions/upload-artifact@",
     ),
     (
         "a deliberately-unrecorded run is reported as a missing-file error",
