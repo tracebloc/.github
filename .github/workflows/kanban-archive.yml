@@ -25,6 +25,11 @@ on:
 
 permissions:
   contents: read
+  # Lets the completeness check below download the PREVIOUS run's recorded board
+  # size. That number is the only one in this job that THIS run's credential did
+  # not produce, which is what makes it able to answer a question no
+  # single-read check can (backend#2802).
+  actions: read
 
 concurrency:
   group: kanban-archive
@@ -201,6 +206,10 @@ jobs:
             fi
           done < terminal.ids
           echo "=== Archived: $ok ok, $fail failed ==="
+          # Handed to the completeness check as the ONLY legitimate reason the
+          # board may be smaller than it was yesterday. Written before the
+          # fail-closed exit below so it exists whatever the archive did.
+          echo "$ok" > archived.count
           {
             echo "## Kanban archive"
             echo ""
@@ -219,6 +228,119 @@ jobs:
           fi
 
 
+      # THE ONE NUMBER THIS RUN DID NOT PRODUCE ITSELF (backend#2802).
+      #
+      # Every completeness check below this line compares two figures that come
+      # out of the SAME credential's SAME view of the board -- `reread_total`
+      # against `declared_total`, and the re-read against the first read. Both
+      # pairs shrink together, so all of them agree while the view itself is
+      # partial. Measured 2026-08-28: two runs two minutes apart reported
+      # "paginated 93, totalCount=93 (agree)" and "paginated 30, totalCount=30
+      # (agree)" with ONE item archived between them, while a PAT saw 742. Each
+      # run was internally consistent and both were wrong. A board cannot lose
+      # 63 cards to a single archive, but nothing in a single run could say so,
+      # because the disagreement is BETWEEN runs and every number was inside one.
+      #
+      # So carry yesterday's count forward as an artifact and compare across the
+      # boundary. Cards leave this board exactly one way -- being archived -- so
+      # `previous - archived_this_run` is a hard floor on today's size, and a
+      # total below it is a shrunken view, not a smaller board.
+      - name: Recall the previous run's board size
+        # `!cancelled()`, NOT the implicit `success()` (Bugbot High, #383). A
+        # non-zero `fail` exits `Archive them` -- and that exit is deliberate,
+        # because a Job left un-archived is what this workflow exists to prevent.
+        # But the run has usually archived `ok` cards BEFORE the one that failed,
+        # so the board really is smaller. Skipping this step and the assert below
+        # meant those archives never reached `board.total`, and the next run's
+        # `previous - archived_now` sat above the real board: a red that clears
+        # only if the next run happens to archive the difference by accident.
+        #
+        # The upload step already carried `!cancelled()` for exactly this reason.
+        # Leaving the two steps that PRODUCE board.total on `success()` armed one
+        # half of the mechanism: the upload survived the failure and found
+        # nothing to upload.
+        if: ${{ !cancelled() && env.DRY_RUN != 'true' }}
+        env:
+          # The DEFAULT token, not the App token: this reads run artifacts in
+          # this repo, which is what `actions: read` above grants it. The App
+          # token is scoped for the project board and is the very credential
+          # under suspicion here -- reading the baseline with it would put both
+          # sides of the comparison back inside one view.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          : > prev.total
+          : > prev.error
+          # ASK WHETHER A BASELINE EXISTS BEFORE ASKING FOR ITS CONTENT, because
+          # those are the two answers this step must never conflate (Bugbot,
+          # #383). The first draft walked `gh run list ... || true` and let an
+          # empty result mean "no baseline" -- so an API failure, an expired
+          # token or a rate limit rendered as the benign first-run warning and
+          # the job still passed. That is the ticket's own defect reproduced one
+          # layer inside its fix: a check reporting clean having compared
+          # nothing, because it could not tell "absent" from "unreadable".
+          #
+          # The artifacts endpoint answers it unambiguously: it FAILS on a
+          # broken lookup and returns an empty list when there is genuinely
+          # nothing yet. It also carries `workflow_run.id`, so the run listing
+          # is not needed at all -- one call, and no second way to be wrong.
+          if ! arts=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" 2>&1); then
+            # selftest:unreadable-path
+            printf 'the artifact listing failed: %s\n' "$(printf '%s' "$arts" | tail -1)" > prev.error
+            echo "::warning::could not list the board-baseline artifacts; the assert step will refuse."
+          else
+            live=$(printf '%s' "$arts" | jq '[.artifacts[] | select(.expired == false)] | length')
+            if [ "$live" = "0" ]; then
+              echo "No unexpired board-baseline artifact exists yet (first run, or retention lapsed)."
+            else
+              rid=$(printf '%s' "$arts" \
+                | jq -r '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id')
+              if gh run download "$rid" -n board-baseline -D prev >/dev/null 2>&1 && [ -s prev/board.total ]; then
+                cp prev/board.total prev.total
+                echo "Baseline: run $rid saw $(cat prev.total) item(s)."
+                # IS THIS JOB THE ONLY ARCHIVER SINCE? It is not, and assuming
+                # so was wrong (Bugbot High, .github#383). `kanban-reconcile.yml`
+                # archives too -- `archiveProjectV2Item` at its own apply step --
+                # every Monday at 04:00, an hour before this job. Cards it
+                # archived are gone from the board and counted by no `ok` of
+                # ours, so a floor of `previous - archived_now` sits above the
+                # real board every Monday: a red produced by the check being
+                # wrong, which is the fastest way to get a tier switched off.
+                #
+                # DERIVED, not estimated: ask when reconcile last succeeded and
+                # compare it against the baseline's own timestamp. If it ran in
+                # between, the arithmetic cannot be exact and this run says so
+                # instead of refusing. Every other day the floor is exact.
+                cut=$(printf '%s' "$arts" \
+                  | jq -r '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .created_at')
+                # `completed`, NOT `success` (Bugbot, #383). Reconcile archives
+                # inside a counted-then-fail-closed apply loop, so a run that
+                # archived cards and THEN failed did archive them -- and filtering
+                # to successes made exactly those runs invisible here. The floor
+                # then read their cards as a shrunken view and `view_bad` withheld
+                # the baseline, which is the same red-that-cannot-clear this whole
+                # block exists to avoid. What matters is whether reconcile RAN
+                # since the baseline, not whether it finished happy.
+                if ! rec=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/kanban-reconcile.yml/runs?status=completed&per_page=1" 2>&1); then
+                  # selftest:unreadable-path
+                  printf 'could not tell whether kanban-reconcile archived since the baseline: %s\n' "$(printf '%s' "$rec" | tail -1)" > prev.error
+                else
+                  last_rec=$(printf '%s' "$rec" | jq -r '.workflow_runs[0].updated_at // ""')
+                  if [ -n "$last_rec" ] && [ "$last_rec" \> "$cut" ]; then
+                    printf '%s\n' "$last_rec" > prev.otherarchiver
+                  fi
+                fi
+              else
+                # The listing SAW a live artifact and the fetch still failed, so
+                # this is a broken read, not an empty history. Refusing is the
+                # whole point of having asked the two questions separately.
+                # selftest:unreadable-path
+                printf 'a live board-baseline artifact exists (run %s) but could not be downloaded\n' "$rid" > prev.error
+                echo "::warning::the baseline exists but could not be read; the assert step will refuse."
+              fi
+            fi
+          fi
+
       # A SEPARATE STEP, AND THAT IS THE FIX (Bugbot High, #339). This block used
       # to sit at the bottom of "Archive them", BELOW `if [ "$n" = "0" ]; then
       # ... exit 0; fi`. So the one case it exists to catch -- a first read that
@@ -231,7 +353,12 @@ jobs:
       # preview into a permanent red that teaches people to ignore it. The
       # assertion is about whether a REAL run left the board clean.
       - name: Assert the board is clean
-        if: env.DRY_RUN != 'true'
+        # `!cancelled()` for the reason the recall step above gives: this is where
+        # `board.total` is written, so gating it on the archive succeeding makes a
+        # partial archive unrecordable and its red permanent. Running here after a
+        # failed archive is also the more honest verdict -- it re-reads the board
+        # and says what is actually left, rather than declining to look.
+        if: ${{ !cancelled() && env.DRY_RUN != 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -256,6 +383,9 @@ jobs:
           # evidence of a clean board, so an empty result with a non-zero total is a
           # finding, not a pass.
           left=0; reread_total=0; nullst_after=0; declared_total=""; cursor="null"
+          # Counted so the identity below need not ASSUME whether this connection
+          # returns archived items -- see the comment there.
+          arch_seen=0
           while :; do
             if [ "$cursor" = "null" ]; then
               # shellcheck disable=SC2016  # $names are GraphQL variables, not shell - keep literal
@@ -307,6 +437,8 @@ jobs:
             [ -z "$declared_total" ] && declared_total="$page_tc"
             n=$(echo "$OUT" | jq -r '.data.organization.projectV2.items.nodes|length')
             reread_total=$((reread_total + n))
+            arch_seen=$((arch_seen + $(echo "$OUT" | jq -r '[.data.organization.projectV2.items.nodes[]
+              | select(.isArchived == true)] | length')))
             left=$((left + $(echo "$OUT" | jq -r '[.data.organization.projectV2.items.nodes[]
               | select(.isArchived == false)
               | select(.fieldValueByName.name == "Prod" or .fieldValueByName.name == "Cancelled" or .fieldValueByName.name == "Done")]
@@ -364,6 +496,17 @@ jobs:
           # whole run produced no answer to it. A guard that masks a stronger guard
           # costs a run per diagnosis.
           fail=$left_bad
+          # SEPARATE FROM `fail`, and the distinction is the whole of the second
+          # Bugbot High (.github#383). `fail` asks "is the board clean?";
+          # `view_bad` asks "can this run's own count be trusted?", and only the
+          # second decides whether the baseline advances. Tying the record to
+          # `fail` made the red SELF-SUSTAINING: a run that archived 50 cards and
+          # then failed on a leftover terminal one skipped the record, so the next
+          # run met a floor 50 too high, refused, skipped the record in turn, and
+          # nothing could ever get back under it. Rule 4 -- a red nobody can clear
+          # trains people to skip the tier. A leftover card or an unreadable
+          # Status makes the JOB fail without making the COUNT wrong.
+          view_bad=0
           # THE SERVER'S OWN COUNT FIRST, because it is the one independent number.
           # `totalCount` is the server's count of the connection; `reread_total` is
           # what pagination actually yielded. They disagree exactly when items are
@@ -373,6 +516,7 @@ jobs:
           if [ "$reread_total" -ne "$declared_total" ]; then
             echo "::error::the post-archive re-read paginated $reread_total item(s) but the server reports totalCount=$declared_total. Items are being omitted from the read, so a terminal card can exist that this run never judged -- this run cannot show the board is clean (backend#2623)."
             fail=1
+            view_bad=1
           else
             echo "Completeness: paginated $reread_total item(s), server totalCount=$declared_total (agree)."
           fi
@@ -380,11 +524,118 @@ jobs:
             echo "::error::$nullst_after un-archived item(s) returned an unreadable Status on the post-archive re-read. They cannot be judged terminal, so this run CANNOT show the board is clean -- unverified is not verified-clean (backend#2623)."
             fail=1
           fi
+          # selftest:xrun-begin
           first_total=$(cat seen.total)
-          if [ "$reread_total" -lt "$first_total" ]; then
-            echo "::error::the post-archive re-read saw $reread_total item(s) but the first read saw $first_total. A read that shrank mid-run lowers the terminal count for a reason that is not archiving, so this run cannot show the board is clean."
+          # THE BARE SHRINK CHECK IS GONE, and it was RED ON EVERY PRODUCTIVE RUN
+          # (backend#2820, found in FR on staging). It compared the re-read
+          # against the PRE-archive count while both reads filter
+          # `isArchived == false` -- so archiving N shrinks the second read by
+          # exactly N and the guard fired on precisely the runs that did their
+          # job. Measured on develop after #380 restored the credential's sight:
+          # 749 read, 253 archived, 496 re-read, and it failed with "a reason
+          # that is not archiving" about arithmetic it never performed.
+          #
+          # Its own error text named the subtraction it was missing. The identity
+          # below IS that subtraction, so this is a strict replacement rather
+          # than a deletion: every shrink the old check could catch is a
+          # `reread_total != first_total - archived` too, and the identity also
+          # catches a shrink the old one could not see (one exactly cancelled by
+          # an archive count) and a GROWTH, which it ignored entirely.
+          #
+          # Leaving both was this PR's own bug: the description claimed the
+          # identity "replaces the weaker bound" while the code kept both, so
+          # #383 would have shipped the red-on-success the ticket describes.
+          # Rule 4 -- never land a red gate; a daily cron that fails whenever it
+          # works is one nobody reads, which is how the original blindness
+          # survived in the first place.
+          # `if`, not `[ -s f ] && v=$(cat f)`: the short-circuit leaves the
+          # absent-file case with a non-zero `$?`, which is harmless HERE and
+          # becomes a failed step the moment anything is appended after it or
+          # this block moves to the end of the step. Measured, so the comment
+          # does not overstate it: `set -e` exempts every command of an AND-OR
+          # list but the last, so the short-circuit does NOT exit mid-step
+          # today. The `if` is what makes that independent of position.
+          archived_now=0
+          if [ -s archived.count ]; then archived_now=$(cat archived.count); fi
+          prev_total=""
+          if [ -s prev.total ]; then prev_total=$(cat prev.total); fi
+          # THE EXACT IDENTITY, and it needs no baseline and no other workflow.
+          # Two reads bracket this job's own archiving, so the re-read's size is
+          # determined -- not bounded, determined. Nothing else archives inside
+          # the seconds between them (reconcile runs an hour earlier), so any
+          # other number is a view that moved under this run. This is what
+          # catches the measured 93 -> 30 with no cross-run state at all.
+          #
+          # WHETHER ARCHIVING SHRINKS THE CONNECTION IS DERIVED, NOT ASSUMED
+          # (Bugbot High, .github#383). The obvious form, `first_total -
+          # archived_now`, is right only if `ProjectV2.items` omits archived
+          # items -- and if that ever stopped being true the identity would fire
+          # on EVERY productive run, a permanent red produced by the check being
+          # wrong. Measured on this board, it does omit them: run 33084151778
+          # read `1626 (un-archived: 1626)` -- a full read with zero archived
+          # items present, weeks after 83+ had been archived, and nothing calls
+          # `deleteProjectV2Item` anywhere in this repo.
+          #
+          # But the reads themselves already carry the answer, so the arithmetic
+          # asks instead of trusting that measurement. `arch_seen - arch_first`
+          # is how many items became archived BETWEEN the two reads:
+          #   - connection omits archived  -> both are 0, expected = first - ok
+          #   - connection keeps archived  -> the difference is `ok`, expected = first
+          # Exact either way, and it stops depending on a fact about someone
+          # else's API that no test here can pin.
+          arch_first=$(awk -F"\t" '$1=="true"' seen.tsv | wc -l | tr -d " ")
+          expected=$((first_total - archived_now + arch_seen - arch_first))
+          if [ "$reread_total" -ne "$expected" ]; then
+            echo "::error::this run read $first_total item(s), archived $archived_now, and then read $reread_total -- but that must leave exactly $expected (archived items in the two reads: $arch_first then $arch_seen). The view moved under this run, so its counts describe no single board (backend#2802)."
             fail=1
+            view_bad=1
           fi
+          # ACROSS THE RUN BOUNDARY, which is the only axis the three checks
+          # above cannot see (backend#2802). Archiving is the sole way a card
+          # leaves this board, so yesterday's total minus what this run archived
+          # is a FLOOR on today's. Below it, the board did not shrink -- this
+          # credential's view of it did.
+          # UNREADABLE FIRST, and it is a REFUSAL rather than the warning below.
+          # The two look identical from here -- both leave `prev_total` empty --
+          # and collapsing them is what this ticket is about. An empty history is
+          # a bounded cannot-tell with no remedy, so it warns; a failed read is
+          # actionable, and a cron job's warnings are exactly what went unread
+          # for weeks while this defect ran.
+          if [ -s prev.error ]; then
+            echo "::error::the previous board size could not be read ($(cat prev.error)), so this run made NO cross-run comparison. An unread baseline is not an absent one -- refusing rather than reporting the first-run warning (backend#2802)."
+            fail=1
+          elif [ -s prev.otherarchiver ]; then
+            # NOT A REFUSAL, because the arithmetic genuinely cannot be exact
+            # here: kanban-reconcile archived after this baseline was taken and
+            # published no count, so a drop is expected and unquantified. Saying
+            # "cannot tell" is the honest answer; refusing would be a red the
+            # calendar produces, and passing silently would be the defect this
+            # whole check exists to remove.
+            echo "::warning::kanban-reconcile succeeded at $(cat prev.otherarchiver), after this baseline was recorded. It archives too, so the floor cannot be exact and NO cross-run comparison was made this run (backend#2802)."
+          elif [ -n "$prev_total" ]; then
+            floor=$((prev_total - archived_now))
+            if [ "$declared_total" -lt "$floor" ]; then
+              echo "::error::the board reports totalCount=$declared_total, but the previous run saw $prev_total and this run archived only $archived_now -- so at least $((floor - declared_total)) item(s) stopped being visible for a reason that is not archiving. This is a shrunken view, not a smaller board (backend#2802)."
+              fail=1
+              view_bad=1
+            else
+              echo "Cross-run: totalCount=$declared_total against a floor of $floor (previous $prev_total - $archived_now archived)."
+            fi
+          else
+            # NOT A PASS, and said out loud. With no baseline the cross-run
+            # comparison did not run, so this is the one shape it exists to
+            # catch going unchecked -- rule 3, "cannot tell" is a finding. It is
+            # a warning rather than a failure only because a first run, and the
+            # run after any retention lapse, legitimately has nothing to compare
+            # against; a red there would be a red nobody could ever clear.
+            echo "::warning::no previous board size was available, so this run could NOT rule out a shrunken view (backend#2802). Its own counts agreeing proves only that they came from the same read."
+          fi
+          if [ "$view_bad" -eq 0 ]; then
+            echo "$declared_total" > board.total
+          else
+            echo "::warning::not recording a baseline from this run: its own read was incoherent, and enshrining it would ratchet the floor down to meet the defect."
+          fi
+          # selftest:xrun-end
           {
             echo ""
             echo "| completeness check | value |"
@@ -393,5 +644,28 @@ jobs:
             echo "| server totalCount | $declared_total |"
             echo "| first read | $first_total |"
             echo "| un-archived null Status | $nullst_after |"
+            echo "| previous run totalCount | ${prev_total:-none} |"
+            echo "| archived this run | $archived_now |"
           } >> "$GITHUB_STEP_SUMMARY"
           [ "$fail" -eq 0 ] || exit 1
+
+      # ONLY ON A PASS -- no `if: always()`. A run whose view shrank must not
+      # write its own shrunken total forward as tomorrow's baseline, or the
+      # floor ratchets down to meet the defect and the check quietly stops
+      # being able to fire. Failing leaves the last TRUSTED count in place, so
+      # the comparison keeps pointing at the real board until it is fixed.
+      - name: Record this run's board size for the next one
+        # `!cancelled()`, not the assert step's success: the decision to record
+        # moved INTO that step, where `view_bad` can separate "the board is not
+        # clean" from "this run's count cannot be trusted". Gating the upload on
+        # the job instead made the red self-sustaining -- see the `view_bad`
+        # comment above. `if-no-files-found: ignore` because a refusing run
+        # deliberately writes no board.total, and that is the mechanism, not a
+        # fault. `always()` is avoided so a cancelled run records nothing.
+        if: ${{ !cancelled() && env.DRY_RUN != 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: board-baseline
+          path: board.total
+          if-no-files-found: ignore
+          retention-days: 30
