@@ -122,6 +122,37 @@ case(
     0,
 )
 
+# --- an unresolvable $(VAR) is a REFUSAL, not a quiet subset ------------------
+#
+# THE CASE THE REFUSAL WAS ADDED FOR, AND WAS SHIPPED WITHOUT (Bugbot, #388).
+# `expand_vars` used to DROP a `$(VAR)` it could not resolve, so a mixed list
+# like `ruff $(UNKNOWN)` kept only `ruff` and the tree was reported fully wired
+# -- the audits behind the unresolved half were never checked and nothing said
+# so. The fix raises `Unresolved`; without this case, reverting that raise to a
+# `continue` reddens nothing, which is how the fix would rot back out.
+#
+# MIXED deliberately. A list of ONLY `$(UNKNOWN)` would also fail the
+# zero-prerequisites guard already above, so it cannot tell the refusal from
+# that one. Keeping a resolvable neighbour means the ONLY thing that can produce
+# a non-zero exit here is the refusal itself.
+case(
+    "an UNRESOLVABLE $(VAR) in `lint` is refused, not silently dropped",
+    "lint: myaudit $(UNKNOWN)\n\t@true\n" "myaudit:\n\tscripts/myaudit.py\n",
+    {"ci.yml": wf_running("lint")},
+    1,
+)
+
+# ... and the same variable resolvable is clean, so the case above is pinning the
+# REFUSAL and not merely "a second prerequisite breaks it".
+case(
+    "the same list with $(UNKNOWN) defined is clean",
+    "UNKNOWN := myaudit\n"
+    "lint: myaudit $(UNKNOWN)\n\t@true\n"
+    "myaudit:\n\tscripts/myaudit.py\n",
+    {"ci.yml": wf_running("lint")},
+    0,
+)
+
 # --- the direct-run escape hatch, which is what makes ruff/shellcheck legal --
 case(
     "an audit run DIRECTLY by its own job (not via make) is clean",

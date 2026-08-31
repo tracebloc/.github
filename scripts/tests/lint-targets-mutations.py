@@ -26,6 +26,15 @@ sys.path.insert(0, str(HERE))
 import mutation_baseline  # noqa: E402
 
 MUTATIONS = [
+    # THE REFUSAL ITSELF. Reverting it to a silent drop is the exact regression
+    # the fix removed -- an unresolvable $(VAR) contributing nothing while the
+    # rest of the list reports fully wired (Bugbot, #388). Without this anchor
+    # the raise could be deleted and every suite stay green.
+    (
+        "drop an unresolvable $(VAR) instead of refusing",
+        "            raise Unresolved(name)",
+        "            continue",
+    ),
     (
         "blanket-pass the direct-run escape hatch",
         '            re.search(rf"(?<![\\w./-]){re.escape(e)}(?![\\w-])", run_text)',
