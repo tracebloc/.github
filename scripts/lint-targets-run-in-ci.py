@@ -143,7 +143,8 @@ def run_evidence(target: str, text: str) -> list[str]:
             # RESOLVE the variable rather than lowercasing its name: `$(ACTIONLINT)`
             # happens to equal its binary, but that is a coincidence of naming and
             # not something to rely on.
-            for tok in expand_vars(text, [f"$({m.group(1)})"]):
+            # strict=False: see expand_vars -- an unnamed interpreter changes no verdict.
+            for tok in expand_vars(text, [f"$({m.group(1)})"], strict=False):
                 base = tok.split("/")[-1].lower()
                 if base and base not in GENERIC:
                     tools.append(base)
@@ -184,7 +185,16 @@ def parse_makefile(text: str) -> dict[str, list[str]]:
     return deps
 
 
-def expand_vars(text: str, tokens: list[str]) -> list[str]:
+class Unresolved(Exception):
+    """A `$(VAR)` prerequisite with no assignment this parser can find.
+
+    Its own exception type rather than a bare ValueError so the caller reports
+    WHICH variable and cannot mistake it for an unrelated failure (CLAUDE.md
+    rule 10 -- a refusal that cannot say which refusal is a coin toss).
+    """
+
+
+def expand_vars(text: str, tokens: list[str], *, strict: bool = True) -> list[str]:
     """Resolve `$(NAME)` / `${NAME}` prerequisites against the Makefile's own
     variable assignments. Without this, `selftests: selftests-cover $(SELFTEST_TARGETS)`
     contributes one unusable token and every real target behind it is invisible --
@@ -196,11 +206,39 @@ def expand_vars(text: str, tokens: list[str]) -> list[str]:
             out.append(tok)
             continue
         name = m.group(1)
+        # EVERY ASSIGNMENT FORM GNU make HAS, not the three that happened to be
+        # in front of us. The pattern was `:?[+]?=`, which covers `=`, `:=` and
+        # `+=` but NOT `?=` -- and `?=` is this Makefile's most common form: ten
+        # of them, including PYTHON, RUFF and SHELLCHECK (Bugbot, #388).
         vm = re.search(
-            rf"^{re.escape(name)}\s*:?[+]?=\s*((?:.*?\\\n)*.*)$", text, re.MULTILINE
+            rf"^{re.escape(name)}\s*(?::::|::|:|\+|\?)?=\s*((?:.*?\\\n)*.*)$",
+            text,
+            re.MULTILINE,
         )
-        if vm:
-            out.extend(vm.group(1).replace("\\\n", " ").split())
+        if not vm:
+            # NOT EVERY UNRESOLVED VAR IS A DEFECT, and the difference is what
+            # `strict` encodes. In a PREREQUISITE list a dropped `$(VAR)` silently
+            # shrinks the reachability graph, so the audits behind it are reported
+            # wired when nothing checked them -- that is the bug. In the RECIPE
+            # interpreter lookup it only means we could not name the interpreter,
+            # which changes no verdict: the script path is the evidence there, and
+            # a Makefile that never defines PYTHON is legal.
+            #
+            # Default is strict, so a new call site fails closed unless it says
+            # why not.
+            if not strict:
+                continue
+            # REFUSE, DO NOT DROP. This is the actual defect the `?=` gap exposed:
+            # an unresolved `$(VAR)` silently contributed NOTHING, so a whole
+            # prerequisite list could vanish and the remaining audits would be
+            # reported as fully wired. This file's own docstring says "'cannot
+            # tell' must never read as 'wired'" -- and then did exactly that.
+            #
+            # Refusing kills the class rather than the instance: the next
+            # assignment syntax this regex does not know becomes a loud failure
+            # instead of a quiet subset.
+            raise Unresolved(name)
+        out.extend(vm.group(1).replace("\\\n", " ").split())
     return out
 
 
@@ -302,7 +340,17 @@ def main(argv: list[str]) -> int:
         print("::error::no `lint` target found in the Makefile -- this guard keys on it, and 'cannot tell' is a finding")
         return 1
 
-    lint_prereqs = [t for t in expand_vars(text, deps["lint"]) if t not in NOT_AN_AUDIT]
+    # CAUGHT AND REPORTED, not raised at the user. A traceback is a crash; this
+    # is a finding, and it names the variable so the fix is obvious.
+    try:
+        lint_prereqs = [t for t in expand_vars(text, deps["lint"]) if t not in NOT_AN_AUDIT]
+    except Unresolved as exc:
+        print(
+            f"::error::`lint` lists $({exc.args[0]}), which has no assignment this parser can "
+            f"find -- so its targets would silently contribute nothing and the rest would be "
+            f"reported as fully wired. Refusing: 'cannot tell' is a finding, not a pass."
+        )
+        return 1
     if not lint_prereqs:
         print("::error::parsed ZERO prerequisites for `lint` -- the reachability check below would be vacuous")
         return 1
@@ -324,7 +372,19 @@ def main(argv: list[str]) -> int:
     real_roots = sorted(t for t in ci_targets if t in deps)
     if ci_targets and not real_roots:
         print(f"note: none of the parsed `make` targets ({' '.join(sorted(ci_targets))}) exist in this Makefile")
-    covered = reachable(real_roots, deps, text) if real_roots else set()
+    # SAME REFUSAL FROM THE OTHER CALL SITE. `reachable` walks prerequisites
+    # transitively and calls `expand_vars` on each, so an unresolvable variable
+    # deeper in the graph must fail the same way -- otherwise the refusal is
+    # armed on one path and a traceback on the other.
+    try:
+        covered = reachable(real_roots, deps, text) if real_roots else set()
+    except Unresolved as exc:
+        print(
+            f"::error::a prerequisite reachable from CI lists $({exc.args[0]}), which has no "
+            f"assignment this parser can find -- refusing rather than reporting a coverage set "
+            f"that is silently missing whatever it expands to."
+        )
+        return 1
     run_text, job_names = workflow_run_text(wf)
     if not run_text.strip():
         print("::error::parsed NO `run:` content from any workflow -- refusing to report wiring I could not read")
