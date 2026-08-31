@@ -47,6 +47,7 @@ Exit 0 when every case behaves as specified.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -196,23 +197,36 @@ CASES = [
 # nothing calls deleteProjectV2Item) -- but the identity must not depend on that
 # staying true, or a change to someone else's API turns it into a permanent red
 # that fires on every productive run.
-# (name, first_total, archived, reread_total, arch_first, arch_seen, must_refuse)
+# `want_expected` is the number archiving accounts for, WRITTEN DOWN rather
+# than recomputed from the shell's own formula -- iterating the formula to check
+# the formula is the self-consistent shape rule 9's corollary warns about.
+# (name, first_total, archived, reread_total, arch_first, arch_seen,
+#  want_expected, must_refuse)
 IDENTITY_CASES = [
     # --- the world this board is in: archived items leave the connection ---
-    ("the view collapsed between this run's two reads", 93, 1, 30, 0, 0, True),
-    ("an ordinary run: 93 read, 63 archived, 30 left", 93, 63, 30, 0, 0, False),
-    ("nothing archived and nothing changed", 700, 0, 700, 0, 0, False),
-    # A view that GREW mid-run is equally incoherent -- a bound would wave it
-    # through, and it means the two counts describe different boards just as much.
-    ("the view grew between the two reads", 93, 1, 150, 0, 0, True),
-    ("one item short of the identity", 93, 1, 91, 0, 0, True),
+    ("the view collapsed between this run's two reads", 93, 1, 30, 0, 0, 92, True),
+    ("an ordinary run: 93 read, 63 archived, 30 left", 93, 63, 30, 0, 0, 30, False),
+    ("nothing archived and nothing changed", 700, 0, 700, 0, 0, 700, False),
+    # GROWTH IS NOT INCOHERENCE (backend#2833). The previous version of this
+    # case asserted the opposite -- "a view that GREW mid-run is equally
+    # incoherent" -- and it was wrong about the board it runs on.
+    # `add-to-kanban` adds a card the instant anyone opens an issue or a PR, so
+    # a card arriving between the two reads is the ordinary case, and refusing
+    # it failed productive runs AND withheld the baseline, leaving the next
+    # run's floor above the live board with no way to clear (rule 4).
+    ("the view grew between the two reads", 93, 1, 150, 0, 0, 92, False),
+    # The measured shape: a real archive with one card added underneath it.
+    ("a card was added during a productive archive", 518, 49, 470, 0, 0, 469, False),
+    # ...and the shrink direction keeps every card of its detection, including
+    # the boundary. One below `expected` is still a refusal.
+    ("one item short of the identity", 93, 1, 91, 0, 0, 92, True),
     # --- the other world: archived items STAY, so the size does not move ------
     # This is the case Bugbot argued we were already in. We are not, but if the
     # API ever changes the identity self-corrects instead of reddening forever.
-    ("archived items are retained, so 93 stays 93", 93, 28, 93, 0, 28, False),
-    ("retained, with a board that already held archived items", 700, 41, 700, 12, 53, False),
+    ("archived items are retained, so 93 stays 93", 93, 28, 93, 0, 28, 93, False),
+    ("retained, with a board that already held archived items", 700, 41, 700, 12, 53, 700, False),
     # ...and it must still catch a genuine collapse in THAT world.
-    ("retained, but the view collapsed anyway", 93, 28, 30, 0, 28, True),
+    ("retained, but the view collapsed anyway", 93, 28, 30, 0, 28, 93, True),
     # THE MEASURED PRODUCTIVE RUN (backend#2820). After #380 restored the
     # credential's sight, the daily cron read 749, archived 253 and re-read 496 --
     # and the run FAILED, because a bare `reread < first` check compared against
@@ -222,7 +236,79 @@ IDENTITY_CASES = [
     # This case is the anchor for that check staying gone. It is not hypothetical
     # arithmetic: these are the three numbers from the 13:37 UTC dispatch.
     ("the measured productive run: 749 read, 253 archived, 496 left",
-     749, 253, 496, 0, 0, False),
+     749, 253, 496, 0, 0, 496, False),
+]
+
+
+# THE DETECTORS BELOW KEY ON PRODUCTION TEXT, so they rot silently when a
+# message is reworded: every case then reads as "passed" because the refusal
+# string is simply never found. `anchor_failures` is what makes that red instead
+# -- the same defect class as a mutation check that matches nothing (rule 9).
+IDENT_REFUSAL = "that archiving accounts for"
+OMISSION_REFUSAL = "Items are being omitted from the read"
+LAG_WARNING = "has not finished catching up"
+EXPECTED_LINE = "archiving accounts for"
+ANCHORS = (IDENT_REFUSAL, OMISSION_REFUSAL, LAG_WARNING, EXPECTED_LINE)
+
+
+def anchor_failures(block: str) -> list:
+    return [
+        f"the detector string {a!r} appears nowhere in the extracted block, so "
+        "every case keyed on it silently reports a pass"
+        for a in ANCHORS
+        if a not in block
+    ]
+
+
+# The server's `totalCount` against what pagination actually returned. These
+# need `declared_total != reread_total`, which IDENTITY_CASES cannot express
+# (its runner passes declared = reread), so they get their own list.
+#
+# `first_total` is derived as `reread + archived` in the runner so the within-run
+# identity agrees exactly and cannot confound the verdict -- a case where two
+# guards can both fire tells you nothing about either.
+# (name, declared_total, reread_total, archived, must_refuse, must_warn,
+#  want_baseline)
+#
+# `want_baseline` IS WRITTEN DOWN PER CASE, not computed (backend#2833). It used
+# to be `str(declared)` in the runner -- the implementation's own rule, restated
+# in the place that was supposed to check it, so the two agreed by construction
+# and the lag-path defect was invisible. Each value below is argued instead.
+COMPLETENESS_CASES = [
+    # THE MEASURED RUN (backend#2831, run 33301924089). First read 518, archived
+    # 49, re-read paginated exactly 469 -- so the read was COMPLETE, 518-49=469
+    # -- while the server still reported totalCount=475. The equality this
+    # replaces failed the run for having archived.
+    #
+    # BASELINE 469, NOT 475: the run walked 469 cards. 475 is `totalCount` still
+    # counting the 49 we just archived, which the warning on this very case says
+    # out loud -- recording it hands tomorrow a floor above the real board, and
+    # when the counter catches up the floor check blocks the corrected record
+    # for ever (backend#2833).
+    ("the measured run: 469 paginated, 475 counted, 49 archived",
+     475, 469, 49, False, True, 469),
+    ("counts agree", 100, 100, 10, False, False, 100),
+    # More returned than counted is the other lag direction (a card added that
+    # totalCount has not picked up). Nothing can be hidden by it: every item is
+    # in hand.
+    #
+    # BASELINE 100, UNCHANGED. Here `totalCount` is the SMALLER of the two, and
+    # the smaller is what gets recorded -- a floor that is too low
+    # under-detects for one cycle and self-corrects, while one that is too high
+    # cannot be cleared at all. This case is what stops the fix above being
+    # "always trust the pagination".
+    ("more returned than counted", 100, 103, 0, False, False, 100),
+    # THE CEILING, both sides of it. The lag can only be still-counting the
+    # cards this job archived, so the gap is bounded by `archived_now`.
+    #
+    # BASELINE 90 for the same reason as the measured run: 100 is the lagging
+    # counter, 90 is the board.
+    ("the gap is exactly the archive count", 100, 90, 10, False, True, 90),
+    ("the gap is one wider than the archive count", 100, 89, 10, True, False, None),
+    # ...and with nothing archived there is no lag to explain any gap at all.
+    # This is the credential-blind omission the check exists for, undiminished.
+    ("nothing archived, so a one-card gap is an omission",
+     100, 99, 0, True, False, None),
 ]
 
 
@@ -360,7 +446,8 @@ def main() -> int:
     # apart from "the mutation broke the harness", which are opposite results
     # that a non-zero exit alone cannot distinguish -- a traceback is not
     # coverage and must never be logged as a catch.
-    print("archive-baseline-selftest: %d case(s)" % (len(CASES) + len(IDENTITY_CASES)))
+    print("archive-baseline-selftest: %d case(s)"
+          % (len(CASES) + len(IDENTITY_CASES) + len(COMPLETENESS_CASES)))
     failures = 0
     for (name, declared, previous, archived, must_refuse, unreadable,
          other_archiver, view_bad, must_record) in CASES:
@@ -408,15 +495,23 @@ def main() -> int:
         print(f"ok   {name}")
 
     for (name, first, archived, reread, arch_first, arch_seen,
-         must_refuse) in IDENTITY_CASES:
-        rc, out, _ = run_case(reread, None, archived,
-                              first_total=first, reread_total=reread,
-                              arch_first=arch_first, arch_seen=arch_seen)
+         want_expected, must_refuse) in IDENTITY_CASES:
+        rc, out, wrote = run_case(reread, None, archived,
+                                  first_total=first, reread_total=reread,
+                                  arch_first=arch_first, arch_seen=arch_seen)
         if rc != 0:
             failures += 1
             print(f"FAIL identity/{name}: the block exited {rc}")
             continue
-        refused = "that must leave exactly" in out
+        got = re.search(r"archiving accounts for (\d+) item", out)
+        if not got or int(got.group(1)) != want_expected:
+            failures += 1
+            shown = got.group(1) if got else "nothing"
+            print(f"FAIL identity/{name}: archiving accounts for {shown}, "
+                  f"expected {want_expected} -- the identity's arithmetic is wrong, "
+                  "which a lower bound alone cannot see")
+            continue
+        refused = IDENT_REFUSAL in out
         if refused != must_refuse:
             failures += 1
             verb = "refused" if refused else "passed"
@@ -424,7 +519,53 @@ def main() -> int:
             print(f"FAIL identity/{name}: the identity {verb}, expected it to {want}")
             print("     " + out.strip().replace("\n", "\n     "))
             continue
+        # THE HALF #2833 WAS ACTUALLY ABOUT. Refusing a growing board was only
+        # the visible symptom; the damage was `view_bad` withholding the
+        # baseline, so the next run compared against a pre-growth floor it could
+        # never get under. A passing case MUST leave a baseline behind.
+        want_record = None if must_refuse else str(reread)
+        if wrote != want_record:
+            failures += 1
+            print(f"FAIL identity/{name}: recorded baseline {wrote!r}, "
+                  f"expected {want_record!r} -- the anti-ratchet is miswired")
+            continue
         print(f"ok   identity: {name}")
+
+    for (name, declared, reread, archived,
+         must_refuse, must_warn, want_baseline) in COMPLETENESS_CASES:
+        rc, out, wrote = run_case(declared, None, archived,
+                                  first_total=reread + archived,
+                                  reread_total=reread)
+        if rc != 0:
+            failures += 1
+            print(f"FAIL completeness/{name}: the block exited {rc}")
+            continue
+        refused = OMISSION_REFUSAL in out
+        warned = LAG_WARNING in out
+        if refused != must_refuse or warned != must_warn:
+            failures += 1
+            print(f"FAIL completeness/{name}: refused={refused} warned={warned}, "
+                  f"expected refused={must_refuse} warned={must_warn}")
+            print("     " + out.strip().replace("\n", "\n     "))
+            continue
+        # A LAG WARNING IS NOT A BAD VIEW. If the warning path also withheld the
+        # baseline, every productive run would starve the next one's floor --
+        # which is #2833's mechanism arriving by a second door.
+        want_record = None if want_baseline is None else str(want_baseline)
+        if wrote != want_record:
+            failures += 1
+            print(f"FAIL completeness/{name}: recorded baseline {wrote!r}, "
+                  f"expected {want_record!r} -- a baseline above the real board "
+                  "cannot be cleared by any later run (backend#2833)")
+            continue
+        print(f"ok   completeness: {name}")
+
+    stale = anchor_failures(BLOCK)
+    for why in stale:
+        failures += 1
+        print(f"FAIL anchor: {why}")
+    if not stale:
+        print("ok   every detector string still appears in the workflow")
 
     wiring = wiring_failures()
     for why in wiring:
@@ -437,8 +578,9 @@ def main() -> int:
     if failures:
         print(f"{failures} check(s) failed.")
         return 1
-    print(f"{len(CASES)} cross-run + {len(IDENTITY_CASES)} identity cases "
-          "+ the artifact wiring passed.")
+    print(f"{len(CASES)} cross-run + {len(IDENTITY_CASES)} identity + "
+          f"{len(COMPLETENESS_CASES)} completeness cases "
+          "+ the detector anchors + the artifact wiring passed.")
     return 0
 
 
