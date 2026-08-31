@@ -97,6 +97,13 @@ jobs:
       - name: reusable-no-cancel (the real workflows, not fixtures)
         run: make reusable-no-cancel
 
+      # THE CLASS, not the instance. The comment above is the fourth of its shape in
+      # this repo, so the rule stops being a paragraph people are asked to remember:
+      # `lint-targets-run-in-ci` derives lint's prerequisites and CI's `make`
+      # invocations and fails when a live audit is reachable from neither.
+      - name: every live audit in `make lint` is reachable from CI
+        run: make lint-targets-run-in-ci
+
       # THE MUTATION TIER, in the SAME already-required context (backend#1788).
       #
       # `house-rules` is a required status check on develop, staging AND prod across

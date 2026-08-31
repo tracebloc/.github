@@ -135,7 +135,7 @@ check-all: check credential-scan mutations
 # ---- lint --------------------------------------------------------
 
 .PHONY: lint
-lint: ruff shellcheck house-rules action-pins mint-scope reusable-no-cancel actionlint mutations-dry
+lint: ruff shellcheck house-rules action-pins mint-scope reusable-no-cancel lint-targets-run-in-ci actionlint mutations-dry
 
 # ruff: code-quality.yml's `ruff` job in all-files mode. This repo has no ruff
 # config, so the workflow falls back to --isolated --select <ruff-select>; that
@@ -303,7 +303,8 @@ MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-conflict-gate \
                    mutation-triage-labels \
                    mutation-archive-baseline \
-                   mutation-reusable-no-cancel
+                   mutation-reusable-no-cancel \
+                   mutation-lint-targets
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -344,7 +345,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-conflict-gate \
                     selftest-triage-labels \
                     selftest-archive-baseline \
-                    selftest-reusable-no-cancel
+                    selftest-reusable-no-cancel \
+                    selftest-lint-targets
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -600,6 +602,33 @@ mutation-closing-ref-gate-dry:
 #
 # The live target sits in `lint` beside `mint-scope` for the same reason: it reads
 # this repo's actual .github/workflows/ and needs neither a token nor the network.
+# lint-targets-run-in-ci: the CLASS behind .github#388 (and #287, #300,
+# backend#2449). A live audit wired only into `make lint` never runs, because CI
+# does not run `make lint` -- four times now, each with a longer comment above it.
+# This makes it a machine check instead of a fifth paragraph.
+#
+#   selftest-lint-targets   does the rule CATCH?     fixtures, offline, in `check`
+#   mutation-lint-targets   would the suite NOTICE?  `mutations`, in `check-all`
+#   lint-targets-run-in-ci  does THIS repo comply?   the real Makefile+workflows
+#
+# The live target is a prerequisite of `lint` like every other audit AND is run
+# directly by selftests.yml -- which is the fix this guard exists to enforce, so
+# it had better hold for the guard itself.
+.PHONY: lint-targets-run-in-ci
+lint-targets-run-in-ci: guard-pyyaml
+	$(PYTHON) scripts/lint-targets-run-in-ci.py
+
+.PHONY: selftest-lint-targets
+selftest-lint-targets: guard-pyyaml
+	$(PYTHON) scripts/tests/lint-targets-selftest.py
+
+.PHONY: mutation-lint-targets mutation-lint-targets-dry
+mutation-lint-targets:
+	$(PYTHON) scripts/tests/lint-targets-mutations.py
+
+mutation-lint-targets-dry:
+	$(PYTHON) scripts/tests/lint-targets-mutations.py --dry
+
 .PHONY: reusable-no-cancel
 reusable-no-cancel: guard-pyyaml
 	$(PYTHON) scripts/reusable-no-cancel.py
