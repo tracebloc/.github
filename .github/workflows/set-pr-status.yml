@@ -127,7 +127,16 @@ on:
 # Keeping the GROUP still solves what the group was for. With
 # `cancel-in-progress: false` a second run goes PENDING until the first
 # finishes rather than running beside it, so the newer evaluation still writes
-# last and the card cannot settle on stale input. Nothing is lost.
+# last and the card cannot settle on stale input.
+#
+# THAT IS ORDERING WITHIN THE GROUP, AND ONLY THAT (@saadqbal on #388). An
+# earlier draft said "nothing is lost", which is too strong. Cancelling also
+# TRUNCATED a superseded run; queuing guarantees it completes. Both the
+# `if: state == 'open'` condition and the draft read come off the FROZEN event
+# payload, so an `edited` run that lands after the closure router has already
+# moved a merged card can still drag it back to `Code review`. Cancelling
+# narrowed that window by accident, not by design, and it paid for it with a red
+# X on every superseded run. Queuing is the better trade, not a free one.
 #
 # RESIDUAL, stated rather than glossed: GitHub cancels a previously PENDING run
 # when a third event supersedes it, so a burst of 3+ rapid edits can still

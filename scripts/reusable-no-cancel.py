@@ -22,8 +22,15 @@ reason about which of those it is exposed to. **A reusable cannot.** Its
 trigger lists it cannot see and does not control. It has no way to tell whether
 the event that superseded it changed the sha, so under RFC-1405 property 2 the
 only safe answer is to queue: with `cancel-in-progress: false` a second run goes
-PENDING until the first finishes, the newer evaluation still writes last, and
-nothing is lost but the corpse.
+PENDING until the first finishes and the newer evaluation still writes last.
+
+That buys ORDERING WITHIN THE GROUP, and only that (@saadqbal on #388).
+Cancelling also TRUNCATED the superseded run; queuing guarantees it completes.
+Both `if: state == 'open'` and the draft read come off the FROZEN event payload,
+so a superseded run landing after the closure router has moved a merged card can
+still drag it back. Cancelling narrowed that window by accident rather than by
+design, and charged a red X on every superseded run for it. Queuing is the better
+trade, not a free one.
 
 Measured on `.github#387` (2026-08-30): the release train creates a PR, then
 edits its body; `edited` cancelled the in-flight `opened` run, and the PR read
@@ -99,7 +106,9 @@ def findings_for(name: str, text: str) -> list[str]:
             "edited/labeled/unlabeled/ready_for_review/reopened supersedes a run WITHOUT "
             "changing the head sha, so the cancelled run lands on the same commit as the "
             "winner and statusCheckRollup (worst-of) turns the PR red. Use false: the run "
-            "queues, the newer evaluation still writes last, and nothing is lost."
+            "queues and the newer evaluation still writes last. That is ordering within the "
+            "group, not a free win -- a queued run completes where a cancelled one was "
+            "truncated, so a superseded run can still act on a frozen payload."
         ]
     return []
 

@@ -83,6 +83,20 @@ jobs:
       - name: mint-scope (the real workflows, not fixtures)
         run: make mint-scope
 
+      # THE SAME GAP, IN THE PR THAT ADDED THE GUARD (@saadqbal on #388).
+      #
+      # `reusable-no-cancel` shipped wired only into `make lint`, exactly like
+      # `mint-scope` before #287 -- so the fixture suite and the mutation tier were
+      # armed and the audit of the REAL workflows was not. A reusable could be added
+      # with `cancel-in-progress: true`, or this one flipped back, and merge green.
+      #
+      # Third time this repo has closed this shape: mint-scope (#287), `make
+      # mutations` (.github#300), reason-citations (backend#2449). Same reasoning,
+      # same placement -- `selftests` is already required on develop/staging/main, so
+      # this arms it without a branch-protection edit and without landing a red gate.
+      - name: reusable-no-cancel (the real workflows, not fixtures)
+        run: make reusable-no-cancel
+
       # THE MUTATION TIER, in the SAME already-required context (backend#1788).
       #
       # `house-rules` is a required status check on develop, staging AND prod across
