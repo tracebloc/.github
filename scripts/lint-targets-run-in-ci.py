@@ -92,27 +92,77 @@ def run_evidence(target: str, text: str) -> list[str]:
     # every Python audit passed trivially. Unwiring the real step still reported
     # clean. Only the SCRIPT identifies the audit; the thing that runs it does not.
     GENERIC = {"python", "python3", "bash", "sh", "env", "make", "pipx", "uv"}
+    # Shell builtins and coreutils. Belt-and-braces beside the first-command rule
+    # above: a recipe may legitimately START with one of these, and such a target
+    # has no distinguishing tool either way, so it stays coverable only by a job
+    # named after it.
+    SHELL_WORDS = {"set", "if", "then", "else", "elif", "fi", "for", "do", "done",
+                   "while", "case", "esac", "echo", "printf", "true", "false", "cd",
+                   "exit", "return", "local", "read", "test", "eval", "shift",
+                   "git", "rm", "cp", "mv", "mkdir", "tr", "awk", "sed", "grep",
+                   "cat", "find", "sort", "uniq", "head", "tail", "xargs", "chmod",
+                   "mktemp", "tee", "wc", "diff", "comm", "jq", "curl", "gh", "ls"}
 
+    # SCRIPT PATHS come from every recipe line (a path is specific enough to be
+    # safe anywhere). TOOLS come from the FIRST command only.
+    #
+    # Why (Bugbot, High, on .github#388, second round): a multi-line shell recipe
+    # contributes the leading word of every line, so `shellcheck`'s evidence was
+    # ['git', 'rm', 'tr'] and `action-pins`'s was ['awk', 'rm'] -- coreutils that
+    # appear in any workflow on earth. Both audits were therefore uncoverable as
+    # orphans even after the assignment fix. The audit tool, if there is one, is
+    # what the recipe RUNS FIRST; everything after is plumbing.
+    #
+    # A recipe whose first command is itself plumbing (`set -e; \`) yields no tool
+    # evidence at all, which is correct: such a target is coverable only by a job
+    # named after it. That is the fail-CLOSED direction -- more orphans reported,
+    # never fewer.
     scripts, tools = [], []
+    first_command_seen = False
     for line in recipe_of(text, target):
         for m in re.finditer(r"(?:\./)?scripts/[A-Za-z0-9_./-]+", line):
             scripts.append(m.group(0).lstrip("./"))
         stripped = line.lstrip("@-").strip()
-        m = re.match(r"\$[({]([A-Za-z0-9_]+)[)}]", stripped) or re.match(
-            r"([A-Za-z][A-Za-z0-9_.-]*)", stripped
-        )
+
+        # A SHELL ASSIGNMENT IS NOT A COMMAND (Bugbot, High, on .github#388).
+        # `action-pins`'s recipe contains `wf=.github/...` and `shellcheck`'s
+        # contains `files=$$(mktemp)`, so the first-word rule produced the "tools"
+        # `wf` and `files`. Both occur as substrings of ordinary workflow text, so
+        # those two audits could never be reported unreachable -- unwiring their
+        # dedicated jobs left this guard green. The check that exists to catch an
+        # unrun audit was itself unable to see two of them.
+        if re.match(r"[A-Za-z_][A-Za-z0-9_]*=", stripped):
+            continue
+
+        if first_command_seen:
+            continue
+        first_command_seen = True
+
+        m = re.match(r"\$[({]([A-Za-z0-9_]+)[)}]", stripped)
         if m:
-            name = m.group(1).lower()
-            if name not in GENERIC and name not in ("set", "if", "for", "echo", "true", "cd"):
-                tools.append(name)
+            # RESOLVE the variable rather than lowercasing its name: `$(ACTIONLINT)`
+            # happens to equal its binary, but that is a coincidence of naming and
+            # not something to rely on.
+            for tok in expand_vars(text, [f"$({m.group(1)})"]):
+                base = tok.split("/")[-1].lower()
+                if base and base not in GENERIC:
+                    tools.append(base)
+                break
+        else:
+            m2 = re.match(r"([A-Za-z][A-Za-z0-9_.-]*)", stripped)
+            if m2:
+                name = m2.group(1).lower()
+                if name not in GENERIC and name not in SHELL_WORDS:
+                    tools.append(name)
 
     # A script path is the strongest evidence and, when present, the ONLY tool
     # evidence worth trusting -- the interpreter in front of it says nothing.
     ev = list(scripts) if scripts else list(tools)
-    # The target name itself: a dedicated job is conventionally named after it,
-    # which is how `ruff` / `shellcheck` / `house-rules` are legitimately covered
-    # by `code-quality.yml` without ever going through make.
-    ev.append(target)
+    # The target name is NOT returned here. A dedicated job named after the target
+    # is how `ruff` / `shellcheck` / `house-rules` / `action-pins` / `actionlint`
+    # are legitimately covered without going through make -- but that is an
+    # EXACT-NAME question about jobs, checked against job names in main(), not a
+    # substring question about script bodies.
     return [e for e in dict.fromkeys(ev) if e]
 
 
@@ -168,13 +218,14 @@ def reachable(roots: list[str], deps: dict[str, list[str]], text: str) -> set[st
     return seen
 
 
-def workflow_run_text(wf_dir: Path) -> str:
+def workflow_run_text(wf_dir: Path) -> tuple[str, set[str]]:
     """Every non-comment `run:` line across every workflow, concatenated.
 
     Searched for the recipe-derived evidence above, so an audit CI executes
     directly (not through make) is recognised as covered.
     """
     out: list[str] = []
+    job_names: set[str] = set()
     for f in sorted(wf_dir.glob("*.yml")) + sorted(wf_dir.glob("*.yaml")):
         try:
             doc = yaml.safe_load(f.read_text(encoding="utf-8"))
@@ -182,17 +233,25 @@ def workflow_run_text(wf_dir: Path) -> str:
             continue
         if not isinstance(doc, dict):
             continue
-        for job in (doc.get("jobs") or {}).values():
+        for key, job in (doc.get("jobs") or {}).items():
             if not isinstance(job, dict):
                 continue
+            # JOB NAMES ARE KEPT SEPARATE from run content, because they are
+            # IDENTITY evidence and run content is INVOCATION evidence. Folding
+            # them together let a target name match anywhere in any script body:
+            # with code-quality.yml deleted, `shellcheck` still read as covered
+            # because some other workflow's run text mentions the word, and
+            # `action-pins` likewise. That is the High finding's claim surviving
+            # its own first fix (Bugbot on .github#388).
+            job_names.add(str(key).lower())
             if isinstance(job.get("name"), str):
-                out.append(job["name"])
+                job_names.add(job["name"].strip().lower())
             for step in job.get("steps") or []:
                 if isinstance(step, dict) and isinstance(step.get("run"), str):
                     out += [ln for ln in step["run"].splitlines() if not ln.strip().startswith("#")]
                 if isinstance(step, dict) and isinstance(step.get("uses"), str):
                     out.append(step["uses"])
-    return "\n".join(out)
+    return "\n".join(out), job_names
 
 
 def ci_make_targets(wf_dir: Path) -> tuple[set[str], int]:
@@ -266,7 +325,7 @@ def main(argv: list[str]) -> int:
     if ci_targets and not real_roots:
         print(f"note: none of the parsed `make` targets ({' '.join(sorted(ci_targets))}) exist in this Makefile")
     covered = reachable(real_roots, deps, text) if real_roots else set()
-    run_text = workflow_run_text(wf)
+    run_text, job_names = workflow_run_text(wf)
     if not run_text.strip():
         print("::error::parsed NO `run:` content from any workflow -- refusing to report wiring I could not read")
         return 1
@@ -276,7 +335,20 @@ def main(argv: list[str]) -> int:
         if t in covered:
             continue
         # Not reachable through make -- is it run DIRECTLY by a dedicated job?
-        if any(e in run_text for e in run_evidence(t, text)):
+        # WORD-BOUNDARY matching, not a bare substring. A two-letter token like
+        # `wf` matched inside unrelated workflow text and manufactured coverage;
+        # the assignment skip above removes that class at the source, and this
+        # closes the same failure for anything short that survives it.
+        # A job named exactly after the target: identity, exact match only.
+        if t.lower() in job_names:
+            continue
+        # Otherwise the audit's own script or tool must actually be invoked.
+        # WORD-BOUNDARY matching, not a bare substring: a two-letter token like
+        # `wf` matched inside unrelated text and manufactured coverage.
+        if any(
+            re.search(rf"(?<![\w./-]){re.escape(e)}(?![\w-])", run_text)
+            for e in run_evidence(t, text)
+        ):
             continue
         orphans.append(t)
 

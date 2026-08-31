@@ -154,6 +154,73 @@ jobs:
     expect_finding=True,
 )
 
+# --- the short `on:` forms (Bugbot on .github#388) -------------------------
+# GitHub accepts three spellings and only the verbose one was recognised, so a
+# reusable written either short way skipped the check and reported clean. These
+# are literals rather than generated from the guard's own parser, for rule 9's
+# corollary: a fixture derived from the matcher agrees with it by construction.
+case(
+    "a reusable declared as a bare STRING is still checked",
+    """
+name: Set PR status
+on: workflow_call
+concurrency:
+  group: g
+  cancel-in-progress: true
+""",
+    expect_finding=True,
+    must_mention="cancel-in-progress: true",
+)
+
+case(
+    "a reusable declared in a LIST is still checked",
+    """
+name: Set PR status
+on: [workflow_call]
+concurrency:
+  group: g
+  cancel-in-progress: true
+""",
+    expect_finding=True,
+    must_mention="cancel-in-progress: true",
+)
+
+case(
+    "a LIST form that queues is clean",
+    """
+name: Set PR status
+on: [workflow_call, workflow_dispatch]
+concurrency:
+  group: g
+  cancel-in-progress: false
+""",
+    expect_finding=False,
+)
+
+case(
+    "a bare-STRING non-reusable trigger is not this rule's business",
+    """
+name: Something
+on: push
+concurrency:
+  group: g
+  cancel-in-progress: true
+""",
+    expect_finding=False,
+)
+
+case(
+    "a LIST form without workflow_call is not this rule's business",
+    """
+name: Something
+on: [push, pull_request]
+concurrency:
+  group: g
+  cancel-in-progress: true
+""",
+    expect_finding=False,
+)
+
 # --- fail closed -----------------------------------------------------------
 case(
     "an EXPRESSION on a reusable is a finding, because it resolves on the caller",

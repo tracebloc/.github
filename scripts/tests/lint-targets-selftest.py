@@ -190,6 +190,110 @@ case(
     1,
 )
 
+# --- Bugbot High on .github#388: recipe tokens are not evidence ------------
+# `action-pins` contained `wf=...` and `shellcheck` contained `files=$(mktemp)`,
+# so the leading-word rule produced the "tools" `wf` and `files` -- substrings of
+# ordinary workflow text, which made those two audits UNCOVERABLE as orphans.
+case(
+    "a shell ASSIGNMENT in a recipe is not tool evidence",
+    "lint: myaudit\n\t@true\n"
+    "myaudit:\n\t@set -e; \\\n\t wf=.github/workflows/x.yml; \\\n\t files=$$(mktemp)\n"
+    "selftests:\n\techo fixtures\n",
+    {
+        "ci.yml": "name: ci\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: |\n          wf=whatever\n          files=here\n"
+        "      - run: make selftests\n"
+    },
+    1,
+)
+
+# Second round of the same finding: with the assignment fix in, a multi-line shell
+# recipe still contributed the leading word of EVERY line, so evidence became
+# ['git', 'rm', 'tr'] -- coreutils present in any workflow. Only the FIRST command
+# identifies the audit.
+case(
+    "coreutils on LATER recipe lines are not tool evidence",
+    "lint: myaudit\n\t@true\n"
+    "myaudit:\n\t@set -e; \\\n\t git diff; \\\n\t tr -d x; \\\n\t rm -f /tmp/z\n"
+    "selftests:\n\techo fixtures\n",
+    {
+        "ci.yml": "name: ci\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: |\n          git rev-parse HEAD\n          rm -f /tmp/a\n"
+        "      - run: make selftests\n"
+    },
+    1,
+)
+
+case(
+    "a job NAMED after the target covers it (identity, exact)",
+    "lint: myaudit\n\t@true\n" "myaudit:\n\t@set -e; \\\n\t grep -q x y\n",
+    {
+        "ci.yml": "name: ci\non: push\njobs:\n  myaudit:\n    name: myaudit\n"
+        "    runs-on: ubuntu-latest\n    steps:\n      - run: echo doing it\n"
+    },
+    0,
+)
+
+case(
+    "the target name merely MENTIONED in a script body does not cover it",
+    "lint: myaudit\n\t@true\n"
+    "myaudit:\n\t@set -e; \\\n\t grep -q x y\n"
+    "selftests:\n\techo fixtures\n",
+    {
+        "ci.yml": "name: ci\non: push\njobs:\n  other:\n    name: other\n"
+        "    runs-on: ubuntu-latest\n    steps:\n"
+        "      - run: echo 'see myaudit for details'\n"
+        "      - run: make selftests\n"
+    },
+    1,
+)
+
+# --- each defence isolated -------------------------------------------------
+# The three rules above (skip assignments / first command only / exclude
+# coreutils) overlap, so each one alone survived its mutation: the other two
+# covered for it. These fixtures isolate one rule each, which is what makes the
+# mutation tier able to see them. Overlapping defences with no isolating test are
+# indistinguishable from one defence.
+
+case(
+    "an assignment as the FIRST recipe line is skipped, not taken as the tool",
+    "lint: myaudit\n\t@true\n"
+    "myaudit:\n\tfiles=$$(mktemp); \\\n\t grep -q x y\n"
+    "selftests:\n\techo fixtures\n",
+    {
+        "ci.yml": "name: ci\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: echo 'files everywhere'\n"
+        "      - run: make selftests\n"
+    },
+    1,
+)
+
+case(
+    "a NON-coreutil tool on a later recipe line is not evidence",
+    "lint: myaudit\n\t@true\n"
+    "myaudit:\n\tmytool --check; \\\n\t helm lint chart/\n"
+    "selftests:\n\techo fixtures\n",
+    {
+        "ci.yml": "name: ci\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: helm lint chart/\n"
+        "      - run: make selftests\n"
+    },
+    1,
+)
+
+case(
+    "a coreutil as the FIRST command is not evidence either",
+    "lint: myaudit\n\t@true\n"
+    "myaudit:\n\tgit diff --exit-code\n"
+    "selftests:\n\techo fixtures\n",
+    {
+        "ci.yml": "name: ci\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: git rev-parse HEAD\n"
+        "      - run: make selftests\n"
+    },
+    1,
+)
+
 # --- fail closed -----------------------------------------------------------
 case("a Makefile with NO lint target is a finding", "selftests:\n\techo hi\n",
      {"ci.yml": wf_running("selftests")}, 1, "no `lint` target found")

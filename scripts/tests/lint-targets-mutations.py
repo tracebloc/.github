@@ -28,8 +28,8 @@ import mutation_baseline  # noqa: E402
 MUTATIONS = [
     (
         "blanket-pass the direct-run escape hatch",
-        "        if any(e in run_text for e in run_evidence(t, text)):",
-        "        if True:",
+        '            re.search(rf"(?<![\\w./-]){re.escape(e)}(?![\\w-])", run_text)',
+        "            True",
     ),
     (
         "re-open the interpreter leak that made v1 vacuous",
@@ -40,6 +40,26 @@ MUTATIONS = [
         "trust the interpreter as evidence even when a script is named",
         "    ev = list(scripts) if scripts else list(tools)",
         "    ev = list(scripts) + list(tools)",
+    ),
+    (
+        "count a shell assignment as tool evidence",
+        '        if re.match(r"[A-Za-z_][A-Za-z0-9_]*=", stripped):\n            continue',
+        "        if False:\n            continue",
+    ),
+    (
+        "take the leading word of EVERY recipe line, not just the first",
+        "        if first_command_seen:\n            continue",
+        "        if False:\n            continue",
+    ),
+    (
+        "drop coreutils from the shell-word exclusion",
+        '                   "git", "rm", "cp", "mv", "mkdir", "tr", "awk", "sed", "grep",',
+        "                   ",
+    ),
+    (
+        "match the target name anywhere in run text, not just job names",
+        "        if t.lower() in job_names:",
+        "        if t.lower() in run_text.lower():",
     ),
     (
         "stop expanding $(VAR) prerequisite lists",

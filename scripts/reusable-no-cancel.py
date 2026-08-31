@@ -71,6 +71,31 @@ def _on_block(doc: dict):
     return doc.get("on")
 
 
+def _declares(on, event: str) -> bool:
+    """Whether `on:` declares `event`, in ANY of the three legal spellings.
+
+    GitHub accepts all of these, and only the first was recognised (Bugbot on
+    .github#388) -- so a reusable written either short way skipped the check
+    entirely and reported clean with `cancel-in-progress: true`:
+
+        on: workflow_call            # a bare string
+        on: [workflow_call]          # a list
+        on:                          # a mapping
+          workflow_call:
+
+    A guard that only understands the verbose form is not checking the rule, it
+    is checking a formatting convention -- and the short forms are exactly what a
+    small reusable is most likely to use.
+    """
+    if isinstance(on, str):
+        return on == event
+    if isinstance(on, list):
+        return event in on
+    if isinstance(on, dict):
+        return event in on
+    return False
+
+
 def findings_for(name: str, text: str) -> list[str]:
     """Return this workflow's findings. Pure, so the suite and the mutations
     both drive the real rule rather than a second copy of it (CLAUDE.md rule 9).
@@ -83,8 +108,7 @@ def findings_for(name: str, text: str) -> list[str]:
         return [f"{name}: is not a YAML mapping, so its concurrency cannot be read"]
 
     on = _on_block(doc)
-    reusable = isinstance(on, dict) and "workflow_call" in on
-    if not reusable:
+    if not _declares(on, "workflow_call"):
         return []
 
     conc = doc.get("concurrency")

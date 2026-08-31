@@ -69,8 +69,18 @@ MUTATIONS = [
     ),
     (
         "flag NON-reusable workflows too (over-broad rule)",
-        "    if not reusable:\n        return []",
+        '    if not _declares(on, "workflow_call"):\n        return []',
         "    if False:\n        return []",
+    ),
+    (
+        "stop recognising the bare-string `on: workflow_call` form",
+        '    if isinstance(on, str):\n        return on == event',
+        "    if False:\n        return on == event",
+    ),
+    (
+        "stop recognising the list `on: [workflow_call]` form",
+        "    if isinstance(on, list):\n        return event in on",
+        "    if False:\n        return event in on",
     ),
 ]
 
