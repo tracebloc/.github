@@ -111,28 +111,52 @@ def findings_for(name: str, text: str) -> list[str]:
     if not _declares(on, "workflow_call"):
         return []
 
-    conc = doc.get("concurrency")
-    if not isinstance(conc, dict):
-        return []
+    # WORKFLOW LEVEL **AND** JOB LEVEL (Bugbot on .github#388). `concurrency` is
+    # legal at `jobs.<id>.concurrency` too, and only the workflow level was read --
+    # so a reusable cancelling at job level reported clean while its cancelled JOB
+    # check run landed on the same sha and reddened the rollup exactly the same
+    # way. Same rule, a second place to write it; a guard that knows only one
+    # spelling is checking a convention rather than the rule.
+    findings: list[str] = []
+    for where, conc in _concurrency_blocks(doc):
+        findings.extend(_verdict(name, where, conc))
+    return findings
+
+
+def _concurrency_blocks(doc: dict) -> list[tuple[str, dict]]:
+    """Every `concurrency:` mapping in the document, labelled by where it sits."""
+    out: list[tuple[str, dict]] = []
+    top = doc.get("concurrency")
+    if isinstance(top, dict):
+        out.append(("workflow level", top))
+    jobs = doc.get("jobs")
+    if isinstance(jobs, dict):
+        for job_id, job in jobs.items():
+            if isinstance(job, dict) and isinstance(job.get("concurrency"), dict):
+                out.append((f"job {job_id!r}", job["concurrency"]))
+    return out
+
+
+def _verdict(name: str, where: str, conc: dict) -> list[str]:
     if "cancel-in-progress" not in conc:
         return []
-
     value = conc["cancel-in-progress"]
     if isinstance(value, str) and "${{" in value:
         return [
-            f"{name}: reusable, and cancel-in-progress is the expression {value!r}. "
-            "It resolves against the CALLER's event, which this workflow cannot see -- "
-            "'cannot tell' is a finding, not a pass."
+            f"{name} ({where}): reusable, and cancel-in-progress is the expression "
+            f"{value!r}. It resolves against the CALLER's event, which this workflow "
+            "cannot see -- 'cannot tell' is a finding, not a pass."
         ]
     if value is True:
         return [
-            f"{name}: reusable, and sets cancel-in-progress: true. A caller triggering on "
-            "edited/labeled/unlabeled/ready_for_review/reopened supersedes a run WITHOUT "
-            "changing the head sha, so the cancelled run lands on the same commit as the "
-            "winner and statusCheckRollup (worst-of) turns the PR red. Use false: the run "
-            "queues and the newer evaluation still writes last. That is ordering within the "
-            "group, not a free win -- a queued run completes where a cancelled one was "
-            "truncated, so a superseded run can still act on a frozen payload."
+            f"{name} ({where}): reusable, and sets cancel-in-progress: true. A caller "
+            "triggering on edited/labeled/unlabeled/ready_for_review/reopened supersedes "
+            "a run WITHOUT changing the head sha, so the cancelled run lands on the same "
+            "commit as the winner and statusCheckRollup (worst-of) turns the PR red. Use "
+            "false: the run queues and the newer evaluation still writes last. That is "
+            "ordering within the group, not a free win -- a queued run completes where a "
+            "cancelled one was truncated, so a superseded run can still act on a frozen "
+            "payload."
         ]
     return []
 

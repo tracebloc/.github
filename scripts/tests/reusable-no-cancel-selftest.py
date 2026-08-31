@@ -221,6 +221,93 @@ concurrency:
     expect_finding=False,
 )
 
+# --- job-level concurrency (Bugbot on .github#388) -------------------------
+# `concurrency` is legal at `jobs.<id>.concurrency` too. Reading only the workflow
+# level let a reusable cancel at job level and report clean, while its cancelled
+# JOB check run landed on the same sha and reddened the rollup identically.
+case(
+    "a reusable cancelling at JOB level is a finding",
+    """
+name: Set PR status
+on:
+  workflow_call:
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: g
+      cancel-in-progress: true
+""",
+    expect_finding=True,
+    must_mention="job 'x'",
+)
+
+case(
+    "a job-level EXPRESSION on a reusable is a finding too",
+    """
+on:
+  workflow_call:
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: g
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+""",
+    expect_finding=True,
+    must_mention="cannot see",
+)
+
+case(
+    "a job-level block that queues is clean",
+    """
+on:
+  workflow_call:
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: g
+      cancel-in-progress: false
+""",
+    expect_finding=False,
+)
+
+case(
+    "job-level cancelling in a NON-reusable is not this rule's business",
+    """
+on:
+  pull_request:
+    types: [opened]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: g
+      cancel-in-progress: true
+""",
+    expect_finding=False,
+)
+
+case(
+    "BOTH levels cancelling reports both, not just the first",
+    """
+on:
+  workflow_call:
+concurrency:
+  group: top
+  cancel-in-progress: true
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: g
+      cancel-in-progress: true
+""",
+    expect_finding=True,
+    must_mention="job 'x'",
+)
+
 # --- fail closed -----------------------------------------------------------
 case(
     "an EXPRESSION on a reusable is a finding, because it resolves on the caller",

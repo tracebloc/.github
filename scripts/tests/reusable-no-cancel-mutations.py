@@ -38,6 +38,21 @@ MUTATIONS = [
         "    if False:",
     ),
     (
+        "read only the workflow level, ignoring jobs.<id>.concurrency",
+        "    jobs = doc.get(\"jobs\")\n    if isinstance(jobs, dict):",
+        "    jobs = doc.get(\"jobs\")\n    if False:",
+    ),
+    (
+        "stop reading the workflow level, only jobs",
+        '    top = doc.get("concurrency")\n    if isinstance(top, dict):',
+        '    top = doc.get("concurrency")\n    if False:',
+    ),
+    (
+        "report only the FIRST concurrency block, not all of them",
+        "    for where, conc in _concurrency_blocks(doc):\n        findings.extend(_verdict(name, where, conc))",
+        "    for where, conc in _concurrency_blocks(doc):\n        return _verdict(name, where, conc)",
+    ),
+    (
         "treat a ${{ }} expression as safe instead of unreadable",
         '    if isinstance(value, str) and "${{" in value:',
         "    if False:",
