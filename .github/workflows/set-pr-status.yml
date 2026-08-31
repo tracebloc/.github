@@ -96,14 +96,55 @@ on:
 # keeps two different callers in one repo apart. Same shape as
 # `rfcs`'s code-quality-caller.yml, deliberately -- one house pattern.
 #
-# CANCELLING IS SAFE HERE, and that is measured rather than assumed: an
-# `edited` event does NOT change the head sha, so the cancelled run and the
-# winner report to the SAME commit under the same check names, and GitHub
-# surfaces the newest per context. Neither job is a required context in any
-# repo (stated above and unchanged), so a cancelled older run blocks nothing.
+# QUEUE, DO NOT CANCEL. The previous revision said "CANCELLING IS SAFE HERE,
+# and that is measured rather than assumed ... GitHub surfaces the newest per
+# context ... so a cancelled older run blocks nothing." Half of that holds and
+# the half that does not is the half that matters.
+#
+# `gh pr checks` does dedupe to the newest per context, which is where the
+# claim came from. `statusCheckRollup.state` does NOT: it aggregates
+# WORST-OF across every check run on the commit, so one CANCELLED run sits
+# beside three SUCCESS runs of the same name and the rollup reports FAILURE.
+# That is what the PR's red X renders from, and what every tool reading the
+# rollup sees -- including our own `ship.py` scan.
+#
+# Measured on `.github#387` (2026-08-30, four runs at 07:39 -- the train
+# creates the PR, then edits the body, and `edited` cancelled the in-flight
+# `opened` run):
+#
+#   mergeStateStatus=BLOCKED  rollup=FAILURE
+#   EVERY non-SUCCESS context:
+#      set-status / set-status  = CANCELLED
+#      set-status / closing-ref = CANCELLED
+#      quality / format         = SKIPPED
+#
+# Nothing else was non-green. "Blocks nothing" was right about MERGING -- these
+# are not required contexts -- and wrong about what a human sees. A red X that
+# is not a real failure is not cosmetic: on 2026-08-28 two reviewers withheld
+# approval over exactly this shape of stale red (@saqlainsyed007 on .github#369,
+# @aptracebloc on client#890), and both were reading the evidence correctly.
+#
+# Keeping the GROUP still solves what the group was for. With
+# `cancel-in-progress: false` a second run goes PENDING until the first
+# finishes rather than running beside it, so the newer evaluation still writes
+# last and the card cannot settle on stale input.
+#
+# THAT IS ORDERING WITHIN THE GROUP, AND ONLY THAT (@saadqbal on #388). An
+# earlier draft said "nothing is lost", which is too strong. Cancelling also
+# TRUNCATED a superseded run; queuing guarantees it completes. Both the
+# `if: state == 'open'` condition and the draft read come off the FROZEN event
+# payload, so an `edited` run that lands after the closure router has already
+# moved a merged card can still drag it back to `Code review`. Cancelling
+# narrowed that window by accident, not by design, and it paid for it with a red
+# X on every superseded run. Queuing is the better trade, not a free one.
+#
+# RESIDUAL, stated rather than glossed: GitHub cancels a previously PENDING run
+# when a third event supersedes it, so a burst of 3+ rapid edits can still
+# leave one CANCELLED entry. The create-then-edit the train actually does is
+# two events, which this removes entirely.
 concurrency:
   group: set-pr-status-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   # ONLY WHILE THE PR IS OPEN (tracebloc/backend#2556). This condition is a
