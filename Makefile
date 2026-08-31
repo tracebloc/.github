@@ -107,6 +107,7 @@ help:
 	@echo "  credential-scan gitleaks over the whole history, as code-quality.yml runs it"
 	@echo "  audit           caller-drift.py against the live org — needs a token"
 	@echo "  reason-citations  the live inventory's ticket citations — needs a token"
+	@echo "  reusable-no-cancel  no reusable workflow cancels in-progress runs"
 	@echo
 	@echo "  Not reproducible locally, by construction:"
 	@echo "    conformance-gate.yml polls the API for caller-drift's verdict on a"
@@ -134,7 +135,7 @@ check-all: check credential-scan mutations
 # ---- lint --------------------------------------------------------
 
 .PHONY: lint
-lint: ruff shellcheck house-rules action-pins mint-scope actionlint mutations-dry
+lint: ruff shellcheck house-rules action-pins mint-scope reusable-no-cancel lint-targets-run-in-ci actionlint mutations-dry
 
 # ruff: code-quality.yml's `ruff` job in all-files mode. This repo has no ruff
 # config, so the workflow falls back to --isolated --select <ruff-select>; that
@@ -300,7 +301,10 @@ MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-branch-owner mutation-reason-citations \
                    mutation-mutation-baseline mutation-standards-sync \
                    mutation-conflict-gate \
-                   mutation-triage-labels
+                   mutation-triage-labels \
+                   mutation-archive-baseline \
+                   mutation-reusable-no-cancel \
+                   mutation-lint-targets
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -339,7 +343,10 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-branch-owner \
                     selftest-mutation-baseline \
                     selftest-conflict-gate \
-                    selftest-triage-labels
+                    selftest-triage-labels \
+                    selftest-archive-baseline \
+                    selftest-reusable-no-cancel \
+                    selftest-lint-targets
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -539,6 +546,21 @@ mutation-bugbot-gate-dry:
 selftest-conflict-gate: guard-pyyaml
 	$(PYTHON) scripts/tests/conflict-gate-selftest.py
 
+# The archive's cross-run floor (backend#2802). guard-pyyaml: the suite parses
+# kanban-archive.yml -- it extracts the comparison's shell out of the assert step
+# and runs it verbatim, and reads the upload step's wiring from the same document.
+# No token and no network: every case is files in a temp dir.
+.PHONY: selftest-archive-baseline
+selftest-archive-baseline: guard-pyyaml
+	$(PYTHON) scripts/tests/archive-baseline-selftest.py
+
+.PHONY: mutation-archive-baseline mutation-archive-baseline-dry
+mutation-archive-baseline:
+	$(PYTHON) scripts/tests/archive-baseline-mutations.py
+
+mutation-archive-baseline-dry:
+	$(PYTHON) scripts/tests/archive-baseline-mutations.py --dry
+
 .PHONY: mutation-conflict-gate mutation-conflict-gate-dry
 mutation-conflict-gate:
 	$(PYTHON) scripts/tests/conflict-gate-mutations.py
@@ -568,6 +590,60 @@ mutation-closing-ref-gate-dry:
 # The reason-citation check (backend#2449). guard-pyyaml: it parses
 # repo-inventory.yml. The suite stubs `gh` on PATH, so neither of these two needs
 # a token or the network -- only the `reason-citations` target above does.
+# reusable-no-cancel: a REUSABLE workflow must not set cancel-in-progress: true
+# (backend#2756). It cannot see its callers' trigger types, so it cannot know
+# whether the event that superseded it changed the head sha -- and a cancelled
+# run on the SAME sha turns statusCheckRollup (worst-of) red on a PR that is
+# actually fine. Three targets, the house split:
+#
+#   selftest-reusable-no-cancel   does the rule CATCH?     fixtures, offline, in `check`
+#   mutation-reusable-no-cancel   would the suite NOTICE?  `mutations`, in `check-all`
+#   reusable-no-cancel            does the TREE comply?    the real workflows, in `lint`
+#
+# The live target sits in `lint` beside `mint-scope` for the same reason: it reads
+# this repo's actual .github/workflows/ and needs neither a token nor the network.
+# lint-targets-run-in-ci: the CLASS behind .github#388 (and #287, #300,
+# backend#2449). A live audit wired only into `make lint` never runs, because CI
+# does not run `make lint` -- four times now, each with a longer comment above it.
+# This makes it a machine check instead of a fifth paragraph.
+#
+#   selftest-lint-targets   does the rule CATCH?     fixtures, offline, in `check`
+#   mutation-lint-targets   would the suite NOTICE?  `mutations`, in `check-all`
+#   lint-targets-run-in-ci  does THIS repo comply?   the real Makefile+workflows
+#
+# The live target is a prerequisite of `lint` like every other audit AND is run
+# directly by selftests.yml -- which is the fix this guard exists to enforce, so
+# it had better hold for the guard itself.
+.PHONY: lint-targets-run-in-ci
+lint-targets-run-in-ci: guard-pyyaml
+	$(PYTHON) scripts/lint-targets-run-in-ci.py
+
+.PHONY: selftest-lint-targets
+selftest-lint-targets: guard-pyyaml
+	$(PYTHON) scripts/tests/lint-targets-selftest.py
+
+.PHONY: mutation-lint-targets mutation-lint-targets-dry
+mutation-lint-targets:
+	$(PYTHON) scripts/tests/lint-targets-mutations.py
+
+mutation-lint-targets-dry:
+	$(PYTHON) scripts/tests/lint-targets-mutations.py --dry
+
+.PHONY: reusable-no-cancel
+reusable-no-cancel: guard-pyyaml
+	$(PYTHON) scripts/reusable-no-cancel.py
+
+.PHONY: selftest-reusable-no-cancel
+selftest-reusable-no-cancel: guard-pyyaml
+	$(PYTHON) scripts/tests/reusable-no-cancel-selftest.py
+
+.PHONY: mutation-reusable-no-cancel mutation-reusable-no-cancel-dry
+mutation-reusable-no-cancel:
+	$(PYTHON) scripts/tests/reusable-no-cancel-mutations.py
+
+mutation-reusable-no-cancel-dry:
+	$(PYTHON) scripts/tests/reusable-no-cancel-mutations.py --dry
+
 .PHONY: selftest-reason-citations
 selftest-reason-citations: guard-pyyaml
 	$(PYTHON) scripts/tests/reason-citations-selftest.py
