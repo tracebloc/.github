@@ -267,26 +267,48 @@ def anchor_failures(block: str) -> list:
 # `first_total` is derived as `reread + archived` in the runner so the within-run
 # identity agrees exactly and cannot confound the verdict -- a case where two
 # guards can both fire tells you nothing about either.
-# (name, declared_total, reread_total, archived, must_refuse, must_warn)
+# (name, declared_total, reread_total, archived, must_refuse, must_warn,
+#  want_baseline)
+#
+# `want_baseline` IS WRITTEN DOWN PER CASE, not computed (backend#2833). It used
+# to be `str(declared)` in the runner -- the implementation's own rule, restated
+# in the place that was supposed to check it, so the two agreed by construction
+# and the lag-path defect was invisible. Each value below is argued instead.
 COMPLETENESS_CASES = [
     # THE MEASURED RUN (backend#2831, run 33301924089). First read 518, archived
     # 49, re-read paginated exactly 469 -- so the read was COMPLETE, 518-49=469
     # -- while the server still reported totalCount=475. The equality this
     # replaces failed the run for having archived.
+    #
+    # BASELINE 469, NOT 475: the run walked 469 cards. 475 is `totalCount` still
+    # counting the 49 we just archived, which the warning on this very case says
+    # out loud -- recording it hands tomorrow a floor above the real board, and
+    # when the counter catches up the floor check blocks the corrected record
+    # for ever (backend#2833).
     ("the measured run: 469 paginated, 475 counted, 49 archived",
-     475, 469, 49, False, True),
-    ("counts agree", 100, 100, 10, False, False),
+     475, 469, 49, False, True, 469),
+    ("counts agree", 100, 100, 10, False, False, 100),
     # More returned than counted is the other lag direction (a card added that
     # totalCount has not picked up). Nothing can be hidden by it: every item is
     # in hand.
-    ("more returned than counted", 100, 103, 0, False, False),
+    #
+    # BASELINE 100, UNCHANGED. Here `totalCount` is the SMALLER of the two, and
+    # the smaller is what gets recorded -- a floor that is too low
+    # under-detects for one cycle and self-corrects, while one that is too high
+    # cannot be cleared at all. This case is what stops the fix above being
+    # "always trust the pagination".
+    ("more returned than counted", 100, 103, 0, False, False, 100),
     # THE CEILING, both sides of it. The lag can only be still-counting the
     # cards this job archived, so the gap is bounded by `archived_now`.
-    ("the gap is exactly the archive count", 100, 90, 10, False, True),
-    ("the gap is one wider than the archive count", 100, 89, 10, True, False),
+    #
+    # BASELINE 90 for the same reason as the measured run: 100 is the lagging
+    # counter, 90 is the board.
+    ("the gap is exactly the archive count", 100, 90, 10, False, True, 90),
+    ("the gap is one wider than the archive count", 100, 89, 10, True, False, None),
     # ...and with nothing archived there is no lag to explain any gap at all.
     # This is the credential-blind omission the check exists for, undiminished.
-    ("nothing archived, so a one-card gap is an omission", 100, 99, 0, True, False),
+    ("nothing archived, so a one-card gap is an omission",
+     100, 99, 0, True, False, None),
 ]
 
 
@@ -510,7 +532,7 @@ def main() -> int:
         print(f"ok   identity: {name}")
 
     for (name, declared, reread, archived,
-         must_refuse, must_warn) in COMPLETENESS_CASES:
+         must_refuse, must_warn, want_baseline) in COMPLETENESS_CASES:
         rc, out, wrote = run_case(declared, None, archived,
                                   first_total=reread + archived,
                                   reread_total=reread)
@@ -529,11 +551,12 @@ def main() -> int:
         # A LAG WARNING IS NOT A BAD VIEW. If the warning path also withheld the
         # baseline, every productive run would starve the next one's floor --
         # which is #2833's mechanism arriving by a second door.
-        want_record = None if must_refuse else str(declared)
+        want_record = None if want_baseline is None else str(want_baseline)
         if wrote != want_record:
             failures += 1
             print(f"FAIL completeness/{name}: recorded baseline {wrote!r}, "
-                  f"expected {want_record!r}")
+                  f"expected {want_record!r} -- a baseline above the real board "
+                  "cannot be cleared by any later run (backend#2833)")
             continue
         print(f"ok   completeness: {name}")
 
