@@ -507,19 +507,6 @@ jobs:
           # trains people to skip the tier. A leftover card or an unreadable
           # Status makes the JOB fail without making the COUNT wrong.
           view_bad=0
-          # THE SERVER'S OWN COUNT FIRST, because it is the one independent number.
-          # `totalCount` is the server's count of the connection; `reread_total` is
-          # what pagination actually yielded. They disagree exactly when items are
-          # omitted from `nodes` while still being counted -- the credential-blind
-          # path, which would otherwise land as a LOWER terminal count and read as
-          # success.
-          if [ "$reread_total" -ne "$declared_total" ]; then
-            echo "::error::the post-archive re-read paginated $reread_total item(s) but the server reports totalCount=$declared_total. Items are being omitted from the read, so a terminal card can exist that this run never judged -- this run cannot show the board is clean (backend#2623)."
-            fail=1
-            view_bad=1
-          else
-            echo "Completeness: paginated $reread_total item(s), server totalCount=$declared_total (agree)."
-          fi
           if [ "$nullst_after" -gt 0 ]; then
             echo "::error::$nullst_after un-archived item(s) returned an unreadable Status on the post-archive re-read. They cannot be judged terminal, so this run CANNOT show the board is clean -- unverified is not verified-clean (backend#2623)."
             fail=1
@@ -585,8 +572,70 @@ jobs:
           # else's API that no test here can pin.
           arch_first=$(awk -F"\t" '$1=="true"' seen.tsv | wc -l | tr -d " ")
           expected=$((first_total - archived_now + arch_seen - arch_first))
-          if [ "$reread_total" -ne "$expected" ]; then
-            echo "::error::this run read $first_total item(s), archived $archived_now, and then read $reread_total -- but that must leave exactly $expected (archived items in the two reads: $arch_first then $arch_seen). The view moved under this run, so its counts describe no single board (backend#2802)."
+          # DIRECTIONAL, NOT EXACT (backend#2833). Growth between the two reads
+          # is routine rather than exceptional: `add-to-kanban` puts a card on
+          # the board the moment anyone opens an issue or a PR, so one can
+          # arrive in the seconds between the reads, and `reread_total >
+          # expected` then says nothing at all about this credential's sight.
+          # Exact equality therefore failed runs for doing their job -- and it
+          # set `view_bad`, so no baseline was recorded, the next run's floor
+          # stayed at the pre-growth total, and the red could not clear. That is
+          # rule 4 twice over: a red on success, and a red with no way out.
+          #
+          # Shrinkage is the entire signal. Archiving is the only way a card
+          # leaves this board and this job knows exactly how many it archived,
+          # so anything BELOW `expected` is a view that moved rather than a
+          # board that changed. This deliberately cannot see a shrink exactly
+          # cancelled by an addition; the cross-run floor below is what catches
+          # a persistent one, and a permanent red catches nothing whatsoever.
+          # `expected` IS PRINTED, and the suite asserts the printed number
+          # against one written down per case (backend#2833). A lower bound
+          # cannot see an `expected` computed too LOW -- the shortfall just
+          # reads as growth -- so the moment the comparison stopped being exact,
+          # every term of this arithmetic became unfalsifiable through the
+          # verdict alone. Measured: dropping `+ arch_seen - arch_first` (the
+          # Bugbot High of .github#383, that archiving-shrinks-the-connection
+          # must not be assumed) went from caught to UNCAUGHT on exactly that
+          # change. Emitting the value is what puts it back under test.
+          echo "Within-run: archiving accounts for $expected item(s) ($first_total read - $archived_now archived + $arch_seen archived-now - $arch_first archived-then); the re-read returned $reread_total."
+          if [ "$reread_total" -lt "$expected" ]; then
+            echo "::error::this run read $first_total item(s), archived $archived_now, and then read only $reread_total -- at least $((expected - reread_total)) item(s) below the $expected that archiving accounts for (archived items in the two reads: $arch_first then $arch_seen). The view shrank under this run, so its counts describe no single board (backend#2802)."
+            fail=1
+            view_bad=1
+          elif [ "$reread_total" -gt "$expected" ]; then
+            echo "Within-run: re-read $reread_total against the $expected archiving accounts for -- $((reread_total - expected)) item(s) added between the two reads. Growth is not a shrunken view."
+          fi
+          # THE SERVER'S OWN COUNT, and NOT an equality (backend#2831).
+          # `totalCount` and `nodes` are not two views of one set immediately
+          # after a bulk archive. Measured on run 33301924089: the first read
+          # returned 518, this job archived 49, the re-read paginated exactly
+          # 469 -- a COMPLETE read, since 518 - 49 = 469 -- and the server still
+          # reported totalCount=475. `totalCount` had caught up with 43 of the
+          # 49 archives, not all of them, so the equality failed the run
+          # BECAUSE it archived.
+          #
+          # #383 asserted the two agree on the strength of a run that archived
+          # NOTHING (33084151778, "1626 (un-archived: 1626)"). That shows the
+          # returned nodes were un-archived; it says nothing about what
+          # `totalCount` counts, and conflating those two was the error.
+          #
+          # The omission this exists to catch survives, because the lag has a
+          # CEILING: `totalCount` can only still be counting cards this job just
+          # archived, so the gap cannot exceed `archived_now`. Wider than that,
+          # or on a run that archived nothing at all, no lag can explain it and
+          # items really are being counted without being returned.
+          #
+          # It is moved BELOW the identity, into the tested region, for a reason
+          # the old position made impossible: `archived_now` is read here, so
+          # above it the ceiling is not merely unknown but `set -u`-fatal.
+          if [ "$reread_total" -gt "$declared_total" ]; then
+            echo "Completeness: paginated $reread_total item(s), server totalCount=$declared_total -- $((reread_total - declared_total)) more returned than counted, so nothing is being omitted from the read."
+          elif [ "$reread_total" -eq "$declared_total" ]; then
+            echo "Completeness: paginated $reread_total item(s), server totalCount=$declared_total (agree)."
+          elif [ "$((declared_total - reread_total))" -le "$archived_now" ]; then
+            echo "::warning::the re-read paginated $reread_total item(s) while the server reports totalCount=$declared_total. The gap of $((declared_total - reread_total)) is within the $archived_now card(s) this job archived, so totalCount has not finished catching up and no omission is implied (backend#2831)."
+          else
+            echo "::error::the post-archive re-read paginated $reread_total item(s) but the server reports totalCount=$declared_total -- a gap of $((declared_total - reread_total)), wider than the $archived_now this job archived, so archive lag cannot account for it. Items are being omitted from the read, and a terminal card can exist that this run never judged (backend#2623)."
             fail=1
             view_bad=1
           fi

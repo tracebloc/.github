@@ -195,11 +195,41 @@ MUTATIONS = [
         "          expected=$((first_total - archived_now + arch_seen - arch_first))",
         "          expected=$((first_total - archived_now))",
     ),
+    # The identity is DIRECTIONAL now (backend#2833) -- growth is ordinary on a
+    # board `add-to-kanban` writes to continuously, shrinkage is the signal --
+    # so the two ways to break it are to point it the wrong way and to make it
+    # exact again. Both are the shape it was mutated for before; the anchor
+    # simply moved from `-ne` to `-lt`, and this list went red until it did,
+    # which is the anchor assertion doing its job.
     (
-        "the within-run identity is a bound rather than an equality, so a view that "
-        "shrank mid-run passes",
-        '          if [ "$reread_total" -ne "$expected" ]; then',
+        "the within-run identity points the wrong way, so a collapsed view passes "
+        "and a growing board refuses",
+        '          if [ "$reread_total" -lt "$expected" ]; then',
         '          if [ "$reread_total" -gt "$expected" ]; then',
+    ),
+    (
+        "the within-run identity is exact again, so every card added mid-run "
+        "refuses the run and withholds the baseline",
+        '          if [ "$reread_total" -lt "$expected" ]; then',
+        '          if [ "$reread_total" -ne "$expected" ]; then',
+    ),
+    # --- (E) the totalCount ceiling (backend#2831) --------------------------
+    #
+    # `totalCount` lags behind a bulk archive, so the gap is tolerated only up
+    # to what this job archived. Unbound it and the omission check is gone;
+    # remove the tolerance and every productive run refuses. Only cases on both
+    # sides of the ceiling can tell those apart.
+    (
+        "the totalCount gap is tolerated without limit, so a credential-blind "
+        "omission passes",
+        '          elif [ "$((declared_total - reread_total))" -le "$archived_now" ]; then',
+        '          elif [ "$((declared_total - reread_total))" -ge 0 ]; then',
+    ),
+    (
+        "the totalCount gap is never tolerated, so archive lag refuses every "
+        "productive run",
+        '          elif [ "$((declared_total - reread_total))" -le "$archived_now" ]; then',
+        '          elif [ "$((declared_total - reread_total))" -lt 0 ]; then',
     ),
     # The producer half of the pair. No upload, no baseline, ever -- every
     # future run takes the cannot-tell branch and the comparison is dead code.
