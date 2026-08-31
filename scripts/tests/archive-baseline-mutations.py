@@ -55,8 +55,25 @@ MUTATIONS = [
     # feeds it shrinkage.
     (
         "the floor comparison is inverted, so a shrunken view passes and growth refuses",
-        'if [ "$declared_total" -lt "$floor" ]; then',
-        'if [ "$declared_total" -gt "$floor" ]; then',
+        'if [ "$board_size" -lt "$floor" ]; then',
+        'if [ "$board_size" -gt "$floor" ]; then',
+    ),
+    # backend#2833 introduced `board_size` as min(declared_total, reread_total)
+    # and the whole fix rests on it being the SMALLER. Taking the larger puts the
+    # lag path back exactly where it was: `totalCount` still counting cards this
+    # job archived becomes tomorrow's baseline, tomorrow's floor sits above the
+    # real board, and no later run can ever write a corrected one.
+    (
+        "board_size takes the LARGER count, restoring the unclearable baseline",
+        'if [ "$reread_total" -lt "$board_size" ]; then board_size="$reread_total"; fi',
+        'if [ "$reread_total" -gt "$board_size" ]; then board_size="$reread_total"; fi',
+    ),
+    # The narrowing dropped entirely -- board_size stays `declared_total`, which
+    # is the pre-#2833 behaviour and the defect itself.
+    (
+        "the narrowing is removed, so board_size is just the server's counter",
+        'if [ "$reread_total" -lt "$board_size" ]; then board_size="$reread_total"; fi',
+        ":",
     ),
     # The floor without the archive term refuses every productive run: archive
     # 63 cards and the board legitimately drops 63. That is the version that
