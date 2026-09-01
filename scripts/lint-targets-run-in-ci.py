@@ -312,12 +312,30 @@ def ci_make_targets(wf_dir: Path) -> tuple[set[str], int]:
                 run = step.get("run")
                 if not isinstance(run, str):
                     continue
-                # Only real invocations: a `make` inside a comment line is not one.
+                # Only real invocations. A `make <target>` mentioned in ECHO TEXT
+                # or an INLINE COMMENT is prose, not a command, and treating it as
+                # one manufactures coverage: `make lint`/`make check` name real
+                # targets, so the later `t in deps` filter does not drop them, and a
+                # single `echo "run make lint"` would mark every lint audit reachable
+                # while CI ran none of them (Bugbot Medium, backend#2884). Both
+                # vectors are stripped before the match rather than pattern-matched
+                # around, because the failure is "text that is not a command was
+                # read as one" and the fix is to remove the non-command text:
+                #   * quoted spans -> echo/message args cannot masquerade
+                #   * an unquoted `#` to end of line -> inline comments, not only
+                #     whole-comment lines (the previous guard caught only the latter)
+                # Deliberately NOT command-position matching: a real invocation can
+                # carry a prefix (`sudo make x`, `env FOO=bar make x`, `time make x`),
+                # and demanding `make` be first would drop those. Removing the prose
+                # is enough and cannot false-drop a real command.
                 for line in run.splitlines():
                     stripped = line.strip()
                     if stripped.startswith("#"):
                         continue
-                    for m in re.finditer(r"\bmake\s+([A-Za-z][A-Za-z0-9_.\-]*)", stripped):
+                    scrubbed = re.sub(r"'[^']*'", " ", stripped)
+                    scrubbed = re.sub(r'"[^"]*"', " ", scrubbed)
+                    scrubbed = re.sub(r"(?:^|\s)#.*$", " ", scrubbed)
+                    for m in re.finditer(r"\bmake\s+([A-Za-z][A-Za-z0-9_.\-]*)", scrubbed):
                         found.add(m.group(1))
     return found, len(files)
 

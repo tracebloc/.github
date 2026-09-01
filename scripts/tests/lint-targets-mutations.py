@@ -81,6 +81,21 @@ MUTATIONS = [
         "                    if False:",
     ),
     (
+        "count `make` inside SINGLE-quoted echo text as a real invocation (backend#2884)",
+        '                    scrubbed = re.sub(r"\'[^\']*\'", " ", stripped)',
+        '                    scrubbed = stripped',
+    ),
+    (
+        "count `make` inside DOUBLE-quoted echo text as a real invocation (backend#2884)",
+        "                    scrubbed = re.sub(r'\"[^\"]*\"', \" \", scrubbed)",
+        "                    scrubbed = scrubbed  # double-strip removed",
+    ),
+    (
+        "count `make` inside a mid-line comment as a real invocation (backend#2884)",
+        '                    scrubbed = re.sub(r"(?:^|\\s)#.*$", " ", scrubbed)',
+        '                    scrubbed = scrubbed  # comment-strip removed',
+    ),
+    (
         "let a missing `lint` target pass",
         '    if "lint" not in deps:',
         "    if False:",
