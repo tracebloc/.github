@@ -330,9 +330,45 @@ def wiring_failures() -> list:
         bad.append("no single step recalls the previous run's board size, so the "
                    "comparison can never have a baseline to use")
     else:
-        body = recall[0].get("run", "")
+        raw_body = recall[0].get("run", "")
+        # CODE ONLY, because a COMMENT satisfied one of these assertions. Measured
+        # (Bugbot round on .github#393): the comment added for the absent-count fix
+        # contains the literal `-gt`, so mutating the real comparison to
+        # `elif false` left `"-gt" in body` true and the truncation mutation went
+        # UNCAUGHT -- a prose string standing in for the code it describes, which
+        # is the defect class this repo strips comments to avoid.
+        body = "\n".join(ln.split("#", 1)[0] for ln in raw_body.split("\n"))
         if "board-baseline" not in body:
             bad.append("the recall step no longer names the `board-baseline` artifact")
+        # THE LISTING MUST PAGINATE, not detect truncation (reviewer, .github#393).
+        # The first cut refused when `total_count > returned` -- but `total_count`
+        # only grows and `board-baseline` gains a record a day, so that refusal fires
+        # on every run once the count crosses one page (~98 days), a red nobody can
+        # clear. `--paginate` reads every page instead, so no page is ever truncated
+        # and the newest un-expired artifact is found wherever it sits. Assert the
+        # wiring by REQUIREMENT: a bare single-page `gh api` (no `--paginate`) reads
+        # only page 1 again, which is exactly the bug. Code only -- a comment naming
+        # `--paginate` must not satisfy it.
+        if "--paginate" not in body:
+            bad.append("the recall step lists board-baseline artifacts without "
+                       "`--paginate`, so it reads only the first page -- the live "
+                       "baseline can sit on a later page and a shrunken board_size is "
+                       "enshrined against no real baseline (backend#2903)")
+        # AND IT MUST SLURP THE PAGINATED STREAM. `--paginate --jq '.artifacts[]'`
+        # emits one artifact object PER LINE across all pages, so `$arts` has NO
+        # `.artifacts` key -- reading a consumer with the single-page idiom
+        # `jq '[.artifacts[] ...]'` selects nothing, live=0, and the run reads as a
+        # first run: the enshrine-a-shrunken-baseline bug by another route. The
+        # tell is `.artifacts[`: it belongs ONLY in the `--jq '.artifacts[]'` that
+        # extracts each page's array, and must appear exactly once. Any consumer of
+        # `$arts` reverting to `.artifacts[` makes it two -- so count, do not just
+        # check presence (a lone `jq -s` elsewhere would mask a single reverted line).
+        elif body.count(".artifacts[") != 1:
+            bad.append("`.artifacts[` appears %d time(s) in the recall step; it belongs "
+                       "only in the paginating `--jq '.artifacts[]'`. A second occurrence "
+                       "means a `$arts` consumer reads the slurped stream with the "
+                       "single-page idiom and selects nothing -> a first run "
+                       "(backend#2903)" % body.count(".artifacts["))
         # THE PRODUCER OF THE DISTINCTION, checked against its consumer
         # (Bugbot, .github#383). "no baseline yet" and "the lookup broke" both
         # leave `prev.total` empty, so the assert step can only tell them apart
@@ -355,7 +391,12 @@ def wiring_failures() -> list:
             1 for line in body.splitlines()
             if "> prev.error" in line and not line.strip().startswith(":")
         )
-        marked = body.count("# selftest:unreadable-path")
+        # RAW, DELIBERATELY: these markers ARE comments, so the comment-stripped
+        # `body` above would count zero of them. The distinction is the point --
+        # assertions about CODE read `body`, assertions about the MARKERS read
+        # `raw_body`, and conflating the two broke this check when the strip was
+        # first added.
+        marked = raw_body.count("# selftest:unreadable-path")
         if writes != marked or writes == 0:
             bad.append(
                 f"the recall step has {marked} branch(es) marked as an unreadable-baseline "
