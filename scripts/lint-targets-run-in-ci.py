@@ -330,8 +330,15 @@ def ci_make_targets(wf_dir: Path) -> tuple[set[str], int]:
                 # is enough and cannot false-drop a real command.
                 for line in run.splitlines():
                     stripped = line.strip()
-                    if stripped.startswith("#"):
-                        continue
+                    # NO SEPARATE WHOLE-LINE-COMMENT SKIP. There was one, and the
+                    # inline-comment scrub below SUBSUMED it: `(?:^|\s)#.*$` matches
+                    # a leading `#` at `^` too, so `# make lint` is emptied either
+                    # way. Measured (Bugbot, review on .github#394) -- the mutation
+                    # registered for that skip stopped reddening the suite, because
+                    # flipping a branch nothing reaches changes no verdict. A guard
+                    # that cannot fire is the defect this repo names, so it is gone
+                    # rather than kept as belt-and-braces; the behaviour it claimed
+                    # is pinned on the scrub instead, by the selftest below.
                     scrubbed = re.sub(r"'[^']*'", " ", stripped)
                     scrubbed = re.sub(r'"[^"]*"', " ", scrubbed)
                     scrubbed = re.sub(r"(?:^|\s)#.*$", " ", scrubbed)

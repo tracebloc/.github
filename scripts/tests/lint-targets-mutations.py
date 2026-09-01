@@ -75,10 +75,17 @@ MUTATIONS = [
         "        for p in expand_vars(text, deps.get(t, [])):",
         "        for p in deps.get(t, []):",
     ),
+    # RE-ANCHORED (Bugbot, review on .github#394). This used to flip a separate
+    # `if stripped.startswith("#"): continue`, which the inline-comment scrub had
+    # made unreachable -- so the mutation changed no verdict and the harness
+    # reported it as not-reddening. The behaviour is real and worth pinning; the
+    # line that implements it is the scrub, so that is what gets broken. Dropping
+    # the `^|` alternative leaves mid-line comments handled and WHOLE-LINE ones
+    # counted, which is precisely the old skip's job.
     (
-        "count a commented `make` line as a real invocation",
-        "                    if stripped.startswith(\"#\"):",
-        "                    if False:",
+        "count a WHOLE-LINE commented `make` as a real invocation (backend#2884)",
+        '                    scrubbed = re.sub(r"(?:^|\\s)#.*$", " ", scrubbed)',
+        '                    scrubbed = re.sub(r"\\s#.*$", " ", scrubbed)',
     ),
     (
         "count `make` inside SINGLE-quoted echo text as a real invocation (backend#2884)",
