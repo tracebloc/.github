@@ -203,6 +203,68 @@ case(
     1,
 )
 
+# ECHO/PROSE `make` IS NOT AN INVOCATION (Bugbot Medium, backend#2884). `make lint`
+# and `make check` name real targets, so the `t in deps` root filter does not drop
+# them -- a single `echo "run make lint"` would mark every lint audit reachable
+# while CI ran none. Here `myaudit` is reachable ONLY through a genuine `make lint`,
+# CI merely MENTIONS one in echo text, and runs `make selftests` (which does not
+# cover it): so `myaudit` is an orphan and this must be a FINDING. Under the old
+# substring match the echo made `lint` a root and the guard reported clean.
+case(
+    "a `make` mentioned in ECHO TEXT does not count as wiring",
+    "lint: myaudit\n\t@true\n"
+    "myaudit:\n\t$(PYTHON) scripts/myaudit.py\n"
+    "selftests:\n\techo fixtures\n",
+    {
+        "ci.yml": "name: ci\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: |\n          echo \"run make lint before pushing\"\n          make selftests\n"
+    },
+    1,
+)
+
+# The single-quote twin, so BOTH quote strips are load-bearing under mutation
+# (a double-quote-only fixture leaves the single-quote strip untested).
+case(
+    "a `make` in SINGLE-quoted echo text does not count as wiring",
+    "lint: myaudit\n\t@true\n"
+    "myaudit:\n\t$(PYTHON) scripts/myaudit.py\n"
+    "selftests:\n\techo fixtures\n",
+    {
+        "ci.yml": "name: ci\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: |\n          echo 'run make lint before pushing'\n          make selftests\n"
+    },
+    1,
+)
+
+# ...and the same for a mid-line (inline) comment, which the previous guard missed
+# because it only skipped WHOLE comment lines.
+case(
+    "a `make` in a mid-line comment does not count as wiring",
+    "lint: myaudit\n\t@true\n"
+    "myaudit:\n\t$(PYTHON) scripts/myaudit.py\n"
+    "selftests:\n\techo fixtures\n",
+    {
+        "ci.yml": "name: ci\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: |\n          make selftests  # make myaudit is NOT run here\n"
+    },
+    1,
+)
+
+# GUARD THE FIX'S OWN FLOOR: a PREFIXED real invocation must still count, or the
+# scrub would have over-corrected into dropping legitimate commands. `sudo make
+# myaudit` genuinely runs the audit, so this is CLEAN (want=0).
+case(
+    "a prefixed `sudo make <audit>` still counts as a real invocation",
+    "lint: myaudit\n\t@true\n"
+    "myaudit:\n\t$(PYTHON) scripts/myaudit.py\n"
+    "selftests:\n\techo fixtures\n",
+    {
+        "ci.yml": "name: ci\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: |\n          sudo make myaudit\n          make selftests\n"
+    },
+    0,
+)
+
 # THE SCRIPT WINS OVER THE TOOL when both are present, and that precedence is
 # load-bearing rather than tidy. Here the audit is `ruffish check <its own
 # config>`, and CI runs `ruffish` on something else entirely. Treating the tool
