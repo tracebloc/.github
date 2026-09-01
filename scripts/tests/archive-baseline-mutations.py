@@ -255,6 +255,18 @@ MUTATIONS = [
         "          name: board-baseline\n",
         "          name: board-baseline-disabled\n",
     ),
+    # --- (F) the truncated-listing guard (backend#2903) ---------------------
+    #
+    # Drop the total_count refusal and a listing that returned fewer records than
+    # the server holds reads as a first run, enshrining a shrunken baseline. Same
+    # class as the totalCount ceiling above, one endpoint over. The requirement
+    # assertion in the selftest catches the deletion; this proves the assertion is
+    # load-bearing rather than vacuous.
+    (
+        "a truncated artifact listing is treated as a first run, not refused",
+        '            if [ "$declared" -gt "$returned" ]; then',
+        '            if false; then',
+    ),
 ]
 
 

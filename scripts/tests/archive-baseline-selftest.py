@@ -333,6 +333,22 @@ def wiring_failures() -> list:
         body = recall[0].get("run", "")
         if "board-baseline" not in body:
             bad.append("the recall step no longer names the `board-baseline` artifact")
+        # A TRUNCATED LISTING MUST BE REFUSED, NOT READ AS A FIRST RUN (backend#2903).
+        # The artifacts listing is fetched at one page; if the server holds more
+        # `board-baseline` records than a page, the live baseline can sit unseen and
+        # the run enshrines a shrunken board_size against no real baseline. The guard
+        # is a comparison of `total_count` against what the page returned -- assert it
+        # by REQUIREMENT (the two jq reads and the `-gt` refusal), not by mutation, so
+        # deleting the guard reddens here rather than only under a mutation that
+        # happens to target it. This is the class of #2831/#2833 one endpoint over.
+        if "total_count" not in body:
+            bad.append("the recall step never reads `total_count` from the artifact "
+                       "listing, so a truncated page (more board-baseline records than "
+                       "one page) reads as a first run and enshrines a shrunken baseline "
+                       "(backend#2903)")
+        elif "-gt" not in body:
+            bad.append("the recall step reads `total_count` but never refuses on a gap "
+                       "against the returned rows, so a truncated listing is not caught")
         # THE PRODUCER OF THE DISTINCTION, checked against its consumer
         # (Bugbot, .github#383). "no baseline yet" and "the lookup broke" both
         # leave `prev.total` empty, so the assert step can only tell them apart

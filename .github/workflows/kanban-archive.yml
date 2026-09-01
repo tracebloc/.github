@@ -289,6 +289,28 @@ jobs:
             printf 'the artifact listing failed: %s\n' "$(printf '%s' "$arts" | tail -1)" > prev.error
             echo "::warning::could not list the board-baseline artifacts; the assert step will refuse."
           else
+            # A TRUNCATED PAGE IS NOT AN EMPTY HISTORY (Bugbot Medium, .github#389 /
+            # backend#2903). The list is fetched at `per_page=100` and the code below
+            # reads only `.artifacts[]`, so if the server holds MORE than one page of
+            # `board-baseline` records -- live plus not-yet-GC'd expired ones can
+            # outnumber 100 -- the un-expired baseline can sit on a page this never
+            # sees. `live` then counts 0, the run reads as a first run, and a shrunken
+            # `board_size` is enshrined against no real baseline: the exact class of
+            # #2831/#2833, one endpoint over. The `?name=` filter does not save it --
+            # it narrows to this name, not to one page.
+            #
+            # `total_count` is the server's own count of the filtered set; compare it
+            # to what the page actually returned and REFUSE on a gap, the same
+            # fail-closed posture as every other unreadable branch here. A partial
+            # view cannot be told from a complete one by looking at its rows, so
+            # "cannot tell" is a finding, not a first run (rule 3).
+            declared=$(printf '%s' "$arts" | jq '.total_count // (.artifacts | length)')
+            returned=$(printf '%s' "$arts" | jq '.artifacts | length')
+            if [ "$declared" -gt "$returned" ]; then
+              # selftest:unreadable-path
+              printf 'the board-baseline listing returned %s of %s record(s); the page is truncated so the live baseline may be unseen\n' "$returned" "$declared" > prev.error
+              echo "::warning::the board-baseline artifact listing was truncated ($returned of $declared); the assert step will refuse rather than treat a partial view as a first run (backend#2903)."
+            else
             live=$(printf '%s' "$arts" | jq '[.artifacts[] | select(.expired == false)] | length')
             if [ "$live" = "0" ]; then
               echo "No unexpired board-baseline artifact exists yet (first run, or retention lapsed)."
@@ -338,6 +360,7 @@ jobs:
                 printf 'a live board-baseline artifact exists (run %s) but could not be downloaded\n' "$rid" > prev.error
                 echo "::warning::the baseline exists but could not be read; the assert step will refuse."
               fi
+            fi
             fi
           fi
 
