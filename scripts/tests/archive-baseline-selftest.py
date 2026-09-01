@@ -330,7 +330,14 @@ def wiring_failures() -> list:
         bad.append("no single step recalls the previous run's board size, so the "
                    "comparison can never have a baseline to use")
     else:
-        body = recall[0].get("run", "")
+        raw_body = recall[0].get("run", "")
+        # CODE ONLY, because a COMMENT satisfied one of these assertions. Measured
+        # (Bugbot round on .github#393): the comment added for the absent-count fix
+        # contains the literal `-gt`, so mutating the real comparison to
+        # `elif false` left `"-gt" in body` true and the truncation mutation went
+        # UNCAUGHT -- a prose string standing in for the code it describes, which
+        # is the defect class this repo strips comments to avoid.
+        body = "\n".join(ln.split("#", 1)[0] for ln in raw_body.split("\n"))
         if "board-baseline" not in body:
             bad.append("the recall step no longer names the `board-baseline` artifact")
         # A TRUNCATED LISTING MUST BE REFUSED, NOT READ AS A FIRST RUN (backend#2903).
