@@ -122,11 +122,19 @@ def finding_body(severity="High", title="A real bug", marker=True):
     return "\n".join(parts)
 
 
-def thread(body, login="cursor", resolved=False, outdated=False):
+def thread(body, login="cursor", resolved=False, outdated=False, raised_against=None):
+    # `raised_against` is the commit the finding was raised against, as GitHub
+    # returns it under `comments.nodes[0].originalCommit.oid`. Left ABSENT by
+    # default (not set to None-in-a-dict): the gate reads a missing/None commit
+    # as against-this-head and blocks -- fail closed -- and every pre-#2816 case
+    # here relies on that, so the default must reproduce "GitHub gave no commit".
+    comment = {"author": {"login": login}, "body": body, "url": "u"}
+    if raised_against is not None:
+        comment["originalCommit"] = {"oid": raised_against}
     return {
         "isResolved": resolved,
         "isOutdated": outdated,
-        "comments": {"nodes": [{"author": {"login": login}, "body": body, "url": "u"}]},
+        "comments": {"nodes": [comment]},
     }
 
 
@@ -377,6 +385,75 @@ for i, name in enumerate(gate.SEVERITY_RANK):
             v == gate.PASS,
             "got %r" % v,
         )
+
+# --------------------------------------------------------------------------
+# 3b. HEAD-SCOPED FAST-FAIL (backend#2816). The fast-fail must distinguish
+#     WHERE an outstanding finding was raised: against THIS head -> fail fast as
+#     before; against an OLDER head while Bugbot is IN_PROGRESS on this one (the
+#     post-fix-push race) -> WAIT for the verdict. A narrowing, never a
+#     weakening -- a finding against this head still blocks, a never-claimed
+#     head still blocks any finding (no laundering), and a stalled Bugbot still
+#     blocks (asserted through main, in the exit-code block below).
+# --------------------------------------------------------------------------
+OLDER = "b" * 40  # a commit that is not HEAD -- an older review head
+
+# THE FIX: an open High raised against an OLDER head, Bugbot IN_PROGRESS on THIS
+# head, WAITS instead of fast-failing.
+v = ev(pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)],
+          threads=[thread(finding_body("High"), raised_against=OLDER)]), "high")
+check("older-head High + IN_PROGRESS waits (PENDING), it does not fast-fail",
+      v == gate.PENDING, "got %r" % v)
+
+# ... and a High raised against THIS head still fails fast, even mid-review.
+v = ev(pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)],
+          threads=[thread(finding_body("High"), raised_against=HEAD)]), "high")
+check("this-head High + IN_PROGRESS still FAILs fast", v == gate.FAIL, "got %r" % v)
+
+# FAIL CLOSED: a finding whose commit could not be read (no originalCommit) is
+# treated as against-this-head and blocks, even while Bugbot is running. "Cannot
+# tell" must not become permission to wait it out.
+v = ev(pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)],
+          threads=[thread(finding_body("High"))]), "high")  # raised_against absent
+check("unknown-commit High + IN_PROGRESS FAILs (fail closed)", v == gate.FAIL, "got %r" % v)
+
+# ANTI-LAUNDER, UNCHANGED: an older-head High with NO check on the head still
+# fast-fails -- there is no in-progress verdict to wait for, so tolerating it
+# would launder a finding across a dropped review (the #356 order bug).
+v = ev(pr(contexts=[], threads=[thread(finding_body("High"), raised_against=OLDER)]), "high")
+check("older-head High + NEVER-CLAIMED still FAILs (no laundering)", v == gate.FAIL, "got %r" % v)
+
+# A completed review on the head blocks on ANY open blocker, whichever head it
+# was raised against -- the reviewed path is head-agnostic and must stay so.
+v = ev(pr(contexts=[check_run()], threads=[thread(finding_body("High"), raised_against=OLDER)]), "high")
+check("older-head High + COMPLETED review still FAILs (reviewed path)", v == gate.FAIL, "got %r" % v)
+
+# THE SPLIT MUST BE REAL: the same open older-head High yields OPPOSITE verdicts,
+# decided solely by whether Bugbot is IN_PROGRESS (wait) or absent (block). A
+# mutation that ignores the head classification collapses these two.
+v_wait = ev(pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)],
+               threads=[thread(finding_body("High"), raised_against=OLDER)]), "high")
+v_block = ev(pr(contexts=[], threads=[thread(finding_body("High"), raised_against=OLDER)]), "high")
+check("the head-scope split is real: IN_PROGRESS waits, absent blocks",
+      v_wait == gate.PENDING and v_block == gate.FAIL and v_wait != v_block,
+      "in_progress=%r absent=%r" % (v_wait, v_block))
+
+# A this-head finding is NOT deferred just because an older-head one shares the
+# PR: the this-head blocker dominates the fast-fail mid-review.
+v = ev(pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)],
+          threads=[thread(finding_body("High"), raised_against=OLDER),
+                   thread(finding_body("High"), raised_against=HEAD)]), "high")
+check("a this-head High still fast-fails alongside an older-head one mid-review",
+      v == gate.FAIL, "got %r" % v)
+
+# THE QUERY-INTEGRITY GUARD, both directions, inputs written independently of
+# the module (rule 9's corollary) and mirroring the author.__typename guard.
+check("the live query DOES ask for the finding's originalCommit",
+      gate.query_lacks_finding_commit() is False)
+check("a query that omits originalCommit is caught",
+      gate.query_lacks_finding_commit("{ comments { nodes { body url } } }") is True)
+check("a query that asks for originalCommit.oid is not caught",
+      gate.query_lacks_finding_commit(
+          "{ comments { nodes { originalCommit { oid } } } }") is False)
 
 # --------------------------------------------------------------------------
 # 4. What is, and is not, a finding.
@@ -685,6 +762,27 @@ try:
         rc_fail = _main_rc(pr(contexts=[check_run()],
                               threads=[thread(finding_body("High"), resolved=False)]))
         check("main: an open finding still exits 1", rc_fail == 1, "got rc=%r" % rc_fail)
+
+        # backend#2816 (c): A STALLED Bugbot STILL BLOCKS. Bugbot is IN_PROGRESS
+        # on this head with only an OLDER-head finding open; WAIT_SECONDS=0 makes
+        # the deadline already past on the first pass, so this is the stall, not
+        # the race resolving. Head-scoping defers it to PENDING (rather than the
+        # old fast-fail FAIL), and PENDING blocks at the deadline -- same exit
+        # code 1, so both `.github#383` stall cases still fail. Without this, the
+        # narrowing could have turned a stall into an exit-0 wait.
+        rc_stall = _main_rc(
+            pr(contexts=[check_run(status="IN_PROGRESS", conclusion=None)],
+               threads=[thread(finding_body("High"), resolved=False,
+                               raised_against="b" * 40)]))
+        check("main: older-head High + STALLED (IN_PROGRESS past budget) exits 1",
+              rc_stall == 1, "got rc=%r" % rc_stall)
+        # And the race, at the deadline, must not have become a silent pass: a
+        # never-claimed head carrying an older-head High still exits 1, never 0.
+        rc_older_unclaimed = _main_rc(
+            pr(contexts=[], threads=[thread(finding_body("High"), resolved=False,
+                                            raised_against="b" * 40)]))
+        check("main: older-head High + never-claimed head exits 1, not 0",
+              rc_older_unclaimed == 1, "got rc=%r" % rc_older_unclaimed)
 
         # -------------------------------------------------------------------
         # THE TOLERANCE MUST NOT LAUNDER A FINDING (Bugbot, #356).
