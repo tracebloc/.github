@@ -405,6 +405,54 @@ def wiring_failures() -> list:
                 "nothing -- this ticket's own defect"
             )
 
+    # THE DOWNLOAD NEEDS A REPO, AND THIS JOB HAS NO CHECKOUT (backend#2802).
+    # `gh run download` takes no `--repo`, so without one it resolves the
+    # repository from the git remote, finds no `.git`, and dies BEFORE any API
+    # call -- which is why the artifacts LISTING succeeded (repo in the URL path)
+    # while the fetch failed, and five scheduled runs went red having archived
+    # successfully. Reproduced outside Actions on gh 2.98.0; `gh` does not read
+    # `GITHUB_REPOSITORY`, so being on a runner does not supply it.
+    recall = [s for s in steps if "gh run download" in str(s.get("run", ""))]
+    if len(recall) != 1:
+        bad.append(f"expected exactly one step running `gh run download`, found "
+                   f"{len(recall)}; the baseline recall cannot be checked")
+    else:
+        renv = recall[0].get("env") or {}
+        if "github.repository" not in str(renv.get("GH_REPO", "")):
+            bad.append(
+                "the baseline-recall step does not set `GH_REPO`, so `gh run download` "
+                "has no repository to resolve and fails before any API call -- the run "
+                "goes red having archived successfully (backend#2802)"
+            )
+        run = str(recall[0].get("run", ""))
+        # AND THE FAILURE MUST BE ABLE TO NAME ITSELF. `>/dev/null 2>&1` on the
+        # download is why the red runs were diagnosable only by reproducing them
+        # by hand: the step reported "could not be downloaded" and discarded the
+        # one line that said why.
+        if "2>&1" in run and "gh run download" in run.split("2>&1")[0][-120:]:
+            bad.append(
+                "the baseline download still discards its stderr, so a failure cannot "
+                "name its own cause in the log"
+            )
+        # CAPTURED, AND NOT INTO THE SENTINEL (Bugbot High, on the first cut of
+        # this fix). The assert step treats ANY non-empty `prev.error` as an
+        # unreadable baseline, so capturing stderr straight into it would let a
+        # SUCCESSFUL download that printed anything mark the baseline unreadable and
+        # keep the job red after a good archive. Measured: gh writes 0 bytes to
+        # stderr on success on a non-TTY, so that does not reproduce today -- but
+        # the coupling is real and one future deprecation notice is all it takes.
+        if "2>prev.stderr" not in run.replace("2> prev.stderr", "2>prev.stderr"):
+            bad.append(
+                "the baseline download does not capture stderr into `prev.stderr`, so "
+                "the refusal below cannot carry the reason"
+            )
+        if "2>prev.error" in run.replace("2> prev.error", "2>prev.error"):
+            bad.append(
+                "the baseline download writes stderr straight into `prev.error`, which "
+                "the assert step reads as 'baseline unreadable' -- a successful "
+                "download that prints anything would keep the job red"
+            )
+
     upload = [s for s in steps if "upload-artifact" in str(s.get("uses", ""))]
     if len(upload) != 1:
         bad.append(f"expected exactly one upload-artifact step, found {len(upload)}; "

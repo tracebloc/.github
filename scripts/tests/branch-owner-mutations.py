@@ -91,18 +91,71 @@ MUTATIONS = [
     ("the oldest line is no longer the one taken",
      "    return out.splitlines()[0].strip()",
      "    return out.splitlines()[-1].strip()"),
-    ("a silently truncated PR list is reported as complete",
-     "    if len(rows) >= PR_LIMIT:",
-     "    if False and len(rows) >= PR_LIMIT:"),
+    # --- THE READ MUST REACH THE END, AND SAY SO WHEN IT DOES NOT (backend#2972)
+    #
+    # `--limit 1000` was replaced by a paged read checked against the repository's
+    # own `totalCount`, so the mutations are the ways that check can be defeated:
+    # stop paging, stop slurping, misname the cursor gh injects, or simply not
+    # compare. Each is a mutation somebody would really write, and the first three
+    # are the ones that leave a SHORT list looking like a complete one.
+    ("the read stops after page 1, so a big repo comes back short",
+     '    rc, out = _run(["gh", "api", "graphql", "--paginate", "--slurp",',
+     '    rc, out = _run(["gh", "api", "graphql", "--slurp",'),
+    ("the pages are not slurped into one document, so the body will not parse",
+     '    rc, out = _run(["gh", "api", "graphql", "--paginate", "--slurp",',
+     '    rc, out = _run(["gh", "api", "graphql", "--paginate",'),
+    ("the query variables go back to -F, which types a numeric repo name",
+     '                    "-f", f"owner={owner}", "-f", f"name={name}",',
+     '                    "-F", f"owner={owner}", "-F", f"name={name}",'),
+    ("the cursor variable is renamed, which is an infinite page-1 loop in reality",
+     "query($owner: String!, $name: String!, $endCursor: String) {",
+     "query($owner: String!, $name: String!, $cursor: String) {"),
+    ("the query pages on a variable gh will never fill",
+     "    pullRequests(first: %d, after: $endCursor) {",
+     "    pullRequests(first: %d, after: $cursor) {"),
+    ("the repository is never asked for its own count, so nothing checks the read",
+     "      totalCount\n      pageInfo { hasNextPage endCursor }",
+     "      pageInfo { hasNextPage endCursor }"),
+    ("a short read is accepted as the whole list",
+     "    if len(rows) != total:",
+     "    if False and len(rows) != total:"),
+    ("a short read loses its marker, so `main` serves rows out of it",
+     '        return {}, (f"{INCOMPLETE_PR_LIST} {where} reports {total} pull request(s) "',
+     '        return {}, (f"{where} reports {total} pull request(s) "'),
+    ("the marker is smeared onto a failed gh call, so it marks nothing",
+     '        return {}, ("`gh api graphql` failed -- no gh, no auth, or no network. "',
+     '        return {}, (f"{INCOMPLETE_PR_LIST} `gh api graphql` failed. "'),
+    ("a page that came back twice is counted as progress",
+     "    if len(set(numbers)) != len(numbers):",
+     "    if False and len(set(numbers)) != len(numbers):"),
+    ("a count that disagrees with itself between pages is picked from arbitrarily",
+     "    if len(totals) != 1 or not isinstance(next(iter(totals)), int):",
+     "    if False and (len(totals) != 1 or not isinstance(next(iter(totals)), int)):"),
+    ("a GraphQL errors[] payload at exit 0 is read as an empty repo",
+     "        errors = page.get(\"errors\")\n        if errors:",
+     "        errors = page.get(\"errors\")\n        if False:"),
+    ("main tallies an incomplete list into rows again, as the ticket found it",
+     "    if problem.startswith(INCOMPLETE_PR_LIST):\n        return 2",
+     "    if False and problem.startswith(INCOMPLETE_PR_LIST):\n        return 2"),
+    ("main refuses on ANY pull-request problem, not just an incomplete read",
+     "    if problem.startswith(INCOMPLETE_PR_LIST):\n        return 2",
+     "    if problem:\n        return 2"),
+    ("the tally drops the one reason every row was refused for",
+     '    because = f" -- every row refused for one reason: {problem}" if problem else ""',
+     '    because = ""'),
+    ("the repo to read is guessed at instead of refused when it is not owner/name",
+     "        if not owner or not slash or not name or \"/\" in name:",
+     "        if False:"),
+
     ("a failed gh call reports no problem",
-     '        return {}, ("`gh pr list` failed -- no gh, no auth, or no network. "\n'
+     '        return {}, ("`gh api graphql` failed -- no gh, no auth, or no network. "\n'
      '                    "Absence from a list that was never read proves nothing")',
      '        return {}, ""'),
     ("an unparseable PR list is reported as empty rather than unreadable",
      '        return {}, f"the pull-request list did not parse as JSON ({exc})"',
      '        return {}, ""'),
     ("a PR list that is not a list is accepted as empty",
-     '        return {}, f"the pull-request list is a {type(rows).__name__}, not a list"',
+     '        return {}, f"the pull-request list is a {type(pages).__name__}, not a list"',
      '        return {}, ""'),
 
     # --- the two defects the first live run turned up ----------------------
@@ -186,9 +239,22 @@ MUTATIONS = [
      '        vrc, _ = _run(["git", "rev-parse", "--verify", "--quiet", ref])\n'
      '        if False:'),
     ("the remote is never asked, so the cache is the only source",
+     '    args = ["gh", "repo", "view"]\n    if repo:\n        args.append(repo)',
+     '    args = ["false"]\n    if repo:\n        args.append(repo)'),
+    # THE REGRESSION THAT WAS INVISIBLE FOR THE LIFE OF THE FILE: `gh repo view`
+    # has no `--repo` flag, so the flag form never asked the remote anything. The
+    # old case asserted the arg shape and passed either way.
+    ("the repo goes back to a --repo flag, which `gh repo view` refuses",
+     '    args = ["gh", "repo", "view"]\n    if repo:\n        args.append(repo)\n'
+     '    args += ["--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]',
      '    args = ["gh", "repo", "view", "--json", "defaultBranchRef",\n'
-     '            "--jq", ".defaultBranchRef.name"]',
-     '    args = ["false"]'),
+     '            "--jq", ".defaultBranchRef.name"]\n    if repo:\n'
+     '        args += ["--repo", repo]'),
+    ("the clone-identity lookup grows a --repo flag gh will not take",
+     '    rc, out = _run(["gh", "repo", "view", "--json", "nameWithOwner",\n'
+     '                    "--jq", ".nameWithOwner"])',
+     '    rc, out = _run(["gh", "repo", "view", "--repo", "--json", "nameWithOwner",\n'
+     '                    "--jq", ".nameWithOwner"])'),
 
     # --- the structural guarantee -----------------------------------------
     ("a tip_author parameter is reintroduced",

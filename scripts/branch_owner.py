@@ -57,15 +57,48 @@ for almost nothing, and a signal that answers for almost nothing is worse than
 one that says "cannot tell": it looks like coverage. The first-commit author is
 derivable from the clone for every branch, forever, and is named for what it is.
 
+THE PULL-REQUEST LIST IS READ TO THE END, NOT TO A CEILING (backend#2972)
+------------------------------------------------------------------------
+This used to ask `gh pr list --limit 1000` and refuse when the answer came back
+at the cap. `tracebloc/backend` has 1418 pull requests, so the tool refused on the
+org's LARGEST repo -- the one it is most needed on, carrying 62 of the org's 99
+stale branches -- and every one of its 108 branches came back `unattributable`
+when a complete list attributes 102 of them.
+
+A bigger number would only move the date this happens again. So the read pages to
+the end (`gh api graphql --paginate`) and asks the repository for its OWN count on
+the same connection, and "did the read finish?" is then a comparison of two
+measured numbers rather than a threshold somebody picked:
+
+    rows read == pullRequests.totalCount    ->  the list is complete
+    anything else                           ->  refuse, naming both numbers
+
+THE CURSOR VARIABLE MUST BE NAMED `$endCursor`, EXACTLY. `gh --paginate` injects
+the next page's cursor into a variable of that name and no other. Misname it and
+gh re-requests page 1 forever; the secondary rate limit that loop trips is
+invisible to `gh api rate_limit`, so the failure does not even look like one. The
+name is asserted by the selftest against the query text rather than trusted.
+
 FAIL CLOSED, AND SAY SO
 -----------------------
 "No PR was found for this branch" is only a fact when the PR list was actually
-read, and completely. If `gh` is missing, unauthenticated, failing, or returned a
-list that hit its own `--limit` cap, then absence proves nothing -- and falling
-through to the commit-author path in that state is precisely the misattribution
-this module exists to prevent, arrived at from a clean read of the wrong thing.
-So a PR-list problem makes EVERY branch `unattributable`, before any other
-evidence is weighed. Same posture, and the same reasoning, as `scripts/git-reap`.
+read, and completely. If `gh` is missing, unauthenticated, failing, or came back
+with fewer rows than the repository says it has, then absence proves nothing --
+and falling through to the commit-author path in that state is precisely the
+misattribution this module exists to prevent, arrived at from a clean read of the
+wrong thing. So a PR-list problem makes EVERY branch `unattributable`, before any
+other evidence is weighed. Same posture, and the same reasoning, as
+`scripts/git-reap`.
+
+AND A REFUSAL MUST NOT WEAR THE SHAPE OF DATA. `108 branch(es): 0 attributed, 108
+unattributable` is also what a genuine "nobody can be named in this repo" answer
+looks like, so the two were indistinguishable and a reader who trusted the tool
+concluded that every branch in the largest repo was unowned. An INCOMPLETE
+pull-request list is therefore not reported as N unattributable rows at all:
+`main` names the repo, both counts and the shortfall, prints no rows, and exits
+non-zero, so no caller can read it as an inventory. The other PR-list problems
+still print rows -- each saying why it was refused -- and the summary line now
+carries the one reason with them.
 
 Ambiguity is also a refusal, not a tie-break. Two PRs for one head name by two
 different people -- branch names get reused, `fix/typo` twice, months apart -- is
@@ -112,10 +145,44 @@ from typing import NamedTuple
 # caller that forgets to check it gets nothing rather than a plausible name.
 UNATTRIBUTABLE = ""
 
-# `gh pr list` truncates at --limit SILENTLY. A miss against a partial window is
-# not an absence, and the old branches this tool is for sort out of a newest-first
-# window first. Reaching the cap is therefore reported as a problem, not a result.
-PR_LIMIT = 1000
+# GitHub's own maximum for a GraphQL connection page. Not a number to tune: `first:`
+# above 100 is refused by the API, so this is simply the largest page the read can
+# ask for, and the page COUNT is whatever the repo's size makes it.
+PAGE_SIZE = 100
+
+# The prefix on the one problem string that means "the list is SHORT -- fewer rows
+# came back than the repository says it has". A caller cannot branch on an English
+# sentence, and `main` has to tell THIS refusal apart from a dead network to answer
+# differently, so the marker is a single constant that the seam writes and `main`
+# matches rather than a phrase each end spells for itself.
+INCOMPLETE_PR_LIST = "REFUSING: incomplete pull-request list --"
+
+# ONE QUERY, PAGED TO THE END, WITH THE REPOSITORY'S OWN COUNT BESIDE THE ROWS.
+#
+# `totalCount` sits on the SAME connection as `nodes`, so it counts exactly the set
+# the pages walk -- which is what lets `pull_requests` derive "the read finished"
+# instead of asserting it. Unfiltered, like the `--state all` it replaces.
+#
+# THE CURSOR VARIABLE IS `$endCursor` AND THE NAME IS LOAD-BEARING: `gh --paginate`
+# injects the next cursor into that name and no other, and a misnamed one re-reads
+# page 1 forever. The field names are also chosen to match `gh pr list --json
+# number,author,headRefName,headRefOid,state,createdAt` one-for-one, so the rows the
+# rule receives -- and any caller importing `attribute` -- keep the same shape and
+# the same OPEN/CLOSED/MERGED vocabulary.
+#
+# MEASURED, 2026-09-01: 4 pages / 386 rows for `.github`, 15 pages / 1418 rows for
+# `backend`, each run ending with rows == totalCount and no duplicate numbers.
+PR_QUERY = """
+query($owner: String!, $name: String!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: %d, after: $endCursor) {
+      totalCount
+      pageInfo { hasNextPage endCursor }
+      nodes { number author { login } headRefName headRefOid state createdAt }
+    }
+  }
+}
+""" % PAGE_SIZE
 
 SIGNALS = ("pr-exact", "pr", "first-commit", "unattributable")
 
@@ -267,29 +334,117 @@ def _run(args: list) -> "tuple[int, str]":
     return proc.returncode, proc.stdout.strip()
 
 
+def repo_identity(repo: str = "") -> "tuple[str, str, str]":
+    """(owner, name, problem). The two halves the GraphQL read needs as variables.
+
+    `gh pr list` accepted `owner/name` whole, or resolved the clone itself. GraphQL
+    takes the halves separately, so the resolution gh did implicitly happens here --
+    and, being a read that can fail, it refuses out loud rather than guessing at a
+    repo. Splitting is deliberately strict: `owner/name/extra` is not a repository,
+    and quietly reading a DIFFERENT repo's pull requests is a misattribution of the
+    same shape as everything else this module refuses.
+    """
+    if repo:
+        owner, slash, name = repo.partition("/")
+        if not owner or not slash or not name or "/" in name:
+            return "", "", (f"{repo!r} is not owner/name, so the pull-request list "
+                            "could not be asked for")
+        return owner, name, ""
+    rc, out = _run(["gh", "repo", "view", "--json", "nameWithOwner",
+                    "--jq", ".nameWithOwner"])
+    if rc != 0 or not out:
+        return "", "", ("this clone's repository could not be identified -- no gh, "
+                        "no auth, no network, or not a repo. Absence from a list "
+                        "that was never read proves nothing")
+    owner, slash, name = out.partition("/")
+    if not owner or not slash or not name:
+        return "", "", (f"gh named this clone {out!r}, which is not owner/name")
+    return owner, name, ""
+
+
 def pull_requests(repo: str = "") -> "tuple[dict, str]":
     """(head ref -> [PR rows], problem). A non-empty problem refuses everything.
 
-    One query per repo, never one per branch: a per-branch call burns the API
-    rate limit on a repo with hundreds of branches.
+    THE WHOLE LIST OR A REFUSAL, NEVER A WINDOW (backend#2972). One paged query per
+    repo, never one per branch -- a per-branch call burns the API rate limit on a
+    repo with hundreds of branches -- read to the end by `gh --paginate` and then
+    CHECKED against the repository's own `totalCount`. Three ways the read can be
+    unsound, and each is a refusal rather than a short list:
+
+      * fewer rows than `totalCount`  -- pagination stopped early
+      * duplicate pull-request numbers -- the same page came back twice, which is
+        what a broken cursor looks like on the near side of an infinite loop
+      * `totalCount` disagreeing between pages -- the repo changed under the read,
+        so no single answer is a fact about it
     """
-    args = ["gh", "pr", "list", "--state", "all", "--limit", str(PR_LIMIT),
-            "--json", "number,author,headRefName,headRefOid,state,createdAt"]
-    if repo:
-        args += ["--repo", repo]
-    rc, out = _run(args)
+    owner, name, problem = repo_identity(repo)
+    if problem:
+        return {}, problem
+    where = f"{owner}/{name}"
+    # `-f`, NEVER `-F`: `-F` types its value, so a numeric repo name arrives as an
+    # int against a `String!` variable and the query is rejected outright --
+    # measured, `-F name=123` comes back "Could not coerce value 123 to String"
+    # while `-f name=123` resolves and reports the repo simply does not exist.
+    rc, out = _run(["gh", "api", "graphql", "--paginate", "--slurp",
+                    "-f", f"owner={owner}", "-f", f"name={name}",
+                    "-f", f"query={PR_QUERY}"])
     if rc != 0 or not out:
-        return {}, ("`gh pr list` failed -- no gh, no auth, or no network. "
+        return {}, ("`gh api graphql` failed -- no gh, no auth, or no network. "
                     "Absence from a list that was never read proves nothing")
     try:
-        rows = json.loads(out)
+        pages = json.loads(out)
     except json.JSONDecodeError as exc:
         return {}, f"the pull-request list did not parse as JSON ({exc})"
-    if not isinstance(rows, list):
-        return {}, f"the pull-request list is a {type(rows).__name__}, not a list"
-    if len(rows) >= PR_LIMIT:
-        return {}, (f"the pull-request list hit its --limit {PR_LIMIT} cap, so a "
-                    "branch missing from it may simply be past the window")
+    # `--slurp` wraps the pages in ONE array, so a bare object here means the shape
+    # is not what was asked for -- not that there is one page.
+    if not isinstance(pages, list):
+        return {}, f"the pull-request list is a {type(pages).__name__}, not a list"
+
+    rows: list = []
+    totals = set()
+    for page in pages:
+        page = page if isinstance(page, dict) else {}
+        # A GRAPHQL ERROR IS A 200. `errors[]` beside a null `data` is how this API
+        # reports a bad field, a missing repo or a permissions problem, and reading
+        # only the exit code turns all three into "no pull requests".
+        errors = page.get("errors")
+        if errors:
+            first = errors[0] if isinstance(errors, list) and errors else errors
+            said = (first or {}).get("message") if isinstance(first, dict) else first
+            return {}, (f"the pull-request query returned an error for {where} "
+                        f"({said!r}), so nothing was read")
+        conn = (((page.get("data") or {}).get("repository") or {})
+                .get("pullRequests"))
+        if not isinstance(conn, dict):
+            return {}, (f"a page of {where}'s pull-request list carries no "
+                        "repository.pullRequests, so the read cannot be trusted")
+        nodes = conn.get("nodes")
+        if not isinstance(nodes, list):
+            return {}, (f"a page's `nodes` is a {type(nodes).__name__}, not a list, "
+                        "so the read cannot be trusted")
+        rows += nodes
+        totals.add(conn.get("totalCount"))
+
+    if len(totals) != 1 or not isinstance(next(iter(totals)), int):
+        return {}, (f"{INCOMPLETE_PR_LIST} {where}'s pull-request count was "
+                    f"{sorted(totals, key=repr)} across the pages read, so there is "
+                    "no single number to check the list against -- either the repo "
+                    "changed mid-read or the count was never returned")
+    total = next(iter(totals))
+
+    numbers = [row.get("number") for row in rows if isinstance(row, dict)]
+    if len(set(numbers)) != len(numbers):
+        return {}, (f"{INCOMPLETE_PR_LIST} {where} returned {len(numbers)} rows but "
+                    f"only {len(set(numbers))} distinct pull requests -- a page came "
+                    "back twice, which is what a broken `$endCursor` looks like, so "
+                    "the read is not a list of the repo's pull requests")
+    if len(rows) != total:
+        return {}, (f"{INCOMPLETE_PR_LIST} {where} reports {total} pull request(s) "
+                    f"but the paged read returned {len(rows)} -- {abs(total - len(rows))} "
+                    "unaccounted for, so a branch missing from this list may simply "
+                    "never have been read. This is a refusal, not an "
+                    "'unattributable' finding")
+
     by_head: dict = {}
     for row in rows:
         by_head.setdefault(row.get("headRefName") or "", []).append(row)
@@ -339,10 +494,24 @@ def default_branch(repo: str = "") -> "tuple[str, str]":
     whoever created this branch. That is a misattribution of the same shape as
     the tip-author bug, one layer down, so it is refused rather than used.
     """
-    args = ["gh", "repo", "view", "--json", "defaultBranchRef",
-            "--jq", ".defaultBranchRef.name"]
+    # THE REPOSITORY IS POSITIONAL HERE, AND THAT IS MEASURED, NOT STYLE.
+    # `gh repo view` HAS NO `--repo` FLAG -- `gh repo view [<repository>] [flags]` --
+    # and the flag form exits 1 without asking anything:
+    #
+    #   $ gh repo view --json defaultBranchRef --repo tracebloc/backend
+    #   unknown flag: --repo                                   (2026-09-01)
+    #
+    # This built the flag form, so THE AUTHORITATIVE LOOKUP WAS UNREACHABLE ON EVERY
+    # `--repo` RUN -- including the `--repo tracebloc/backend` invocation the tool
+    # exists for. It fell through to `origin/HEAD`, a clone-time cache, and the
+    # first-commit signal was then withheld for every branch while the message said
+    # the remote "could not be confirmed". The remote was never asked; the command
+    # was malformed. The no-argument form still resolves from the clone, which is
+    # the only reason the bug stayed invisible (backend#2972).
+    args = ["gh", "repo", "view"]
     if repo:
-        args += ["--repo", repo]
+        args.append(repo)
+    args += ["--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]
     rc, out = _run(args)
     if rc == 0 and out:
         # THE REMOTE'S ANSWER IS AUTHORITATIVE ABOUT THE NAME, NOT ABOUT THIS
@@ -430,6 +599,14 @@ def main(argv: "list[str] | None" = None) -> int:
         if note:
             sys.stderr.write(f"branch_owner: {note}\n")
 
+    # AN INCOMPLETE PR LIST IS A REFUSAL, SO DO NOT SERVE IT AS ROWS (backend#2972).
+    # Every row below would be `unattributable` for this one reason, and the tally
+    # they add up to is character-for-character what a repo with genuinely
+    # unattributable branches prints. Nothing is printed and the exit code carries
+    # the refusal, so no caller can mistake a short read for the repo.
+    if problem.startswith(INCOMPLETE_PR_LIST):
+        return 2
+
     refs, refs_problem = remote_branches(default)
     if refs_problem:
         # REFUSE, do not report zero. Without the ref list there is no tip for any
@@ -478,8 +655,13 @@ def main(argv: "list[str] | None" = None) -> int:
             print(f"{r['branch']}\t{r['owner']}\t{r['signal']}\t{r['why']}")
 
     unattributed = sum(1 for r in out if r["signal"] == "unattributable")
+    # SAY WHEN THE TALLY IS NOT A MEASUREMENT. The short-read refusal above never
+    # reaches this line, but the other PR-list problems do, and they refuse every
+    # row for one reason -- which a bare count hides just as completely. Carrying
+    # the reason here is what stops the same misreading on the paths that do print.
+    because = f" -- every row refused for one reason: {problem}" if problem else ""
     print(f"\n{len(out)} branch(es): {len(out) - unattributed} attributed, "
-          f"{unattributed} unattributable", file=sys.stderr)
+          f"{unattributed} unattributable{because}", file=sys.stderr)
     return 0
 
 
