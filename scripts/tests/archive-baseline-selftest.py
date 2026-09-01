@@ -434,10 +434,23 @@ def wiring_failures() -> list:
                 "the baseline download still discards its stderr, so a failure cannot "
                 "name its own cause in the log"
             )
-        if "2>prev.error" not in run.replace("2> prev.error", "2>prev.error"):
+        # CAPTURED, AND NOT INTO THE SENTINEL (Bugbot High, on the first cut of
+        # this fix). The assert step treats ANY non-empty `prev.error` as an
+        # unreadable baseline, so capturing stderr straight into it would let a
+        # SUCCESSFUL download that printed anything mark the baseline unreadable and
+        # keep the job red after a good archive. Measured: gh writes 0 bytes to
+        # stderr on success on a non-TTY, so that does not reproduce today -- but
+        # the coupling is real and one future deprecation notice is all it takes.
+        if "2>prev.stderr" not in run.replace("2> prev.stderr", "2>prev.stderr"):
             bad.append(
-                "the baseline download does not capture stderr into `prev.error`, so "
+                "the baseline download does not capture stderr into `prev.stderr`, so "
                 "the refusal below cannot carry the reason"
+            )
+        if "2>prev.error" in run.replace("2> prev.error", "2>prev.error"):
+            bad.append(
+                "the baseline download writes stderr straight into `prev.error`, which "
+                "the assert step reads as 'baseline unreadable' -- a successful "
+                "download that prints anything would keep the job red"
             )
 
     upload = [s for s in steps if "upload-artifact" in str(s.get("uses", ""))]

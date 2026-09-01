@@ -335,8 +335,22 @@ jobs:
               # reported "could not be downloaded" and threw away the one line
               # that said why ("failed to run git: fatal: not a git repository").
               # Stdout still goes to /dev/null -- it is progress noise -- but the
-              # error text lands in prev.error and is echoed by the refusal below.
-              if gh run download "$rid" -n board-baseline -D prev >/dev/null 2>prev.error && [ -s prev/board.total ]; then
+              # error text is captured and echoed by the refusal below.
+              # STDERR TO A SCRATCH FILE, PROMOTED TO prev.error ONLY ON FAILURE
+              # (Bugbot, High -- on my own fix). Writing straight into prev.error
+              # couples the two: the assert step at the bottom treats ANY non-empty
+              # prev.error as an unreadable baseline (`if [ -s prev.error ]`), so a
+              # SUCCESSFUL download that printed anything at all would mark the
+              # baseline unreadable and keep the job red after a good archive --
+              # the exact failure this PR fixes, arriving from the other side.
+              #
+              # MEASURED, and stated honestly: `gh run download` writes 0 bytes to
+              # stderr on success on a non-TTY (tested, gh 2.98.0), so the finding
+              # as described does not reproduce today. The COUPLING is real
+              # regardless, and one deprecation notice on stderr in a future gh is
+              # all it would take. Decoupled unconditionally because it costs
+              # nothing: only the failure branch can now populate prev.error.
+              if gh run download "$rid" -n board-baseline -D prev >/dev/null 2>prev.stderr && [ -s prev/board.total ]; then
                 cp prev/board.total prev.total
                 echo "Baseline: run $rid saw $(cat prev.total) item(s)."
                 # IS THIS JOB THE ONLY ARCHIVER SINCE? It is not, and assuming
@@ -381,7 +395,7 @@ jobs:
                 # WHY -- overwriting it with this summary is what made the last
                 # five red runs undiagnosable from their own logs. The summary
                 # goes first because it names the run; the tool's own words follow.
-                reason=$(tr '\n' ' ' < prev.error 2>/dev/null | cut -c1-300)
+                reason=$(tr '\n' ' ' < prev.stderr 2>/dev/null | cut -c1-300)
                 printf 'a live board-baseline artifact exists (run %s) but could not be downloaded. gh said: %s\n' \
                   "$rid" "${reason:-<no stderr captured>}" > prev.error
                 echo "::warning::the baseline exists but could not be read; the assert step will refuse."
