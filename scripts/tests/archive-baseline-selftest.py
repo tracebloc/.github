@@ -405,6 +405,41 @@ def wiring_failures() -> list:
                 "nothing -- this ticket's own defect"
             )
 
+    # THE DOWNLOAD NEEDS A REPO, AND THIS JOB HAS NO CHECKOUT (backend#2802).
+    # `gh run download` takes no `--repo`, so without one it resolves the
+    # repository from the git remote, finds no `.git`, and dies BEFORE any API
+    # call -- which is why the artifacts LISTING succeeded (repo in the URL path)
+    # while the fetch failed, and five scheduled runs went red having archived
+    # successfully. Reproduced outside Actions on gh 2.98.0; `gh` does not read
+    # `GITHUB_REPOSITORY`, so being on a runner does not supply it.
+    recall = [s for s in steps if "gh run download" in str(s.get("run", ""))]
+    if len(recall) != 1:
+        bad.append(f"expected exactly one step running `gh run download`, found "
+                   f"{len(recall)}; the baseline recall cannot be checked")
+    else:
+        renv = recall[0].get("env") or {}
+        if "github.repository" not in str(renv.get("GH_REPO", "")):
+            bad.append(
+                "the baseline-recall step does not set `GH_REPO`, so `gh run download` "
+                "has no repository to resolve and fails before any API call -- the run "
+                "goes red having archived successfully (backend#2802)"
+            )
+        run = str(recall[0].get("run", ""))
+        # AND THE FAILURE MUST BE ABLE TO NAME ITSELF. `>/dev/null 2>&1` on the
+        # download is why the red runs were diagnosable only by reproducing them
+        # by hand: the step reported "could not be downloaded" and discarded the
+        # one line that said why.
+        if "2>&1" in run and "gh run download" in run.split("2>&1")[0][-120:]:
+            bad.append(
+                "the baseline download still discards its stderr, so a failure cannot "
+                "name its own cause in the log"
+            )
+        if "2>prev.error" not in run.replace("2> prev.error", "2>prev.error"):
+            bad.append(
+                "the baseline download does not capture stderr into `prev.error`, so "
+                "the refusal below cannot carry the reason"
+            )
+
     upload = [s for s in steps if "upload-artifact" in str(s.get("uses", ""))]
     if len(upload) != 1:
         bad.append(f"expected exactly one upload-artifact step, found {len(upload)}; "
