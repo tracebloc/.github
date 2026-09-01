@@ -340,37 +340,35 @@ def wiring_failures() -> list:
         body = "\n".join(ln.split("#", 1)[0] for ln in raw_body.split("\n"))
         if "board-baseline" not in body:
             bad.append("the recall step no longer names the `board-baseline` artifact")
-        # A TRUNCATED LISTING MUST BE REFUSED, NOT READ AS A FIRST RUN (backend#2903).
-        # The artifacts listing is fetched at one page; if the server holds more
-        # `board-baseline` records than a page, the live baseline can sit unseen and
-        # the run enshrines a shrunken board_size against no real baseline. The guard
-        # is a comparison of `total_count` against what the page returned -- assert it
-        # by REQUIREMENT (the two jq reads and the `-gt` refusal), not by mutation, so
-        # deleting the guard reddens here rather than only under a mutation that
-        # happens to target it. This is the class of #2831/#2833 one endpoint over.
-        if "total_count" not in body:
-            bad.append("the recall step never reads `total_count` from the artifact "
-                       "listing, so a truncated page (more board-baseline records than "
-                       "one page) reads as a first run and enshrines a shrunken baseline "
-                       "(backend#2903)")
-        elif "-gt" not in body:
-            bad.append("the recall step reads `total_count` but never refuses on a gap "
-                       "against the returned rows, so a truncated listing is not caught")
-        # AND THE ABSENT-COUNT PATH, by requirement for the same reason (Bugbot,
-        # review on .github#393). The first cut read `.total_count // (.artifacts |
-        # length)`, so a listing with no count made `declared` equal `returned` and
-        # the `-gt` above could not fire -- the guard failed open in its own
-        # default. A `-lt 0` refusal is what distinguishes "the server said 12 and
-        # sent 5" from "the server never said", and both must refuse.
-        elif '-lt 0' not in body:
-            bad.append("the recall step compares `total_count` but does not refuse "
-                       "when it is ABSENT, so a listing that cannot say how many "
-                       "board-baseline records exist is read as complete -- the "
-                       "fail-open this guard exists to close (backend#2903)")
-        elif 'type) == "number"' not in body:
-            bad.append("the recall step no longer type-checks `total_count`, so a "
-                       "null or string value falls back to the page length and the "
-                       "truncation comparison is dead again")
+        # THE LISTING MUST PAGINATE, not detect truncation (reviewer, .github#393).
+        # The first cut refused when `total_count > returned` -- but `total_count`
+        # only grows and `board-baseline` gains a record a day, so that refusal fires
+        # on every run once the count crosses one page (~98 days), a red nobody can
+        # clear. `--paginate` reads every page instead, so no page is ever truncated
+        # and the newest un-expired artifact is found wherever it sits. Assert the
+        # wiring by REQUIREMENT: a bare single-page `gh api` (no `--paginate`) reads
+        # only page 1 again, which is exactly the bug. Code only -- a comment naming
+        # `--paginate` must not satisfy it.
+        if "--paginate" not in body:
+            bad.append("the recall step lists board-baseline artifacts without "
+                       "`--paginate`, so it reads only the first page -- the live "
+                       "baseline can sit on a later page and a shrunken board_size is "
+                       "enshrined against no real baseline (backend#2903)")
+        # AND IT MUST SLURP THE PAGINATED STREAM. `--paginate --jq '.artifacts[]'`
+        # emits one artifact object PER LINE across all pages, so `$arts` has NO
+        # `.artifacts` key -- reading a consumer with the single-page idiom
+        # `jq '[.artifacts[] ...]'` selects nothing, live=0, and the run reads as a
+        # first run: the enshrine-a-shrunken-baseline bug by another route. The
+        # tell is `.artifacts[`: it belongs ONLY in the `--jq '.artifacts[]'` that
+        # extracts each page's array, and must appear exactly once. Any consumer of
+        # `$arts` reverting to `.artifacts[` makes it two -- so count, do not just
+        # check presence (a lone `jq -s` elsewhere would mask a single reverted line).
+        elif body.count(".artifacts[") != 1:
+            bad.append("`.artifacts[` appears %d time(s) in the recall step; it belongs "
+                       "only in the paginating `--jq '.artifacts[]'`. A second occurrence "
+                       "means a `$arts` consumer reads the slurped stream with the "
+                       "single-page idiom and selects nothing -> a first run "
+                       "(backend#2903)" % body.count(".artifacts["))
         # THE PRODUCER OF THE DISTINCTION, checked against its consumer
         # (Bugbot, .github#383). "no baseline yet" and "the lookup broke" both
         # leave `prev.total` empty, so the assert step can only tell them apart

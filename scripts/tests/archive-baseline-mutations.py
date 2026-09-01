@@ -255,27 +255,25 @@ MUTATIONS = [
         "          name: board-baseline\n",
         "          name: board-baseline-disabled\n",
     ),
-    # --- (F) the truncated-listing guard (backend#2903) ---------------------
+    # --- (F) the paginated listing (backend#2903, reviewer .github#393) ------
     #
-    # Drop the total_count refusal and a listing that returned fewer records than
-    # the server holds reads as a first run, enshrining a shrunken baseline. Same
-    # class as the totalCount ceiling above, one endpoint over. The requirement
-    # assertion in the selftest catches the deletion; this proves the assertion is
-    # load-bearing rather than vacuous.
+    # Drop `--paginate` and the listing reads only the first page again -- the live
+    # baseline can sit on a later page and a shrunken baseline is enshrined against
+    # no real one. This is the bug this fix exists to close; restoring it must redden
+    # the pagination requirement assertion, or that assertion is decoration.
     (
-        "a truncated artifact listing is treated as a first run, not refused",
-        '            elif [ "$declared" -gt "$returned" ]; then',
-        '            elif false; then',
+        "the artifact listing reads only the first page (no --paginate)",
+        'if ! arts=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" --jq \'.artifacts[]\' 2>&1); then',
+        'if ! arts=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" 2>&1); then',
     ),
-    # AND THE DEFAULT, which is where this guard first failed open (Bugbot, review
-    # on .github#393): substituting the page length for a missing `total_count`
-    # makes declared == returned, so the comparison above cannot fire on a listing
-    # that never said how many records it has. Restoring that default must redden,
-    # or the refusal added for it is decoration.
+    # AND THE SLURP. The paginated stream is one artifact per line; reading it with
+    # a plain `jq '.artifacts[]'` (the single-page idiom) selects nothing, so live=0
+    # and the run reads as a first run -- the same enshrine-a-shrunken-baseline bug
+    # by a different route. Reverting the slurp must redden.
     (
-        "a listing with no total_count is counted as complete rather than refused",
-        "| jq 'if (.total_count | type) == \"number\" then .total_count else -1 end'",
-        "| jq '.total_count // (.artifacts | length)'",
+        "the paginated artifact stream is read without -s, so it selects nothing",
+        "live=$(printf '%s' \"$arts\" | jq -s '[.[] | select(.expired == false)] | length')",
+        "live=$(printf '%s' \"$arts\" | jq '[.artifacts[] | select(.expired == false)] | length')",
     ),
 ]
 
