@@ -349,6 +349,21 @@ def wiring_failures() -> list:
         elif "-gt" not in body:
             bad.append("the recall step reads `total_count` but never refuses on a gap "
                        "against the returned rows, so a truncated listing is not caught")
+        # AND THE ABSENT-COUNT PATH, by requirement for the same reason (Bugbot,
+        # review on .github#393). The first cut read `.total_count // (.artifacts |
+        # length)`, so a listing with no count made `declared` equal `returned` and
+        # the `-gt` above could not fire -- the guard failed open in its own
+        # default. A `-lt 0` refusal is what distinguishes "the server said 12 and
+        # sent 5" from "the server never said", and both must refuse.
+        elif '-lt 0' not in body:
+            bad.append("the recall step compares `total_count` but does not refuse "
+                       "when it is ABSENT, so a listing that cannot say how many "
+                       "board-baseline records exist is read as complete -- the "
+                       "fail-open this guard exists to close (backend#2903)")
+        elif 'type) == "number"' not in body:
+            bad.append("the recall step no longer type-checks `total_count`, so a "
+                       "null or string value falls back to the page length and the "
+                       "truncation comparison is dead again")
         # THE PRODUCER OF THE DISTINCTION, checked against its consumer
         # (Bugbot, .github#383). "no baseline yet" and "the lookup broke" both
         # leave `prev.total` empty, so the assert step can only tell them apart

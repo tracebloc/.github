@@ -304,9 +304,21 @@ jobs:
             # fail-closed posture as every other unreadable branch here. A partial
             # view cannot be told from a complete one by looking at its rows, so
             # "cannot tell" is a finding, not a first run (rule 3).
-            declared=$(printf '%s' "$arts" | jq '.total_count // (.artifacts | length)')
+            # AND AN ABSENT `total_count` IS ITSELF THE FINDING (Bugbot, review on
+            # .github#393). `.total_count // (.artifacts | length)` substituted the page
+            # length whenever the server did not say -- so `declared` equalled `returned`,
+            # the `-gt` below could not fire, and a listing that cannot say how many
+            # records exist was read as COMPLETE. That is the exact fail-open this guard
+            # was added to close, reproduced in its own default. A missing count is
+            # "cannot tell", and cannot-tell refuses.
+            declared=$(printf '%s' "$arts" \
+              | jq 'if (.total_count | type) == "number" then .total_count else -1 end')
             returned=$(printf '%s' "$arts" | jq '.artifacts | length')
-            if [ "$declared" -gt "$returned" ]; then
+            if [ "$declared" -lt 0 ]; then
+              # selftest:unreadable-path
+              printf 'the board-baseline listing carried no numeric total_count, so this run cannot tell a complete page from a truncated one\n' > prev.error
+              echo "::warning::the board-baseline artifact listing carried no total_count; the assert step will refuse rather than treat an uncountable view as a first run (backend#2903)."
+            elif [ "$declared" -gt "$returned" ]; then
               # selftest:unreadable-path
               printf 'the board-baseline listing returned %s of %s record(s); the page is truncated so the live baseline may be unseen\n' "$returned" "$declared" > prev.error
               echo "::warning::the board-baseline artifact listing was truncated ($returned of $declared); the assert step will refuse rather than treat a partial view as a first run (backend#2903)."

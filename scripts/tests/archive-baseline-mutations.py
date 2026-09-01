@@ -264,8 +264,18 @@ MUTATIONS = [
     # load-bearing rather than vacuous.
     (
         "a truncated artifact listing is treated as a first run, not refused",
-        '            if [ "$declared" -gt "$returned" ]; then',
-        '            if false; then',
+        '            elif [ "$declared" -gt "$returned" ]; then',
+        '            elif false; then',
+    ),
+    # AND THE DEFAULT, which is where this guard first failed open (Bugbot, review
+    # on .github#393): substituting the page length for a missing `total_count`
+    # makes declared == returned, so the comparison above cannot fire on a listing
+    # that never said how many records it has. Restoring that default must redden,
+    # or the refusal added for it is decoration.
+    (
+        "a listing with no total_count is counted as complete rather than refused",
+        "| jq 'if (.total_count | type) == \"number\" then .total_count else -1 end'",
+        "| jq '.total_count // (.artifacts | length)'",
     ),
 ]
 
