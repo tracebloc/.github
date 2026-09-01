@@ -133,8 +133,9 @@ MUTATIONS = [
         # exists. The harness caught this itself -- "anchor matched 0 times" --
         # rather than reporting 0 uncaught about a premise nobody typed, which is
         # the behaviour that made the re-anchor necessary instead of optional.
-        "                printf 'a live board-baseline artifact exists (run %s) but could not be downloaded. gh said: %s\\n' \\",
-        '                echo "could not download the baseline" #',
+        "                printf 'a live board-baseline artifact exists (run %s) but could not be downloaded. gh said: %s\\n' \\\n"
+        "                  \"$rid\" \"${reason:-<no stderr captured>}\" > prev.error",
+        '                echo "could not download the baseline"',
     ),
     # The marker/write pairing that lets the suite DERIVE how many failure paths
     # exist. Drop a marker and the counts diverge; that is the whole mechanism.
