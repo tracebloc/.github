@@ -393,7 +393,12 @@ def wiring_failures() -> list:
             1 for line in body.splitlines()
             if "> prev.error" in line and not line.strip().startswith(":")
         )
-        marked = body.count("# selftest:unreadable-path")
+        # RAW, DELIBERATELY: these markers ARE comments, so the comment-stripped
+        # `body` above would count zero of them. The distinction is the point --
+        # assertions about CODE read `body`, assertions about the MARKERS read
+        # `raw_body`, and conflating the two broke this check when the strip was
+        # first added.
+        marked = raw_body.count("# selftest:unreadable-path")
         if writes != marked or writes == 0:
             bad.append(
                 f"the recall step has {marked} branch(es) marked as an unreadable-baseline "
