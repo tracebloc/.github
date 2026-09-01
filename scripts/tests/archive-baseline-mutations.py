@@ -255,6 +255,26 @@ MUTATIONS = [
         "          name: board-baseline\n",
         "          name: board-baseline-disabled\n",
     ),
+    # --- (F) the paginated listing (backend#2903, reviewer .github#393) ------
+    #
+    # Drop `--paginate` and the listing reads only the first page again -- the live
+    # baseline can sit on a later page and a shrunken baseline is enshrined against
+    # no real one. This is the bug this fix exists to close; restoring it must redden
+    # the pagination requirement assertion, or that assertion is decoration.
+    (
+        "the artifact listing reads only the first page (no --paginate)",
+        'if ! arts=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" --jq \'.artifacts[]\' 2>&1); then',
+        'if ! arts=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" 2>&1); then',
+    ),
+    # AND THE SLURP. The paginated stream is one artifact per line; reading it with
+    # a plain `jq '.artifacts[]'` (the single-page idiom) selects nothing, so live=0
+    # and the run reads as a first run -- the same enshrine-a-shrunken-baseline bug
+    # by a different route. Reverting the slurp must redden.
+    (
+        "the paginated artifact stream is read without -s, so it selects nothing",
+        "live=$(printf '%s' \"$arts\" | jq -s '[.[] | select(.expired == false)] | length')",
+        "live=$(printf '%s' \"$arts\" | jq '[.artifacts[] | select(.expired == false)] | length')",
+    ),
 ]
 
 

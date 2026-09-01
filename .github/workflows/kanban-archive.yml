@@ -284,17 +284,35 @@ jobs:
           # broken lookup and returns an empty list when there is genuinely
           # nothing yet. It also carries `workflow_run.id`, so the run listing
           # is not needed at all -- one call, and no second way to be wrong.
-          if ! arts=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" 2>&1); then
+          # PAGINATE, do not refuse on truncation (reviewer, .github#393). An earlier
+          # cut of this fix fetched one `per_page=100` page and refused when
+          # `total_count > returned` -- but `total_count` is a filtered, monotonically
+          # GROWING count that GitHub never brings back down, and `board-baseline`
+          # gains a record a day, so it crosses 100 in ~98 days and the refusal then
+          # fires on EVERY run forever. That is the red-nobody-can-clear this file's
+          # own comments cite three times, reproduced in the fix for it. The live
+          # baseline being on page 1 (newest-first) would make the refusal spurious
+          # even so -- and leaning on that ordering is itself fragile, because the
+          # artifacts API does not document it.
+          #
+          # `--paginate` follows every page, so the listing is read WHOLE regardless
+          # of how many records accumulate or what order they come in: no truncation
+          # to detect, and the newest un-expired artifact is found wherever it sits.
+          # `--jq '.artifacts[]'` streams the artifact objects across all pages, so
+          # `$arts` is newline-delimited JSON that the `jq -s` reads below slurp back
+          # into one array. A non-JSON body makes `--jq` fail and `gh` exit non-zero,
+          # which the branch below catches and refuses -- fail-closed, no fall-through.
+          if ! arts=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" --jq '.artifacts[]' 2>&1); then
             # selftest:unreadable-path
             printf 'the artifact listing failed: %s\n' "$(printf '%s' "$arts" | tail -1)" > prev.error
             echo "::warning::could not list the board-baseline artifacts; the assert step will refuse."
           else
-            live=$(printf '%s' "$arts" | jq '[.artifacts[] | select(.expired == false)] | length')
+            live=$(printf '%s' "$arts" | jq -s '[.[] | select(.expired == false)] | length')
             if [ "$live" = "0" ]; then
               echo "No unexpired board-baseline artifact exists yet (first run, or retention lapsed)."
             else
               rid=$(printf '%s' "$arts" \
-                | jq -r '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id')
+                | jq -sr '[.[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id')
               if gh run download "$rid" -n board-baseline -D prev >/dev/null 2>&1 && [ -s prev/board.total ]; then
                 cp prev/board.total prev.total
                 echo "Baseline: run $rid saw $(cat prev.total) item(s)."
@@ -312,7 +330,7 @@ jobs:
                 # between, the arithmetic cannot be exact and this run says so
                 # instead of refusing. Every other day the floor is exact.
                 cut=$(printf '%s' "$arts" \
-                  | jq -r '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .created_at')
+                  | jq -sr '[.[] | select(.expired == false)] | sort_by(.created_at) | last | .created_at')
                 # `completed`, NOT `success` (Bugbot, #383). Reconcile archives
                 # inside a counted-then-fail-closed apply loop, so a run that
                 # archived cards and THEN failed did archive them -- and filtering
