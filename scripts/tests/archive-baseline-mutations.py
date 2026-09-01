@@ -127,8 +127,14 @@ MUTATIONS = [
     # smaller blast radius and no way to notice it.
     (
         "one of the lookup failure paths stops marking itself unreadable",
-        "                printf 'a live board-baseline artifact exists (run %s) but could not be downloaded\\n' \"$rid\" > prev.error",
-        '                echo "could not download the baseline"',
+        # RE-ANCHORED for backend#2802. The old anchor was the single-line
+        # `printf ... > prev.error`; that branch now captures `gh run download`'s
+        # stderr first and APPENDS the summary to it, so the literal no longer
+        # exists. The harness caught this itself -- "anchor matched 0 times" --
+        # rather than reporting 0 uncaught about a premise nobody typed, which is
+        # the behaviour that made the re-anchor necessary instead of optional.
+        "                printf 'a live board-baseline artifact exists (run %s) but could not be downloaded. gh said: %s\\n' \\",
+        '                echo "could not download the baseline" #',
     ),
     # The marker/write pairing that lets the suite DERIVE how many failure paths
     # exist. Drop a marker and the counts diverge; that is the whole mechanism.
