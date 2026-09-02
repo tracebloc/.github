@@ -104,6 +104,36 @@ esac
 [ -r "$AWK_PROG" ] || { echo "pipefail-early-close: cannot read $AWK_PROG" >&2; exit 2; }
 cd "$ROOT" || { echo "pipefail-early-close: cannot enter $ROOT" >&2; exit 2; }
 
+# WHAT GITHUB ITSELF PARSES AS WORKFLOW YAML, and nothing else
+# (@saadqbal, blocking). Every tracked `*.y{a,}ml` used to be offered to the
+# extractor, on the reasoning that filtering here would be a hand-kept list.
+# The reasoning was right about hand-kept lists and wrong about this being one.
+#
+# An unparseable YAML is rc 2, and a Helm chart template is not YAML. Measured
+# on fresh clones: client 45 of 120 tracked YAML unparseable, backend 14 of 54,
+# averaging-service 6 of 24 -- all rc 2. And rc 2 cannot be softened, because
+# `code-quality.yml` does `exit "$RC"` for any rc outside {0,1} BEFORE it
+# consults `$SOFT`, so `yaml-run-blocks-soft-fail: true` -- the switch added for
+# exactly this -- never applies. Those three repos would go red on every PR the
+# moment this reached `main`, which is the opposite of "arm while green".
+#
+# So the scope is DERIVED, not listed: these are the only paths GitHub will ever
+# execute workflow steps from -- `.github/workflows/` for workflows, any
+# `action.y{a,}ml` for a composite action. A parse failure there really does
+# mean a broken workflow and deserves rc 2. A parse failure in a Helm template
+# means the file is a Helm template, and refusing on it costs the repo all of
+# its coverage instead of protecting anything.
+#
+# One predicate, both call sites, so the explicit-argument path and the
+# whole-tree path cannot disagree about what a given file is.
+is_workflow_yaml() {
+  case "$1" in
+    .github/workflows/*.yml|.github/workflows/*.yaml) return 0 ;;
+    action.yml|action.yaml|*/action.yml|*/action.yaml) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 files=()
 yfiles=()
 if [ "$#" -gt 0 ]; then
@@ -112,10 +142,16 @@ if [ "$#" -gt 0 ]; then
   # is. Anything not YAML goes to the shell phase, which is where an
   # extensionless or oddly-named script belongs.
   for f in "$@"; do
-    case "$f" in
-      *.yml|*.yaml) yfiles+=("$f") ;;
-      *) files+=("$f") ;;
-    esac
+    if is_workflow_yaml "$f"; then
+      yfiles+=("$f")
+    else
+      case "$f" in
+        # A YAML that is not a workflow is neither phase's business: it holds no
+        # `run:` blocks this rule governs, and it is not shell.
+        *.yml|*.yaml) ;;
+        *) files+=("$f") ;;
+      esac
+    fi
   done
 else
   # Enumerate TRACKED files only. An untracked build artefact is not this
@@ -137,12 +173,10 @@ else
     [ -f "$f" ] || continue
     case "$f" in
       *.sh|*.bash|*.ksh) files+=("$f") ;;
-      # EVERY tracked YAML is OFFERED; the extractor decides which ones hold
-      # workflow/composite-action steps. Filtering to `.github/workflows/`
-      # here would be the hand-kept list that point 2 above is about -- and it
-      # would miss a composite action's `action.yml`, which is exactly the
-      # shape the ticket asked about.
-      *.yml|*.yaml) yfiles+=("$f") ;;
+      # Only the YAML GitHub parses as a workflow -- see `is_workflow_yaml`.
+      # `action.y{a,}ml` is included there, so a composite action, the shape
+      # the ticket asked about, is still covered.
+      *.yml|*.yaml) is_workflow_yaml "$f" && yfiles+=("$f") ;;
       *.bats|*.ps1|*.psm1|*.zsh) ;;
       *) head -n 1 "$f" 2>/dev/null \
            | grep -Eq '^#![[:space:]]*[^[:space:]]*(/|[[:space:]])(ba|da|k)?sh([[:space:]]|$)' \

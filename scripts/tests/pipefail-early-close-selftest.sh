@@ -1069,5 +1069,60 @@ else
   record 1 "the YAML scan reaches a verdict on this repo's own workflows" "rc=$RC out=$OUT"
 fi
 
+# == THE SCOPE IS WHAT GITHUB PARSES, AND THAT CUTS BOTH WAYS =================
+#
+# @saadqbal measured the cost of offering every tracked YAML to `yaml.compose`:
+# an unparseable one is rc 2, a Helm chart template is not YAML, and rc 2 cannot
+# be softened because `code-quality.yml` exits on any rc outside {0,1} before it
+# consults the soft-fail switch. client 45/120, backend 14/54,
+# averaging-service 6/24 -- three repos red on every PR.
+#
+# Both directions are asserted, because a fix for the first alone is just a
+# blanket loosening: a Helm template must be SPARED, and an unparseable file
+# that GitHub really would execute must still REFUSE.
+mk_yaml_repo() {  # $1 = repo dir ; $2 = path for the unparseable YAML
+  local r="$1" p="$2"
+  mkdir -p "$r/.github/workflows" "$(dirname "$r/$p")"
+  # A clean, parseable workflow so the scan has something legitimate to do.
+  printf 'name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n' \
+    > "$r/.github/workflows/ok.yml"
+  # Go templating: not YAML, and `yaml.compose` cannot parse it.
+  printf '{{- if .Values.enabled }}\napiVersion: v1\nkind: ConfigMap\ndata:\n  x: {{ .Values.x | quote }}\n{{- end }}\n' \
+    > "$r/$p"
+  ( cd "$r" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+}
+
+rm -rf "$WORK/helm"; mk_yaml_repo "$WORK/helm" "charts/tracebloc/templates/cm.yaml"
+OUT=$(PIPEFAIL_ROOT="$WORK/helm" PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" 2>&1); RC=$?
+if [ "$RC" != 2 ] && ! grep -q 'templates/cm.yaml' <<<"$OUT"; then
+  record 0 "a Helm chart template is not a workflow and must not be parsed" ""
+else
+  record 1 "a Helm chart template is not a workflow and must not be parsed" "rc=$RC out=$OUT"
+fi
+
+# ...AND THE FAIL-CLOSED HALF SURVIVES. The same unparseable bytes under
+# `.github/workflows/` are a broken workflow, which is exactly what rc 2 is for.
+# Without this case the fix above is indistinguishable from deleting the refusal.
+rm -rf "$WORK/badwf"; mk_yaml_repo "$WORK/badwf" ".github/workflows/broken.yml"
+OUT=$(PIPEFAIL_ROOT="$WORK/badwf" PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" 2>&1); RC=$?
+if [ "$RC" = 2 ]; then
+  record 0 "...but an unparseable WORKFLOW still refuses (rc 2)" ""
+else
+  record 1 "...but an unparseable WORKFLOW still refuses (rc 2)" "rc=$RC out=$OUT"
+fi
+
+# A COMPOSITE ACTION IS IN SCOPE TOO, which is the shape the ticket asked about
+# and the reason the predicate is not just `.github/workflows/`.
+rm -rf "$WORK/act"; mkdir -p "$WORK/act"
+printf 'name: a\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: |\n        x=$(printf "%%s" "$Y" | head -1)\n' \
+  > "$WORK/act/action.yml"
+( cd "$WORK/act" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+OUT=$(PIPEFAIL_ROOT="$WORK/act" PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" 2>&1); RC=$?
+if [ "$RC" = 1 ] && grep -q 'action.yml' <<<"$OUT"; then
+  record 0 "a composite action's action.yml is still scanned" ""
+else
+  record 1 "a composite action's action.yml is still scanned" "rc=$RC out=$OUT"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ] || exit 1

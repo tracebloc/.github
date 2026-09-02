@@ -148,9 +148,23 @@ MUTATIONS = [
     # -- once in the explicit-argument split, once in the derived classifier
     # -- and an anchor matching twice mutates an arbitrary one of them.
     ("YAML is not enumerated at all, so run blocks stay out of scope", SH,
-     '      *.yml|*.yaml) yfiles+=("$f") ;;\n      *.bats|*.ps1|*.psm1|*.zsh) ;;',
+     '      *.yml|*.yaml) is_workflow_yaml "$f" && yfiles+=("$f") ;;\n'
+     '      *.bats|*.ps1|*.psm1|*.zsh) ;;',
      '      *.bats|*.ps1|*.psm1|*.zsh) ;;',
      "f4d6fec's literal"),
+    # THE SCOPE PREDICATE ITSELF, because narrowing to the workflow paths is
+    # what stopped three repos going rc 2 on every PR (@saadqbal) -- and a
+    # predicate that answers `true` for everything silently restores that. The
+    # arm above is still enumerated, so only the FILTER is gone: the mutation
+    # is "offer every tracked YAML again", which is precisely the state the
+    # review measured as red on client, backend and averaging-service.
+    ("the workflow-path filter accepts every YAML, so Helm templates are rc 2",
+     SH,
+     '    action.yml|action.yaml|*/action.yml|*/action.yaml) return 0 ;;\n'
+     '    *) return 1 ;;',
+     '    action.yml|action.yaml|*/action.yml|*/action.yaml) return 0 ;;\n'
+     '    *) return 0 ;;',
+     "a Helm chart template is not a workflow and must not be parsed"),
     # THE BUG THIS FIX SHIPPED WITH, kept as a mutation because it is the exact
     # failure mode the gate exists to prevent: written outside the
     # substitution, the here-string feeds the ASSIGNMENT, the awk reads the

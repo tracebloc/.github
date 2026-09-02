@@ -64,6 +64,7 @@ Writes: DIR/<n>.frag           one synthetic `set` line + the dedented body
 Exit:   0 wrote a manifest (possibly empty) · 2 cannot tell
 """
 import os
+import re
 import sys
 
 try:
@@ -127,6 +128,36 @@ def flags_for_shell(shell):
     tokens = spec.split()
     if not tokens:
         return None
+
+    # PEEL WRAPPER PROGRAMS BEFORE ASKING WHAT THE PROGRAM IS (Bugbot,
+    # .github#404). `shell: /usr/bin/env bash -eo pipefail {0}` runs bash with
+    # pipefail, but `basename(tokens[0])` is `env` -- not a POSIX shell -- so it
+    # fell through to the custom-interpreter branch below and was SKIPPED, while
+    # the byte-identical `bash -eo pipefail {0}` and `/bin/bash -eo pipefail {0}`
+    # both flag. A live `| head -1` in such a step was reported clean: fail-open,
+    # in the scan this file exists to add.
+    #
+    # `env` is the only wrapper worth peeling, and it is the one people actually
+    # write. Its own flags and any `VAR=value` assignments sit between it and the
+    # real program, so they are stepped over too -- `env` applies them itself,
+    # which is what makes this shape reachable at all. (A bare `FOO=bar bash …`
+    # is NOT reachable: GitHub execs the spec directly, so there is no shell to
+    # apply the assignment, and GitHub refuses the workflow.)
+    _VALUE_FLAGS = ("-u", "--unset", "-S", "--split-string", "-C", "--chdir")
+    i = 0
+    while i < len(tokens) and os.path.basename(tokens[i]) == "env":
+        i += 1
+        while i < len(tokens) and (
+            tokens[i].startswith("-")
+            or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[i])
+        ):
+            i += 2 if tokens[i] in _VALUE_FLAGS else 1
+    # Peeling everything leaves no program to judge. Fall through armed rather
+    # than skipped -- the same direction every other "cannot tell" takes here.
+    if i >= len(tokens):
+        return "-eo pipefail"
+    tokens = tokens[i:]
+
     program = os.path.basename(tokens[0])
 
     # A COMMAND LINE, whose flags are whatever is written -- GitHub uses it
