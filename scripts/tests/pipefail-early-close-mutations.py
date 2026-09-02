@@ -278,7 +278,14 @@ def main() -> int:
             continue
         target.write_text(mutated, encoding="utf-8")
         try:
-            run = subprocess.run(["bash", str(SUITE)], capture_output=True, text=True, cwd=ROOT)
+            # stdin IS /dev/null, and one of the mutations below makes that
+            # load-bearing: "the mapping here-string attaches to the
+            # assignment" leaves an `awk … -` reading the INHERITED stdin.
+            # Run from an interactive shell, that awk blocks on the TTY and
+            # the harness hangs instead of reporting. Same trap caller-drift.py
+            # documents for `gh`.
+            run = subprocess.run(["bash", str(SUITE)], capture_output=True,
+                                 text=True, cwd=ROOT, stdin=subprocess.DEVNULL)
         finally:
             # ALWAYS restore, including on a crash. A mutation left on disk makes
             # every later run measure the wrong script, and the tell is a suite
