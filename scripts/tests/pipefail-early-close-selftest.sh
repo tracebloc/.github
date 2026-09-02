@@ -578,6 +578,13 @@ yaml_spare shcustom "a custom 'bash -x {0}' gets NO implicit -e, so it is spared
   "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -x {0}\n        $HAZ_BODY"
 yaml_flag shcustomeo "...but a custom 'bash -eo pipefail {0}' IS armed" \
   "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -eo pipefail {0}\n        $HAZ_BODY"
+# THE FLAGS ARE READ, NOT TOPPED UP. `bash -x {0}` above is spared whether or
+# not an `-e` is injected, because it has no pipefail either way -- so it
+# cannot tell "flags parsed" from "flags parsed plus a helpful -e". This one
+# can: pipefail is present and errexit is not, so ANY injected `-e` arms both
+# options and the case reddens. Found by the mutation surviving.
+yaml_spare shcustomo "a custom 'bash -o pipefail {0}' has pipefail but NO errexit" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -o pipefail {0}\n        $HAZ_BODY"
 yaml_spare shpython "'shell: python' is not a POSIX shell and carries no pipefail" \
   "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: python\n        $HAZ_BODY"
 
@@ -654,6 +661,29 @@ if [ "$RC" = 2 ]; then
   record 0 "a missing YAML extractor is exit 2, never a clean tree" ""
 else
   record 1 "a missing YAML extractor is exit 2" "rc=$RC out=$OUT"
+fi
+
+# A NON-ZERO EXTRACTOR IS FATAL EVEN WHEN IT LEFT A MANIFEST BEHIND. The
+# unparseable-YAML case above does not reach this: the extractor returns before
+# writing anything, so the missing-manifest guard catches it and the exit-status
+# check is never consulted -- which is exactly why its mutation survived. The
+# shape that needs the status check is a crash PART WAY THROUGH: a manifest on
+# disk, fewer fragments in it than the tree really has, and a clean-looking
+# scan of the ones that made it. Driven with a stub extractor, because no real
+# input produces that.
+rm -rf "$WORK/ystub"; mkdir -p "$WORK/ystub/scripts" "$WORK/ystub/.github/workflows"
+cp "$GATE_ABS" "$WORK/ystub/scripts/pipefail-early-close.sh"
+cp "$SCANNER_ABS" "$WORK/ystub/scripts/pipefail-early-close.awk"
+printf '#!/usr/bin/env python3\nimport os, sys\nd = sys.argv[sys.argv.index("--out") + 1]\nos.makedirs(d, exist_ok=True)\nopen(os.path.join(d, "manifest.tsv"), "w").close()\nsys.exit(1)\n' \
+  > "$WORK/ystub/scripts/pipefail-early-close-yaml.py"
+printf 'name: j\non:\n  push:\njobs:\n  j:\n    steps:\n      - shell: bash\n        run: echo hi\n' \
+  > "$WORK/ystub/.github/workflows/w.yml"
+( cd "$WORK/ystub" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f ) >/dev/null
+OUT=$(PIPEFAIL_ROOT="$WORK/ystub" bash "$WORK/ystub/scripts/pipefail-early-close.sh" 2>&1); RC=$?
+if [ "$RC" = 2 ]; then
+  record 0 "an extractor that fails AFTER writing a manifest is exit 2" ""
+else
+  record 1 "an extractor that fails AFTER writing a manifest is exit 2" "rc=$RC out=$OUT"
 fi
 
 # An unrecognised PIPEFAIL_SCOPE must refuse rather than quietly narrow the run.

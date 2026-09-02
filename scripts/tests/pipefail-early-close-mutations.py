@@ -154,13 +154,14 @@ MUTATIONS = [
      '''END { if (bad) exit 3 }' "$MANIFEST" - <<<"$yout")''',
      '''END { if (bad) exit 3 }' "$MANIFEST" -) <<<"$yout"''',
      "f4d6fec's literal"),
-    ("an unmapped scanner row is dropped instead of refusing", SH,
-     '''            bad = 1; next
-          }
-          printf "%s:%d: %s\\n", real[frag], first[frag] + ln - 2, txt''',
-     '''            next
-          }
-          printf "%s:%d: %s\\n", real[frag], first[frag] + ln - 2, txt'''),
+    # NOT MUTATED: "an unmapped scanner row is dropped instead of refusing".
+    # The branch is unreachable by construction, so a mutation of it can only
+    # ever report UNCAUGHT and would train people to ignore the tier
+    # (backend#1729 rule 8 -- say so with evidence rather than pin a path no
+    # input reaches). The wrapper hands awk exactly the strings it read out of
+    # the manifest, so `FILENAME` is always one of the manifest keys and the
+    # `!(frag in real)` arm cannot fire. It stays in the code as a fail-closed
+    # assertion about an internal invariant; it is not claimed as covered.
     ("a failing YAML extractor reads as 'no run blocks'", SH,
      '''  if ! python3 "$YAML_PROG" --out "$FRAG_DIR" "${yfiles[@]}"; then
     echo "pipefail-early-close: the YAML extractor failed — refusing to report clean" >&2
@@ -172,17 +173,28 @@ MUTATIONS = [
      '''  *) SCOPE=all ;;'''),
 
     # --- the extractor's half: what the effective shell IS -----------------
-    ("`shell: bash` loses pipefail, so f4d6fec's own step reads as safe", YML,
+    # EXPECT NAMES A CASE THAT ACTUALLY DEPENDS ON THIS MAPPING. It first named
+    # the f4d6fec regression, and the harness reported MISCAUGHT -- correctly:
+    # that fixture's body opens with `set -uo pipefail`, faithfully to the real
+    # file, so the body re-arms what the mapping dropped. The rule-9 proof that
+    # the YAML path calls the awk is the HEAD-ARM mutation above, which does
+    # name f4d6fec and is caught by it.
+    ("`shell: bash` loses pipefail", YML,
      '    "bash": "-eo pipefail",', '    "bash": "-e",',
-     "f4d6fec's literal"),
+     "'shell: bash' arms errexit AND pipefail"),
     ("every shell arms pipefail, so `shell: sh` invents hazards", YML,
      '    "sh": "-e",', '    "sh": "-eo pipefail",'),
     ("the default shell arms pipefail, which GitHub does not", YML,
      'DEFAULT_FLAGS = "-e"', 'DEFAULT_FLAGS = "-eo pipefail"'),
     ("a custom command line is assumed to carry -e", YML,
      '    kept = []\n    for tok in tokens[1:]:', '    kept = ["-e"]\n    for tok in tokens[1:]:'),
-    ("non-POSIX shells (python, pwsh) are scanned as shell", YML,
-     'NON_SHELL = {"python", "pwsh", "powershell", "cmd"}', 'NON_SHELL = set()'),
+    # THE MUTATION HAS TO ARM THE BLOCK, not merely stop excluding it. Emptying
+    # NON_SHELL let `python` fall through to DEFAULT_FLAGS (`-e`) -- errexit
+    # only, no pipefail -- so nothing was flagged and the mutation survived
+    # while looking like coverage.
+    ("a non-POSIX shell (python, pwsh) is scanned as armed shell", YML,
+     '    if spec in NON_SHELL:\n        return None',
+     '    if spec in NON_SHELL:\n        return "-eo pipefail"'),
     ("composite-action `runs.steps` are not walked", YML,
      '''    runs = _mapping_get(root, "runs")
     if isinstance(runs, yaml.MappingNode):''',
