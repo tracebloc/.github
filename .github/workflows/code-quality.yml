@@ -160,6 +160,25 @@ on:
           costs one awk pass, and a repo with no shell files exits clean.
         type: boolean
         default: true
+      yaml-run-blocks:
+        description: >-
+          Also scan `run:` blocks in workflow and composite-action YAML
+          (backend#2967). A `run:` block IS shell -- GitHub executes it with
+          `bash -eo pipefail` whenever the step says `shell: bash` -- but the
+          gate classified files by extension-else-shebang, so YAML was out of
+          scope and the gate reported success on a live `printf | head -1`.
+        type: boolean
+        default: true
+      yaml-run-blocks-soft-fail:
+        description: >-
+          Report YAML `run:` findings but exit 0, even when `soft-fail` is
+          false. Defaults TRUE for the same reason as `action-pins-soft-fail`:
+          bringing a new file class into scope surfaces a pre-existing backlog
+          in every repo at once, and a gate that reddens on arrival gets
+          removed rather than cleared (backend#1729 rule 4). Flip it per
+          caller once that repo's `run:` blocks are converted.
+        type: boolean
+        default: true
       action-pins:
         description: "Run the whole-tree action-pin gate (backend#1492, D10)."
         type: boolean
@@ -619,21 +638,63 @@ jobs:
           path: .quality-tools
           persist-credentials: false
 
+      # PyYAML IS PROVISIONED, NEVER ASSUMED. The YAML phase imports it, and a
+      # missing import is (correctly) exit 2 -- "cannot tell" is a finding. But
+      # an rc 2 is a HARD failure regardless of soft-fail, so relying on
+      # whatever the runner image happens to ship would turn the first run of
+      # this coverage into a red gate across the fleet. Same pin and same
+      # invocation as selftests.yml and caller-drift.yml.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: ${{ inputs.yaml-run-blocks }}
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML for the YAML run-block phase
+        if: ${{ inputs.yaml-run-blocks }}
+        run: python -m pip install --quiet --disable-pip-version-check 'pyyaml==6.0.2'
+
       - name: pipefail early-close
         env:
           SOFT_FAIL: ${{ inputs.soft-fail }}
+          YAML_RUN_BLOCKS: ${{ inputs.yaml-run-blocks }}
+          YAML_SOFT_FAIL: ${{ inputs.yaml-run-blocks-soft-fail }}
         run: |
           set -uo pipefail
           GATE=".quality-tools/scripts/pipefail-early-close.sh"
           chmod +x "$GATE"
 
-          # PIPEFAIL_ROOT is the CALLER's checkout. The `.quality-tools` tree
-          # sits inside the workspace but outside the caller's git index, so
-          # `git ls-files` cannot reach it and the checker never lints itself.
-          RC=0
-          PIPEFAIL_ROOT="$GITHUB_WORKSPACE" bash "$GATE" > /tmp/early-close.out 2>/tmp/early-close.err || RC=$?
-          cat /tmp/early-close.out
-          cat /tmp/early-close.err >&2 || true
+          # TWO SCOPES, ONE RULE (backend#2967). `shell` is the tree's shell
+          # files -- the verdict this job has always produced, under whatever
+          # `soft-fail` the caller chose. `yaml` is the `run:` blocks of
+          # workflows and composite actions, which were never in scope at all:
+          # the classifier is extension-else-shebang and YAML is neither, so
+          # the gate reported SUCCESS on `e2e-test-agent@f4d6fec`'s live
+          # `printf | head -1`. Both halves are judged by the SAME awk; only
+          # the file list differs.
+          #
+          # THEY RUN AS SEPARATE INVOCATIONS, not one `all` pass, because the
+          # two halves need different blocking behaviour during the migration
+          # and a single exit code cannot say which half produced it.
+          OVERALL=0
+          for scope in shell yaml; do
+            if [ "$scope" = yaml ]; then
+              [ "$YAML_RUN_BLOCKS" = "true" ] || continue
+              SOFT="$YAML_SOFT_FAIL"
+              TITLE="pipefail early-close (YAML run blocks)"
+            else
+              SOFT="$SOFT_FAIL"
+              TITLE="pipefail early-close"
+            fi
+            OUT="/tmp/early-close-$scope.out"
+            ERR="/tmp/early-close-$scope.err"
+
+            # PIPEFAIL_ROOT is the CALLER's checkout. The `.quality-tools` tree
+            # sits inside the workspace but outside the caller's git index, so
+            # `git ls-files` cannot reach it and the checker never lints itself.
+            RC=0
+            PIPEFAIL_SCOPE="$scope" PIPEFAIL_ROOT="$GITHUB_WORKSPACE" \
+              bash "$GATE" > "$OUT" 2>"$ERR" || RC=$?
+            cat "$OUT"
+            cat "$ERR" >&2 || true
 
           # ONLY 0 AND 1 ARE VERDICTS. 0 = clean, 1 = findings; anything else is
           # the gate failing to run -- rc 2 (cannot tell), 126/127 (not
@@ -646,53 +707,55 @@ jobs:
           # load-bearing part. The first version tested `[ "$RC" = 2 ]`, so a
           # missing or non-executable script exited 127, fell through to the
           # soft-fail branch, and reported green (Bugbot, .github#300).
-          if [ "$RC" != 0 ] && [ "$RC" != 1 ]; then
-            echo "::error title=pipefail early-close::the gate exited $RC — it did not run to a verdict, so this is not a pass"
-            {
-              echo "### pipefail early-close"
-              echo ""
-              echo "**The gate exited \`$RC\`** — not a verdict (0 = clean, 1 = findings)."
-              echo "Hard failure regardless of \`soft-fail\`: a gate that could not check has not passed."
-              echo ""
-              echo '```'
-              head -20 /tmp/early-close.err
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit "$RC"
-          fi
-
-          if [ "$SOFT_FAIL" = "true" ]; then LEVEL=warning; else LEVEL=error; fi
-          # Output is `path:line: code`.
-          awk -v lvl="$LEVEL" -F: '
-            /^[^:]+:[0-9]+: / {
-              msg=$0; sub(/^[^:]*:[0-9]+: /, "", msg)
-              printf "::%s file=%s,line=%s,title=pipefail early-close::pipes into an early-closing reader under errexit+pipefail; use a here-string or capture-then-slice: %s\n", lvl, $1, $2, msg
-            }' /tmp/early-close.out
-
-          COUNT=$(grep -cE "^[^:]+:[0-9]+: " /tmp/early-close.out || true)
-          {
-            echo "### pipefail early-close"
-            echo ""
-            if [ "$COUNT" = "0" ]; then
-              echo "No findings."
-            else
-              echo "**$COUNT finding(s).** Each pipes into a reader that closes before EOF"
-              echo "(\`head\`, \`grep -q\`, \`grep -m N\`) in a file running under errexit + pipefail."
-              echo "Use a here-string (\`head -25 <<<\"\$out\"\`) or capture-then-slice."
-              echo "If an instance is genuinely safe, mark the line \`# pipefail-guard: allow\` and say why."
-              echo ""
-              echo '```'
-              head -100 /tmp/early-close.out
-              echo '```'
+            if [ "$RC" != 0 ] && [ "$RC" != 1 ]; then
+              echo "::error title=$TITLE::the gate exited $RC — it did not run to a verdict, so this is not a pass"
+              {
+                echo "### $TITLE"
+                echo ""
+                echo "**The gate exited \`$RC\`** — not a verdict (0 = clean, 1 = findings)."
+                echo "Hard failure regardless of \`soft-fail\`: a gate that could not check has not passed."
+                echo ""
+                echo '```'
+                head -20 "$ERR"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit "$RC"
             fi
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$RC" != "0" ] && [ "$SOFT_FAIL" = "true" ]; then
-            echo "soft-fail is on — reporting only, not failing this job."
-            exit 0
-          fi
-          exit "$RC"
+            if [ "$SOFT" = "true" ]; then LEVEL=warning; else LEVEL=error; fi
+            # Output is `path:line: code`.
+            awk -v lvl="$LEVEL" -v title="$TITLE" -F: '
+              /^[^:]+:[0-9]+: / {
+                msg=$0; sub(/^[^:]*:[0-9]+: /, "", msg)
+                printf "::%s file=%s,line=%s,title=%s::pipes into an early-closing reader under errexit+pipefail; use a here-string or capture-then-slice: %s\n", lvl, $1, $2, title, msg
+              }' "$OUT"
+
+            COUNT=$(grep -cE "^[^:]+:[0-9]+: " "$OUT" || true)
+            {
+              echo "### $TITLE"
+              echo ""
+              if [ "$COUNT" = "0" ]; then
+                echo "No findings."
+              else
+                echo "**$COUNT finding(s).** Each pipes into a reader that closes before EOF"
+                echo "(\`head\`, \`grep -q\`, \`grep -m N\`, \`sed q\`, \`read\`) where errexit + pipefail are both live."
+                echo "Use a here-string (\`head -25 <<<\"\$out\"\`) or capture-then-slice."
+                echo "If an instance is genuinely safe, mark the line \`# pipefail-guard: allow\` and say why."
+                echo ""
+                echo '```'
+                head -100 "$OUT"
+                echo '```'
+              fi
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            if [ "$RC" != "0" ] && [ "$SOFT" = "true" ]; then
+              echo "$TITLE: soft-fail is on — reporting only, not failing this job."
+            elif [ "$RC" != "0" ]; then
+              OVERALL=1
+            fi
+          done
+          exit "$OVERALL"
 
   # --------------------------------------------------------------- gitleaks ---
   gitleaks:
