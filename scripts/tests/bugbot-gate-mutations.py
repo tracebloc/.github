@@ -107,15 +107,53 @@ MUTATIONS = [
     # a gate that reached FAIL for some other reason entirely.
     ("the head is classified BEFORE the threshold, so a dropped review "
      "launders an open High",
-     '    if not claimed and blocking:',
-     '    if False and not claimed and blocking:'),
+     '    if not claimed and fast_blockers:',
+     '    if False and not claimed and fast_blockers:'),
     ("only the never-claimed absence checks the threshold, leaving PENDING "
      "with the same hole",
-     '    if not claimed and blocking:',
-     '    if check is None and blocking:'),
+     '    if not claimed and fast_blockers:',
+     '    if check is None and fast_blockers:'),
     ("the laundering guard fires on any absence, so the tolerance is gone",
-     '    if not claimed and blocking:',
+     '    if not claimed and fast_blockers:',
      '    if not claimed:'),
+
+    # --- (A3b) HEAD-SCOPED FAST-FAIL (backend#2816) -------------------------
+    #
+    # The fast-fail must distinguish WHERE an outstanding finding was raised.
+    # Each mutation here restores a shape that either re-breaks the post-fix-push
+    # race (an older-head finding fast-failing while a verdict is seconds away)
+    # or opens a laundering/fail-open hole, and is what makes the section-3b
+    # selftest cases load-bearing rather than decorative.
+    #
+    # The two one-way collapses of the fast-blocker set:
+    ("an older-head finding fast-fails while Bugbot re-reviews, so the race stays red",
+     '    fast_blockers = against_this_head if check is not None else blocking',
+     '    fast_blockers = blocking'),
+    ("a never-claimed head stops blocking an older-head finding, laundering it",
+     '    fast_blockers = against_this_head if check is not None else blocking',
+     '    fast_blockers = against_this_head'),
+    # Fail-closed removed: an unreadable finding-commit is filed as an OLDER head
+    # (so it waits) instead of THIS head (so it blocks).
+    ("an unreadable finding commit is treated as an older head, not fail-closed",
+     '        if f["raised_against"] is None or f["raised_against"] == head_oid:',
+     '        if f["raised_against"] == head_oid:'),
+    # The head comparison inverted: this-head and older-head swap wholesale.
+    ("the head comparison is inverted, so this-head and older-head swap",
+     '        if f["raised_against"] is None or f["raised_against"] == head_oid:',
+     '        if f["raised_against"] is None or f["raised_against"] != head_oid:'),
+    # findings() stops reading the commit at all: every finding becomes None ->
+    # fail-closed to this-head -> the race is fast-failed again, green log.
+    ("findings stops reading the finding's commit, so the race is fast-failed again",
+     '                "raised_against": ((first.get("originalCommit") or {}) or {}).get("oid"),',
+     '                "raised_against": None,'),
+    # The query stops asking for the commit -- caught by the integrity guard, the
+    # same shape as the totalCount and author.__typename guards.
+    ("the query stops asking which commit a finding was raised against",
+     '              originalCommit { oid }\n',
+     ''),
+    ("the finding-commit query guard is disarmed, so an inert head-scope runs green",
+     '    return re.search(r"originalCommit\\s*\\{[^}]*oid", query) is None',
+     '    return False'),
     # `blocking` is the threshold itself. If it collapses to "any open
     # finding", the split measured in backend#2284 dies -- a Low on an
     # unreviewed head would block, which is the thing the gate was loosened to
