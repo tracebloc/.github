@@ -536,7 +536,7 @@ awk 'BEGIN { for (i = 0; i < 200;   i++) printf "line%08d\n", i }' > "$WORK/payl
 # never crosses an execve boundary and MAX_ARG_STRLEN cannot apply.
 measure() {  # $1 = consumer ; $2 = SMALL|BIG -> sets MRC
   C="$1" PAYLOAD="$WORK/payload-$2" bash -c \
-    'set -eo pipefail; P=$(cat "$PAYLOAD"); printf "%s\n" "$P" | $C >/dev/null' 2>/dev/null
+    'set -eo pipefail; P=$(cat "$PAYLOAD"); printf "%s\n" "$P" | eval "$C" >/dev/null' 2>/dev/null
   MRC=$?
 }
 # Does the gate flag that same consumer, in a file where both options are live?
@@ -579,6 +579,30 @@ while IFS= read -r consumer; do
     continue
   fi
 
+  # A MEASURED MEMBER THE SCANNER CANNOT SEE IS REGISTERED, NOT HIDDEN. This is
+  # an acknowledged-gap register, and the assertion runs BOTH ways: the row must
+  # still be a measured member, and it must still go unflagged. If the scanner
+  # ever grows the ability to see it, this case REDDENS and tells you to delete
+  # the row -- so the register cannot quietly rot into a lie, which is the usual
+  # fate of a documented limitation.
+  #
+  # `sed '1d;q'` is here because the scanner splits a line on `;` with no quote
+  # awareness (deliberately -- that split is what stops a `|| true` on one
+  # pipeline sparing the next), so a `;` INSIDE a quoted sed script cuts the
+  # script in half and `q` is never seen. Widening the sed arm cannot reach it;
+  # only a quote-aware segmenter could, and that is a change to the most
+  # heavily pinned function in the scanner. Not attempted here, and not claimed.
+  case "$consumer" in
+    "sed '1d;q'")
+      if [ "$hazard" = yes ] && [ -z "$DOUT" ]; then
+        record 0 "'$consumer' is a KNOWN-UNSEEN member (rc $big_rc): ';' inside quotes splits the segment" ""
+      else
+        record 1 "'$consumer' known-gap register is out of date" \
+          "hazard=$hazard detector=$DOUT -- if the scanner now sees it, delete this row"
+      fi
+      continue ;;
+  esac
+
   if [ "$hazard" = yes ] && [ -n "$DOUT" ]; then
     record 0 "'$consumer' fails at 260KB (rc $big_rc), succeeds at 2.6KB -- and is flagged" ""
   elif [ "$hazard" = no ] && [ -z "$DOUT" ]; then
@@ -598,6 +622,10 @@ head
 sed q
 sed 1q
 sed -n 2q
+sed -e q
+sed '1d;q'
+sed 's/a/q/'
+sed 'y/ab/qz/'
 grep -q line00000000
 grep -m 1 line00000000
 read -r line

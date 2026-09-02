@@ -278,10 +278,19 @@ FNR == 1 {
   # EOF is not this class, and an arm that flagged it would be reporting on
   # `| sort`.
   #
-  # THE SED SCRIPT TOKEN IS MATCHED EXACTLY, `[0-9]*q` optionally quoted, not
-  # `sed[^|]*q`. The loose form flags `sed 's/a/q/'` -- a substitution that
-  # reads to EOF -- and a gate that reports on ordinary `sed` gets switched off.
-  # `sed -n 1p` has no `q` and stays spared, which is what pins the difference.
+  # THE TERMINATOR CLASS IS WHAT SPARES A SUBSTITUTION, not the shape of the
+  # script token -- and getting that backwards cost a real member. An earlier
+  # version matched the token exactly (`[0-9]*q`, optionally quoted) on the
+  # theory that `sed[^|]*q` would flag `sed 's/a/q/'`. It does not: that `q` is
+  # followed by `/`, which is not a terminator, so the loose form spares it
+  # anyway. What the tight token DID do was miss `sed '1d;q'` -- measured a
+  # member, 0 at 2.6KB and 141 at 260KB. Measured over nine sed spellings, the
+  # loose form agrees with the shell on all nine and the tight one on eight:
+  #     q · 1q · -n 2q · -e q · '1d;q'            0 -> 141   members
+  #     's/a/q/' · 's/a/b/' · -n 1p · 'y/ab/qz/'  0 ->   0   spared
+  # Found by the tightness mutation surviving: the case that was supposed to
+  # justify the tight token passed under the loose pattern too, which is the
+  # harness saying the distinction was imaginary.
   #
   # `read` MUST SIT DIRECTLY AFTER THE BAR. `producer | while read -r l` is the
   # opposite of this class: the loop reads to EOF, so nothing SIGPIPEs. Only a
@@ -290,7 +299,7 @@ FNR == 1 {
   if (probe ~ /\|&?[[:space:]]*head([[:space:]]|$|[)"'\''`;|&\001])/ \
       || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*q/ \
       || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/ \
-      || probe ~ /\|&?[[:space:]]*sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*'?[0-9]*q'?([[:space:]]|$|[)"'\''`;|&\001])/ \
+      || probe ~ /\|&?[[:space:]]*sed[^|\001]*q([[:space:]]|$|[)"'\''`;|&\001])/ \
       || probe ~ /\|&?[[:space:]]*read([[:space:]]|$|[)"'\''`;|&\001])/) {
       sub(/^[[:space:]]+/, "", line)
       print curfile ":" FNR ": " line

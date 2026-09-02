@@ -128,17 +128,20 @@ MUTATIONS = [
      "      *) ;;"),
     # --- the arms added for the two MEASURED gaps (backend#2967) -----------
     ("the sed q arm never fires", AWK,
-     "|| probe ~ /\\|&?[[:space:]]*sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*'?[0-9]*q'?",
-     "|| (0 && probe ~ /\\|&?[[:space:]]*sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*'?[0-9]*q'?"),
+     '|| probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q(',
+     '|| (0 && probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q('),
     ("the read arm never fires", AWK,
      '|| probe ~ /\\|&?[[:space:]]*read([[:space:]]|$|',
      '|| (0 && probe ~ /\\|&?[[:space:]]*read([[:space:]]|$|'),
-    # The sed arm's TIGHTNESS, not merely its presence. The loose form reports
-    # on every `sed 's/...q.../'` in the fleet, which is how a gate gets
-    # switched off rather than fixed.
-    ("the sed arm matches any q in the sed script, not the script token", AWK,
-     "sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*'?[0-9]*q'?",
-     "sed[^|\\001]*q"),
+    # THE SED ARM'S TERMINATOR, which is the part that actually discriminates.
+    # The mutation here used to loosen the script TOKEN and was reported
+    # UNCAUGHT -- correctly, because the token shape changes nothing: the `q`
+    # in `sed 's/a/q/'` is followed by `/`, which the terminator class rejects
+    # either way. Drop the terminator and that substitution IS flagged, which
+    # `sedsubst` catches. The measurement that settled it is in the awk.
+    ("the sed arm stops requiring a terminator after the q", AWK,
+     'sed[^|\\001]*q([[:space:]]|$|',
+     'sed[^|\\001]*q('),
     # `read` must sit DIRECTLY after the bar, or `| while read` -- which reads
     # to EOF and is the opposite of this class -- reads as a hazard.
     ("the read arm no longer requires read to follow the bar directly", AWK,
