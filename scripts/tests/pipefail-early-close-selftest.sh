@@ -101,6 +101,14 @@ echo
 echo "== discrimination: readers that do NOT close early ============================"
 case_spare plaingrep.sh "a grep that reads to EOF is not the hazard" \
   '  producer | grep needle | sed s/a/b/'
+# A SED SUBSTITUTION CONTAINING `q` IS NOT `sed q`. This is what forces the sed
+# arm to match the script token exactly (`[0-9]*q`, optionally quoted) instead
+# of the cheap `sed[^|]*q`: the loose form reports on ordinary substitutions,
+# and a gate that reports on `sed` gets switched off. It cannot go in the
+# measured table above, whose harness runs the consumer through word splitting.
+case_spare sedsubst.sh "a sed SUBSTITUTION containing q reads to EOF and is spared" \
+  "  producer | sed 's/a/q/'"
+
 
 echo
 echo "== the house idioms are spared ================================================"
@@ -486,6 +494,280 @@ else
 fi
 
 echo
+echo "== THE REQUIREMENT, MEASURED: which consumers actually SIGPIPE ================"
+# backend#1729 rule 6: mutation-proof is not requirement-proof. Every case above
+# compares the scanner against a shape someone typed. This block compares it
+# against the RUNTIME, so the expected set is derived rather than restated --
+# and it is the only thing here that could have told us `sed q` was missing.
+#
+# NEVER TEST A LIST AGAINST ITSELF (rule 9's corollary). The consumers below are
+# written down independently of the matcher; nothing reads the awk's regexes.
+# For each, the pipeline is RUN through `bash -eo pipefail` at both payload
+# sizes and the detector is required to AGREE with what the shell did.
+#
+# BOTH SIZES ARE THE POINT. The class is size-dependent: under ~64KB the reader
+# closes and the producer's write has already fit in the pipe buffer, so nothing
+# is signalled and the construct looks correct in review. That is why instances
+# survive, and why a gate tested only on a small payload proves nothing.
+# Measured here, and the numbers are the ticket's: 200 lines (~2.6KB) vs 20000
+# (~260KB).
+# THE PAYLOADS ARE FILES, NOT ENVIRONMENT VARIABLES, and that is portability
+# rather than style. Passed as `BIG=$BIG bash -c ...`, the 260KB payload
+# exceeds Linux's MAX_ARG_STRLEN (128KB for a single string), `execve` refuses,
+# and bash reports 126 -- so EVERY consumer measured "126 at both sizes", every
+# member looked like a non-member, and the suite went 17 red. macOS has no
+# per-string cap, so the first version passed locally and failed only in CI.
+# See `measure` below for why the fix could not be as simple as piping the file.
+awk 'BEGIN { for (i = 0; i < 20000; i++) printf "line%08d\n", i }' > "$WORK/payload-BIG"
+awk 'BEGIN { for (i = 0; i < 200;   i++) printf "line%08d\n", i }' > "$WORK/payload-SMALL"
+
+# THE PRODUCER IS `printf`, A BASH BUILTIN, AND SUBSTITUTING ONE CHANGES THE
+# MEASUREMENT. An earlier version used `cat "$PAYLOAD" | $C` to dodge the
+# environment limit above, which looked equivalent and was not: GNU coreutils
+# `cat` reports the failed write as `write error: Broken pipe` and exits 1,
+# where BSD `cat` dies on SIGPIPE and yields 141. So on Linux every member
+# measured `small=0 big=1` -- neither a member nor a non-member -- and all ten
+# reported MEASUREMENT UNCLEAR, while macOS still said 141. The harness has to
+# reproduce the CONSTRUCT, not something that resembles it: the real instances
+# are `printf ... | head -1`, and printf is a builtin, so the subshell itself
+# takes the signal and the pipeline returns 141 on both platforms.
+#
+# The payload reaches printf through a variable read INSIDE the subshell, so it
+# never crosses an execve boundary and MAX_ARG_STRLEN cannot apply.
+measure() {  # $1 = consumer ; $2 = SMALL|BIG -> sets MRC
+  C="$1" PAYLOAD="$WORK/payload-$2" bash -c \
+    'set -eo pipefail; P=$(cat "$PAYLOAD"); printf "%s\n" "$P" | eval "$C" >/dev/null' 2>/dev/null
+  MRC=$?
+}
+# Does the gate flag that same consumer, in a file where both options are live?
+detects() {  # $1 = consumer -> sets DOUT
+  printf '#!/usr/bin/env bash\nset -euo pipefail\nprintf "%%s" "$X" | %s\n' "$1" \
+    > "$WORK/req.sh"
+  DOUT=$(awk -f "$SCANNER_ABS" "$WORK/req.sh")
+}
+
+# The needle matches the FIRST line on purpose: `grep -q` cannot close early
+# until it has matched, so a non-matching needle measures nothing at all. That
+# is a real trap -- with `grep -q nomatch` every size returns 1 and the arm
+# looks dead.
+while IFS= read -r consumer; do
+  [ -n "$consumer" ] || continue
+  measure "$consumer" SMALL; small_rc=$MRC
+  measure "$consumer" BIG;   big_rc=$MRC
+  detects "$consumer"
+
+  # A MEMBER OF THE CLASS is defined by behaviour, not by a list: the pipeline
+  # SUCCEEDS on the small payload and FAILS on the large one. The flip is the
+  # requirement -- under errexit+pipefail any non-zero status aborts the script,
+  # which is the damage -- and it is deliberately NOT pinned to 141.
+  #
+  # 141 IS NOT PORTABLE, and assuming it cost a CI round. The producer here is
+  # bash's `printf` builtin: macOS bash 3.2 is killed by SIGPIPE and the
+  # pipeline yields 141 with nothing on stderr, while GNU bash 5 reports the
+  # EPIPE itself (`printf: write error: Broken pipe`) and yields 1. Same defect,
+  # same abort, different number -- so a test that demanded 141 called every
+  # member "MEASUREMENT UNCLEAR" on Linux while passing on macOS. The observed
+  # code is printed in the case name so the platform difference stays visible
+  # instead of being smoothed over.
+  if [ "$small_rc" = 0 ] && [ "$big_rc" != 0 ]; then
+    hazard=yes
+  elif [ "$small_rc" = 0 ] && [ "$big_rc" = 0 ]; then
+    hazard=no
+  else
+    record 1 "MEASUREMENT UNCLEAR for '$consumer'" \
+      "small=$small_rc big=$big_rc -- the small payload must succeed; it did not, so the fixture is wrong"
+    continue
+  fi
+
+  # A MEASURED MEMBER THE SCANNER CANNOT SEE IS REGISTERED, NOT HIDDEN. This is
+  # an acknowledged-gap register, and the assertion runs BOTH ways: the row must
+  # still be a measured member, and it must still go unflagged. If the scanner
+  # ever grows the ability to see it, this case REDDENS and tells you to delete
+  # the row -- so the register cannot quietly rot into a lie, which is the usual
+  # fate of a documented limitation.
+  #
+  # `sed '1d;q'` is here because the scanner splits a line on `;` with no quote
+  # awareness (deliberately -- that split is what stops a `|| true` on one
+  # pipeline sparing the next), so a `;` INSIDE a quoted sed script cuts the
+  # script in half and `q` is never seen. Widening the sed arm cannot reach it;
+  # only a quote-aware segmenter could, and that is a change to the most
+  # heavily pinned function in the scanner. Not attempted here, and not claimed.
+  case "$consumer" in
+    "sed '1d;q'")
+      if [ "$hazard" = yes ] && [ -z "$DOUT" ]; then
+        record 0 "'$consumer' is a KNOWN-UNSEEN member (rc $big_rc): ';' inside quotes splits the segment" ""
+      else
+        record 1 "'$consumer' known-gap register is out of date" \
+          "hazard=$hazard detector=$DOUT -- if the scanner now sees it, delete this row"
+      fi
+      continue ;;
+
+    # THE ACCEPTED FALSE POSITIVES, REGISTERED THE SAME WAY AND FOR THE SAME
+    # REASON. The sed arm discriminates on what FOLLOWS the `q`, and inside a
+    # sed script that is arbitrary text -- so a `q` in REPLACEMENT text that
+    # happens to be followed by a space or a `;` flags, while `'s/a/q/'` and
+    # `'y/ab/qz/'` are spared only because their `q` is followed by `/` and `z`.
+    # Those two spare rows above therefore agree with the shell by coincidence
+    # of the delimiter their examples chose, and nothing pinned the difference:
+    # the arm's behaviour on this shape was "an accident of two well-chosen
+    # examples" (Shujaat, .github#403).
+    #
+    # The trade is accepted deliberately -- `/addr/q` is a real member and no
+    # regex separates `q`-the-command from `q`-the-replacement-text without
+    # knowing where the script's commands end, which needs the quote-aware
+    # segmenter the row above also rules out. So these are registered instead of
+    # fixed, and the assertion runs BOTH ways like the known-gap row: each must
+    # still be measurably SAFE and must still be FLAGGED. If the arm ever learns
+    # to spare them, the row REDDENS and tells you to delete it -- which is the
+    # only version of an accepted false positive that cannot rot into a lie.
+    "sed 's/^/q /'"|'sed "s/x/q y/"'|"sed 's/a/q;b/'")
+      if [ "$hazard" = no ] && [ -n "$DOUT" ]; then
+        record 0 "'$consumer' is an ACCEPTED FALSE POSITIVE: reads to EOF (rc 0), flagged by the loose sed arm" ""
+      else
+        record 1 "'$consumer' false-positive register is out of date" \
+          "hazard=$hazard detector=$DOUT -- if the arm now spares it, delete this row"
+      fi
+      continue ;;
+  esac
+
+  if [ "$hazard" = yes ] && [ -n "$DOUT" ]; then
+    record 0 "'$consumer' fails at 260KB (rc $big_rc), succeeds at 2.6KB -- and is flagged" ""
+  elif [ "$hazard" = no ] && [ -z "$DOUT" ]; then
+    record 0 "'$consumer' reads to EOF at both sizes (rc 0) -- and is spared" ""
+  elif [ "$hazard" = yes ]; then
+    record 1 "'$consumer' is a MEASURED hazard the gate does not flag" \
+      "small=$small_rc big=$big_rc (the abort is real at 260KB), detector said nothing"
+  else
+    record 1 "'$consumer' is measurably safe but the gate flags it" \
+      "small=$small_rc big=$big_rc, detector said: $DOUT"
+  fi
+done <<'CONSUMERS'
+head -1
+head -n1
+head -n 1
+head
+sed q
+sed 1q
+sed -n 2q
+sed -e q
+sed '1d;q'
+sed 's/a/q/'
+sed 'y/ab/qz/'
+sed 's/^/q /'
+sed "s/x/q y/"
+sed 's/a/q;b/'
+grep -q line00000000
+grep -m 1 line00000000
+read -r line
+IFS= read -r line
+grep -c line00000000
+sed -n 1p
+tail -1
+sort
+CONSUMERS
+
+# `| while read` IS THE OPPOSITE SHAPE and cannot go through `measure`, whose
+# harness runs the consumer as a simple command. The loop reads to EOF, so
+# nothing SIGPIPEs -- and an arm matching `read` anywhere after the bar would
+# report on it. Measured inline, then asserted against the detector.
+# BOTH PRODUCER BEHAVIOURS ARE PINNED HERE, so the platform difference is
+# covered wherever this runs instead of only where the platform happens to
+# behave one way -- the same lesson as the gawk case further down. Ignoring
+# SIGPIPE makes bash report the EPIPE itself rather than die from the signal,
+# which is exactly what GNU bash 5 does on the runners: rc 1 with `printf:
+# write error: Broken pipe`, where macOS bash 3.2 is killed and yields 141.
+# Both must read as a member, because both abort the caller under errexit.
+EPIPE_SMALL=0
+PAYLOAD="$WORK/payload-SMALL" bash -c \
+  'set -eo pipefail; trap "" PIPE; P=$(cat "$PAYLOAD"); printf "%s\n" "$P" | head -1 >/dev/null' \
+  2>/dev/null || EPIPE_SMALL=$?
+EPIPE_BIG=0
+PAYLOAD="$WORK/payload-BIG" bash -c \
+  'set -eo pipefail; trap "" PIPE; P=$(cat "$PAYLOAD"); printf "%s\n" "$P" | head -1 >/dev/null' \
+  2>"$WORK/epipe-err" || EPIPE_BIG=$?
+if [ "$EPIPE_SMALL" = 0 ] && [ "$EPIPE_BIG" != 0 ] \
+   && grep -qi "broken pipe" "$WORK/epipe-err"; then
+  record 0 "the EPIPE form (GNU bash) also flips: rc $EPIPE_BIG at 260KB, 0 at 2.6KB" ""
+else
+  record 1 "the EPIPE form (GNU bash) must also flip" \
+    "small=$EPIPE_SMALL big=$EPIPE_BIG err=$(cat "$WORK/epipe-err" 2>/dev/null)"
+fi
+
+WHILE_RC=0
+PAYLOAD="$WORK/payload-BIG" bash -c \
+  'set -eo pipefail; P=$(cat "$PAYLOAD"); printf "%s\n" "$P" | while read -r l; do :; done' \
+  2>/dev/null || WHILE_RC=$?
+detects 'while read -r l; do :; done'
+if [ "$WHILE_RC" = 0 ] && [ -z "$DOUT" ]; then
+  record 0 "'| while read' reads to EOF at 260KB (rc 0, no flip) -- and is spared" ""
+else
+  record 1 "'| while read' must be spared" "rc=$WHILE_RC detector=$DOUT"
+fi
+
+# AND THE PREFIXED LOOP FORM, which is what makes the widened `read` arm safe
+# rather than merely wider. The arm now admits a run of `VAR=value` assignments
+# before `read` so that `| IFS= read -r line` is caught (a measured member, in
+# CONSUMERS above), and `IFS= read -r` is ALSO the canonical way to write the
+# loop -- so this is the exact shape that would break if the prefix were allowed
+# to swallow a loop keyword too. `while` is not of the form `NAME=`, so it
+# cannot match the prefix; this asserts that rather than trusting it.
+WHILE_IFS_RC=0
+PAYLOAD="$WORK/payload-BIG" bash -c \
+  'set -eo pipefail; P=$(cat "$PAYLOAD"); printf "%s\n" "$P" | while IFS= read -r l; do :; done' \
+  2>/dev/null || WHILE_IFS_RC=$?
+detects 'while IFS= read -r l; do :; done'
+if [ "$WHILE_IFS_RC" = 0 ] && [ -z "$DOUT" ]; then
+  record 0 "'| while IFS= read' reads to EOF at 260KB (rc 0, no flip) -- and is spared" ""
+else
+  record 1 "'| while IFS= read' must be spared" "rc=$WHILE_IFS_RC detector=$DOUT"
+fi
+
+echo
+echo "== A CLEAN RUN IS SILENT ON STDERR ==========================================="
+# THE DEFECT THIS PINS, and it is the same shape as the bug this whole file is
+# about: output that is not what the assertion thinks it is.
+#
+# `pipefail-early-close.awk:237` carried `\"` inside a bracket expression. BSD
+# awk (every macOS) accepts it silently; gawk (every ubuntu-latest runner)
+# emitted `warning: regexp escape sequence` on EVERY invocation. A helper here
+# folded the gate's stderr into its captured output with `2>&1`, so five
+# unrelated "is spared" assertions saw non-empty output and failed -- in CI
+# only, invisible locally. Two separate fixes came out of it: the helpers now
+# keep the streams apart, and THIS asserts the invariant that made the
+# confusion possible. A gate with nothing to report reports nothing, on both
+# streams; any future warning reddens here, with its text, instead of surfacing
+# as a handful of baffling failures somewhere else.
+rm -rf "$WORK/quiet"; mkdir -p "$WORK/quiet/.github/workflows"
+printf '#!/usr/bin/env bash\nset -euo pipefail\nhead -1 <<<"$x"\n' > "$WORK/quiet/ok.sh"
+printf 'name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash\n        run: |\n          head -1 <<<"$x"\n' \
+  > "$WORK/quiet/.github/workflows/w.yml"
+( cd "$WORK/quiet" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f ) >/dev/null
+
+QOUT=$(PIPEFAIL_ROOT="$WORK/quiet" bash "$GATE_ABS" 2>"$WORK/qerr"); QRC=$?
+QERR=$(cat "$WORK/qerr" 2>/dev/null)
+if [ "$QRC" = 0 ] && [ -z "$QOUT" ] && [ -z "$QERR" ]; then
+  record 0 "a clean tree produces no findings AND no stderr ($(awk --version 2>/dev/null | head -1 || awk -Wversion 2>&1 | head -1))" ""
+else
+  record 1 "a clean tree produces no findings AND no stderr" "rc=$QRC out=$QOUT err=$QERR"
+fi
+
+# AND UNDER gawk EXPLICITLY WHERE IT EXISTS, because the whole failure was an
+# implementation difference: asserting only against the local awk is what let
+# this reach CI. ubuntu-latest has gawk, so CI always takes this branch.
+if command -v gawk >/dev/null 2>&1; then
+  GQERR=$(PATH="$(dirname "$(command -v gawk)"):$PATH" \
+    env AWKPATH= sh -c 'gawk -f "$1" "$2" 2>&1 >/dev/null' _ "$SCANNER_ABS" "$WORK/quiet/ok.sh")
+  if [ -z "$GQERR" ]; then
+    record 0 "...and gawk parses the scanner without a single warning" ""
+  else
+    record 1 "...and gawk parses the scanner without a single warning" "$GQERR"
+  fi
+else
+  record 1 "gawk is not installed, so the CI awk cannot be checked here" \
+    "install gawk (brew install gawk) -- ubuntu-latest runs gawk, and an awk-specific warning is invisible to BSD awk"
+fi
+
+echo
 echo "== YAML \`run:\` BLOCKS ARE IN SCOPE (backend#2967) ============================"
 # THE HOLE THIS TICKET FOUND. The wrapper classifies a file as shell by
 # extension, else by shebang; workflow YAML has neither, so every `run:` block
@@ -786,9 +1068,6 @@ if [ "$RC" = 0 ] || [ "$RC" = 1 ]; then
 else
   record 1 "the YAML scan reaches a verdict on this repo's own workflows" "rc=$RC out=$OUT"
 fi
-
-printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
-[ "$FAIL" = 0 ] || exit 1
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ] || exit 1
