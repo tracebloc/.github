@@ -517,15 +517,26 @@ echo "== THE REQUIREMENT, MEASURED: which consumers actually SIGPIPE ===========
 # and bash reports 126 -- so EVERY consumer measured "126 at both sizes", every
 # member looked like a non-member, and the suite went 17 red. macOS has no
 # per-string cap, so the first version passed locally and failed only in CI.
+# See `measure` below for why the fix could not be as simple as piping the file.
 awk 'BEGIN { for (i = 0; i < 20000; i++) printf "line%08d\n", i }' > "$WORK/payload-BIG"
 awk 'BEGIN { for (i = 0; i < 200;   i++) printf "line%08d\n", i }' > "$WORK/payload-SMALL"
 
-# rc of `cat <payload> | <consumer>` under errexit+pipefail. `cat` is the
-# producer that takes the SIGPIPE, exactly as `printf`/`kubectl`/`jq` do in the
-# real instances.
+# THE PRODUCER IS `printf`, A BASH BUILTIN, AND SUBSTITUTING ONE CHANGES THE
+# MEASUREMENT. An earlier version used `cat "$PAYLOAD" | $C` to dodge the
+# environment limit above, which looked equivalent and was not: GNU coreutils
+# `cat` reports the failed write as `write error: Broken pipe` and exits 1,
+# where BSD `cat` dies on SIGPIPE and yields 141. So on Linux every member
+# measured `small=0 big=1` -- neither a member nor a non-member -- and all ten
+# reported MEASUREMENT UNCLEAR, while macOS still said 141. The harness has to
+# reproduce the CONSTRUCT, not something that resembles it: the real instances
+# are `printf ... | head -1`, and printf is a builtin, so the subshell itself
+# takes the signal and the pipeline returns 141 on both platforms.
+#
+# The payload reaches printf through a variable read INSIDE the subshell, so it
+# never crosses an execve boundary and MAX_ARG_STRLEN cannot apply.
 measure() {  # $1 = consumer ; $2 = SMALL|BIG -> sets MRC
   C="$1" PAYLOAD="$WORK/payload-$2" bash -c \
-    'set -eo pipefail; cat "$PAYLOAD" | $C >/dev/null' 2>/dev/null
+    'set -eo pipefail; P=$(cat "$PAYLOAD"); printf "%s\n" "$P" | $C >/dev/null' 2>/dev/null
   MRC=$?
 }
 # Does the gate flag that same consumer, in a file where both options are live?
@@ -591,7 +602,8 @@ CONSUMERS
 # report on it. Measured inline, then asserted against the detector.
 WHILE_RC=0
 PAYLOAD="$WORK/payload-BIG" bash -c \
-  'set -eo pipefail; cat "$PAYLOAD" | while read -r l; do :; done' 2>/dev/null || WHILE_RC=$?
+  'set -eo pipefail; P=$(cat "$PAYLOAD"); printf "%s\n" "$P" | while read -r l; do :; done' \
+  2>/dev/null || WHILE_RC=$?
 detects 'while read -r l; do :; done'
 if [ "$WHILE_RC" = 0 ] && [ -z "$DOUT" ]; then
   record 0 "'| while read' reads to EOF at 260KB (rc 0) -- and is spared" ""
