@@ -139,9 +139,20 @@ MUTATIONS = [
     # in `sed 's/a/q/'` is followed by `/`, which the terminator class rejects
     # either way. Drop the terminator and that substitution IS flagged, which
     # `sedsubst` catches. The measurement that settled it is in the awk.
-    ("the sed arm stops requiring a terminator after the q", AWK,
+    # TWO SEPARATE PROPERTIES OF THE SED TERMINATOR, because the first label
+    # here was wrong: it said "stops requiring a terminator" while the diff
+    # only dropped whitespace and EOL from the class. Caught, but by the
+    # measured `sed q` rows rather than by the false-positive guard, so it
+    # pinned the wrong half and said so in a misleading name.
+    ("the sed terminator stops admitting whitespace and end-of-line", AWK,
      'sed[^|\\001]*q([[:space:]]|$|',
      'sed[^|\\001]*q('),
+    # ...and the one that pins the DISCRIMINATION: with no terminator at all,
+    # `sed 's/a/q/'` and `sed 'y/ab/qz/'` -- both measured non-members -- are
+    # flagged, and `sedsubst` plus both measured rows redden.
+    ("the sed arm drops its terminator entirely", AWK,
+     'sed[^|\\001]*q([[:space:]]|$|[)"\'\\\'\'`;|&\\001])',
+     'sed[^|\\001]*q'),
     # `read` must sit DIRECTLY after the bar, or `| while read` -- which reads
     # to EOF and is the opposite of this class -- reads as a hazard.
     ("the read arm no longer requires read to follow the bar directly", AWK,
