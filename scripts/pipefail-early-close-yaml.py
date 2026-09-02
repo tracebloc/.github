@@ -106,11 +106,18 @@ def flags_for_shell(shell):
     if spec in NON_SHELL:
         return None
     if "{0}" not in spec:
-        # An unrecognised keyword. Fail CLOSED on scope: treat it as the
-        # default shell rather than silently dropping the block. The worst case
-        # is a finding someone can silence with the marker; the other direction
-        # is the hole this file exists to close.
-        return DEFAULT_FLAGS
+        # An unrecognised keyword -- including a GitHub expression like
+        # `${{ matrix.shell }}` that resolves at run time to any of the keyword
+        # shells. Fail CLOSED on the HAZARD, not merely on scope: DEFAULT_FLAGS
+        # ("-e") keeps the block in scope but leaves pipefail OFF, and the awk
+        # scanner only flags a `| head` when errexit AND pipefail are both live
+        # -- so "-e" here scanned the block and reported it clean, the exact
+        # vacuous-success hole this file closes (Bugbot #402). Assume the most
+        # hazardous resolution instead: bash with `-eo pipefail`, so an
+        # interpolated `bash` step's `| head` IS flagged. If the expression in
+        # fact resolves to `sh`, the finding is a false positive someone silences
+        # with the marker -- the accepted direction; the other one is a miss.
+        return KEYWORD_FLAGS["bash"]
     # A custom command line, used VERBATIM by GitHub -- so its flags are
     # whatever is written, and no `-e` is implied.
     tokens = spec.split()

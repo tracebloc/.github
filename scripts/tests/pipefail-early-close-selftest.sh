@@ -693,6 +693,15 @@ yaml_flag shcustomeo "...but a custom 'bash -eo pipefail {0}' IS armed" \
   "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -eo pipefail {0}\n        $HAZ_BODY"
 yaml_spare shpython "'shell: python' is not a POSIX shell and carries no pipefail" \
   "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: python\n        $HAZ_BODY"
+# An UNRECOGNISED shell -- here a GitHub expression that resolves at run time --
+# must fail CLOSED on the HAZARD, not just on scope: assume the most hazardous
+# resolution (bash with pipefail) so an interpolated bash step's `| head` IS
+# flagged. Returning DEFAULT_FLAGS ("-e") kept the block in scope but left
+# pipefail off, so the hazard read clean -- the vacuous hole this file closes
+# (Bugbot #402). Mutation: revert flags_for_shell's unrecognised arm to
+# DEFAULT_FLAGS and this flips to spared.
+yaml_flag shexpr "an expression 'shell: \${{ matrix.shell }}' is scanned WITH pipefail (fail closed)" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: \${{ matrix.shell }}\n        $HAZ_BODY"
 
 echo
 echo "-- 'defaults.run.shell' applies, at both levels -------------------------------"
