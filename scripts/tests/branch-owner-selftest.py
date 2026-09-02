@@ -16,7 +16,9 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from branch_owner import (  # noqa: E402
-    PR_LIMIT,
+    INCOMPLETE_PR_LIST,
+    PAGE_SIZE,
+    PR_QUERY,
     SIGNALS,
     UNATTRIBUTABLE,
     attribute,
@@ -300,8 +302,65 @@ try:
             return rc, out
         return run
 
+    import json as _json
+
+    REPO = "tracebloc/backend"
+
+    def graphql_pages(rows, total=None, per_page=None):
+        """A `gh api graphql --paginate --slurp` body: `rows` split into pages.
+
+        `total` defaults to len(rows) -- a COMPLETE read. Passing a LARGER one is
+        how a short read is constructed: the repository says it has N and the pages
+        carry fewer, which is exactly the shape pagination stopping early leaves
+        behind, and nothing about it has to be assumed about gh's internals.
+        """
+        per_page = PAGE_SIZE if per_page is None else per_page
+        total = len(rows) if total is None else total
+        chunks = [rows[i:i + per_page] for i in range(0, len(rows), per_page)] or [[]]
+        return _json.dumps([
+            {"data": {"repository": {"pullRequests": {
+                "totalCount": total,
+                "pageInfo": {"hasNextPage": i < len(chunks) - 1,
+                             "endCursor": f"cursor{i}"},
+                "nodes": chunk}}}}
+            for i, chunk in enumerate(chunks)])
+
+    # THE CURSOR VARIABLE'S NAME IS THE TRAP, so it is a machine check on the query
+    # text rather than a comment asking the next editor to be careful. `gh
+    # --paginate` injects the next cursor into `$endCursor` and no other name;
+    # misname it and gh re-requests page 1 forever, and the secondary rate limit
+    # that loop trips does not show up in `gh api rate_limit` -- so the failure does
+    # not even look like a failure. Asserted on BOTH halves: the declaration and
+    # the use, because renaming either one alone is enough to break it.
+    eq("the paged query declares the cursor variable gh will inject",
+       "$endCursor: String" in PR_QUERY, True)
+    eq("the paged query actually pages on that variable",
+       "after: $endCursor" in PR_QUERY, True)
+    eq("no other cursor variable name is used",
+       [w for w in PR_QUERY.split() if w.startswith("$cursor")], [])
+    eq("the page size asked for is GitHub's connection maximum", PAGE_SIZE, 100)
+    eq("the query asks the repository for its own count, to check the read against",
+       "totalCount" in PR_QUERY, True)
+
+    # ... and the read must actually ASK to be paged and slurped, or the query above
+    # returns exactly one page and every completeness check below is vacuous.
+    calls.clear()
+    _m._run = stub(0, graphql_pages([]))
+    _m.pull_requests(REPO)
+    args = calls[-1]
+    eq("the read pages to the end", "--paginate" in args, True)
+    eq("the pages come back as one document", "--slurp" in args, True)
+    eq("the repo is passed as the query's two halves",
+       [a for a in args if a.startswith(("owner=", "name="))],
+       ["owner=tracebloc", "name=backend"])
+    # `-f` NOT `-F`: `-F` types its value, and a numeric repo name then arrives as
+    # an int against a `String!` variable. Measured 2026-09-01: `-F name=123` is
+    # refused with "Could not coerce value 123 to String", `-f name=123` is not.
+    eq("the variables are sent as strings, so a numeric repo name still resolves",
+       [a for a in args if a == "-F"], [])
+
     _m._run = stub(1, "")
-    heads, problem = _m.pull_requests()
+    heads, problem = _m.pull_requests(REPO)
     eq("a failed gh call yields no heads", heads, {})
     if problem and "proves nothing" in problem:
         ok("a failed gh call yields a problem that explains itself")
@@ -309,50 +368,161 @@ try:
         bad(f"a failed gh call did not fail closed: {problem!r}")
 
     _m._run = stub(0, "not json at all")
-    heads, problem = _m.pull_requests()
+    heads, problem = _m.pull_requests(REPO)
     if problem and "JSON" in problem:
         ok("an unparseable list is a problem, not an empty result")
     else:
         bad(f"an unparseable list was accepted: {problem!r}")
 
+    # `--slurp` wraps the pages in ONE array, so a bare object is a shape problem
+    # and not "a single page".
     _m._run = stub(0, '{"headRefName": "x"}')
-    heads, problem = _m.pull_requests()
+    heads, problem = _m.pull_requests(REPO)
     if problem and "not a list" in problem:
-        ok("a list that is not a list is a problem")
+        ok("a body that is not a list of pages is a problem")
     else:
         bad(f"a non-list was accepted: {problem!r}")
 
-    # THE SILENT-TRUNCATION CASE. Exactly PR_LIMIT rows means the window may be
-    # partial, so absence from it proves nothing -- derived from PR_LIMIT, not
-    # from a hand-typed number.
-    import json as _json
-    capped = _json.dumps([pr(i, "x", f"b{i}", "0" * 40) for i in range(PR_LIMIT)])
-    _m._run = stub(0, capped)
-    heads, problem = _m.pull_requests()
-    if problem and str(PR_LIMIT) in problem:
-        ok(f"a list of exactly {PR_LIMIT} rows is reported as possibly truncated")
+    # A GRAPHQL ERROR IS AN HTTP 200. Reading only the exit code turns a bad field,
+    # a missing repo and a permissions failure alike into "no pull requests".
+    _m._run = stub(0, _json.dumps([{"data": None, "errors": [
+        {"message": "Could not resolve to a Repository with the name 'x/y'."}]}]))
+    heads, problem = _m.pull_requests(REPO)
+    eq("an errors[] payload at exit 0 yields no heads", heads, {})
+    if problem and "Could not resolve" in problem:
+        ok("an errors[] payload at exit 0 is a refusal that quotes the error")
     else:
-        bad(f"the --limit cap was not detected: {problem!r}")
+        bad(f"a GraphQL error at exit 0 was accepted: {problem!r}")
 
-    under = _json.dumps([pr(i, "x", f"b{i}", "0" * 40) for i in range(PR_LIMIT - 1)])
-    _m._run = stub(0, under)
-    heads, problem = _m.pull_requests()
-    eq(f"a list of {PR_LIMIT - 1} rows is not truncated", problem, "")
-    eq("rows are grouped by head ref", len(heads), PR_LIMIT - 1)
+    # --- THE REGRESSION THIS TICKET IS FOR ---------------------------------
+    #
+    # A repo with MORE PULL REQUESTS THAN ONE PAGE STILL ATTRIBUTES. Under the old
+    # `--limit 1000` the largest repo in the org refused outright -- 108 branches,
+    # 0 attributed -- so "the read spans pages and the answer still comes back" is
+    # the case that has to hold, not merely "a big read is refused politely".
+    # PAGE_SIZE * 2 + 50 rows, so the last page is a PARTIAL one: an off-by-one in
+    # the paging would land exactly here.
+    many = [pr(i, "saqlainsyed007", f"b{i}", f"{i:040d}")
+            for i in range(PAGE_SIZE * 2 + 50)]
+    _m._run = stub(0, graphql_pages(many))
+    heads, problem = _m.pull_requests(REPO)
+    eq(f"a {len(many)}-pull-request repo is read across pages without refusing",
+       problem, "")
+    eq("every row from every page arrives", sum(len(v) for v in heads.values()),
+       len(many))
+    eq("rows are grouped by head ref", len(heads), len(many))
+    # ... and the rows still carry what the RULE reads, so paging did not change
+    # the shape `attribute` was written against.
+    last = heads[f"b{len(many) - 1}"][0]
+    got = att(last["headRefName"], last["headRefOid"], [last])
+    eq("a branch from the last page attributes from its PR author",
+       (got.owner, got.signal), ("saqlainsyed007", "pr-exact"))
 
-    _m._run = stub(0, _json.dumps([pr(1, "a", "same", "0" * 40),
-                                   pr(2, "b", "same", "1" * 40)]))
-    heads, problem = _m.pull_requests()
+    # --- AND THE BACKSTOP STILL REFUSES ------------------------------------
+    #
+    # Pagination CAN stop early, and then the list is short. Derived from the
+    # repository's own totalCount, so this is two measured numbers disagreeing
+    # rather than a ceiling somebody picked -- and it is a MARKED refusal, because
+    # `main` exits non-zero on this and on nothing else.
+    short = graphql_pages(many[:PAGE_SIZE], total=len(many))
+    _m._run = stub(0, short)
+    heads, problem = _m.pull_requests(REPO)
+    eq("a short read yields no heads at all", heads, {})
+    eq("a short read is a marked refusal", problem.startswith(INCOMPLETE_PR_LIST),
+       True)
+    eq("the refusal names the repo it is about", REPO in problem, True)
+    for what, number in (("what the repo says it has", len(many)),
+                         ("what the read returned", PAGE_SIZE),
+                         ("the shortfall", len(many) - PAGE_SIZE)):
+        eq(f"the refusal names {what}", str(number) in problem, True)
+    if "not a" in problem and "unattributable" in problem:
+        ok("the refusal says outright it is not an 'unattributable' finding")
+    else:
+        bad(f"the refusal does not distinguish itself: {problem!r}")
+
+    # A PAGE THAT CAME BACK TWICE is what a broken cursor looks like on the near
+    # side of the infinite loop, and it would otherwise pass the count check by
+    # accident once the duplicates make the totals line up.
+    dupes = many[:PAGE_SIZE] + many[:PAGE_SIZE]
+    _m._run = stub(0, graphql_pages(dupes, total=len(dupes)))
+    heads, problem = _m.pull_requests(REPO)
+    eq("a duplicated page is a marked refusal",
+       (heads, problem.startswith(INCOMPLETE_PR_LIST)), ({}, True))
+    if "distinct" in problem and "endCursor" in problem:
+        ok("the duplicate refusal names the cursor as the likely cause")
+    else:
+        bad(f"a duplicated page was not diagnosed: {problem!r}")
+
+    # A COUNT THAT DISAGREES WITH ITSELF between pages is a repo that changed
+    # mid-read: there is then no single number to check against, and "cannot tell"
+    # is a refusal rather than a pass.
+    pages = _json.loads(graphql_pages(many))
+    pages[-1]["data"]["repository"]["pullRequests"]["totalCount"] = len(many) + 1
+    _m._run = stub(0, _json.dumps(pages))
+    heads, problem = _m.pull_requests(REPO)
+    eq("a totalCount that disagrees across pages is a marked refusal",
+       (heads, problem.startswith(INCOMPLETE_PR_LIST)), ({}, True))
+
+    # ... and so is a count that never came back at all, which would otherwise
+    # compare a list against None and take the mismatch for a short read.
+    pages = _json.loads(graphql_pages(many))
+    for page in pages:
+        del page["data"]["repository"]["pullRequests"]["totalCount"]
+    _m._run = stub(0, _json.dumps(pages))
+    eq("a missing totalCount is a marked refusal",
+       _m.pull_requests(REPO)[1].startswith(INCOMPLETE_PR_LIST), True)
+
+    # --- THE MARKER MUST BE EXCLUSIVE --------------------------------------
+    #
+    # `main` exits non-zero on the marked refusal and on no other problem, so a
+    # bare non-zero would leave a cap-hit and a dead network indistinguishable --
+    # which is where this ticket started. That is a claim about the seam's WHOLE
+    # problem domain, so it is asserted against every other problem it can produce
+    # rather than about the one string above.
+    for label, answer in (("a failed gh call", (1, "")),
+                          ("a missing gh", (127, "gh: not found")),
+                          ("an unparseable body", (0, "not json at all")),
+                          ("a body that is not a list", (0, '{"a": 1}')),
+                          ("a page with no pullRequests", (0, '[{"data": {}}]')),
+                          ("an errors[] payload",
+                           (0, '[{"errors": [{"message": "nope"}]}]'))):
+        _m._run = stub(*answer)
+        _, other = _m.pull_requests(REPO)
+        eq(f"{label} is a problem, but NOT the incomplete-list refusal",
+           (bool(other), other.startswith(INCOMPLETE_PR_LIST)), (True, False))
+
+    _m._run = stub(0, graphql_pages([pr(1, "a", "same", "0" * 40),
+                                     pr(2, "b", "same", "1" * 40)]))
+    heads, problem = _m.pull_requests(REPO)
     eq("two PRs on one head land in one group", len(heads.get("same", [])), 2)
 
-    # `--repo` is only added when asked for, so the tool works in a bare clone.
+    # --- WHICH REPO IS BEING READ -----------------------------------------
+    #
+    # GraphQL has no `{owner}/{repo}` placeholder, so the resolution `gh pr list`
+    # did implicitly now happens in the open -- and can fail, which is a refusal.
+    eq("owner/name is split for the query", _m.repo_identity("tracebloc/client"),
+       ("tracebloc", "client", ""))
+    for bad_repo in ("tracebloc", "/client", "tracebloc/", "a/b/c", ""):
+        if bad_repo == "":
+            continue
+        owner, name, why = _m.repo_identity(bad_repo)
+        eq(f"{bad_repo!r} is not a repository and is refused, not guessed at",
+           (owner, name, bool(why)), ("", "", True))
+    # ... and with nothing passed, the clone is asked -- by a command that has no
+    # `--repo` flag to get wrong (see `default_branch`).
     calls.clear()
-    _m._run = stub(0, "[]")
-    _m.pull_requests("tracebloc/client")
-    eq("--repo is passed through", "tracebloc/client" in calls[-1], True)
-    calls.clear()
-    _m.pull_requests()
-    eq("--repo is absent by default", "--repo" in calls[-1], False)
+    _m._run = stub(0, "tracebloc/.github")
+    eq("a bare clone resolves itself", _m.repo_identity(),
+       ("tracebloc", ".github", ""))
+    eq("the clone is asked for nameWithOwner", "nameWithOwner" in calls[-1], True)
+    eq("no --repo flag is handed to `gh repo view`", "--repo" in calls[-1], False)
+    _m._run = stub(1, "")
+    owner, name, why = _m.repo_identity()
+    eq("a clone that cannot be identified is a refusal", (owner, name), ("", ""))
+    if why and "proves nothing" in why:
+        ok("an unidentifiable clone fails closed rather than reading some other repo")
+    else:
+        bad(f"an unidentifiable clone did not fail closed: {why!r}")
 
     # THE OLDEST COMMIT, NOT THE TIP. git prints oldest-first under --reverse, so
     # the first line is the one to take -- and the request must say --reverse and
@@ -453,9 +623,43 @@ try:
     eq("the named ref is verified to exist locally",
        any("rev-parse" in c and "origin/develop" in c for c in calls), True)
 
+    # --- WITH A REPO NAMED, THE REMOTE MUST ACTUALLY BE ASKED --------------
+    #
+    # `gh repo view` HAS NO `--repo` FLAG. It takes the repository positionally
+    # (`gh repo view [<repository>] [flags]`) and the flag form exits 1 with
+    # `unknown flag: --repo` -- measured 2026-09-01. This seam built the flag form,
+    # so on EVERY `--repo` run the authoritative lookup failed unasked, the answer
+    # fell through to `origin/HEAD` (a clone-time cache), the first-commit signal
+    # was withheld for every branch, and the message blamed a remote that was never
+    # queried. On `tracebloc/backend` that alone cost 14 of 108 attributions
+    # (backend#2972).
+    #
+    # ASSERTING THE ARGUMENT SHAPE IS THE WEAK TEST, and its weakness is why this
+    # survived: a permissive stub answers a malformed command as happily as a good
+    # one, so a case named "--repo reaches the default-branch query" passed
+    # throughout. This stub instead MODELS gh's real accepted surface -- it refuses
+    # an unknown flag the way gh does -- and the assertion is that the problem
+    # string comes back EMPTY, which only a command gh would accept can achieve.
+    def gh_like(answer):
+        def run(args):
+            calls.append(args)
+            if args[:3] == ["gh", "repo", "view"] and "--repo" in args:
+                return 1, ""          # exactly what gh does: unknown flag
+            return answer
+        return run
+
     calls.clear()
-    _m.default_branch("tracebloc/client")
-    eq("--repo reaches the default-branch query", "tracebloc/client" in calls[0], True)
+    _m._run = gh_like((0, "develop"))
+    eq("a named repo reaches the AUTHORITATIVE default-branch lookup",
+       _m.default_branch("tracebloc/client"), ("origin/develop", ""))
+    eq("the repo is named to the command in the form that command accepts",
+       "tracebloc/client" in calls[0], True)
+
+    # ... and the same surface, applied to the other seam that calls `gh repo view`.
+    calls.clear()
+    _m._run = gh_like((0, "tracebloc/client"))
+    eq("resolving a bare clone reaches the authoritative lookup too",
+       _m.repo_identity(), ("tracebloc", "client", ""))
     seq2 = [(0, "develop"), (1, "")]          # gh answers; the local ref is absent
     _m._run = lambda args: seq2.pop(0)
     ref, why = _m.default_branch()
@@ -512,7 +716,12 @@ try:
     # argument reverts the whole fix while every isolated case stays green -- which
     # is exactly what a mutation run showed. So this drives the real entry point.
     def run_main(answers, argv=()):
-        """(exit code, stdout) with `_run` answering per command."""
+        """(exit code, stdout, stderr) with `_run` answering per command.
+
+        STDERR IS RETURNED, NOT DISCARDED: every refusal this entry point makes is
+        written there, so a case reading only the exit code cannot say WHICH refusal
+        it got -- and a short read and a dead network would look alike again.
+        """
         def fake(args):
             joined = " ".join(args)
             for needle, reply in answers:
@@ -520,15 +729,21 @@ try:
                     return reply
             return 0, ""
         _m._run = fake
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+        buf, ebuf = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(ebuf):
             code = _m.main(list(argv))
-        return code, buf.getvalue()
+        return code, buf.getvalue(), ebuf.getvalue()
 
-    GOOD_HEAD = [("repo view", (0, "develop")), ("pr list", (0, "[]")),
+    # NEEDLES ARE MATCHED AGAINST THE JOINED COMMAND, so `gh repo view` has to be
+    # disambiguated BY THE FIELD IT ASKS FOR: two seams call it now, and a bare
+    # "repo view" needle answers whichever one asks first -- a fake that agrees with
+    # itself instead of with the module.
+    GOOD_HEAD = [("defaultBranchRef", (0, "develop")),
+                 ("nameWithOwner", (0, "tracebloc/backend")),
+                 ("graphql", (0, graphql_pages([]))),
                  ("for-each-ref", (0, "origin/feat/x\tabc123"))]
 
-    code, out = run_main([*GOOD_HEAD, ("git log", (128, ""))])
+    code, out, _ = run_main([*GOOD_HEAD, ("git log", (128, ""))])
     eq("main exits 0 having reported the branch", code, 0)
     if "was not measured" in out and "git log" in out:
         ok("main carries a FAILED history read through to the row as unmeasured")
@@ -541,7 +756,7 @@ try:
 
     # ... and with the same shape but a SUCCESSFUL empty history, the other
     # sentence is the right one. Pinned apart end-to-end, not only at the seam.
-    code, out = run_main([*GOOD_HEAD, ("git log", (0, ""))])
+    code, out, _ = run_main([*GOOD_HEAD, ("git log", (0, ""))])
     eq("main exits 0 on a genuinely empty history", code, 0)
     if "no commit on this branch" in out and "was not measured" not in out:
         ok("main renders a genuinely empty history as exactly that")
@@ -550,15 +765,79 @@ try:
 
     # A FAILED ENUMERATION IS A NON-ZERO EXIT, not a report of zero branches --
     # Saqlain's finding, asserted at the entry point he was reading.
-    code, out = run_main([("repo view", (0, "develop")), ("pr list", (0, "[]")),
-                          ("for-each-ref", (128, ""))])
+    code, out, _ = run_main([*GOOD_HEAD[:3], ("for-each-ref", (128, ""))])
     eq("main refuses when the branch list could not be read", code, 2)
     eq("main prints no rows when it refuses", out.strip(), "")
 
     # ... while a genuinely empty remote is a clean, zero-row success.
-    code, out = run_main([("repo view", (0, "develop")), ("pr list", (0, "[]")),
-                          ("for-each-ref", (0, ""))])
+    code, out, _ = run_main([*GOOD_HEAD[:3], ("for-each-ref", (0, ""))])
     eq("main exits 0 on a genuinely empty remote", code, 0)
+
+    # --- MORE PULL REQUESTS THAN ONE PAGE, END TO END ----------------------
+    #
+    # THE CASE THE TICKET WAS FILED FOR (backend#2972), driven through the entry
+    # point rather than described. `tracebloc/backend`'s 1418 pull requests against
+    # the old `--limit 1000` made the seam fail closed, and `main` printed
+    #
+    #     108 branch(es): 0 attributed, 108 unattributable
+    #
+    # and exited 0 -- indistinguishable from a repo whose branches genuinely cannot
+    # be attributed, in the repo where 102 of the 108 do attribute. A seam that
+    # pages correctly buys nothing if `main` cannot carry a multi-page answer, so
+    # this asserts the ANSWER, not merely the absence of a refusal.
+    spread = [pr(i, "shujaatTracebloc", f"old/{i}", f"{i:040d}")
+              for i in range(PAGE_SIZE * 2 + 7)]
+    spread.append(pr(9999, "waqaskhanroghani", "feat/x", "abc123"))
+    code, out, err = run_main(
+        [*GOOD_HEAD[:2], ("graphql", (0, graphql_pages(spread))),
+         ("for-each-ref", (0, "origin/feat/x\tabc123")),
+         ("git log", (0, "First Person <first@example.com>"))],
+        argv=("--repo", "tracebloc/backend"))
+    eq(f"main attributes across a {len(spread)}-pull-request repo", code, 0)
+    eq("the owner comes from the PR author on a paged read",
+       [ln for ln in out.splitlines() if ln.startswith("feat/x\t")],
+       ["feat/x\twaqaskhanroghani\tpr-exact\tPR #9999 author, head oid matches the tip"])
+    eq("the tally is a measurement, with nothing appended to it",
+       err.strip().endswith("1 branch(es): 1 attributed, 0 unattributable"), True)
+
+    # --- AND AN INCOMPLETE READ IS A REFUSAL, NOT A ZERO-ROW ANSWER --------
+    #
+    # The backstop survives the fix: pagination stopping early is now a real
+    # "could not read it all" rather than the routine condition it used to be, and
+    # it must not come back as rows.
+    code, out, err = run_main(
+        [*GOOD_HEAD[:2],
+         ("graphql", (0, graphql_pages(spread[:PAGE_SIZE], total=len(spread)))),
+         ("for-each-ref", (0, "origin/feat/x\tabc123"))],
+        argv=("--repo", "tracebloc/backend"))
+    eq("main refuses an incomplete PR list instead of reporting rows", code, 2)
+    eq("main prints no rows out of a short read", out.strip(), "")
+    # NOT A BARE NON-ZERO: that is also what a dead network returns, and a caller
+    # who cannot tell them apart is back where this ticket started.
+    eq("main's refusal is the incomplete-list one specifically",
+       INCOMPLETE_PR_LIST in err, True)
+    eq("main's refusal names the repo whose read fell short",
+       "tracebloc/backend" in err, True)
+    eq("main's refusal names both counts",
+       (str(len(spread)) in err, str(PAGE_SIZE) in err), (True, True))
+    # ... and prints NO tally at all, because a tally is the shape of an answer.
+    eq("main prints no branch tally for a short read", "branch(es):" in err, False)
+
+    # ... while the PR-list problems that are NOT a short read still report their
+    # rows -- with the one reason they were all refused for carried into the tally,
+    # since `0 attributed, N unattributable` alone is the same misreading one path
+    # over. Pinned in both directions, or "refuse on a short read" degrades into
+    # "refuse whenever the PR list is imperfect".
+    code, out, err = run_main([*GOOD_HEAD[:2], ("graphql", (1, "")),
+                               ("for-each-ref", (0, "origin/feat/x\tabc123"))],
+                              argv=("--repo", "tracebloc/backend"))
+    eq("a PR list that could not be read still reports its rows", code, 0)
+    eq("its rows are all refused for the unread list",
+       out.count("the pull-request list is not evidence"), 1)
+    if "every row refused for one reason" in err and "proves nothing" in err:
+        ok("the tally carries the one reason every row was refused for")
+    else:
+        bad(f"the tally hid the reason behind a bare count: {err.strip()[-200:]!r}")
 finally:
     _m._run = _real
 
