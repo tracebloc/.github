@@ -257,9 +257,32 @@ FNR == 1 {
   # The terminator class matters: `head` can be followed by a CLOSING delimiter,
   # not just whitespace or end-of-line. `x="$(cmd | head)"` ends at `)` and then
   # `"`, and requiring space-or-EOL missed exactly that shape (Bugbot #763).
+  #
+  # `sed q` AND `| read` ARE MEMBERS TOO, and both were missed (backend#2967).
+  # Measured, 20k lines vs 200 through `bash -eo pipefail`:
+  #     head -1 / head -n1 / head -n 1 / head   0  -> 141   (already caught)
+  #     grep -q / grep -m 1  (matching early)   0  -> 141   (already caught)
+  #     sed q / sed 1q                          0  -> 141   NOT caught
+  #     read -r l                               0  -> 141   NOT caught
+  #     grep -c / sed -n 1p / tail -1 / sort     0  ->   0   correctly spared
+  # The last row is the discrimination and is asserted: a reader that runs to
+  # EOF is not this class, and an arm that flagged it would be reporting on
+  # `| sort`.
+  #
+  # THE SED SCRIPT TOKEN IS MATCHED EXACTLY, `[0-9]*q` optionally quoted, not
+  # `sed[^|]*q`. The loose form flags `sed 's/a/q/'` -- a substitution that
+  # reads to EOF -- and a gate that reports on ordinary `sed` gets switched off.
+  # `sed -n 1p` has no `q` and stays spared, which is what pins the difference.
+  #
+  # `read` MUST SIT DIRECTLY AFTER THE BAR. `producer | while read -r l` is the
+  # opposite of this class: the loop reads to EOF, so nothing SIGPIPEs. Only a
+  # bare `| read` closes early, and requiring `read` to be the first token is
+  # what separates them.
   if (probe ~ /\|&?[[:space:]]*head([[:space:]]|$|[)"'\''`;|&\001])/ \
       || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*q/ \
-      || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/) {
+      || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/ \
+      || probe ~ /\|&?[[:space:]]*sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*'?[0-9]*q'?([[:space:]]|$|[)"'\''`;|&\001])/ \
+      || probe ~ /\|&?[[:space:]]*read([[:space:]]|$|[)"'\''`;|&\001])/) {
       sub(/^[[:space:]]+/, "", line)
       print curfile ":" FNR ": " line
       break
