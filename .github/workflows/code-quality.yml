@@ -638,6 +638,20 @@ jobs:
           path: .quality-tools
           persist-credentials: false
 
+      # PyYAML IS PROVISIONED, NEVER ASSUMED. The YAML phase imports it, and a
+      # missing import is (correctly) exit 2 -- "cannot tell" is a finding. But
+      # an rc 2 is a HARD failure regardless of soft-fail, so relying on
+      # whatever the runner image happens to ship would turn the first run of
+      # this coverage into a red gate across the fleet. Same pin and same
+      # invocation as selftests.yml and caller-drift.yml.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: ${{ inputs.yaml-run-blocks }}
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML for the YAML run-block phase
+        if: ${{ inputs.yaml-run-blocks }}
+        run: python -m pip install --quiet --disable-pip-version-check 'pyyaml==6.0.2'
+
       - name: pipefail early-close
         env:
           SOFT_FAIL: ${{ inputs.soft-fail }}

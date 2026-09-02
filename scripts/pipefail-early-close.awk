@@ -279,7 +279,7 @@ FNR == 1 {
   # bare `| read` closes early, and requiring `read` to be the first token is
   # what separates them.
   if (probe ~ /\|&?[[:space:]]*head([[:space:]]|$|[)"'\''`;|&\001])/ \
-      || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*q/ \
+      || probe ~ /\|&?[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*q/ \
       || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/ \
       || probe ~ /\|&?[[:space:]]*sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*'?[0-9]*q'?([[:space:]]|$|[)"'\''`;|&\001])/ \
       || probe ~ /\|&?[[:space:]]*read([[:space:]]|$|[)"'\''`;|&\001])/) {
