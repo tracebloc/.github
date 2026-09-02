@@ -132,12 +132,34 @@ def _scalar(node):
 
 
 def _mapping_get(node, key):
-    """The value node for `key`, or None. Mapping nodes only."""
+    """The value node for `key`, or None. Mapping nodes only.
+
+    Honours YAML `<<:` merge keys. `yaml.compose` already resolves ALIASES to
+    the anchored node -- an aliased step (`- *anchor`) arrives here as a real
+    MappingNode and is scanned normally -- but it does NOT expand merges, so a
+    step whose `run:`/`shell:` lives only on a `<<: *anchor` merge would be read
+    as if it had neither, and the gate would report a verdict without scanning
+    that block (Bugbot #404, the vacuous-success hole this file closes).
+
+    A directly-present key wins over any merged one, and within a sequence merge
+    (`<<: [*a, *b]`) earlier entries win -- both per the YAML merge-key spec.
+    """
     if not isinstance(node, yaml.MappingNode):
         return None
+    merge = None
     for k, v in node.value:
         if _scalar(k) == key:
-            return v
+            return v  # a direct key always wins over a merged one
+        if _scalar(k) == "<<":
+            merge = v
+    if merge is not None:
+        # The merge value is one mapping, or a sequence of them (earlier first).
+        # compose has resolved each alias to its anchored MappingNode already.
+        sources = merge.value if isinstance(merge, yaml.SequenceNode) else [merge]
+        for src in sources:
+            found = _mapping_get(src, key)
+            if found is not None:
+                return found
     return None
 
 

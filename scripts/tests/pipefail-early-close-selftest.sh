@@ -588,6 +588,17 @@ yaml_spare shcustomo "a custom 'bash -o pipefail {0}' has pipefail but NO errexi
 yaml_spare shpython "'shell: python' is not a POSIX shell and carries no pipefail" \
   "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: python\n        $HAZ_BODY"
 
+# ANCHORS, ALIASES AND `<<:` MERGES must not create a vacuous verdict (Bugbot
+# #404). The anchor lives under a top-level `x-templates` key that collect_steps
+# never visits, so the ONLY scanned step is the alias/merge one -- if it flags,
+# it is because the alias/merge was actually followed. yaml.compose resolves
+# aliases on its own; the merge is what _mapping_get had to learn.
+ANCHORED='name: j\non:\n  push:\nx-templates:\n  base: &base\n    shell: bash\n    run: |\n      x=$(printf "%%s" "$Y" | head -1)\n'
+yaml_flag shalias "an aliased step (`- *base`) is resolved and scanned" \
+  "${ANCHORED}jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - *base\n"
+yaml_flag shmerge "a step whose shell/run arrive via '<<: *base' IS scanned" \
+  "${ANCHORED}jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - <<: *base\n        name: merged\n"
+
 echo
 echo "-- 'defaults.run.shell' applies, at both levels -------------------------------"
 # A step with no `shell:` inherits the job's default, and failing over to the
