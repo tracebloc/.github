@@ -510,13 +510,21 @@ echo "== THE REQUIREMENT, MEASURED: which consumers actually SIGPIPE ===========
 # survive, and why a gate tested only on a small payload proves nothing.
 # Measured here, and the numbers are the ticket's: 200 lines (~2.6KB) vs 20000
 # (~260KB).
-BIG=$(awk 'BEGIN { for (i = 0; i < 20000; i++) printf "line%08d\n", i }')
-SMALL=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "line%08d\n", i }')
+# THE PAYLOADS ARE FILES, NOT ENVIRONMENT VARIABLES, and that is portability
+# rather than style. Passed as `BIG=$BIG bash -c ...`, the 260KB payload
+# exceeds Linux's MAX_ARG_STRLEN (128KB for a single string), `execve` refuses,
+# and bash reports 126 -- so EVERY consumer measured "126 at both sizes", every
+# member looked like a non-member, and the suite went 17 red. macOS has no
+# per-string cap, so the first version passed locally and failed only in CI.
+awk 'BEGIN { for (i = 0; i < 20000; i++) printf "line%08d\n", i }' > "$WORK/payload-BIG"
+awk 'BEGIN { for (i = 0; i < 200;   i++) printf "line%08d\n", i }' > "$WORK/payload-SMALL"
 
-# rc of `printf "$payload" | <consumer>` under errexit+pipefail.
+# rc of `cat <payload> | <consumer>` under errexit+pipefail. `cat` is the
+# producer that takes the SIGPIPE, exactly as `printf`/`kubectl`/`jq` do in the
+# real instances.
 measure() {  # $1 = consumer ; $2 = SMALL|BIG -> sets MRC
-  C="$1" S="$2" BIG="$BIG" SMALL="$SMALL" bash -c \
-    'set -eo pipefail; P=${!S}; printf "%s\n" "$P" | $C >/dev/null' 2>/dev/null
+  C="$1" PAYLOAD="$WORK/payload-$2" bash -c \
+    'set -eo pipefail; cat "$PAYLOAD" | $C >/dev/null' 2>/dev/null
   MRC=$?
 }
 # Does the gate flag that same consumer, in a file where both options are live?
@@ -581,8 +589,8 @@ CONSUMERS
 # nothing SIGPIPEs -- and an arm matching `read` anywhere after the bar would
 # report on it. Measured inline, then asserted against the detector.
 WHILE_RC=0
-BIG="$BIG" bash -c 'set -eo pipefail; printf "%s\n" "$BIG" | while read -r l; do :; done' \
-  2>/dev/null || WHILE_RC=$?
+PAYLOAD="$WORK/payload-BIG" bash -c \
+  'set -eo pipefail; cat "$PAYLOAD" | while read -r l; do :; done' 2>/dev/null || WHILE_RC=$?
 detects 'while read -r l; do :; done'
 if [ "$WHILE_RC" = 0 ] && [ -z "$DOUT" ]; then
   record 0 "'| while read' reads to EOF at 260KB (rc 0) -- and is spared" ""
@@ -615,15 +623,22 @@ scan_yaml() {  # $1 = name ; $2 = printf FORMAT for the workflow file
   # shellcheck disable=SC2059  # $2 IS the format, by contract
   printf "$2" > "$d/.github/workflows/w.yml"
   ( cd "$d" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f ) >/dev/null
-  OUT=$(PIPEFAIL_ROOT="$d" bash "$GATE_ABS" 2>&1); RC=$?
+  # STDERR IS KEPT SEPARATE, never folded into OUT. Under `2>&1`, gawk's
+  # long-standing warning about the `\"` in the `|| true` spare regex
+  # (pipefail-early-close.awk:237 -- byte-identical on develop, so not from
+  # this change) landed in OUT, and every "spares" assertion then saw non-empty
+  # output and failed. macOS awk emits no such warning, which is why it passed
+  # locally. An assertion about FINDINGS must read the findings stream only.
+  OUT=$(PIPEFAIL_ROOT="$d" bash "$GATE_ABS" 2>"$WORK/yerr"); RC=$?
+  ERRTXT=$(cat "$WORK/yerr" 2>/dev/null)
 }
 yaml_flag()  { # $1 name ; $2 desc ; $3 format
   scan_yaml "$1" "$3"
-  if [ "$RC" = 1 ] && [ -n "$OUT" ]; then record 0 "$2" ""; else record 1 "$2" "rc=$RC out=$OUT"; fi
+  if [ "$RC" = 1 ] && [ -n "$OUT" ]; then record 0 "$2" ""; else record 1 "$2" "rc=$RC out=$OUT err=$ERRTXT"; fi
 }
 yaml_spare() { # $1 name ; $2 desc ; $3 format
   scan_yaml "$1" "$3"
-  if [ "$RC" = 0 ] && [ -z "$OUT" ]; then record 0 "$2" ""; else record 1 "$2" "rc=$RC out=$OUT"; fi
+  if [ "$RC" = 0 ] && [ -z "$OUT" ]; then record 0 "$2" ""; else record 1 "$2" "rc=$RC out=$OUT err=$ERRTXT"; fi
 }
 
 # f4d6fec's LITERAL line, in f4d6fec's shape: a `shell: bash` step. This is the
@@ -704,7 +719,8 @@ scan_yaml_action() {  # $1 = name ; $2 = format
   # shellcheck disable=SC2059
   printf "$2" > "$d/.github/actions/thing/action.yml"
   ( cd "$d" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f ) >/dev/null
-  OUT=$(PIPEFAIL_ROOT="$d" bash "$GATE_ABS" 2>&1); RC=$?
+  OUT=$(PIPEFAIL_ROOT="$d" bash "$GATE_ABS" 2>"$WORK/yerr"); RC=$?
+  ERRTXT=$(cat "$WORK/yerr" 2>/dev/null)
 }
 scan_yaml_action composite \
   'name: t\ndescription: d\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: |\n        x=$(printf "%%s" "$Y" | head -1)\n'
@@ -777,6 +793,51 @@ if grep -q 's\.sh:3:' <<<"$A" && ! grep -q 'w\.yml' <<<"$A" \
   record 0 "scope=shell, scope=yaml and scope=all each report their own half" ""
 else
   record 1 "the three scopes must differ" "shell=[$A] yaml=[$B] all=[$C]"
+fi
+
+echo
+echo "== A CLEAN RUN IS SILENT ON STDERR ==========================================="
+# THE DEFECT THIS PINS, and it is the same shape as the bug this whole file is
+# about: output that is not what the assertion thinks it is.
+#
+# `pipefail-early-close.awk:237` carried `\"` inside a bracket expression. BSD
+# awk (every macOS) accepts it silently; gawk (every ubuntu-latest runner)
+# emitted `warning: regexp escape sequence` on EVERY invocation. A helper here
+# folded the gate's stderr into its captured output with `2>&1`, so five
+# unrelated "is spared" assertions saw non-empty output and failed -- in CI
+# only, invisible locally. Two separate fixes came out of it: the helpers now
+# keep the streams apart, and THIS asserts the invariant that made the
+# confusion possible. A gate with nothing to report reports nothing, on both
+# streams; any future warning reddens here, with its text, instead of surfacing
+# as a handful of baffling failures somewhere else.
+rm -rf "$WORK/quiet"; mkdir -p "$WORK/quiet/.github/workflows"
+printf '#!/usr/bin/env bash\nset -euo pipefail\nhead -1 <<<"$x"\n' > "$WORK/quiet/ok.sh"
+printf 'name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash\n        run: |\n          head -1 <<<"$x"\n' \
+  > "$WORK/quiet/.github/workflows/w.yml"
+( cd "$WORK/quiet" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f ) >/dev/null
+
+QOUT=$(PIPEFAIL_ROOT="$WORK/quiet" bash "$GATE_ABS" 2>"$WORK/qerr"); QRC=$?
+QERR=$(cat "$WORK/qerr" 2>/dev/null)
+if [ "$QRC" = 0 ] && [ -z "$QOUT" ] && [ -z "$QERR" ]; then
+  record 0 "a clean tree produces no findings AND no stderr ($(awk --version 2>/dev/null | head -1 || awk -Wversion 2>&1 | head -1))" ""
+else
+  record 1 "a clean tree produces no findings AND no stderr" "rc=$QRC out=$QOUT err=$QERR"
+fi
+
+# AND UNDER gawk EXPLICITLY WHERE IT EXISTS, because the whole failure was an
+# implementation difference: asserting only against the local awk is what let
+# this reach CI. ubuntu-latest has gawk, so CI always takes this branch.
+if command -v gawk >/dev/null 2>&1; then
+  GQERR=$(PATH="$(dirname "$(command -v gawk)"):$PATH" \
+    env AWKPATH= sh -c 'gawk -f "$1" "$2" 2>&1 >/dev/null' _ "$SCANNER_ABS" "$WORK/quiet/ok.sh")
+  if [ -z "$GQERR" ]; then
+    record 0 "...and gawk parses the scanner without a single warning" ""
+  else
+    record 1 "...and gawk parses the scanner without a single warning" "$GQERR"
+  fi
+else
+  record 1 "gawk is not installed, so the CI awk cannot be checked here" \
+    "install gawk (brew install gawk) -- ubuntu-latest runs gawk, and an awk-specific warning is invisible to BSD awk"
 fi
 
 echo

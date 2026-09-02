@@ -234,7 +234,16 @@ FNR == 1 {
 
     # Spared: this segment's own status is discarded. The trailing class admits
     # the command-substitution form, `x="$(cmd | head -1 || true)"`.
-    if (segtext ~ /\|\|[[:space:]]*(true|:)[[:space:])\"']*[[:space:]]*$/) continue
+    # `\"` WAS AN INVALID ESCAPE INSIDE THE BRACKET EXPRESSION, and gawk said so
+    # on EVERY invocation: `warning: regexp escape sequence `\"' is not a known
+    # regexp operator`. Semantically a no-op -- probed under gawk 5.4.1 and BSD
+    # awk, both spare exactly {space, `)`, `"`, `'`} and flag a literal `\` and
+    # any other char, before and after -- but the warning is real damage: it
+    # goes to stderr on every run, and a selftest helper that folded stderr into
+    # its captured output silently failed five unrelated "is spared" assertions
+    # on Linux while passing on macOS, whose awk does not warn. Pre-existing:
+    # byte-identical on develop, same line 237.
+    if (segtext ~ /\|\|[[:space:]]*(true|:)[[:space:])"']*[[:space:]]*$/) continue
 
   probe = segtext
   gsub(/\|\|/, "\001\001", probe)
@@ -279,7 +288,7 @@ FNR == 1 {
   # bare `| read` closes early, and requiring `read` to be the first token is
   # what separates them.
   if (probe ~ /\|&?[[:space:]]*head([[:space:]]|$|[)"'\''`;|&\001])/ \
-      || probe ~ /\|&?[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*q/ \
+      || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*q/ \
       || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/ \
       || probe ~ /\|&?[[:space:]]*sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*'?[0-9]*q'?([[:space:]]|$|[)"'\''`;|&\001])/ \
       || probe ~ /\|&?[[:space:]]*read([[:space:]]|$|[)"'\''`;|&\001])/) {

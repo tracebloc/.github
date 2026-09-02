@@ -108,7 +108,7 @@ MUTATIONS = [
      '  line = strip_trailing_comment(line)',
      '  # strip removed'),
     ("the `|| true` spare is unanchored again, covering the whole segment", AWK,
-     '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)[[:space:])\\"\']*[[:space:]]*$/) continue',
+     '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)[[:space:])"\']*[[:space:]]*$/) continue',
      '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)/) continue'),
     ("the multi-line function opener `next`s again, skipping its own body", AWK,
      '      save_e = e_on; save_p = p_on; in_fn = 1\n    }',
