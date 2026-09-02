@@ -66,8 +66,13 @@ MUTATIONS = [
      'grep[^|\\001]*[[:space:]]-[a-zA-Z]*q/', 'grep[^|]*[[:space:]]-[a-zA-Z]*q/'),
     ("\\001 dropped from the grep -m class", AWK,
      'grep[^|\\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/', 'grep[^|]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/'),
+    # THE ANCHOR NAMES THE HEAD ARM. That terminator class is now shared with
+    # the `sed q` and `read` arms added for backend#2967, so the bare class
+    # string matches three times -- and an anchor matching more than once
+    # mutates an arbitrary one of them, then reports about the wrong arm.
     ("\\001 dropped from the head terminator class (head||die)", AWK,
-     '`;|&\\001])/', '`;|&])/'),
+     'head([[:space:]]|$|[)"\'\\\'\'`;|&\\001])/',
+     'head([[:space:]]|$|[)"\'\\\'\'`;|&])/'),
 
     # --- `|&` is a pipe ---------------------------------------------------
     ("|& no longer counts as a pipe on the head arm", AWK,
@@ -82,7 +87,7 @@ MUTATIONS = [
      '  line = strip_trailing_comment(line)',
      '  # strip removed'),
     ("the `|| true` spare is unanchored again, covering the whole segment", AWK,
-     '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)[[:space:])\\"\']*[[:space:]]*$/) continue',
+     '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)[[:space:])"\']*[[:space:]]*$/) continue',
      '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)/) continue'),
     ("the multi-line function opener `next`s again, skipping its own body", AWK,
      '      save_e = e_on; save_p = p_on; in_fn = 1\n    }',
@@ -121,6 +126,25 @@ MUTATIONS = [
            | grep -Eq '^#![[:space:]]*[^[:space:]]*(/|[[:space:]])(ba|da|k)?sh([[:space:]]|$)' \\
            && files+=("$f") ;;""",
      "      *) ;;"),
+    # --- the arms added for the two MEASURED gaps (backend#2967) -----------
+    ("the sed q arm never fires", AWK,
+     "|| probe ~ /\\|&?[[:space:]]*sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*'?[0-9]*q'?",
+     "|| (0 && probe ~ /\\|&?[[:space:]]*sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*'?[0-9]*q'?"),
+    ("the read arm never fires", AWK,
+     '|| probe ~ /\\|&?[[:space:]]*read([[:space:]]|$|',
+     '|| (0 && probe ~ /\\|&?[[:space:]]*read([[:space:]]|$|'),
+    # The sed arm's TIGHTNESS, not merely its presence. The loose form reports
+    # on every `sed 's/...q.../'` in the fleet, which is how a gate gets
+    # switched off rather than fixed.
+    ("the sed arm matches any q in the sed script, not the script token", AWK,
+     "sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*'?[0-9]*q'?",
+     "sed[^|\\001]*q"),
+    # `read` must sit DIRECTLY after the bar, or `| while read` -- which reads
+    # to EOF and is the opposite of this class -- reads as a hazard.
+    ("the read arm no longer requires read to follow the bar directly", AWK,
+     '|| probe ~ /\\|&?[[:space:]]*read(',
+     '|| probe ~ /\\|&?[^|\\001]*read('),
+
     ("an unreadable tree reports clean instead of failing closed", SH,
      """    echo "pipefail-early-close: 'git ls-files' failed in $ROOT — refusing to report clean" >&2
     exit 2""",

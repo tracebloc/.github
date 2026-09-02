@@ -234,7 +234,16 @@ FNR == 1 {
 
     # Spared: this segment's own status is discarded. The trailing class admits
     # the command-substitution form, `x="$(cmd | head -1 || true)"`.
-    if (segtext ~ /\|\|[[:space:]]*(true|:)[[:space:])\"']*[[:space:]]*$/) continue
+    # `\"` WAS AN INVALID ESCAPE INSIDE THE BRACKET EXPRESSION, and gawk said so
+    # on EVERY invocation: `warning: regexp escape sequence `\"' is not a known
+    # regexp operator`. Semantically a no-op -- probed under gawk 5.4.1 and BSD
+    # awk, both spare exactly {space, `)`, `"`, `'`} and flag a literal `\` and
+    # any other char, before and after -- but the warning is real damage: it
+    # goes to stderr on every run, and a selftest helper that folded stderr into
+    # its captured output silently failed five unrelated "is spared" assertions
+    # on Linux while passing on macOS, whose awk does not warn. Pre-existing:
+    # byte-identical on develop, same line 237.
+    if (segtext ~ /\|\|[[:space:]]*(true|:)[[:space:])"']*[[:space:]]*$/) continue
 
   probe = segtext
   gsub(/\|\|/, "\001\001", probe)
@@ -257,9 +266,32 @@ FNR == 1 {
   # The terminator class matters: `head` can be followed by a CLOSING delimiter,
   # not just whitespace or end-of-line. `x="$(cmd | head)"` ends at `)` and then
   # `"`, and requiring space-or-EOL missed exactly that shape (Bugbot #763).
+  #
+  # `sed q` AND `| read` ARE MEMBERS TOO, and both were missed (backend#2967).
+  # Measured, 20k lines vs 200 through `bash -eo pipefail`:
+  #     head -1 / head -n1 / head -n 1 / head   0  -> 141   (already caught)
+  #     grep -q / grep -m 1  (matching early)   0  -> 141   (already caught)
+  #     sed q / sed 1q                          0  -> 141   NOT caught
+  #     read -r l                               0  -> 141   NOT caught
+  #     grep -c / sed -n 1p / tail -1 / sort     0  ->   0   correctly spared
+  # The last row is the discrimination and is asserted: a reader that runs to
+  # EOF is not this class, and an arm that flagged it would be reporting on
+  # `| sort`.
+  #
+  # THE SED SCRIPT TOKEN IS MATCHED EXACTLY, `[0-9]*q` optionally quoted, not
+  # `sed[^|]*q`. The loose form flags `sed 's/a/q/'` -- a substitution that
+  # reads to EOF -- and a gate that reports on ordinary `sed` gets switched off.
+  # `sed -n 1p` has no `q` and stays spared, which is what pins the difference.
+  #
+  # `read` MUST SIT DIRECTLY AFTER THE BAR. `producer | while read -r l` is the
+  # opposite of this class: the loop reads to EOF, so nothing SIGPIPEs. Only a
+  # bare `| read` closes early, and requiring `read` to be the first token is
+  # what separates them.
   if (probe ~ /\|&?[[:space:]]*head([[:space:]]|$|[)"'\''`;|&\001])/ \
       || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*q/ \
-      || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/) {
+      || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/ \
+      || probe ~ /\|&?[[:space:]]*sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*'?[0-9]*q'?([[:space:]]|$|[)"'\''`;|&\001])/ \
+      || probe ~ /\|&?[[:space:]]*read([[:space:]]|$|[)"'\''`;|&\001])/) {
       sub(/^[[:space:]]+/, "", line)
       print curfile ":" FNR ": " line
       break

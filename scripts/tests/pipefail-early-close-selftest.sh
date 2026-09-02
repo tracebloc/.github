@@ -101,6 +101,14 @@ echo
 echo "== discrimination: readers that do NOT close early ============================"
 case_spare plaingrep.sh "a grep that reads to EOF is not the hazard" \
   '  producer | grep needle | sed s/a/b/'
+# A SED SUBSTITUTION CONTAINING `q` IS NOT `sed q`. This is what forces the sed
+# arm to match the script token exactly (`[0-9]*q`, optionally quoted) instead
+# of the cheap `sed[^|]*q`: the loose form reports on ordinary substitutions,
+# and a gate that reports on `sed` gets switched off. It cannot go in the
+# measured table above, whose harness runs the consumer through word splitting.
+case_spare sedsubst.sh "a sed SUBSTITUTION containing q reads to EOF and is spared" \
+  "  producer | sed 's/a/q/'"
+
 
 echo
 echo "== the house idioms are spared ================================================"
@@ -483,6 +491,157 @@ if [ "$RC" = 2 ]; then
   record 0 "a scanner that CRASHES is exit 2, never a clean tree" ""
 else
   record 1 "a scanner that CRASHES is exit 2, never a clean tree" "rc=$RC out=$OUT"
+fi
+
+echo
+echo "== THE REQUIREMENT, MEASURED: which consumers actually SIGPIPE ================"
+# backend#1729 rule 6: mutation-proof is not requirement-proof. Every case above
+# compares the scanner against a shape someone typed. This block compares it
+# against the RUNTIME, so the expected set is derived rather than restated --
+# and it is the only thing here that could have told us `sed q` was missing.
+#
+# NEVER TEST A LIST AGAINST ITSELF (rule 9's corollary). The consumers below are
+# written down independently of the matcher; nothing reads the awk's regexes.
+# For each, the pipeline is RUN through `bash -eo pipefail` at both payload
+# sizes and the detector is required to AGREE with what the shell did.
+#
+# BOTH SIZES ARE THE POINT. The class is size-dependent: under ~64KB the reader
+# closes and the producer's write has already fit in the pipe buffer, so nothing
+# is signalled and the construct looks correct in review. That is why instances
+# survive, and why a gate tested only on a small payload proves nothing.
+# Measured here, and the numbers are the ticket's: 200 lines (~2.6KB) vs 20000
+# (~260KB).
+# THE PAYLOADS ARE FILES, NOT ENVIRONMENT VARIABLES, and that is portability
+# rather than style. Passed as `BIG=$BIG bash -c ...`, the 260KB payload
+# exceeds Linux's MAX_ARG_STRLEN (128KB for a single string), `execve` refuses,
+# and bash reports 126 -- so EVERY consumer measured "126 at both sizes", every
+# member looked like a non-member, and the suite went 17 red. macOS has no
+# per-string cap, so the first version passed locally and failed only in CI.
+awk 'BEGIN { for (i = 0; i < 20000; i++) printf "line%08d\n", i }' > "$WORK/payload-BIG"
+awk 'BEGIN { for (i = 0; i < 200;   i++) printf "line%08d\n", i }' > "$WORK/payload-SMALL"
+
+# rc of `cat <payload> | <consumer>` under errexit+pipefail. `cat` is the
+# producer that takes the SIGPIPE, exactly as `printf`/`kubectl`/`jq` do in the
+# real instances.
+measure() {  # $1 = consumer ; $2 = SMALL|BIG -> sets MRC
+  C="$1" PAYLOAD="$WORK/payload-$2" bash -c \
+    'set -eo pipefail; cat "$PAYLOAD" | $C >/dev/null' 2>/dev/null
+  MRC=$?
+}
+# Does the gate flag that same consumer, in a file where both options are live?
+detects() {  # $1 = consumer -> sets DOUT
+  printf '#!/usr/bin/env bash\nset -euo pipefail\nprintf "%%s" "$X" | %s\n' "$1" \
+    > "$WORK/req.sh"
+  DOUT=$(awk -f "$SCANNER_ABS" "$WORK/req.sh")
+}
+
+# The needle matches the FIRST line on purpose: `grep -q` cannot close early
+# until it has matched, so a non-matching needle measures nothing at all. That
+# is a real trap -- with `grep -q nomatch` every size returns 1 and the arm
+# looks dead.
+while IFS= read -r consumer; do
+  [ -n "$consumer" ] || continue
+  measure "$consumer" SMALL; small_rc=$MRC
+  measure "$consumer" BIG;   big_rc=$MRC
+  detects "$consumer"
+
+  # A MEMBER OF THE CLASS is defined by behaviour, not by a list: survives the
+  # small payload, dies with SIGPIPE (141) on the large one.
+  if [ "$small_rc" = 0 ] && [ "$big_rc" = 141 ]; then
+    hazard=yes
+  elif [ "$small_rc" = "$big_rc" ] && [ "$big_rc" != 141 ]; then
+    hazard=no
+  else
+    record 1 "MEASUREMENT UNCLEAR for '$consumer'" \
+      "small=$small_rc big=$big_rc -- neither a clean member nor a clean non-member"
+    continue
+  fi
+
+  if [ "$hazard" = yes ] && [ -n "$DOUT" ]; then
+    record 0 "'$consumer' SIGPIPEs at 260KB (rc 141), not at 2.6KB -- and is flagged" ""
+  elif [ "$hazard" = no ] && [ -z "$DOUT" ]; then
+    record 0 "'$consumer' reads to EOF at both sizes (rc $big_rc) -- and is spared" ""
+  elif [ "$hazard" = yes ]; then
+    record 1 "'$consumer' is a MEASURED hazard the gate does not flag" \
+      "small=$small_rc big=$big_rc, detector said nothing"
+  else
+    record 1 "'$consumer' is measurably safe but the gate flags it" \
+      "small=$small_rc big=$big_rc, detector said: $DOUT"
+  fi
+done <<'CONSUMERS'
+head -1
+head -n1
+head -n 1
+head
+sed q
+sed 1q
+sed -n 2q
+grep -q line00000000
+grep -m 1 line00000000
+read -r line
+grep -c line00000000
+sed -n 1p
+tail -1
+sort
+CONSUMERS
+
+# `| while read` IS THE OPPOSITE SHAPE and cannot go through `measure`, whose
+# harness runs the consumer as a simple command. The loop reads to EOF, so
+# nothing SIGPIPEs -- and an arm matching `read` anywhere after the bar would
+# report on it. Measured inline, then asserted against the detector.
+WHILE_RC=0
+PAYLOAD="$WORK/payload-BIG" bash -c \
+  'set -eo pipefail; cat "$PAYLOAD" | while read -r l; do :; done' 2>/dev/null || WHILE_RC=$?
+detects 'while read -r l; do :; done'
+if [ "$WHILE_RC" = 0 ] && [ -z "$DOUT" ]; then
+  record 0 "'| while read' reads to EOF at 260KB (rc 0) -- and is spared" ""
+else
+  record 1 "'| while read' must be spared" "rc=$WHILE_RC detector=$DOUT"
+fi
+
+echo
+echo "== A CLEAN RUN IS SILENT ON STDERR ==========================================="
+# THE DEFECT THIS PINS, and it is the same shape as the bug this whole file is
+# about: output that is not what the assertion thinks it is.
+#
+# `pipefail-early-close.awk:237` carried `\"` inside a bracket expression. BSD
+# awk (every macOS) accepts it silently; gawk (every ubuntu-latest runner)
+# emitted `warning: regexp escape sequence` on EVERY invocation. A helper here
+# folded the gate's stderr into its captured output with `2>&1`, so five
+# unrelated "is spared" assertions saw non-empty output and failed -- in CI
+# only, invisible locally. Two separate fixes came out of it: the helpers now
+# keep the streams apart, and THIS asserts the invariant that made the
+# confusion possible. A gate with nothing to report reports nothing, on both
+# streams; any future warning reddens here, with its text, instead of surfacing
+# as a handful of baffling failures somewhere else.
+rm -rf "$WORK/quiet"; mkdir -p "$WORK/quiet/.github/workflows"
+printf '#!/usr/bin/env bash\nset -euo pipefail\nhead -1 <<<"$x"\n' > "$WORK/quiet/ok.sh"
+printf 'name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash\n        run: |\n          head -1 <<<"$x"\n' \
+  > "$WORK/quiet/.github/workflows/w.yml"
+( cd "$WORK/quiet" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f ) >/dev/null
+
+QOUT=$(PIPEFAIL_ROOT="$WORK/quiet" bash "$GATE_ABS" 2>"$WORK/qerr"); QRC=$?
+QERR=$(cat "$WORK/qerr" 2>/dev/null)
+if [ "$QRC" = 0 ] && [ -z "$QOUT" ] && [ -z "$QERR" ]; then
+  record 0 "a clean tree produces no findings AND no stderr ($(awk --version 2>/dev/null | head -1 || awk -Wversion 2>&1 | head -1))" ""
+else
+  record 1 "a clean tree produces no findings AND no stderr" "rc=$QRC out=$QOUT err=$QERR"
+fi
+
+# AND UNDER gawk EXPLICITLY WHERE IT EXISTS, because the whole failure was an
+# implementation difference: asserting only against the local awk is what let
+# this reach CI. ubuntu-latest has gawk, so CI always takes this branch.
+if command -v gawk >/dev/null 2>&1; then
+  GQERR=$(PATH="$(dirname "$(command -v gawk)"):$PATH" \
+    env AWKPATH= sh -c 'gawk -f "$1" "$2" 2>&1 >/dev/null' _ "$SCANNER_ABS" "$WORK/quiet/ok.sh")
+  if [ -z "$GQERR" ]; then
+    record 0 "...and gawk parses the scanner without a single warning" ""
+  else
+    record 1 "...and gawk parses the scanner without a single warning" "$GQERR"
+  fi
+else
+  record 1 "gawk is not installed, so the CI awk cannot be checked here" \
+    "install gawk (brew install gawk) -- ubuntu-latest runs gawk, and an awk-specific warning is invisible to BSD awk"
 fi
 
 echo
