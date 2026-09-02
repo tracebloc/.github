@@ -292,15 +292,53 @@ FNR == 1 {
   # justify the tight token passed under the loose pattern too, which is the
   # harness saying the distinction was imaginary.
   #
-  # `read` MUST SIT DIRECTLY AFTER THE BAR. `producer | while read -r l` is the
-  # opposite of this class: the loop reads to EOF, so nothing SIGPIPEs. Only a
-  # bare `| read` closes early, and requiring `read` to be the first token is
-  # what separates them.
+  # THAT "ALL NINE" IS ABOUT THIS PATTERN, NOT ABOUT THE SCANNER, and the
+  # difference matters because a reader who stops here concludes the gate
+  # catches `sed '1d;q'`. It does not: `segment()` splits on `;` with no quote
+  # awareness (deliberately -- that split is what stops a `|| true` on one
+  # pipeline sparing the next), so a `;` inside a quoted script cuts it in half
+  # and the arm is handed `sed '1d` with no `q` in it. End to end the scanner
+  # agrees on EIGHT of the nine, and `'1d;q'` is a measured member it cannot
+  # see. It is registered as exactly that in the selftest's known-gap register,
+  # asserted both ways, rather than being claimed here (Shujaat, .github#403).
+  # Widening this arm cannot reach it; only a quote-aware segmenter could.
+  #
+  # WHAT THE LOOSE FORM COSTS, pinned rather than incidental. It discriminates
+  # on what FOLLOWS the `q`, and inside a sed script that is arbitrary text --
+  # so `'s/a/q/'` is spared because its `q` is followed by `/`, and `'y/ab/qz/'`
+  # because its is followed by `z`. Put a space or a `;` after the same `q` and
+  # it flags: `'s/^/q /'`, `"s/x/q y/"` and `'s/a/q;b/'` are measurably safe and
+  # ARE flagged. The two spare rows above therefore agree with the shell by
+  # coincidence of the delimiter their examples happen to use, not because they
+  # are substitutions. That trade is accepted here -- `/addr/q` is a real member
+  # worth catching and no regex separates `q`-the-command from `q`-the-
+  # replacement-text without knowing where the script's commands end -- and the
+  # three false positives are registered in the selftest so the accepted side is
+  # asserted instead of being an accident of two well-chosen examples.
+  #
+  # `read` MUST NOT BE PRECEDED BY A LOOP KEYWORD -- which is not the same rule
+  # as "read sits directly after the bar", and the difference was a false
+  # negative. `producer | while read -r l` is the opposite of this class: the
+  # loop reads to EOF, so nothing SIGPIPEs. But requiring `read` to be the FIRST
+  # token to separate them also excluded `producer | IFS= read -r line`, the
+  # usual one-line slurp and a measured member (Bugbot, .github#402).
+  #
+  # Measured, same harness and payloads as the table above:
+  #     read -r l                    0 -> 141   member (was caught)
+  #     IFS= read -r l               0 -> 141   member (was NOT caught)
+  #     while read -r l              0 ->   0   spared
+  #     while IFS= read -r l         0 ->   0   spared
+  # So the discriminator is the LOOP KEYWORD, not adjacency: a `VAR=value`
+  # prefix leaves `read` a simple command that still closes after one line,
+  # while `while`/`until`/`for` make it a loop body that drains. The arm now
+  # admits any run of assignments and nothing else, which spares both loop
+  # forms without having to enumerate them -- `while` is not of the form
+  # `NAME=`, so it cannot match the prefix.
   if (probe ~ /\|&?[[:space:]]*head([[:space:]]|$|[)"'\''`;|&\001])/ \
       || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*q/ \
       || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/ \
       || probe ~ /\|&?[[:space:]]*sed[^|\001]*q([[:space:]]|$|[)"'\''`;|&\001])/ \
-      || probe ~ /\|&?[[:space:]]*read([[:space:]]|$|[)"'\''`;|&\001])/) {
+      || probe ~ /\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\001]*[[:space:]]+)*read([[:space:]]|$|[)"'\''`;|&\001])/) {
       sub(/^[[:space:]]+/, "", line)
       print curfile ":" FNR ": " line
       break

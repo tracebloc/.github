@@ -131,8 +131,8 @@ MUTATIONS = [
      '|| probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q(',
      '|| (0 && probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q('),
     ("the read arm never fires", AWK,
-     '|| probe ~ /\\|&?[[:space:]]*read([[:space:]]|$|',
-     '|| (0 && probe ~ /\\|&?[[:space:]]*read([[:space:]]|$|'),
+     '|| probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read(',
+     '|| (0 && probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read('),
     # THE SED ARM'S TERMINATOR, which is the part that actually discriminates.
     # The mutation here used to loosen the script TOKEN and was reported
     # UNCAUGHT -- correctly, because the token shape changes nothing: the `q`
@@ -153,10 +153,23 @@ MUTATIONS = [
     ("the sed arm drops its terminator entirely", AWK,
      'sed[^|\\001]*q([[:space:]]|$|[)"\'\\\'\'`;|&\\001])',
      'sed[^|\\001]*q'),
-    # `read` must sit DIRECTLY after the bar, or `| while read` -- which reads
-    # to EOF and is the opposite of this class -- reads as a hazard.
-    ("the read arm no longer requires read to follow the bar directly", AWK,
-     '|| probe ~ /\\|&?[[:space:]]*read(',
+    # THE READ ARM'S PREFIX, and it takes TWO mutations because the arm makes
+    # two claims that fail in opposite directions. It admits a run of
+    # `VAR=value` assignments before `read` and nothing else, so it must catch
+    # `| IFS= read -r` (a measured member) while still sparing `| while read`.
+    # One mutation per direction; a single one would leave the other side
+    # unpinned, which is how the sed terminator came to be mislabelled.
+    #
+    # DROP THE PREFIX: `| IFS= read -r line` stops being seen. Caught by that
+    # row in CONSUMERS, which measures it a member at 260KB.
+    ("the read arm stops admitting an assignment prefix, losing `IFS= read`", AWK,
+     '([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read(',
+     'read('),
+    # WIDEN THE PREFIX TO ANYTHING: `| while read` now reads as a hazard, which
+    # is the opposite of this class -- the loop drains to EOF. Caught by the two
+    # `| while read` / `| while IFS= read` spare assertions.
+    ("the read arm's prefix admits any text, so `| while read` reads as a hazard", AWK,
+     '|| probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read(',
      '|| probe ~ /\\|&?[^|\\001]*read('),
 
     ("an unreadable tree reports clean instead of failing closed", SH,

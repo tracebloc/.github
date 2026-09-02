@@ -601,6 +601,33 @@ while IFS= read -r consumer; do
           "hazard=$hazard detector=$DOUT -- if the scanner now sees it, delete this row"
       fi
       continue ;;
+
+    # THE ACCEPTED FALSE POSITIVES, REGISTERED THE SAME WAY AND FOR THE SAME
+    # REASON. The sed arm discriminates on what FOLLOWS the `q`, and inside a
+    # sed script that is arbitrary text -- so a `q` in REPLACEMENT text that
+    # happens to be followed by a space or a `;` flags, while `'s/a/q/'` and
+    # `'y/ab/qz/'` are spared only because their `q` is followed by `/` and `z`.
+    # Those two spare rows above therefore agree with the shell by coincidence
+    # of the delimiter their examples chose, and nothing pinned the difference:
+    # the arm's behaviour on this shape was "an accident of two well-chosen
+    # examples" (Shujaat, .github#403).
+    #
+    # The trade is accepted deliberately -- `/addr/q` is a real member and no
+    # regex separates `q`-the-command from `q`-the-replacement-text without
+    # knowing where the script's commands end, which needs the quote-aware
+    # segmenter the row above also rules out. So these are registered instead of
+    # fixed, and the assertion runs BOTH ways like the known-gap row: each must
+    # still be measurably SAFE and must still be FLAGGED. If the arm ever learns
+    # to spare them, the row REDDENS and tells you to delete it -- which is the
+    # only version of an accepted false positive that cannot rot into a lie.
+    "sed 's/^/q /'"|'sed "s/x/q y/"'|"sed 's/a/q;b/'")
+      if [ "$hazard" = no ] && [ -n "$DOUT" ]; then
+        record 0 "'$consumer' is an ACCEPTED FALSE POSITIVE: reads to EOF (rc 0), flagged by the loose sed arm" ""
+      else
+        record 1 "'$consumer' false-positive register is out of date" \
+          "hazard=$hazard detector=$DOUT -- if the arm now spares it, delete this row"
+      fi
+      continue ;;
   esac
 
   if [ "$hazard" = yes ] && [ -n "$DOUT" ]; then
@@ -626,9 +653,13 @@ sed -e q
 sed '1d;q'
 sed 's/a/q/'
 sed 'y/ab/qz/'
+sed 's/^/q /'
+sed "s/x/q y/"
+sed 's/a/q;b/'
 grep -q line00000000
 grep -m 1 line00000000
 read -r line
+IFS= read -r line
 grep -c line00000000
 sed -n 1p
 tail -1
@@ -671,6 +702,24 @@ if [ "$WHILE_RC" = 0 ] && [ -z "$DOUT" ]; then
   record 0 "'| while read' reads to EOF at 260KB (rc 0, no flip) -- and is spared" ""
 else
   record 1 "'| while read' must be spared" "rc=$WHILE_RC detector=$DOUT"
+fi
+
+# AND THE PREFIXED LOOP FORM, which is what makes the widened `read` arm safe
+# rather than merely wider. The arm now admits a run of `VAR=value` assignments
+# before `read` so that `| IFS= read -r line` is caught (a measured member, in
+# CONSUMERS above), and `IFS= read -r` is ALSO the canonical way to write the
+# loop -- so this is the exact shape that would break if the prefix were allowed
+# to swallow a loop keyword too. `while` is not of the form `NAME=`, so it
+# cannot match the prefix; this asserts that rather than trusting it.
+WHILE_IFS_RC=0
+PAYLOAD="$WORK/payload-BIG" bash -c \
+  'set -eo pipefail; P=$(cat "$PAYLOAD"); printf "%s\n" "$P" | while IFS= read -r l; do :; done' \
+  2>/dev/null || WHILE_IFS_RC=$?
+detects 'while IFS= read -r l; do :; done'
+if [ "$WHILE_IFS_RC" = 0 ] && [ -z "$DOUT" ]; then
+  record 0 "'| while IFS= read' reads to EOF at 260KB (rc 0, no flip) -- and is spared" ""
+else
+  record 1 "'| while IFS= read' must be spared" "rc=$WHILE_IFS_RC detector=$DOUT"
 fi
 
 echo
