@@ -200,6 +200,11 @@ MUTATIONS = [
     if isinstance(runs, yaml.MappingNode):''',
      '''    runs = None
     if isinstance(runs, yaml.MappingNode):'''),
+    # The jobs mapping is iterated, so it needs the merge-aware ITEMS helper --
+    # `_mapping_get` being merge-aware does nothing for a key nobody looks up.
+    ("the jobs mapping is iterated directly, skipping merged-in jobs", YML,
+     "        for _name, job in _mapping_items(jobs):",
+     "        for _name, job in jobs.value:"),
     ("the job/workflow `defaults.run.shell` layer is ignored", YML,
      '            job_default = _defaults_shell(job) or workflow_default',
      '            job_default = None'),

@@ -163,6 +163,40 @@ def _mapping_get(node, key):
     return None
 
 
+def _mapping_items(node):
+    """Every (key, value) of a mapping, INCLUDING entries merged in via `<<:`.
+
+    `_mapping_get` was made merge-aware for a step's `run:`/`shell:` (Bugbot
+    #404), which fixed the instance. THIS is the rest of the class: `jobs:` is
+    ITERATED rather than looked up, so a job arriving via `jobs: <<: *tpl` was
+    still skipped entirely -- measured, rc 0 with no finding, where the same job
+    written directly is flagged. One level up, same fail-open, and the reason to
+    route every mapping read through one of these two functions.
+
+    Precedence is `_mapping_get`'s, because it is the same rule: a direct key
+    shadows a merged one, and within a sequence merge earlier entries win.
+    """
+    if not isinstance(node, yaml.MappingNode):
+        return []
+    out, seen, merges = [], set(), []
+    for k, v in node.value:
+        name = _scalar(k)
+        if name == "<<":
+            merges.append(v)
+            continue
+        if name is not None and name not in seen:
+            seen.add(name)
+            out.append((name, v))
+    for merge in merges:
+        sources = merge.value if isinstance(merge, yaml.SequenceNode) else [merge]
+        for src in sources:
+            for name, v in _mapping_items(src):
+                if name not in seen:
+                    seen.add(name)
+                    out.append((name, v))
+    return out
+
+
 def _defaults_shell(node):
     """`defaults: run: shell:` on a workflow or job node, as a string or None."""
     run = _mapping_get(_mapping_get(node, "defaults"), "run")
@@ -182,7 +216,9 @@ def collect_steps(root):
 
     jobs = _mapping_get(root, "jobs")
     if isinstance(jobs, yaml.MappingNode):
-        for _name, job in jobs.value:
+        # `_mapping_items`, not `jobs.value` -- a job merged in via
+        # `jobs: <<: *tpl` is otherwise never visited at all.
+        for _name, job in _mapping_items(jobs):
             job_default = _defaults_shell(job) or workflow_default
             steps = _mapping_get(job, "steps")
             if isinstance(steps, yaml.SequenceNode):

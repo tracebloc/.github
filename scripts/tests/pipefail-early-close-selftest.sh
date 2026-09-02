@@ -598,6 +598,13 @@ yaml_flag shalias "an aliased step (`- *base`) is resolved and scanned" \
   "${ANCHORED}jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - *base\n"
 yaml_flag shmerge "a step whose shell/run arrive via '<<: *base' IS scanned" \
   "${ANCHORED}jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - <<: *base\n        name: merged\n"
+# THE REST OF THE CLASS, one level up. `jobs:` is ITERATED rather than looked
+# up, so making `_mapping_get` merge-aware fixed the step case and left this
+# one: a whole job arriving via `jobs: <<: *tpl` was never visited. Measured
+# before the fix -- rc 0, no finding, where the identical job written directly
+# is flagged.
+yaml_flag shjobsmerge "a whole JOB merged in via 'jobs: <<: *tpl' IS scanned" \
+  'name: j\non:\n  push:\nx-tpl:\n  tpl: &tpl\n    myjob:\n      runs-on: ubuntu-latest\n      steps:\n        - shell: bash\n          run: |\n            x=$(printf "%%s" "$Y" | head -1)\njobs:\n  <<: *tpl\n'
 
 echo
 echo "-- 'defaults.run.shell' applies, at both levels -------------------------------"
