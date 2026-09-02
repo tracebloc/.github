@@ -66,8 +66,13 @@ MUTATIONS = [
      'grep[^|\\001]*[[:space:]]-[a-zA-Z]*q/', 'grep[^|]*[[:space:]]-[a-zA-Z]*q/'),
     ("\\001 dropped from the grep -m class", AWK,
      'grep[^|\\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/', 'grep[^|]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/'),
+    # THE ANCHOR NAMES THE HEAD ARM. That terminator class is now shared with
+    # the `sed q` and `read` arms added for backend#2967, so the bare class
+    # string matches three times -- and an anchor matching more than once
+    # mutates an arbitrary one of them, then reports about the wrong arm.
     ("\\001 dropped from the head terminator class (head||die)", AWK,
-     '`;|&\\001])/', '`;|&])/'),
+     'head([[:space:]]|$|[)"\'\\\'\'`;|&\\001])/',
+     'head([[:space:]]|$|[)"\'\\\'\'`;|&])/'),
 
     # --- `|&` is a pipe ---------------------------------------------------
     ("|& no longer counts as a pipe on the head arm", AWK,
@@ -82,7 +87,7 @@ MUTATIONS = [
      '  line = strip_trailing_comment(line)',
      '  # strip removed'),
     ("the `|| true` spare is unanchored again, covering the whole segment", AWK,
-     '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)[[:space:])\\"\']*[[:space:]]*$/) continue',
+     '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)[[:space:])"\']*[[:space:]]*$/) continue',
      '    if (segtext ~ /\\|\\|[[:space:]]*(true|:)/) continue'),
     ("the multi-line function opener `next`s again, skipping its own body", AWK,
      '      save_e = e_on; save_p = p_on; in_fn = 1\n    }',
@@ -121,6 +126,52 @@ MUTATIONS = [
            | grep -Eq '^#![[:space:]]*[^[:space:]]*(/|[[:space:]])(ba|da|k)?sh([[:space:]]|$)' \\
            && files+=("$f") ;;""",
      "      *) ;;"),
+    # --- the arms added for the two MEASURED gaps (backend#2967) -----------
+    ("the sed q arm never fires", AWK,
+     '|| probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q(',
+     '|| (0 && probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q('),
+    ("the read arm never fires", AWK,
+     '|| probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read(',
+     '|| (0 && probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read('),
+    # THE SED ARM'S TERMINATOR, which is the part that actually discriminates.
+    # The mutation here used to loosen the script TOKEN and was reported
+    # UNCAUGHT -- correctly, because the token shape changes nothing: the `q`
+    # in `sed 's/a/q/'` is followed by `/`, which the terminator class rejects
+    # either way. Drop the terminator and that substitution IS flagged, which
+    # `sedsubst` catches. The measurement that settled it is in the awk.
+    # TWO SEPARATE PROPERTIES OF THE SED TERMINATOR, because the first label
+    # here was wrong: it said "stops requiring a terminator" while the diff
+    # only dropped whitespace and EOL from the class. Caught, but by the
+    # measured `sed q` rows rather than by the false-positive guard, so it
+    # pinned the wrong half and said so in a misleading name.
+    ("the sed terminator stops admitting whitespace and end-of-line", AWK,
+     'sed[^|\\001]*q([[:space:]]|$|',
+     'sed[^|\\001]*q('),
+    # ...and the one that pins the DISCRIMINATION: with no terminator at all,
+    # `sed 's/a/q/'` and `sed 'y/ab/qz/'` -- both measured non-members -- are
+    # flagged, and `sedsubst` plus both measured rows redden.
+    ("the sed arm drops its terminator entirely", AWK,
+     'sed[^|\\001]*q([[:space:]]|$|[)"\'\\\'\'`;|&\\001])',
+     'sed[^|\\001]*q'),
+    # THE READ ARM'S PREFIX, and it takes TWO mutations because the arm makes
+    # two claims that fail in opposite directions. It admits a run of
+    # `VAR=value` assignments before `read` and nothing else, so it must catch
+    # `| IFS= read -r` (a measured member) while still sparing `| while read`.
+    # One mutation per direction; a single one would leave the other side
+    # unpinned, which is how the sed terminator came to be mislabelled.
+    #
+    # DROP THE PREFIX: `| IFS= read -r line` stops being seen. Caught by that
+    # row in CONSUMERS, which measures it a member at 260KB.
+    ("the read arm stops admitting an assignment prefix, losing `IFS= read`", AWK,
+     '([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read(',
+     'read('),
+    # WIDEN THE PREFIX TO ANYTHING: `| while read` now reads as a hazard, which
+    # is the opposite of this class -- the loop drains to EOF. Caught by the two
+    # `| while read` / `| while IFS= read` spare assertions.
+    ("the read arm's prefix admits any text, so `| while read` reads as a hazard", AWK,
+     '|| probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read(',
+     '|| probe ~ /\\|&?[^|\\001]*read('),
+
     ("an unreadable tree reports clean instead of failing closed", SH,
      """    echo "pipefail-early-close: 'git ls-files' failed in $ROOT — refusing to report clean" >&2
     exit 2""",
