@@ -186,12 +186,27 @@ MUTATIONS = [
      '    "sh": "-e",', '    "sh": "-eo pipefail",'),
     ("the default shell arms pipefail, which GitHub does not", YML,
      'DEFAULT_FLAGS = "-e"', 'DEFAULT_FLAGS = "-eo pipefail"'),
+    # RE-ANCHORED: this block moved inside the `program in POSIX_SHELL_PROGRAMS`
+    # branch for .github#404, so the old indentation no longer matched -- caught
+    # by `--dry` as a stale anchor, which is what that pass is for.
     ("a custom command line is assumed to carry -e", YML,
-     '    kept = []\n    for tok in tokens[1:]:', '    kept = ["-e"]\n    for tok in tokens[1:]:'),
+     '        kept = []\n        for tok in tokens[1:]:',
+     '        kept = ["-e"]\n        for tok in tokens[1:]:'),
     # THE MUTATION HAS TO ARM THE BLOCK, not merely stop excluding it. Emptying
     # NON_SHELL let `python` fall through to DEFAULT_FLAGS (`-e`) -- errexit
     # only, no pipefail -- so nothing was flagged and the mutation survived
     # while looking like coverage.
+    # THE THREE BRANCHES OF THE UNKNOWN-SPEC PATH (Bugbot, .github#404), each
+    # pinned by the case that depends on it.
+    ("an unresolved ${{ }} expression falls back to the default -e", YML,
+     '    if "${{" in spec:\n        return "-eo pipefail"',
+     '    if False:\n        return "-eo pipefail"'),
+    ("a command line is only recognised when it carries {0}", YML,
+     '    if program in POSIX_SHELL_PROGRAMS:',
+     '    if program in POSIX_SHELL_PROGRAMS and "{0}" in spec:'),
+    ("a custom interpreter (perl, node) is armed as shell", YML,
+     '    if "{0}" in spec:\n        return None',
+     '    if False:\n        return None'),
     ("a non-POSIX shell (python, pwsh) is scanned as armed shell", YML,
      '    if spec in NON_SHELL:\n        return None',
      '    if spec in NON_SHELL:\n        return "-eo pipefail"'),

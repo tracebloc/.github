@@ -585,6 +585,34 @@ yaml_flag shcustomeo "...but a custom 'bash -eo pipefail {0}' IS armed" \
 # options and the case reddens. Found by the mutation surviving.
 yaml_spare shcustomo "a custom 'bash -o pipefail {0}' has pipefail but NO errexit" \
   "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -o pipefail {0}\n        $HAZ_BODY"
+# AN UNRESOLVED `${{ }}` EXPRESSION MUST ARM, NOT DEFAULT (Bugbot, .github#404).
+# GitHub evaluates the expression BEFORE choosing the shell, so a matrix-driven
+# `shell:` resolving to `bash` runs with errexit AND pipefail -- while the
+# scanner sees only the literal text. It used to fall through to the default
+# `-e`, so a live `| head -1` in such a step was reported CLEAN: fail-open, in
+# the scan this file adds.
+yaml_flag shexpr "an unresolved 'shell: \${{ matrix.shell }}' arms both options" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: \${{ matrix.shell }}\n        $HAZ_BODY"
+# ...AND THE FORM THAT ACTUALLY NEEDS THE EXPRESSION BRANCH. The bare
+# `${{ matrix.shell }}` case above is ALSO covered by the unknown-bare-word
+# catch-all, so on its own it passes even with the expression check disabled --
+# it was vacuous, and its own mutation said so. With a `{0}` present the spec
+# reads as a command line whose program is `${{`, which is not a POSIX shell,
+# so without the expression branch it is classified as a custom interpreter and
+# SKIPPED. This is the case that pins it.
+yaml_flag shexprtmpl "'shell: \${{ inputs.shell }} {0}' arms both options too" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: \${{ inputs.shell }} {0}\n        $HAZ_BODY"
+# ...and the template is not required to recognise a command line. `bash -eo
+# pipefail` is the same invocation as `bash -eo pipefail {0}`; treating the
+# first as "unrecognised" dropped its pipefail.
+yaml_flag shnotmpl "'shell: bash -eo pipefail' without the {0} template is armed" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -eo pipefail\n        $HAZ_BODY"
+# THE DISCRIMINATIONS, without which the two above are satisfied by a scanner
+# that simply arms everything it cannot classify.
+yaml_spare shnotmplx "'shell: bash -x' without {0} still reads its flags (no pipefail)" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -x\n        $HAZ_BODY"
+yaml_spare shperl "a custom interpreter ('perl {0}') is not a shell and is skipped" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: perl {0}\n        $HAZ_BODY"
 yaml_spare shpython "'shell: python' is not a POSIX shell and carries no pipefail" \
   "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: python\n        $HAZ_BODY"
 

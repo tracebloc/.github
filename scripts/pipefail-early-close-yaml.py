@@ -105,26 +105,53 @@ def flags_for_shell(shell):
         return KEYWORD_FLAGS[spec]
     if spec in NON_SHELL:
         return None
-    if "{0}" not in spec:
-        # An unrecognised keyword. Fail CLOSED on scope: treat it as the
-        # default shell rather than silently dropping the block. The worst case
-        # is a finding someone can silence with the marker; the other direction
-        # is the hole this file exists to close.
-        return DEFAULT_FLAGS
-    # A custom command line, used VERBATIM by GitHub -- so its flags are
-    # whatever is written, and no `-e` is implied.
+
+    # AN UNRESOLVED EXPRESSION IS CHECKED FIRST, and before the command-line
+    # branch, because `shell: ${{ matrix.shell }} {0}` would otherwise be read
+    # as a command whose program is `${{` -- not a POSIX shell -- and skipped.
+    #
+    # GitHub evaluates `${{ }}` BEFORE choosing the shell, so an expression
+    # resolving to `bash` runs with errexit AND pipefail. The scanner only ever
+    # sees the literal text, so what runs cannot be determined here and the one
+    # safe answer is the one that still reports (Bugbot, .github#404). Before
+    # this, such a step fell through to the default `-e` -- errexit only, no
+    # pipefail -- and a live `| head -1` in it was reported CLEAN: fail-open, in
+    # the scan this file exists to add.
+    #
+    # Arming both is the same trade the wrapper makes for basename-matched
+    # `source` targets: the worst case is a spurious finding someone silences
+    # with `# pipefail-guard: allow`, where the other direction is silent.
+    if "${{" in spec:
+        return "-eo pipefail"
+
     tokens = spec.split()
     if not tokens:
         return None
     program = os.path.basename(tokens[0])
-    if program not in POSIX_SHELL_PROGRAMS:
+
+    # A COMMAND LINE, whose flags are whatever is written -- GitHub uses it
+    # verbatim and implies no `-e`. The `{0}` is NOT required to reach this
+    # branch: `shell: bash -eo pipefail` with the template omitted is the same
+    # invocation as `bash -eo pipefail {0}`, and treating it as "unrecognised"
+    # dropped its pipefail.
+    if program in POSIX_SHELL_PROGRAMS:
+        kept = []
+        for tok in tokens[1:]:
+            if tok == "{0}":
+                break
+            kept.append(tok)
+        return " ".join(kept)
+
+    # A CUSTOM INTERPRETER (`perl {0}`, `node {0}`) is not a shell and has no
+    # pipefail, exactly like the `python`/`pwsh` keywords above. The `{0}` is
+    # what marks it as a real command rather than a typo.
+    if "{0}" in spec:
         return None
-    kept = []
-    for tok in tokens[1:]:
-        if tok == "{0}":
-            break
-        kept.append(tok)
-    return " ".join(kept)
+
+    # A bare word that is neither a keyword nor a program: a workflow GitHub
+    # itself refuses to run. Armed rather than skipped, so the fail-open
+    # direction is never the default, and it costs nothing real.
+    return "-eo pipefail"
 
 
 def _scalar(node):
