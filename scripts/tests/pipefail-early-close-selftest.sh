@@ -556,25 +556,36 @@ while IFS= read -r consumer; do
   measure "$consumer" BIG;   big_rc=$MRC
   detects "$consumer"
 
-  # A MEMBER OF THE CLASS is defined by behaviour, not by a list: survives the
-  # small payload, dies with SIGPIPE (141) on the large one.
-  if [ "$small_rc" = 0 ] && [ "$big_rc" = 141 ]; then
+  # A MEMBER OF THE CLASS is defined by behaviour, not by a list: the pipeline
+  # SUCCEEDS on the small payload and FAILS on the large one. The flip is the
+  # requirement -- under errexit+pipefail any non-zero status aborts the script,
+  # which is the damage -- and it is deliberately NOT pinned to 141.
+  #
+  # 141 IS NOT PORTABLE, and assuming it cost a CI round. The producer here is
+  # bash's `printf` builtin: macOS bash 3.2 is killed by SIGPIPE and the
+  # pipeline yields 141 with nothing on stderr, while GNU bash 5 reports the
+  # EPIPE itself (`printf: write error: Broken pipe`) and yields 1. Same defect,
+  # same abort, different number -- so a test that demanded 141 called every
+  # member "MEASUREMENT UNCLEAR" on Linux while passing on macOS. The observed
+  # code is printed in the case name so the platform difference stays visible
+  # instead of being smoothed over.
+  if [ "$small_rc" = 0 ] && [ "$big_rc" != 0 ]; then
     hazard=yes
-  elif [ "$small_rc" = "$big_rc" ] && [ "$big_rc" != 141 ]; then
+  elif [ "$small_rc" = 0 ] && [ "$big_rc" = 0 ]; then
     hazard=no
   else
     record 1 "MEASUREMENT UNCLEAR for '$consumer'" \
-      "small=$small_rc big=$big_rc -- neither a clean member nor a clean non-member"
+      "small=$small_rc big=$big_rc -- the small payload must succeed; it did not, so the fixture is wrong"
     continue
   fi
 
   if [ "$hazard" = yes ] && [ -n "$DOUT" ]; then
-    record 0 "'$consumer' SIGPIPEs at 260KB (rc 141), not at 2.6KB -- and is flagged" ""
+    record 0 "'$consumer' fails at 260KB (rc $big_rc), succeeds at 2.6KB -- and is flagged" ""
   elif [ "$hazard" = no ] && [ -z "$DOUT" ]; then
-    record 0 "'$consumer' reads to EOF at both sizes (rc $big_rc) -- and is spared" ""
+    record 0 "'$consumer' reads to EOF at both sizes (rc 0) -- and is spared" ""
   elif [ "$hazard" = yes ]; then
     record 1 "'$consumer' is a MEASURED hazard the gate does not flag" \
-      "small=$small_rc big=$big_rc, detector said nothing"
+      "small=$small_rc big=$big_rc (the abort is real at 260KB), detector said nothing"
   else
     record 1 "'$consumer' is measurably safe but the gate flags it" \
       "small=$small_rc big=$big_rc, detector said: $DOUT"
@@ -600,13 +611,36 @@ CONSUMERS
 # harness runs the consumer as a simple command. The loop reads to EOF, so
 # nothing SIGPIPEs -- and an arm matching `read` anywhere after the bar would
 # report on it. Measured inline, then asserted against the detector.
+# BOTH PRODUCER BEHAVIOURS ARE PINNED HERE, so the platform difference is
+# covered wherever this runs instead of only where the platform happens to
+# behave one way -- the same lesson as the gawk case further down. Ignoring
+# SIGPIPE makes bash report the EPIPE itself rather than die from the signal,
+# which is exactly what GNU bash 5 does on the runners: rc 1 with `printf:
+# write error: Broken pipe`, where macOS bash 3.2 is killed and yields 141.
+# Both must read as a member, because both abort the caller under errexit.
+EPIPE_SMALL=0
+PAYLOAD="$WORK/payload-SMALL" bash -c \
+  'set -eo pipefail; trap "" PIPE; P=$(cat "$PAYLOAD"); printf "%s\n" "$P" | head -1 >/dev/null' \
+  2>/dev/null || EPIPE_SMALL=$?
+EPIPE_BIG=0
+PAYLOAD="$WORK/payload-BIG" bash -c \
+  'set -eo pipefail; trap "" PIPE; P=$(cat "$PAYLOAD"); printf "%s\n" "$P" | head -1 >/dev/null' \
+  2>"$WORK/epipe-err" || EPIPE_BIG=$?
+if [ "$EPIPE_SMALL" = 0 ] && [ "$EPIPE_BIG" != 0 ] \
+   && grep -qi "broken pipe" "$WORK/epipe-err"; then
+  record 0 "the EPIPE form (GNU bash) also flips: rc $EPIPE_BIG at 260KB, 0 at 2.6KB" ""
+else
+  record 1 "the EPIPE form (GNU bash) must also flip" \
+    "small=$EPIPE_SMALL big=$EPIPE_BIG err=$(cat "$WORK/epipe-err" 2>/dev/null)"
+fi
+
 WHILE_RC=0
 PAYLOAD="$WORK/payload-BIG" bash -c \
   'set -eo pipefail; P=$(cat "$PAYLOAD"); printf "%s\n" "$P" | while read -r l; do :; done' \
   2>/dev/null || WHILE_RC=$?
 detects 'while read -r l; do :; done'
 if [ "$WHILE_RC" = 0 ] && [ -z "$DOUT" ]; then
-  record 0 "'| while read' reads to EOF at 260KB (rc 0) -- and is spared" ""
+  record 0 "'| while read' reads to EOF at 260KB (rc 0, no flip) -- and is spared" ""
 else
   record 1 "'| while read' must be spared" "rc=$WHILE_RC detector=$DOUT"
 fi
