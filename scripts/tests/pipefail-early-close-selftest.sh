@@ -1190,5 +1190,57 @@ else
   record 1 "...but a './'-spelled Helm template is still out of scope" "rc=$RC out=$OUT"
 fi
 
+# == DISCOVERY HAS A FLOOR, AND `.yaml` NEEDS ITS OWN FIXTURE ================
+#
+# @saadqbal asked for a numeric floor on YAML discovery, because the tail
+# assertion above is `rc = 0 || rc = 1` and passes whether the scan found forty
+# files or zero -- and specifically because "losing `.yaml` while keeping `.yml`"
+# is not caught by the arm's own mutation.
+#
+# Measured before writing it, and the measurement changed the answer: this repo
+# has **40** in-scope files and **0** of them end in `.yaml`. So a floor counted
+# here would stay green with `.yaml` support deleted outright -- vacuous for the
+# exact case it was asked for. The floor and the extension need separate cases.
+#
+# 1. THE EXTENSION, on a fixture that actually has one.
+rm -rf "$WORK/yamlext"; mkdir -p "$WORK/yamlext/.github/workflows"
+printf 'name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash\n        run: |\n          x=$(printf "%%s" "$Y" | head -1)\n' \
+  > "$WORK/yamlext/.github/workflows/hz.yaml"
+( cd "$WORK/yamlext" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+OUT=$(PIPEFAIL_ROOT="$WORK/yamlext" PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" 2>&1); RC=$?
+if [ "$RC" = 1 ] && grep -q 'hz.yaml' <<<"$OUT"; then
+  record 0 "a .yaml workflow is discovered, not just .yml" ""
+else
+  record 1 "a .yaml workflow is discovered, not just .yml" "rc=$RC out=$OUT"
+fi
+
+# 2. THE FLOOR, for the general case the extension check cannot see: discovery
+# collapsing wholesale. Counted from the extractor's own manifest rather than
+# from a hand-kept list of files, so a new workflow raises it for free.
+# Measured on this repo: 40 in-scope files -> 105 fragments across 30 of them.
+# The floor is deliberately well under that -- it is a "did discovery happen at
+# all" tripwire, not a coverage target that reddens whenever someone deletes a
+# `run:` block.
+YAML_FRAG_FLOOR=60
+FRAGDIR=$(mktemp -d)
+INSCOPE=$(git ls-files \
+  | grep -E '^\.github/workflows/.*\.ya?ml$|(^|/)action\.ya?ml$' || true)
+# shellcheck disable=SC2086
+if [ -n "$INSCOPE" ] \
+   && python3 "$(dirname "$GATE_ABS")/pipefail-early-close-yaml.py" \
+        --out "$FRAGDIR" $INSCOPE >/dev/null 2>&1; then
+  NFRAG=$(grep -c . "$FRAGDIR/manifest.tsv" 2>/dev/null || echo 0)
+  if [ "$NFRAG" -ge "$YAML_FRAG_FLOOR" ]; then
+    record 0 "YAML discovery is above its floor ($NFRAG >= $YAML_FRAG_FLOOR fragments)" ""
+  else
+    record 1 "YAML discovery is above its floor" \
+      "only $NFRAG fragment(s) from ${INSCOPE:+$(printf '%s\n' "$INSCOPE" | grep -c .)} in-scope file(s); floor is $YAML_FRAG_FLOOR"
+  fi
+else
+  # FAIL CLOSED: if the extractor cannot run here, the floor proves nothing and
+  # must not read as satisfied.
+  record 1 "YAML discovery is above its floor" "the extractor could not be run, so the floor is unverified"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ] || exit 1
