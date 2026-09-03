@@ -316,6 +316,7 @@ query($owner: String!, $name: String!, $number: Int!) {
           comments(first: 1) {
             nodes {
               author { login }
+              originalCommit { oid }
               body
               url
             }
@@ -386,6 +387,28 @@ def query_lacks_author_kind(query=QUERY):
     field this gate reads is pinned separately by the fixtures in the selftest.
     """
     return re.search(r"author\s*\{[^}]*__typename", query) is None
+
+
+def query_lacks_finding_commit(query=QUERY):
+    """True when `query` no longer asks which commit a finding was raised against.
+
+    `findings` reads `originalCommit.oid` off a finding's comment to tell a
+    finding raised against THIS head from one raised against an OLDER head
+    (backend#2816). `originalCommit` is the commit the review was left on and it
+    stays pinned there; `commit` fast-forwards to the head whenever the line
+    still maps, so it reads equal to the head for a finding raised against an
+    older commit -- which is why this gate reads `originalCommit`, not `commit`,
+    and why a query edited to stop asking for it is a defect and not a
+    simplification.
+
+    Were it dropped, every finding's `raised_against` would be None, which
+    fail-closed treats as against-this-head -- so the gate would silently revert
+    to fast-failing the post-fix-push race it was changed to WAIT through, and
+    the log would stay green while doing it. Same inert-guard shape as
+    `query_lacks_author_kind`, one field over: the run refuses rather than
+    reporting from a field it stopped requesting. Derived by reading the query.
+    """
+    return re.search(r"originalCommit\s*\{[^}]*oid", query) is None
 
 
 def author_kind(pr):
@@ -573,6 +596,12 @@ def findings(pr):
                 "severity": severity_of(body),
                 "resolved": bool(thread.get("isResolved")),
                 "outdated": bool(thread.get("isOutdated")),
+                # The commit the finding was RAISED AGAINST -- `originalCommit`,
+                # which stays pinned to the review's commit, never `commit`,
+                # which fast-forwards to the head (backend#2816). None when
+                # GitHub gave no commit, which evaluate() treats as
+                # against-this-head: fail closed, "cannot tell" blocks.
+                "raised_against": ((first.get("originalCommit") or {}) or {}).get("oid"),
                 "title": (body.strip().splitlines() or ["(no title)"])[0].lstrip("# ").strip(),
                 "url": first.get("url") or "",
             }
@@ -668,25 +697,65 @@ def evaluate(pr, min_severity):
 
     check = bugbot_check(pr)
     claimed = check is not None and check.get("status") in TERMINAL_STATUSES
-    if not claimed and blocking:
-        head = (pr.get("headRefOid") or "?")[:12]
+
+    # WHERE AN OUTSTANDING FINDING WAS RAISED IS THE DISCRIMINATOR (backend#2816).
+    #
+    # The fast-fail above still holds when the finding was raised against the
+    # head being evaluated: a completed review already saw this exact commit, so
+    # a verdict that is still coming cannot change the answer. It does NOT hold
+    # for the post-fix-push race, which is the ticket: the fix cycle is push ->
+    # reply -> resolve, the push fires this gate before the resolve can land, and
+    # the finding it sees was raised against the PREVIOUS head. Bugbot is now
+    # IN_PROGRESS on the new one and a verdict is seconds away, so this case must
+    # WAIT -- exactly as the gate already does when there are no findings at all.
+    #
+    # So the finding's `raised_against` commit (from findings(), read off
+    # `originalCommit`) is split against the head:
+    head_oid = pr.get("headRefOid")
+    against_this_head = []
+    against_older_head = []
+    for f in blocking:
+        # FAIL CLOSED: a finding whose commit could not be read (None) is treated
+        # as against THIS head and blocks. "Cannot tell" must never become
+        # permission to wait it out.
+        if f["raised_against"] is None or f["raised_against"] == head_oid:
+            against_this_head.append(f)
+        else:
+            against_older_head.append(f)
+
+    # WHAT STILL FAST-FAILS, AND WHAT NOW WAITS. This is a NARROWING of the
+    # fast-fail, never a weakening:
+    #   * IN_PROGRESS on this head (check is not None here, since `claimed` is
+    #     false) -> only findings against THIS head fast-fail; findings against an
+    #     older head fall through to PENDING and are decided by the verdict that
+    #     is arriving (and still block at the deadline if it never does -- a
+    #     stalled Bugbot still blocks).
+    #   * NEVER CLAIMED (check is None) -> ANY blocking finding fast-fails, exactly
+    #     as before. There is no in-progress verdict to wait for, and tolerating
+    #     an older-head finding here would LAUNDER it across a dropped review --
+    #     the #356 order bug the block below the comprehension guards against.
+    fast_blockers = against_this_head if check is not None else blocking
+    if not claimed and fast_blockers:
+        head = (head_oid or "?")[:12]
         lines.append(
             "Bugbot %s head %s, AND %d open finding(s) at or above %s are "
-            "outstanding from an earlier review."
+            "outstanding that a pending verdict would not clear."
             % (
                 "never claimed" if check is None
                 else "has not finished (status %s) on"
                      % check.get("status"),
                 head,
-                len(blocking),
+                len(fast_blockers),
                 min_severity,
             )
         )
         lines.append(
-            "The absence of a review on THIS head is tolerated; the findings "
-            "are not. Resolve them -- fix, or reply with the ticket and resolve "
-            "-- then re-run. This does not wait for the missing review: the "
-            "answer would not change."
+            "A finding raised against THIS head (or one whose commit could not "
+            "be read) is not cleared by a pending review. Resolve it -- fix, or "
+            "reply with the ticket and resolve -- then re-run. (A finding raised "
+            "against an OLDER head, while Bugbot is IN_PROGRESS on this one, is "
+            "the post-fix-push race and is NOT counted here: that waits for the "
+            "verdict instead of failing -- backend#2816.)"
         )
         lines.extend(_finding_lines(found))
         return FAIL, lines
@@ -700,13 +769,31 @@ def evaluate(pr, min_severity):
             "checked before this verdict, not after." % min_severity,
         ]
     if not claimed:
-        return PENDING, [
+        pending_lines = [
             "Bugbot is still running on head %s (status %s)."
-            % ((pr.get("headRefOid") or "?")[:12], check.get("status")),
+            % ((head_oid or "?")[:12], check.get("status")),
             "A verdict that has not arrived is not a clean one.",
-            "No open finding at or above %s from any earlier review, either -- "
-            "checked before this verdict, not after." % min_severity,
         ]
+        if against_older_head:
+            # The post-fix-push race (backend#2816): findings remain open, but
+            # every one was raised against an OLDER head, so we wait for the
+            # verdict on THIS head rather than fast-failing findings a resolve is
+            # about to clear. If Bugbot never finishes, PENDING still blocks at
+            # the deadline (main), so this defers the decision -- it does not
+            # drop it.
+            pending_lines.append(
+                "%d open finding(s) at or above %s remain, but every one was "
+                "raised against an OLDER head -- the post-fix-push race. Waiting "
+                "for the verdict on this head; if it never lands, this still "
+                "blocks at the deadline (backend#2816)." % (len(against_older_head), min_severity)
+            )
+            pending_lines.extend(_finding_lines(found))
+        else:
+            pending_lines.append(
+                "No open finding at or above %s from any earlier review, either "
+                "-- checked before this verdict, not after." % min_severity
+            )
+        return PENDING, pending_lines
 
     lines.append(
         "Bugbot reviewed head %s -- check %r, status %s, conclusion %s."
@@ -806,6 +893,18 @@ def main(argv=None):
         _emit(FAIL, [], "the GraphQL query no longer requests author.__typename, "
                         "so an unreviewed head cannot be told apart from a "
                         "Bot-authored one. See author_kind.")
+        return 2
+
+    # Same shape again (backend#2816): if the query stopped asking for a
+    # finding's originalCommit, every finding reads as raised against no commit,
+    # fail-closed folds them into against-this-head, and the head-scoped
+    # fast-fail silently reverts to blocking the race it was changed to wait
+    # through -- with a green run. A defect in this file, so it fails the run.
+    if query_lacks_finding_commit():
+        _emit(FAIL, [], "the GraphQL query no longer requests originalCommit.oid "
+                        "on finding comments, so a finding raised against an older "
+                        "head cannot be told from one against this head. See "
+                        "query_lacks_finding_commit.")
         return 2
 
     sleeper = time.sleep

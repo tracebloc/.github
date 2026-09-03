@@ -46,6 +46,26 @@
 #     deliberately the SAME rule the `shellcheck` job in code-quality.yml
 #     applies, so the two jobs cannot disagree about what "a shell file" is.
 #
+#  3. YAML `run:` BLOCKS ARE SHELL, AND WERE OUT OF SCOPE (backend#2967). The
+#     classifier above is extension-else-shebang, and workflow YAML has
+#     neither -- so the gate reported SUCCESS on `e2e-test-agent@f4d6fec`,
+#     whose `journey-tier-a.yml:2014` carried
+#     `CM=$(printf '%s\n' "$CM_RAW" | head -1)` in a step declaring
+#     `shell: bash`. Handed that file explicitly the scanner flags line 2014
+#     correctly, so THE LINE GRAMMAR WAS NEVER THE HOLE -- the awk was never
+#     handed the file. The ticket suspected a narrower matcher (`head -1`
+#     missed where `head -n1` is caught); that is false, all four spellings
+#     were already matched, and the selftest pins it so the claim stays
+#     measured rather than restated.
+#
+#     `pipefail-early-close-yaml.py` explodes those blocks into fragments and
+#     THE SAME awk judges them -- no second matcher (rule 9). Which YAML files
+#     are in scope is decided by STRUCTURE, not by a path glob: every tracked
+#     `.yml`/`.yaml` is offered, and the extractor emits a fragment only where
+#     it actually finds workflow/composite-action steps. A hand-kept list of
+#     workflow directories is the same defect as the hand-kept file list in
+#     point 2.
+#
 #  FAILS CLOSED (backend#1729 rule 3). An unreadable tree exits 2, not 0 —
 #  "cannot tell" is a finding, never a pass. A tree that is readable and simply
 #  contains no shell files is a legitimate 0: nothing in scope is not the same
@@ -53,6 +73,15 @@
 #
 #  Usage:  pipefail-early-close.sh [file...]      (default: the whole repo)
 #          PIPEFAIL_ROOT=<dir>                    (default: $PWD)
+#          PIPEFAIL_SCOPE=all|shell|yaml          (default: all)
+#
+#  PIPEFAIL_SCOPE EXISTS FOR THE MIGRATION, NOT AS A DIAL. `all` is the default
+#  because a guard's default must be the fail-closed one. The split lets
+#  code-quality.yml report the newly-in-scope YAML findings at warning level
+#  while the shell verdict keeps whatever `soft-fail` the caller already chose
+#  -- so arming this cannot redden a repo that was green (rule 4). Same
+#  migration shape as `action-pins-soft-fail`, and the same expectation: a repo
+#  still splitting them months from now is the finding.
 #  Output: one `path:line: code` per offender. Exit 0 clean / 1 offenders /
 #          2 cannot tell. Reporting and judging are separate on purpose: the
 #          workflow decides whether findings block, via `soft-fail`.
@@ -61,14 +90,81 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 AWK_PROG="$HERE/pipefail-early-close.awk"
+YAML_PROG="$HERE/pipefail-early-close-yaml.py"
 ROOT="${PIPEFAIL_ROOT:-$PWD}"
+SCOPE="${PIPEFAIL_SCOPE:-all}"
+
+case "$SCOPE" in
+  all|shell|yaml) ;;
+  # An unrecognised scope is "cannot tell", not "scan everything" and not
+  # "scan nothing". A typo in a caller must not silently narrow a gate.
+  *) echo "pipefail-early-close: unknown PIPEFAIL_SCOPE '$SCOPE' (all|shell|yaml)" >&2; exit 2 ;;
+esac
 
 [ -r "$AWK_PROG" ] || { echo "pipefail-early-close: cannot read $AWK_PROG" >&2; exit 2; }
 cd "$ROOT" || { echo "pipefail-early-close: cannot enter $ROOT" >&2; exit 2; }
 
+# WHAT GITHUB ITSELF PARSES AS WORKFLOW YAML, and nothing else
+# (@saadqbal, blocking). Every tracked `*.y{a,}ml` used to be offered to the
+# extractor, on the reasoning that filtering here would be a hand-kept list.
+# The reasoning was right about hand-kept lists and wrong about this being one.
+#
+# An unparseable YAML is rc 2, and a Helm chart template is not YAML. Measured
+# on fresh clones: client 45 of 120 tracked YAML unparseable, backend 14 of 54,
+# averaging-service 6 of 24 -- all rc 2. And rc 2 cannot be softened, because
+# `code-quality.yml` does `exit "$RC"` for any rc outside {0,1} BEFORE it
+# consults `$SOFT`, so `yaml-run-blocks-soft-fail: true` -- the switch added for
+# exactly this -- never applies. Those three repos would go red on every PR the
+# moment this reached `main`, which is the opposite of "arm while green".
+#
+# So the scope is DERIVED, not listed: these are the only paths GitHub will ever
+# execute workflow steps from -- `.github/workflows/` for workflows, any
+# `action.y{a,}ml` for a composite action. A parse failure there really does
+# mean a broken workflow and deserves rc 2. A parse failure in a Helm template
+# means the file is a Helm template, and refusing on it costs the repo all of
+# its coverage instead of protecting anything.
+#
+# One predicate, both call sites, so the explicit-argument path and the
+# whole-tree path cannot disagree about what a given file is.
+is_workflow_yaml() {
+  # NORMALISE BEFORE MATCHING (Bugbot, Medium). The globs below are literal
+  # relative prefixes, so `./.github/workflows/x.yml` and an absolute path both
+  # MISSED, fell through to the non-workflow `*.yml` arm, and were dropped from
+  # BOTH phases -- the gate exited 0 without scanning a live `run:` block.
+  # Reproduced before fixing: the bare path gave rc 1 with a finding, the same
+  # file as `./...` gave rc 0 and nothing. That is a fail-open this commit
+  # introduced, and the worst shape of one: silent, and only on the argument
+  # form a caller is most likely to pass.
+  local p="$1"
+  p="${p#"$ROOT"/}"
+  p="${p#"$PWD"/}"
+  while [ "${p#./}" != "$p" ]; do p="${p#./}"; done
+  case "$p" in
+    .github/workflows/*.yml|.github/workflows/*.yaml) return 0 ;;
+    action.yml|action.yaml|*/action.yml|*/action.yaml) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 files=()
+yfiles=()
 if [ "$#" -gt 0 ]; then
-  files=("$@")
+  # Explicit arguments are split by the SAME extension rule the derived path
+  # below uses, so `gate foo.yml` and a whole-tree run agree about what foo.yml
+  # is. Anything not YAML goes to the shell phase, which is where an
+  # extensionless or oddly-named script belongs.
+  for f in "$@"; do
+    if is_workflow_yaml "$f"; then
+      yfiles+=("$f")
+    else
+      case "$f" in
+        # A YAML that is not a workflow is neither phase's business: it holds no
+        # `run:` blocks this rule governs, and it is not shell.
+        *.yml|*.yaml) ;;
+        *) files+=("$f") ;;
+      esac
+    fi
+  done
 else
   # Enumerate TRACKED files only. An untracked build artefact is not this
   # repo's shell, and `git ls-files` is what every other whole-tree gate here
@@ -89,6 +185,10 @@ else
     [ -f "$f" ] || continue
     case "$f" in
       *.sh|*.bash|*.ksh) files+=("$f") ;;
+      # Only the YAML GitHub parses as a workflow -- see `is_workflow_yaml`.
+      # `action.y{a,}ml` is included there, so a composite action, the shape
+      # the ticket asked about, is still covered.
+      *.yml|*.yaml) is_workflow_yaml "$f" && yfiles+=("$f") ;;
       *.bats|*.ps1|*.psm1|*.zsh) ;;
       *) head -n 1 "$f" 2>/dev/null \
            | grep -Eq '^#![[:space:]]*[^[:space:]]*(/|[[:space:]])(ba|da|k)?sh([[:space:]]|$)' \
@@ -97,11 +197,13 @@ else
   done <<EOF
 $cand
 EOF
-  if [ "${#files[@]}" -eq 0 ]; then
+  if [ "${#files[@]}" -eq 0 ] && [ "${#yfiles[@]}" -eq 0 ]; then
     echo "pipefail-early-close: no shell files in scope."
     exit 0
   fi
 fi
+
+findings=""
 
 # --- seed: files that enable BOTH options themselves ------------------------
 # COMMENTS ARE STRIPPED FIRST. `.*` lets the option cluster sit anywhere on the
@@ -135,7 +237,7 @@ fi
 # have been green in CI and broken for every developer running the suite
 # locally. Caught only because the suite was run on macOS.
 haz=()
-for f in "${files[@]}"; do
+for f in ${files[@]+"${files[@]}"}; do
   [ -f "$f" ] || continue
   setlines=$(sed -E 's/#.*$//' "$f" 2>/dev/null | grep -E '^[[:space:]]*set[[:space:]]') || continue
   grep -qE '(-[a-zA-Z]*e[a-zA-Z]*([[:space:]]|$)|-o[[:space:]]+errexit)' <<<"$setlines" || continue
@@ -182,14 +284,115 @@ while :; do
   [ "$added" -eq 0 ] && break
 done
 
-out=$(awk -v hazardous="${haz[*]+${haz[*]}} " -f "$AWK_PROG" "${files[@]}")
-awk_rc=$?
-if [ "$awk_rc" -ne 0 ]; then
-  echo "pipefail-early-close: the scanner exited $awk_rc — refusing to report clean" >&2
-  exit 2
+if [ "$SCOPE" != yaml ] && [ "${#files[@]}" -gt 0 ]; then
+  out=$(awk -v hazardous="${haz[*]+${haz[*]}} " -f "$AWK_PROG" "${files[@]}")
+  awk_rc=$?
+  if [ "$awk_rc" -ne 0 ]; then
+    echo "pipefail-early-close: the scanner exited $awk_rc — refusing to report clean" >&2
+    exit 2
+  fi
+  findings="$out"
 fi
-if [ -n "$out" ]; then
-  printf '%s\n' "$out"
+
+# --- YAML `run:` blocks ------------------------------------------------------
+# The blocks are exploded into shell fragments by the extractor and judged by
+# THE SAME awk that judges every .sh in the tree. There is no second matcher
+# and no second option parser: the extractor prepends one synthesised `set`
+# line per fragment (from the step's effective `shell:`) and the awk's own
+# `apply_set` reads it. Mutating the awk's head arm therefore reddens the YAML
+# cases too, which is what proves this path calls the rule instead of copying
+# it (backend#1729 rule 9).
+if [ "$SCOPE" != shell ] && [ "${#yfiles[@]}" -gt 0 ]; then
+  [ -r "$YAML_PROG" ] || {
+    echo "pipefail-early-close: cannot read $YAML_PROG — refusing to report clean" >&2
+    exit 2
+  }
+  FRAG_DIR=$(mktemp -d) || {
+    echo "pipefail-early-close: cannot create a scratch dir — refusing to report clean" >&2
+    exit 2
+  }
+  trap 'rm -rf "$FRAG_DIR"' EXIT
+
+  # A NON-ZERO EXTRACTOR IS ALWAYS FATAL, never "no run blocks". Unparseable
+  # YAML, an unreadable file and a missing python3/PyYAML all land here, and
+  # every one of them is "cannot tell" (rule 3). The first draft let this fall
+  # through to an empty manifest, which reads exactly like a clean tree.
+  if ! python3 "$YAML_PROG" --out "$FRAG_DIR" "${yfiles[@]}"; then
+    echo "pipefail-early-close: the YAML extractor failed — refusing to report clean" >&2
+    exit 2
+  fi
+  MANIFEST="$FRAG_DIR/manifest.tsv"
+  [ -r "$MANIFEST" ] || {
+    echo "pipefail-early-close: the extractor wrote no manifest — refusing to report clean" >&2
+    exit 2
+  }
+
+  frags=()
+  while IFS="	" read -r frag _real _first; do
+    [ -n "${frag:-}" ] && frags+=("$frag")
+  done < "$MANIFEST"
+
+  if [ "${#frags[@]}" -gt 0 ]; then
+    # `hazardous` is deliberately EMPTY here. A fragment's options come from its
+    # synthesised `set` line, not from inheritance -- seeding both on would make
+    # every `run:` block read as errexit+pipefail, and the default GitHub shell
+    # (`bash -e {0}`) carries no pipefail at all.
+    yout=$(awk -v hazardous="" -f "$AWK_PROG" "${frags[@]}")
+    yawk_rc=$?
+    if [ "$yawk_rc" -ne 0 ]; then
+      echo "pipefail-early-close: the scanner exited $yawk_rc on YAML fragments — refusing to report clean" >&2
+      exit 2
+    fi
+    if [ -n "$yout" ]; then
+      # Map `<frag>:<n>: text` back to `<real path>:<real line>: text`. The
+      # fragment's line 1 is the synthesised `set` line, so body line n sits at
+      # `first + n - 2`. A row whose fragment is not in the manifest is a
+      # FINDING, not a row to drop: it means the mapping is broken, and a
+      # silently dropped offender is the failure mode this whole gate exists to
+      # prevent.
+      # THE HERE-STRING GOES INSIDE THE SUBSTITUTION. Written the other way,
+      # `mapped=$(awk ... -) <<<"$yout"`, the redirection attaches to the
+      # ASSIGNMENT: the awk then inherits the script own stdin, reads nothing,
+      # and every YAML finding is silently dropped -- rc 0, no output,
+      # byte-identical to a clean tree. That is the gate going vacuous a second
+      # time, in the fix for it going vacuous the first time. Caught by the
+      # f4d6fec regression case, which is why that case exists.
+      mapped=$(awk -F"	" '
+        NR == FNR { real[$1] = $2; first[$1] = $3; next }
+        {
+          if (match($0, /:[0-9]+: /) == 0) {
+            printf "pipefail-early-close: unparseable scanner row: %s\n", $0 > "/dev/stderr"
+            bad = 1; next
+          }
+          frag = substr($0, 1, RSTART - 1)
+          rest = substr($0, RSTART + 1)
+          c = index(rest, ":")
+          ln = substr(rest, 1, c - 1) + 0
+          txt = substr(rest, c + 2)
+          if (!(frag in real)) {
+            printf "pipefail-early-close: no manifest entry for %s\n", frag > "/dev/stderr"
+            bad = 1; next
+          }
+          printf "%s:%d: %s\n", real[frag], first[frag] + ln - 2, txt
+        }
+        END { if (bad) exit 3 }' "$MANIFEST" - <<<"$yout")
+      map_rc=$?
+      if [ "$map_rc" -ne 0 ]; then
+        echo "pipefail-early-close: could not map YAML findings back to source lines — refusing to report clean" >&2
+        exit 2
+      fi
+      if [ -n "$findings" ]; then
+        findings="$findings
+$mapped"
+      else
+        findings="$mapped"
+      fi
+    fi
+  fi
+fi
+
+if [ -n "$findings" ]; then
+  printf '%s\n' "$findings"
   exit 1
 fi
 exit 0
