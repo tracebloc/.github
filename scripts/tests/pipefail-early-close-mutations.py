@@ -279,13 +279,27 @@ MUTATIONS = [
     # takes no separate value (its argument is the rest of the command), while
     # `-C DIR` does.
     ("`-S` eats the program, so `env -S bash` is skipped", YML,
-     '    _VALUE_FLAGS = ("-u", "--unset", "-C", "--chdir")',
-     '    _VALUE_FLAGS = ("-u", "--unset", "-S", "--split-string", "-C", "--chdir")',
+     '            if char == "S":\n                return False',
+     '            if char == "\x00":\n                return False',
      "'env -S bash -eo pipefail {0}' IS armed (-S takes no separate value)"),
     ("`-C` stops consuming its DIR, so the DIR becomes the program", YML,
-     '    _VALUE_FLAGS = ("-u", "--unset", "-C", "--chdir")',
-     '    _VALUE_FLAGS = ()',
+     '    _VALUE_SHORT = "uC"',
+     '    _VALUE_SHORT = ""',
      "'env -C /tmp bash -eo pipefail {0}' IS armed (-C consumes its DIR)"),
+    # AND THE CLUSTER RULE ITSELF (Bugbot Medium, .github#404). `-iu` is not the
+    # token `-u`; the exact-token match that preceded this consumed one token,
+    # `HOME` became the program, and the step was SKIPPED with its `| head`
+    # unreported. Mutating back to that match is mutating back to the bug.
+    ("a clustered value flag is read as a no-value flag, losing the program", YML,
+     '            i += 2 if _consumes_next(tokens[i]) else 1',
+     '            i += 2 if tokens[i] in ("-u", "--unset", "-C", "--chdir") else 1',
+     "...and a CLUSTERED value flag, `env -iu HOME bash \u2026`"),
+    # The attached form is the other half of the same decision: `-iuHOME`
+    # carries its own value, so consuming the next token eats the program.
+    ("an ATTACHED cluster value consumes the next token too", YML,
+     '                return pos == len(body) - 1',
+     '                return True',
+     "...and an ATTACHED value, `env -iuHOME bash \u2026`, which consumes nothing"),
     ("composite-action `runs.steps` are not walked", YML,
      '''    runs = _mapping_get(root, "runs")
     if isinstance(runs, yaml.MappingNode):''',

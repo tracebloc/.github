@@ -874,10 +874,25 @@ yaml_spare shcustomo "a custom 'bash -o pipefail {0}' has pipefail but NO errexi
 # that fixes it shipped unguarded; these are its cases (Bugbot Medium, #404).
 yaml_flag shenvbash "'/usr/bin/env bash -eo pipefail {0}' IS armed, not skipped" \
   "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env bash -eo pipefail {0}\n        $HAZ_BODY"
-yaml_flag shenvassign "...and `env FOO=bar bash …`, which env applies itself" \
+yaml_flag shenvassign "...and \`env FOO=bar bash …\`, which env applies itself" \
   "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env FOO=bar bash -eo pipefail {0}\n        $HAZ_BODY"
-yaml_flag shenvopts "...and past env's own options, including `-u NAME`" \
+yaml_flag shenvopts "...and past env's own options, including \`-u NAME\`" \
   "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -i -u HOME bash -eo pipefail {0}\n        $HAZ_BODY"
+# AND SHORT FLAGS CLUSTER (Bugbot Medium, #404). `-iu` is not the token `-u`,
+# so an exact-token match consumed ONE token, `HOME` became the program, and the
+# step was skipped with its `| head` unreported -- the same fail-open as the two
+# cases above, reached a third way. The last character of a cluster decides, and
+# only when the value is not already attached to it.
+yaml_flag shenvclust "...and a CLUSTERED value flag, \`env -iu HOME bash …\`" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -iu HOME bash -eo pipefail {0}\n        $HAZ_BODY"
+yaml_flag shenvclustattached "...and an ATTACHED value, \`env -iuHOME bash …\`, which consumes nothing" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -iuHOME bash -eo pipefail {0}\n        $HAZ_BODY"
+yaml_flag shenvclustchdir "...and \`-iC DIR\`, the other value-taking short flag, clustered" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -iC /tmp bash -eo pipefail {0}\n        $HAZ_BODY"
+# A CLUSTER ENDING IN `S` still takes no separate value, so the program is the
+# very next token -- the `-S` carve-out must survive clustering too.
+yaml_flag shenvclustsplit "...while \`env -iS bash …\` still consumes nothing (-S carve-out holds)" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -iS bash -eo pipefail {0}\n        $HAZ_BODY"
 # `-S` IS NOT A VALUE FLAG. Its argument is the whole remaining command, so the
 # next token after it IS the program -- consuming one made the peel land on
 # `pipefail` and skip the step, reintroducing the bug one flag along.
@@ -930,7 +945,7 @@ yaml_spare shpython "'shell: python' is not a POSIX shell and carries no pipefai
 # it is because the alias/merge was actually followed. yaml.compose resolves
 # aliases on its own; the merge is what _mapping_get had to learn.
 ANCHORED='name: j\non:\n  push:\nx-templates:\n  base: &base\n    shell: bash\n    run: |\n      x=$(printf "%%s" "$Y" | head -1)\n'
-yaml_flag shalias "an aliased step (`- *base`) is resolved and scanned" \
+yaml_flag shalias "an aliased step (\`- *base\`) is resolved and scanned" \
   "${ANCHORED}jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - *base\n"
 yaml_flag shmerge "a step whose shell/run arrive via '<<: *base' IS scanned" \
   "${ANCHORED}jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - <<: *base\n        name: merged\n"
@@ -1324,7 +1339,7 @@ else
 
   bad_err=$(printf 'frag-missing:3: something\n' | awk -F"	" -f "$MAP_AWK" "$MAP_MAN" - 2>&1 >/dev/null)
   bad_rc=$?
-  if [ "$bad_rc" = 3 ] && printf '%s' "$bad_err" | grep -q "no manifest entry"; then
+  if [ "$bad_rc" = 3 ] && grep -q "no manifest entry" <<<"$bad_err"; then
     record 0 "an unmapped scanner row REFUSES instead of being dropped" ""
   else
     record 1 "an unmapped scanner row REFUSES instead of being dropped" \
@@ -1333,7 +1348,7 @@ else
 
   ugly_err=$(printf 'no-colon-here\n' | awk -F"	" -f "$MAP_AWK" "$MAP_MAN" - 2>&1 >/dev/null)
   ugly_rc=$?
-  if [ "$ugly_rc" = 3 ] && printf '%s' "$ugly_err" | grep -q "unparseable scanner row"; then
+  if [ "$ugly_rc" = 3 ] && grep -q "unparseable scanner row" <<<"$ugly_err"; then
     record 0 "an unparseable scanner row REFUSES instead of being dropped" ""
   else
     record 1 "an unparseable scanner row REFUSES instead of being dropped" \
@@ -1342,6 +1357,47 @@ else
   rm -f "$MAP_MAN"
 fi
 rm -f "$MAP_AWK"
+
+# --- THIS FILE OBEYS ITS OWN HEADER RULE --------------------------------------
+#
+# The header (top of this file) forbids `printf … | grep -q` in an assertion,
+# because `grep -q` closes early, the producer takes SIGPIPE, the pipeline is
+# 141 under `set -uo pipefail`, and a real match then reads as ABSENT. It was
+# prose, and prose does not fail a build: the form was committed in eight
+# assertions at .github#300, fixed, and committed again in two more at
+# .github#404. Twice is a rule (org standards: a finding that recurs becomes a
+# rule, and this one is grep-expressible), so the rule is now a check.
+#
+# QUOTE-AWARE, because this file's own FIXTURES are the forbidden string --
+# `case_flag badq.sh … '  producer | grep -q needle'` is an INPUT to the scanner
+# and must stay exactly as written. A plain grep for the form would flag those
+# and would have to be silenced, which is how a guard becomes noise. So a
+# match counts only where it is real shell: outside single quotes, and not in a
+# comment.
+self_bad=$(awk '
+  { line = $0
+    sub(/#.*/, "", line)                 # strip comments
+    out = ""; inq = 0
+    n = length(line)
+    for (i = 1; i <= n; i++) {
+      c = substr(line, i, 1)
+      if (c == "\047") { inq = !inq; continue }
+      if (!inq) out = out c
+    }
+    # A REAL PIPE, not the second bar of a `||` -- the exact confusion the
+    # header of this file lists first, and which this check got wrong on its
+    # own fixtures before it was pinned. `|&` is a pipe too.
+    if (out ~ /(^|[^|])\|[ \t]*grep -q/ || out ~ /\|&[ \t]*grep -q/)
+      printf "%d: %s\n", NR, $0
+  }
+' "$0")
+if [ -z "$self_bad" ]; then
+  record 0 "this suite pipes nothing into grep -q outside a fixture" ""
+else
+  record 1 "this suite pipes nothing into grep -q outside a fixture" \
+    "use a here-string (grep -q PAT <<<\"\$var\"); offenders:
+$self_bad"
+fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ] || exit 1

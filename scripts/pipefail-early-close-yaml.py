@@ -149,7 +149,36 @@ def flags_for_shell(shell):
     # Consuming it skipped `env -S bash -eo pipefail {0}` entirely -- the peel
     # landed on `pipefail` as the program -- which is the same fail-open shape
     # the peel was added to close.
-    _VALUE_FLAGS = ("-u", "--unset", "-C", "--chdir")
+    # AND SHORT FLAGS CLUSTER, which an exact-token match cannot see (Bugbot,
+    # .github#404). `env -iu HOME bash -eo pipefail {0}` is a real, common
+    # shape, and `-iu` is not `-u`: the exact match consumed one token, `HOME`
+    # became the program, `basename("HOME")` is not a POSIX shell, and the step
+    # was SKIPPED with its `| head` unreported -- the identical fail-open the
+    # peel and the `-S` carve-out were each added to close, arrived at a third
+    # way. Whether a cluster takes an argument is decided by its LAST character,
+    # and only when the value is not already attached: `-iu HOME` consumes the
+    # next token, `-iuHOME` carries its own.
+    _VALUE_SHORT = "uC"  # `env -u NAME`, `env -C DIR`
+    _VALUE_LONG = ("--unset", "--chdir")
+
+    def _consumes_next(token):
+        """Whether `token` takes the FOLLOWING token as its value."""
+        if token.startswith("--"):
+            # `--unset=NAME` carries its own; bare `--unset` takes the next.
+            return token in _VALUE_LONG
+        body = token[1:]
+        if not body:
+            return False
+        for pos, char in enumerate(body):
+            # `-S`'s argument is the whole remaining command, so after a
+            # `.split()` the next token IS the program -- never consume it.
+            if char == "S":
+                return False
+            if char in _VALUE_SHORT:
+                # Attached (`-uHOME`) or separate (`-u HOME`)?
+                return pos == len(body) - 1
+        return False
+
     i = 0
     while i < len(tokens) and os.path.basename(tokens[i]) == "env":
         i += 1
@@ -157,7 +186,7 @@ def flags_for_shell(shell):
             tokens[i].startswith("-")
             or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[i])
         ):
-            i += 2 if tokens[i] in _VALUE_FLAGS else 1
+            i += 2 if _consumes_next(tokens[i]) else 1
     # Peeling everything leaves no program to judge. Fall through armed rather
     # than skipped -- the same direction every other "cannot tell" takes here.
     if i >= len(tokens):
