@@ -1214,6 +1214,43 @@ else
   record 1 "a .yaml workflow is discovered, not just .yml" "rc=$RC out=$OUT"
 fi
 
+# 1b. THE COMPOSITE ARM'S OTHER THREE SPELLINGS, for the same reason one arm
+# over. `is_workflow_yaml` lists SIX globs, and counting what reaches each of
+# them: `.github/workflows/*.yml` has the f4d6fec regression,
+# `.github/workflows/*.yaml` now has `hz.yaml`, and `action.yml` has the
+# composite-action case above -- whose fixture sits at the fixture repo's ROOT,
+# so it matches the bare `action.yml` arm and not `*/action.yml`. That leaves
+# `action.yaml`, `*/action.yml` and `*/action.yaml` reached by nothing, and both
+# whole-arm mutations on the composite line are caught by the root `action.yml`
+# case, so deleting any one of the three left the suite green. Exactly the gap
+# @saadqbal named for `.yaml`, three arms further along.
+rm -rf "$WORK/actspell"; mkdir -p "$WORK/actspell/sub" "$WORK/actspell/sub2"
+act_hazard() {  # a composite action whose only step carries the head hazard
+  printf 'name: a\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: |\n        x=$(printf "%%s" "$Y" | head -1)\n'
+}
+act_hazard > "$WORK/actspell/action.yaml"
+act_hazard > "$WORK/actspell/sub/action.yml"
+act_hazard > "$WORK/actspell/sub2/action.yaml"
+( cd "$WORK/actspell" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+OUT=$(PIPEFAIL_ROOT="$WORK/actspell" PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" 2>&1); RC=$?
+# ANCHORED, because `sub2/action.yaml:` CONTAINS `action.yaml:` -- an unanchored
+# needle for the root file is satisfied by the subdirectory one, and the arm
+# this case exists to pin would read as covered while nothing reached it.
+MISSED=""
+while IFS= read -r want; do
+  [ -n "$want" ] || continue
+  grep -qE "$want" <<<"$OUT" || MISSED="$MISSED $want"
+done <<'ACTSPELLINGS'
+^action\.yaml:
+^sub/action\.yml:
+^sub2/action\.yaml:
+ACTSPELLINGS
+if [ "$RC" = 1 ] && [ -z "$MISSED" ]; then
+  record 0 "every composite spelling is in scope (action.yaml, */action.yml, */action.yaml)" ""
+else
+  record 1 "every composite spelling is in scope" "rc=$RC missed=[$MISSED] out=$OUT"
+fi
+
 # 2. THE FLOOR, for the general case the extension check cannot see: discovery
 # collapsing wholesale. Counted from the extractor's own manifest rather than
 # from a hand-kept list of files, so a new workflow raises it for free.

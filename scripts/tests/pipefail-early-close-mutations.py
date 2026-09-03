@@ -165,6 +165,39 @@ MUTATIONS = [
      '    action.yml|action.yaml|*/action.yml|*/action.yaml) return 0 ;;\n'
      '    *) return 0 ;;',
      "a Helm chart template is not a workflow and must not be parsed"),
+    # ONE GLOB AT A TIME, because every whole-arm mutation above is satisfied by
+    # a predicate that still admits ONE spelling -- and @saadqbal's gap was
+    # precisely "losing `.yaml` while keeping `.yml`". The predicate lists SIX
+    # globs, so there are six ways to lose exactly one, and each `expect` below
+    # names a DIFFERENT case. That is the claim worth making: those cases are
+    # not interchangeable coverage of one rule, each is the only evidence for
+    # one glob. Written after the fixtures rather than before, because until
+    # `hz.yaml` and the `action.y{a,}ml` spellings existed four of these six
+    # could only ever have reported UNCAUGHT (rule 8).
+    ("the workflow arm loses `.yaml`, keeping only `.yml`", SH,
+     '    .github/workflows/*.yml|.github/workflows/*.yaml) return 0 ;;',
+     '    .github/workflows/*.yml) return 0 ;;',
+     "a .yaml workflow is discovered"),
+    ("the workflow arm loses `.yml`, keeping only `.yaml`", SH,
+     '    .github/workflows/*.yml|.github/workflows/*.yaml) return 0 ;;',
+     '    .github/workflows/*.yaml) return 0 ;;',
+     "f4d6fec's literal"),
+    ("the composite arm loses the bare `action.yml`", SH,
+     '    action.yml|action.yaml|*/action.yml|*/action.yaml) return 0 ;;',
+     '    action.yaml|*/action.yml|*/action.yaml) return 0 ;;',
+     "a composite action's action.yml is still scanned"),
+    ("the composite arm loses the bare `action.yaml`", SH,
+     '    action.yml|action.yaml|*/action.yml|*/action.yaml) return 0 ;;',
+     '    action.yml|*/action.yml|*/action.yaml) return 0 ;;',
+     "every composite spelling is in scope"),
+    ("the composite arm loses `*/action.yml`", SH,
+     '    action.yml|action.yaml|*/action.yml|*/action.yaml) return 0 ;;',
+     '    action.yml|action.yaml|*/action.yaml) return 0 ;;',
+     "every composite spelling is in scope"),
+    ("the composite arm loses `*/action.yaml`", SH,
+     '    action.yml|action.yaml|*/action.yml|*/action.yaml) return 0 ;;',
+     '    action.yml|action.yaml|*/action.yml) return 0 ;;',
+     "every composite spelling is in scope"),
     # THE BUG THIS FIX SHIPPED WITH, kept as a mutation because it is the exact
     # failure mode the gate exists to prevent: written outside the
     # substitution, the here-string feeds the ASSIGNMENT, the awk reads the
