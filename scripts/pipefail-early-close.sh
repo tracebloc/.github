@@ -127,7 +127,19 @@ cd "$ROOT" || { echo "pipefail-early-close: cannot enter $ROOT" >&2; exit 2; }
 # One predicate, both call sites, so the explicit-argument path and the
 # whole-tree path cannot disagree about what a given file is.
 is_workflow_yaml() {
-  case "$1" in
+  # NORMALISE BEFORE MATCHING (Bugbot, Medium). The globs below are literal
+  # relative prefixes, so `./.github/workflows/x.yml` and an absolute path both
+  # MISSED, fell through to the non-workflow `*.yml` arm, and were dropped from
+  # BOTH phases -- the gate exited 0 without scanning a live `run:` block.
+  # Reproduced before fixing: the bare path gave rc 1 with a finding, the same
+  # file as `./...` gave rc 0 and nothing. That is a fail-open this commit
+  # introduced, and the worst shape of one: silent, and only on the argument
+  # form a caller is most likely to pass.
+  local p="$1"
+  p="${p#"$ROOT"/}"
+  p="${p#"$PWD"/}"
+  while [ "${p#./}" != "$p" ]; do p="${p#./}"; done
+  case "$p" in
     .github/workflows/*.yml|.github/workflows/*.yaml) return 0 ;;
     action.yml|action.yaml|*/action.yml|*/action.yaml) return 0 ;;
     *) return 1 ;;

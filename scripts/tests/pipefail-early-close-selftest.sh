@@ -1124,5 +1124,38 @@ else
   record 1 "a composite action's action.yml is still scanned" "rc=$RC out=$OUT"
 fi
 
+# AND THE ARGUMENT FORM MUST NOT DECIDE THE ANSWER (Bugbot, Medium). The scope
+# globs are literal relative prefixes, so `./.github/workflows/x.yml` and an
+# absolute path both missed, fell through to the non-workflow arm, and were
+# dropped from BOTH phases -- rc 0 with a live `| head -1` unscanned. Silent,
+# and only on the forms a caller is most likely to pass.
+rm -rf "$WORK/argform"; mkdir -p "$WORK/argform/.github/workflows"
+printf 'name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash\n        run: |\n          x=$(printf "%%s" "$Y" | head -1)\n' \
+  > "$WORK/argform/.github/workflows/hz.yml"
+( cd "$WORK/argform" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+while IFS= read -r form; do
+  [ -n "$form" ] || continue
+  case "$form" in ABS) arg="$WORK/argform/.github/workflows/hz.yml" ;;
+                  *)   arg="$form" ;; esac
+  OUT=$(cd "$WORK/argform" && PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" "$arg" 2>&1); RC=$?
+  if [ "$RC" = 1 ] && [ -n "$OUT" ]; then
+    record 0 "an explicit workflow path is scanned however it is spelled: $form" ""
+  else
+    record 1 "an explicit workflow path is scanned however it is spelled: $form" "rc=$RC out=$OUT"
+  fi
+done <<'FORMS'
+.github/workflows/hz.yml
+./.github/workflows/hz.yml
+ABS
+FORMS
+
+# ...and normalising must NOT drag a non-workflow back into scope.
+OUT=$(cd "$WORK/argform" && PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" "./charts/x/templates/cm.yaml" 2>&1); RC=$?
+if [ "$RC" != 2 ] && [ -z "$OUT" ]; then
+  record 0 "...but a './'-spelled Helm template is still out of scope" ""
+else
+  record 1 "...but a './'-spelled Helm template is still out of scope" "rc=$RC out=$OUT"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ] || exit 1
