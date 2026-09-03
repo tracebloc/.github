@@ -1242,5 +1242,69 @@ else
   record 1 "YAML discovery is above its floor" "the extractor could not be run, so the floor is unverified"
 fi
 
+# --- the fail-closed MAPPING arm, driven directly ------------------------------
+# @saadqbal asked (on #402) that the unmapped-row refusal stay pinned. It cannot
+# be pinned with a MUTATION: the wrapper hands the scanner exactly the strings it
+# read out of column 1 of the manifest, so `FILENAME` is always a manifest key
+# and `!(frag in real)` cannot fire through that path -- the mutations file says
+# so, with the mechanism, and a mutation of an unreachable branch can only report
+# UNCAUGHT and train people to skip the tier (backend#1729, rules 4 and 8).
+#
+# But "unreachable from the wrapper" is not "unspecified". The arm is a
+# fail-closed assertion about an internal invariant, and nothing asserted it at
+# all. Driving the awk DIRECTLY pins the behaviour without claiming wrapper-level
+# coverage and without landing a permanently-red mutation.
+#
+# THE AWK IS EXTRACTED FROM THE SCRIPT, NOT COPIED HERE. A second copy would
+# drift and then prove that a program nobody runs behaves correctly (rule 9).
+MAP_AWK="$(mktemp)"
+python3 - "$GATE_ABS" "$MAP_AWK" <<'EXTRACT'
+import pathlib, sys
+src = pathlib.Path(sys.argv[1]).read_text()
+start = src.index('mapped=$(awk -F"\t" \'')
+body = src.index("'", start + len('mapped=$(awk -F"\t" ')) + 1
+end = src.index('\' "$MANIFEST" - <<<"$yout")', body)
+pathlib.Path(sys.argv[2]).write_text(src[body:end])
+EXTRACT
+
+if [ ! -s "$MAP_AWK" ]; then
+  record 1 "the mapping awk could be extracted from the gate" \
+    "found no awk program in $GATE_ABS -- this check proves nothing"
+else
+  record 0 "the mapping awk could be extracted from the gate" ""
+
+  MAP_MAN="$(mktemp)"
+  printf 'frag-a\treal/workflow.yml\t10\n' > "$MAP_MAN"
+
+  good_out=$(printf 'frag-a:3: something\n' | awk -F"	" -f "$MAP_AWK" "$MAP_MAN" - 2>/dev/null)
+  good_rc=$?
+  if [ "$good_rc" = 0 ] && [ "$good_out" = "real/workflow.yml:11: something" ]; then
+    record 0 "a mapped scanner row resolves to its source line" ""
+  else
+    record 1 "a mapped scanner row resolves to its source line" \
+      "rc=$good_rc out='$good_out' (wanted rc 0 and real/workflow.yml:11: something)"
+  fi
+
+  bad_err=$(printf 'frag-missing:3: something\n' | awk -F"	" -f "$MAP_AWK" "$MAP_MAN" - 2>&1 >/dev/null)
+  bad_rc=$?
+  if [ "$bad_rc" = 3 ] && printf '%s' "$bad_err" | grep -q "no manifest entry"; then
+    record 0 "an unmapped scanner row REFUSES instead of being dropped" ""
+  else
+    record 1 "an unmapped scanner row REFUSES instead of being dropped" \
+      "rc=$bad_rc (wanted 3) stderr='$bad_err'"
+  fi
+
+  ugly_err=$(printf 'no-colon-here\n' | awk -F"	" -f "$MAP_AWK" "$MAP_MAN" - 2>&1 >/dev/null)
+  ugly_rc=$?
+  if [ "$ugly_rc" = 3 ] && printf '%s' "$ugly_err" | grep -q "unparseable scanner row"; then
+    record 0 "an unparseable scanner row REFUSES instead of being dropped" ""
+  else
+    record 1 "an unparseable scanner row REFUSES instead of being dropped" \
+      "rc=$ugly_rc (wanted 3) stderr='$ugly_err'"
+  fi
+  rm -f "$MAP_MAN"
+fi
+rm -f "$MAP_AWK"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ] || exit 1
