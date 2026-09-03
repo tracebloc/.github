@@ -867,6 +867,32 @@ yaml_flag shcustomeo "...but a custom 'bash -eo pipefail {0}' IS armed" \
 # options and the case reddens. Found by the mutation surviving.
 yaml_spare shcustomo "a custom 'bash -o pipefail {0}' has pipefail but NO errexit" \
   "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -o pipefail {0}\n        $HAZ_BODY"
+# A WRAPPED bash IS STILL bash. `flags_for_shell` read the program as
+# `tokens[0]`, so `/usr/bin/env bash …` basenamed to `env`, fell through to the
+# custom-interpreter branch and was SKIPPED ENTIRELY -- a step running bash with
+# pipefail was not scanned, and a live `| head -1` in it read CLEAN. The peel
+# that fixes it shipped unguarded; these are its cases (Bugbot Medium, #404).
+yaml_flag shenvbash "'/usr/bin/env bash -eo pipefail {0}' IS armed, not skipped" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env bash -eo pipefail {0}\n        $HAZ_BODY"
+yaml_flag shenvassign "...and `env FOO=bar bash …`, which env applies itself" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env FOO=bar bash -eo pipefail {0}\n        $HAZ_BODY"
+yaml_flag shenvopts "...and past env's own options, including `-u NAME`" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -i -u HOME bash -eo pipefail {0}\n        $HAZ_BODY"
+# `-S` IS NOT A VALUE FLAG. Its argument is the whole remaining command, so the
+# next token after it IS the program -- consuming one made the peel land on
+# `pipefail` and skip the step, reintroducing the bug one flag along.
+yaml_flag shenvsplit "'env -S bash -eo pipefail {0}' IS armed (-S takes no separate value)" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -S bash -eo pipefail {0}\n        $HAZ_BODY"
+# ...while `-C DIR` really does take one, so it must still be stepped over.
+yaml_flag shenvchdir "'env -C /tmp bash -eo pipefail {0}' IS armed (-C consumes its DIR)" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -C /tmp bash -eo pipefail {0}\n        $HAZ_BODY"
+# AND THE PEEL STOPS AT THE FIRST NON-`env`, so this is not "skip anything
+# before a shell name": `sudo` changes who runs the shell, and `env perl` is
+# still perl. Without these, a peel that swallowed everything would pass above.
+yaml_spare shsudobash "'sudo bash -eo pipefail {0}' is NOT treated as plain bash" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: sudo bash -eo pipefail {0}\n        $HAZ_BODY"
+yaml_spare shenvperl "'/usr/bin/env perl {0}' is still a custom interpreter" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env perl {0}\n        $HAZ_BODY"
 # AN UNRESOLVED `${{ }}` EXPRESSION MUST ARM, NOT DEFAULT (Bugbot, .github#404).
 # GitHub evaluates the expression BEFORE choosing the shell, so a matrix-driven
 # `shell:` resolving to `bash` runs with errexit AND pipefail -- while the
@@ -915,6 +941,13 @@ yaml_flag shmerge "a step whose shell/run arrive via '<<: *base' IS scanned" \
 # is flagged.
 yaml_flag shjobsmerge "a whole JOB merged in via 'jobs: <<: *tpl' IS scanned" \
   'name: j\non:\n  push:\nx-tpl:\n  tpl: &tpl\n    myjob:\n      runs-on: ubuntu-latest\n      steps:\n        - shell: bash\n          run: |\n            x=$(printf "%%s" "$Y" | head -1)\njobs:\n  <<: *tpl\n'
+# TWO MERGE KEYS ON ONE MAPPING, and the wanted one is the FIRST. `_mapping_get`
+# kept a single `merge`, overwriting it per `<<:` key, so only the LAST was ever
+# searched -- while `_mapping_items` collected all of them. Two helpers over the
+# same mapping, disagreeing (Bugbot Medium, #404). A `shell:`/`run:` reachable
+# only through the earlier merge read as absent and the gate returned clean.
+yaml_flag shmerge2 "a step whose shell/run arrive via the FIRST of two '<<:' keys IS scanned" \
+  "${ANCHORED}x-extra:\n  extra: &extra\n    name: merged\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - <<: *base\n        <<: *extra\n"
 
 echo
 echo "-- 'defaults.run.shell' applies, at both levels -------------------------------"

@@ -229,6 +229,30 @@ MUTATIONS = [
     ("a non-POSIX shell (python, pwsh) is scanned as armed shell", YML,
      '    if spec in NON_SHELL:\n        return None',
      '    if spec in NON_SHELL:\n        return "-eo pipefail"'),
+    # THE `env` PEEL, pinned in BOTH directions. It shipped with no mutation
+    # and no selftest case, so nothing proved it caught anything; and a peel
+    # can fail two opposite ways -- not peeling (the original skip) and peeling
+    # past the shell (`sudo bash` read as bash). One mutation per direction,
+    # each named by the case that depends on it.
+    ("a wrapped `/usr/bin/env bash` is skipped entirely", YML,
+     '    while i < len(tokens) and os.path.basename(tokens[i]) == "env":',
+     '    while False:',
+     "'/usr/bin/env bash -eo pipefail {0}' IS armed, not skipped"),
+    ("the peel walks past ANY program, so `sudo bash` reads as bash", YML,
+     '    while i < len(tokens) and os.path.basename(tokens[i]) == "env":',
+     '    while i < len(tokens) and os.path.basename(tokens[i]) != "\x00":',
+     "'sudo bash -eo pipefail {0}' is NOT treated as plain bash"),
+    # And the value-flag list, which is wrong in both directions too: `-S`
+    # takes no separate value (its argument is the rest of the command), while
+    # `-C DIR` does.
+    ("`-S` eats the program, so `env -S bash` is skipped", YML,
+     '    _VALUE_FLAGS = ("-u", "--unset", "-C", "--chdir")',
+     '    _VALUE_FLAGS = ("-u", "--unset", "-S", "--split-string", "-C", "--chdir")',
+     "'env -S bash -eo pipefail {0}' IS armed (-S takes no separate value)"),
+    ("`-C` stops consuming its DIR, so the DIR becomes the program", YML,
+     '    _VALUE_FLAGS = ("-u", "--unset", "-C", "--chdir")',
+     '    _VALUE_FLAGS = ()',
+     "'env -C /tmp bash -eo pipefail {0}' IS armed (-C consumes its DIR)"),
     ("composite-action `runs.steps` are not walked", YML,
      '''    runs = _mapping_get(root, "runs")
     if isinstance(runs, yaml.MappingNode):''',
@@ -239,6 +263,12 @@ MUTATIONS = [
     ("the jobs mapping is iterated directly, skipping merged-in jobs", YML,
      "        for _name, job in _mapping_items(jobs):",
      "        for _name, job in jobs.value:"),
+    # ONLY THE LAST `<<:` IS SEARCHED -- the state this shipped in, and the
+    # one `_mapping_items` never shared (Bugbot Medium, #404).
+    ("`_mapping_get` keeps only the last merge key", YML,
+     "            merges.append(v)\n    # Document order, matching `_mapping_items`",
+     "            merges = [v]\n    # Document order, matching `_mapping_items`",
+     "a step whose shell/run arrive via the FIRST of two '<<:' keys IS scanned"),
     ("the job/workflow `defaults.run.shell` layer is ignored", YML,
      '            job_default = _defaults_shell(job) or workflow_default',
      '            job_default = None'),

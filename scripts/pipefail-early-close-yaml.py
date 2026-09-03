@@ -143,7 +143,13 @@ def flags_for_shell(shell):
     # which is what makes this shape reachable at all. (A bare `FOO=bar bash …`
     # is NOT reachable: GitHub execs the spec directly, so there is no shell to
     # apply the assignment, and GitHub refuses the workflow.)
-    _VALUE_FLAGS = ("-u", "--unset", "-S", "--split-string", "-C", "--chdir")
+    # `-S` IS NOT A VALUE FLAG, and treating it as one loses the program. `-u
+    # NAME` and `-C DIR` take a separate argument; `-S`'s argument is the WHOLE
+    # remaining command, so after `.split()` the very next token IS the program.
+    # Consuming it skipped `env -S bash -eo pipefail {0}` entirely -- the peel
+    # landed on `pipefail` as the program -- which is the same fail-open shape
+    # the peel was added to close.
+    _VALUE_FLAGS = ("-u", "--unset", "-C", "--chdir")
     i = 0
     while i < len(tokens) and os.path.basename(tokens[i]) == "env":
         i += 1
@@ -204,15 +210,23 @@ def _mapping_get(node, key):
     """
     if not isinstance(node, yaml.MappingNode):
         return None
-    merge = None
+    # EVERY `<<:`, NOT THE LAST ONE. This kept a single `merge`, overwriting it
+    # on each merge key, so with two of them the FIRST was never searched -- and
+    # a `run:`/`shell:`/`defaults:`/`steps:` arriving only through it read as
+    # absent, letting the gate reach a clean verdict without scanning the block
+    # (Bugbot Medium, .github#404). `_mapping_items` already collected all of
+    # them, so the two helpers disagreed about the same mapping: the shape this
+    # file keeps finding, here between two functions that must not differ.
+    merges = []
     for k, v in node.value:
         if _scalar(k) == key:
             return v  # a direct key always wins over a merged one
         if _scalar(k) == "<<":
-            merge = v
-    if merge is not None:
-        # The merge value is one mapping, or a sequence of them (earlier first).
-        # compose has resolved each alias to its anchored MappingNode already.
+            merges.append(v)
+    # Document order, matching `_mapping_items`: within a sequence merge
+    # (`<<: [*a, *b]`) earlier entries win, and the same holds across repeated
+    # merge keys. compose has resolved each alias to its anchored MappingNode.
+    for merge in merges:
         sources = merge.value if isinstance(merge, yaml.SequenceNode) else [merge]
         for src in sources:
             found = _mapping_get(src, key)
