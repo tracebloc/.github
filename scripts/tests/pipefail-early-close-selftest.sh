@@ -768,12 +768,635 @@ else
 fi
 
 echo
-echo "== the gate reports on THIS repo =============================================="
-OUT=$(bash "$GATE_ABS"); RC=$?
-if [ "$RC" = 0 ]; then
-  record 0 "tracebloc/.github is itself clean under the rule" ""
+echo "== YAML \`run:\` BLOCKS ARE IN SCOPE (backend#2967) ============================"
+# THE HOLE THIS TICKET FOUND. The wrapper classifies a file as shell by
+# extension, else by shebang; workflow YAML has neither, so every `run:` block
+# in the fleet was out of scope and the gate reported SUCCESS on
+# `e2e-test-agent@f4d6fec`. Handed that file explicitly, the scanner flagged the
+# offending line correctly -- so the LINE GRAMMAR was never the hole. The
+# ticket's suspicion (a matcher too narrow for `head -1`) is FALSE, and the four
+# spellings are pinned in the requirement block above so the claim stays
+# measured.
+#
+# These cases drive the REAL gate over a REAL git tree, because scope is the
+# wrapper's job and the awk alone cannot know.
+#
+# FIXTURES ARE ONE-LINE printf FORMATS for the reason documented at the top of
+# this file, with one addition: `%` must be written `%%`, since the fixture
+# bodies contain `printf '%s\n'`. A literal fixture indented into YAML would put
+# `set -euo pipefail` behind nothing but whitespace, and the scanner's dispatch
+# is `^[[:space:]]*set` -- it would read this suite's own options off a fixture.
+scan_yaml() {  # $1 = name ; $2 = printf FORMAT for the workflow file
+  local d="$WORK/y-$1"
+  rm -rf "$d"; mkdir -p "$d/.github/workflows"
+  # shellcheck disable=SC2059  # $2 IS the format, by contract
+  printf "$2" > "$d/.github/workflows/w.yml"
+  ( cd "$d" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f ) >/dev/null
+  # STDERR IS KEPT SEPARATE, never folded into OUT. Under `2>&1`, gawk's
+  # long-standing warning about the `\"` in the `|| true` spare regex
+  # (pipefail-early-close.awk:237 -- byte-identical on develop, so not from
+  # this change) landed in OUT, and every "spares" assertion then saw non-empty
+  # output and failed. macOS awk emits no such warning, which is why it passed
+  # locally. An assertion about FINDINGS must read the findings stream only.
+  OUT=$(PIPEFAIL_ROOT="$d" bash "$GATE_ABS" 2>"$WORK/yerr"); RC=$?
+  ERRTXT=$(cat "$WORK/yerr" 2>/dev/null)
+}
+yaml_flag()  { # $1 name ; $2 desc ; $3 format
+  scan_yaml "$1" "$3"
+  if [ "$RC" = 1 ] && [ -n "$OUT" ]; then record 0 "$2" ""; else record 1 "$2" "rc=$RC out=$OUT err=$ERRTXT"; fi
+}
+yaml_spare() { # $1 name ; $2 desc ; $3 format
+  scan_yaml "$1" "$3"
+  if [ "$RC" = 0 ] && [ -z "$OUT" ]; then record 0 "$2" ""; else record 1 "$2" "rc=$RC out=$OUT err=$ERRTXT"; fi
+}
+
+# f4d6fec's LITERAL line, in f4d6fec's shape: a `shell: bash` step. This is the
+# regression case the ticket asks for.
+F4D='name: j\non:\n  push:\njobs:\n  journey:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Record what the chart decided about telemetry\n        shell: bash\n        run: |\n          set -uo pipefail\n          CM=$(printf "%%s\\\\n" "$CM_RAW" | head -1)\n'
+yaml_flag f4d6fec "f4d6fec's literal 'printf | head -1' in a 'shell: bash' step IS flagged" "$F4D"
+
+# THE LINE NUMBER MUST POINT AT THE REAL FILE. A fragment offset reported as a
+# source line sends the reviewer to the wrong place and the annotation lands on
+# the wrong row -- which is how a finding gets dismissed as noise. Line 12 is
+# the `CM=$(...)` line of the fixture above.
+scan_yaml f4d6fec "$F4D"
+if grep -q '^\.github/workflows/w\.yml:12: ' <<<"$OUT"; then
+  record 0 "...and reported at the source line, not the fragment offset" ""
 else
-  record 1 "tracebloc/.github is itself clean under the rule" "$OUT"
+  record 1 "...and reported at the source line, not the fragment offset" "$OUT"
+fi
+
+# 720b952, the FIXED head: capture-then-slice, plus a COMMENT that still names
+# the old hazard. The ticket requires this to stay green -- that is what makes
+# the case above derived rather than a restatement of one line of text.
+yaml_spare fixedhead "720b952's capture-then-slice fix is spared, comment and all" \
+  'name: j\non:\n  push:\njobs:\n  journey:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash\n        run: |\n          set -uo pipefail\n          # This was `printf "%%s\\\\n" "$CM_RAW" | head -1`, which SIGPIPEs.\n          CM="${CM_RAW%%%%$"\\\\n"*}"\n'
+
+echo
+echo "-- the effective shell is DERIVED from the YAML, not assumed ------------------"
+# GitHub's contract, and the whole reason f4d6fec was hazardous while its
+# neighbours were not: `shell: bash` is the only keyword that turns pipefail ON.
+#   shell: bash   -> bash --noprofile --norc -eo pipefail {0}
+#   shell: sh     -> sh -e {0}
+#   (absent)      -> bash -e {0}, falling back to sh -e {0}
+# Both halves are asserted. A scanner that armed every run block would pass the
+# flagging cases and fail these; one that armed none would do the reverse.
+HAZ_BODY='run: |\n          x=$(printf "%%s" "$Y" | head -1)\n'
+yaml_flag shbash  "'shell: bash' arms errexit AND pipefail" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash\n        $HAZ_BODY"
+yaml_spare shsh   "'shell: sh' is errexit-only -- no pipefail, so not the hazard" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: sh\n        $HAZ_BODY"
+yaml_spare shnone "no 'shell:' at all is 'bash -e {0}' -- errexit-only, spared" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - $HAZ_BODY"
+# ...and the default shell's block can still arm pipefail ITSELF. This is the
+# shape three of tracebloc/.github's own findings have, so it is not academic:
+# the synthesised `set -e` must not stop the body's own `set -euo pipefail`
+# from counting.
+yaml_flag shnoneset "a default-shell block that sets '-euo pipefail' itself IS flagged" \
+  'name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          set -euo pipefail\n          x=$(printf "%%s" "$Y" | head -1)\n'
+# A CUSTOM COMMAND LINE IS USED VERBATIM, so GitHub adds no `-e`. Assuming
+# every `bash …` means errexit would invent hazards; the flags have to be read.
+yaml_spare shcustom "a custom 'bash -x {0}' gets NO implicit -e, so it is spared" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -x {0}\n        $HAZ_BODY"
+yaml_flag shcustomeo "...but a custom 'bash -eo pipefail {0}' IS armed" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -eo pipefail {0}\n        $HAZ_BODY"
+# THE FLAGS ARE READ, NOT TOPPED UP. `bash -x {0}` above is spared whether or
+# not an `-e` is injected, because it has no pipefail either way -- so it
+# cannot tell "flags parsed" from "flags parsed plus a helpful -e". This one
+# can: pipefail is present and errexit is not, so ANY injected `-e` arms both
+# options and the case reddens. Found by the mutation surviving.
+yaml_spare shcustomo "a custom 'bash -o pipefail {0}' has pipefail but NO errexit" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -o pipefail {0}\n        $HAZ_BODY"
+# A WRAPPED bash IS STILL bash. `flags_for_shell` read the program as
+# `tokens[0]`, so `/usr/bin/env bash …` basenamed to `env`, fell through to the
+# custom-interpreter branch and was SKIPPED ENTIRELY -- a step running bash with
+# pipefail was not scanned, and a live `| head -1` in it read CLEAN. The peel
+# that fixes it shipped unguarded; these are its cases (Bugbot Medium, #404).
+yaml_flag shenvbash "'/usr/bin/env bash -eo pipefail {0}' IS armed, not skipped" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env bash -eo pipefail {0}\n        $HAZ_BODY"
+yaml_flag shenvassign "...and \`env FOO=bar bash …\`, which env applies itself" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env FOO=bar bash -eo pipefail {0}\n        $HAZ_BODY"
+yaml_flag shenvopts "...and past env's own options, including \`-u NAME\`" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -i -u HOME bash -eo pipefail {0}\n        $HAZ_BODY"
+# AND SHORT FLAGS CLUSTER (Bugbot Medium, #404). `-iu` is not the token `-u`,
+# so an exact-token match consumed ONE token, `HOME` became the program, and the
+# step was skipped with its `| head` unreported -- the same fail-open as the two
+# cases above, reached a third way. The last character of a cluster decides, and
+# only when the value is not already attached to it.
+yaml_flag shenvclust "...and a CLUSTERED value flag, \`env -iu HOME bash …\`" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -iu HOME bash -eo pipefail {0}\n        $HAZ_BODY"
+yaml_flag shenvclustattached "...and an ATTACHED value, \`env -iuHOME bash …\`, which consumes nothing" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -iuHOME bash -eo pipefail {0}\n        $HAZ_BODY"
+yaml_flag shenvclustchdir "...and \`-iC DIR\`, the other value-taking short flag, clustered" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -iC /tmp bash -eo pipefail {0}\n        $HAZ_BODY"
+# A CLUSTER ENDING IN `S` still takes no separate value, so the program is the
+# very next token -- the `-S` carve-out must survive clustering too.
+yaml_flag shenvclustsplit "...while \`env -iS bash …\` still consumes nothing (-S carve-out holds)" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -iS bash -eo pipefail {0}\n        $HAZ_BODY"
+# `-S` IS NOT A VALUE FLAG. Its argument is the whole remaining command, so the
+# next token after it IS the program -- consuming one made the peel land on
+# `pipefail` and skip the step, reintroducing the bug one flag along.
+yaml_flag shenvsplit "'env -S bash -eo pipefail {0}' IS armed (-S takes no separate value)" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -S bash -eo pipefail {0}\n        $HAZ_BODY"
+# ...while `-C DIR` really does take one, so it must still be stepped over.
+yaml_flag shenvchdir "'env -C /tmp bash -eo pipefail {0}' IS armed (-C consumes its DIR)" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -C /tmp bash -eo pipefail {0}\n        $HAZ_BODY"
+# AND THE PEEL STOPS AT THE FIRST NON-`env`, so this is not "skip anything
+# before a shell name": `sudo` changes who runs the shell, and `env perl` is
+# still perl. Without these, a peel that swallowed everything would pass above.
+yaml_spare shsudobash "'sudo bash -eo pipefail {0}' is NOT treated as plain bash" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: sudo bash -eo pipefail {0}\n        $HAZ_BODY"
+yaml_spare shenvperl "'/usr/bin/env perl {0}' is still a custom interpreter" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env perl {0}\n        $HAZ_BODY"
+# AN UNRESOLVED `${{ }}` EXPRESSION MUST ARM, NOT DEFAULT (Bugbot, .github#404).
+# GitHub evaluates the expression BEFORE choosing the shell, so a matrix-driven
+# `shell:` resolving to `bash` runs with errexit AND pipefail -- while the
+# scanner sees only the literal text. It used to fall through to the default
+# `-e`, so a live `| head -1` in such a step was reported CLEAN: fail-open, in
+# the scan this file adds.
+yaml_flag shexpr "an unresolved 'shell: \${{ matrix.shell }}' arms both options" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: \${{ matrix.shell }}\n        $HAZ_BODY"
+# ...AND THE FORM THAT ACTUALLY NEEDS THE EXPRESSION BRANCH. The bare
+# `${{ matrix.shell }}` case above is ALSO covered by the unknown-bare-word
+# catch-all, so on its own it passes even with the expression check disabled --
+# it was vacuous, and its own mutation said so. With a `{0}` present the spec
+# reads as a command line whose program is `${{`, which is not a POSIX shell,
+# so without the expression branch it is classified as a custom interpreter and
+# SKIPPED. This is the case that pins it.
+yaml_flag shexprtmpl "'shell: \${{ inputs.shell }} {0}' arms both options too" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: \${{ inputs.shell }} {0}\n        $HAZ_BODY"
+# ...and the template is not required to recognise a command line. `bash -eo
+# pipefail` is the same invocation as `bash -eo pipefail {0}`; treating the
+# first as "unrecognised" dropped its pipefail.
+yaml_flag shnotmpl "'shell: bash -eo pipefail' without the {0} template is armed" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -eo pipefail\n        $HAZ_BODY"
+# THE DISCRIMINATIONS, without which the two above are satisfied by a scanner
+# that simply arms everything it cannot classify.
+yaml_spare shnotmplx "'shell: bash -x' without {0} still reads its flags (no pipefail)" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -x\n        $HAZ_BODY"
+yaml_spare shperl "a custom interpreter ('perl {0}') is not a shell and is skipped" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: perl {0}\n        $HAZ_BODY"
+yaml_spare shpython "'shell: python' is not a POSIX shell and carries no pipefail" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: python\n        $HAZ_BODY"
+
+# ANCHORS, ALIASES AND `<<:` MERGES must not create a vacuous verdict (Bugbot
+# #404). The anchor lives under a top-level `x-templates` key that collect_steps
+# never visits, so the ONLY scanned step is the alias/merge one -- if it flags,
+# it is because the alias/merge was actually followed. yaml.compose resolves
+# aliases on its own; the merge is what _mapping_get had to learn.
+ANCHORED='name: j\non:\n  push:\nx-templates:\n  base: &base\n    shell: bash\n    run: |\n      x=$(printf "%%s" "$Y" | head -1)\n'
+yaml_flag shalias "an aliased step (\`- *base\`) is resolved and scanned" \
+  "${ANCHORED}jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - *base\n"
+yaml_flag shmerge "a step whose shell/run arrive via '<<: *base' IS scanned" \
+  "${ANCHORED}jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - <<: *base\n        name: merged\n"
+# THE REST OF THE CLASS, one level up. `jobs:` is ITERATED rather than looked
+# up, so making `_mapping_get` merge-aware fixed the step case and left this
+# one: a whole job arriving via `jobs: <<: *tpl` was never visited. Measured
+# before the fix -- rc 0, no finding, where the identical job written directly
+# is flagged.
+yaml_flag shjobsmerge "a whole JOB merged in via 'jobs: <<: *tpl' IS scanned" \
+  'name: j\non:\n  push:\nx-tpl:\n  tpl: &tpl\n    myjob:\n      runs-on: ubuntu-latest\n      steps:\n        - shell: bash\n          run: |\n            x=$(printf "%%s" "$Y" | head -1)\njobs:\n  <<: *tpl\n'
+# TWO MERGE KEYS ON ONE MAPPING, and the wanted one is the FIRST. `_mapping_get`
+# kept a single `merge`, overwriting it per `<<:` key, so only the LAST was ever
+# searched -- while `_mapping_items` collected all of them. Two helpers over the
+# same mapping, disagreeing (Bugbot Medium, #404). A `shell:`/`run:` reachable
+# only through the earlier merge read as absent and the gate returned clean.
+yaml_flag shmerge2 "a step whose shell/run arrive via the FIRST of two '<<:' keys IS scanned" \
+  "${ANCHORED}x-extra:\n  extra: &extra\n    name: merged\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - <<: *base\n        <<: *extra\n"
+
+echo
+echo "-- 'defaults.run.shell' applies, at both levels -------------------------------"
+# A step with no `shell:` inherits the job's default, and failing over to the
+# workflow's. Miss either layer and a whole repo's worth of blocks read as
+# errexit-only.
+yaml_flag defjob "a job-level 'defaults.run.shell: bash' arms its steps" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        shell: bash\n    steps:\n      - $HAZ_BODY"
+yaml_flag defwf "a workflow-level 'defaults.run.shell: bash' does too" \
+  "name: j\non:\n  push:\ndefaults:\n  run:\n    shell: bash\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - $HAZ_BODY"
+# The discrimination: without it, the two above are satisfied by a scanner that
+# arms every block regardless of what any `shell:` says.
+yaml_spare defsh "...and a 'defaults.run.shell: sh' does NOT arm them" \
+  "name: j\non:\n  push:\ndefaults:\n  run:\n    shell: sh\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - $HAZ_BODY"
+
+echo
+echo "-- composite actions, and single-line 'run:' ----------------------------------"
+# The ticket asks specifically about composite actions: their steps live under
+# `runs.steps`, not `jobs.*.steps`, so a walker that only knows about workflows
+# sees none of them.
+scan_yaml_action() {  # $1 = name ; $2 = format
+  local d="$WORK/ya-$1"
+  rm -rf "$d"; mkdir -p "$d/.github/actions/thing"
+  # shellcheck disable=SC2059
+  printf "$2" > "$d/.github/actions/thing/action.yml"
+  ( cd "$d" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f ) >/dev/null
+  OUT=$(PIPEFAIL_ROOT="$d" bash "$GATE_ABS" 2>"$WORK/yerr"); RC=$?
+  ERRTXT=$(cat "$WORK/yerr" 2>/dev/null)
+}
+scan_yaml_action composite \
+  'name: t\ndescription: d\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: |\n        x=$(printf "%%s" "$Y" | head -1)\n'
+if [ "$RC" = 1 ] && grep -q 'action.yml' <<<"$OUT"; then
+  record 0 "a composite action's 'runs.steps' run block is in scope" ""
+else
+  record 1 "a composite action's 'runs.steps' run block is in scope" "rc=$RC out=$OUT"
+fi
+# A SINGLE-LINE `run:` is not a block scalar, and taking `raw[1:]` of it yields
+# nothing -- so the block would be silently skipped.
+yaml_flag oneline "a single-line 'run:' (no block scalar) is scanned too" \
+  'name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash\n        run: x=$(printf "%%s" "$Y" | head -1)\n'
+# And a YAML with no run blocks at all contributes nothing -- "nothing in scope"
+# is not "nothing checked", or the gate would be unadoptable.
+yaml_spare norun "a workflow with no 'run:' blocks is a clean 0" \
+  'name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n'
+
+echo
+echo "-- the YAML path FAILS CLOSED -------------------------------------------------"
+# rule 3: "cannot tell" is a finding. Unparseable YAML is the case that matters,
+# because the alternative -- skip what will not parse -- means any repo with one
+# broken workflow silently loses coverage of ALL of them.
+rm -rf "$WORK/ybad"; mkdir -p "$WORK/ybad/.github/workflows"
+printf 'jobs:\n  j:\n  steps: [ unclosed\n   bad: : :\n' > "$WORK/ybad/.github/workflows/w.yml"
+( cd "$WORK/ybad" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f ) >/dev/null
+OUT=$(PIPEFAIL_ROOT="$WORK/ybad" bash "$GATE_ABS" 2>&1); RC=$?
+if [ "$RC" = 2 ]; then
+  record 0 "unparseable YAML is exit 2, never a clean tree" ""
+else
+  record 1 "unparseable YAML is exit 2" "rc=$RC out=$OUT"
+fi
+
+# A MISSING EXTRACTOR IS ALSO 'CANNOT TELL'. Driven through a copied tree so the
+# real gate runs with the real sibling absent -- the shape that made the
+# workflow's rc-whitelist necessary in the first place (127 read as clean).
+rm -rf "$WORK/ynoext"; mkdir -p "$WORK/ynoext/scripts" "$WORK/ynoext/.github/workflows"
+cp "$GATE_ABS" "$WORK/ynoext/scripts/pipefail-early-close.sh"
+cp "$SCANNER_ABS" "$WORK/ynoext/scripts/pipefail-early-close.awk"
+printf 'name: j\non:\n  push:\njobs:\n  j:\n    steps:\n      - shell: bash\n        run: echo hi\n' \
+  > "$WORK/ynoext/.github/workflows/w.yml"
+( cd "$WORK/ynoext" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f ) >/dev/null
+OUT=$(PIPEFAIL_ROOT="$WORK/ynoext" bash "$WORK/ynoext/scripts/pipefail-early-close.sh" 2>&1); RC=$?
+if [ "$RC" = 2 ]; then
+  record 0 "a missing YAML extractor is exit 2, never a clean tree" ""
+else
+  record 1 "a missing YAML extractor is exit 2" "rc=$RC out=$OUT"
+fi
+
+# A NON-ZERO EXTRACTOR IS FATAL EVEN WHEN IT LEFT A MANIFEST BEHIND. The
+# unparseable-YAML case above does not reach this: the extractor returns before
+# writing anything, so the missing-manifest guard catches it and the exit-status
+# check is never consulted -- which is exactly why its mutation survived. The
+# shape that needs the status check is a crash PART WAY THROUGH: a manifest on
+# disk, fewer fragments in it than the tree really has, and a clean-looking
+# scan of the ones that made it. Driven with a stub extractor, because no real
+# input produces that.
+rm -rf "$WORK/ystub"; mkdir -p "$WORK/ystub/scripts" "$WORK/ystub/.github/workflows"
+cp "$GATE_ABS" "$WORK/ystub/scripts/pipefail-early-close.sh"
+cp "$SCANNER_ABS" "$WORK/ystub/scripts/pipefail-early-close.awk"
+printf '#!/usr/bin/env python3\nimport os, sys\nd = sys.argv[sys.argv.index("--out") + 1]\nos.makedirs(d, exist_ok=True)\nopen(os.path.join(d, "manifest.tsv"), "w").close()\nsys.exit(1)\n' \
+  > "$WORK/ystub/scripts/pipefail-early-close-yaml.py"
+printf 'name: j\non:\n  push:\njobs:\n  j:\n    steps:\n      - shell: bash\n        run: echo hi\n' \
+  > "$WORK/ystub/.github/workflows/w.yml"
+( cd "$WORK/ystub" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f ) >/dev/null
+OUT=$(PIPEFAIL_ROOT="$WORK/ystub" bash "$WORK/ystub/scripts/pipefail-early-close.sh" 2>&1); RC=$?
+if [ "$RC" = 2 ]; then
+  record 0 "an extractor that fails AFTER writing a manifest is exit 2" ""
+else
+  record 1 "an extractor that fails AFTER writing a manifest is exit 2" "rc=$RC out=$OUT"
+fi
+
+# An unrecognised PIPEFAIL_SCOPE must refuse rather than quietly narrow the run.
+OUT=$(PIPEFAIL_SCOPE=shel PIPEFAIL_ROOT="$WORK/noshell" bash "$GATE_ABS" 2>&1); RC=$?
+if [ "$RC" = 2 ]; then
+  record 0 "an unknown PIPEFAIL_SCOPE is exit 2, not a narrowed scan" ""
+else
+  record 1 "an unknown PIPEFAIL_SCOPE is exit 2" "rc=$RC out=$OUT"
+fi
+
+# THE SCOPES MUST ACTUALLY DIFFER, or every YAML case above could be satisfied
+# by a wrapper that ignores PIPEFAIL_SCOPE entirely.
+rm -rf "$WORK/yboth"; mkdir -p "$WORK/yboth/.github/workflows"
+printf '#!/usr/bin/env bash\nset -euo pipefail\nx=$(ls | head -1)\n' > "$WORK/yboth/s.sh"
+printf 'name: j\non:\n  push:\njobs:\n  j:\n    steps:\n      - shell: bash\n        run: |\n          y=$(ls | head -1)\n' \
+  > "$WORK/yboth/.github/workflows/w.yml"
+( cd "$WORK/yboth" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f ) >/dev/null
+A=$(PIPEFAIL_SCOPE=shell PIPEFAIL_ROOT="$WORK/yboth" bash "$GATE_ABS")
+B=$(PIPEFAIL_SCOPE=yaml  PIPEFAIL_ROOT="$WORK/yboth" bash "$GATE_ABS")
+C=$(PIPEFAIL_SCOPE=all   PIPEFAIL_ROOT="$WORK/yboth" bash "$GATE_ABS")
+if grep -q 's\.sh:3:' <<<"$A" && ! grep -q 'w\.yml' <<<"$A" \
+   && grep -q 'w\.yml:9:' <<<"$B" && ! grep -q 's\.sh' <<<"$B" \
+   && grep -q 's\.sh:3:' <<<"$C" && grep -q 'w\.yml:9:' <<<"$C"; then
+  record 0 "scope=shell, scope=yaml and scope=all each report their own half" ""
+else
+  record 1 "the three scopes must differ" "shell=[$A] yaml=[$B] all=[$C]"
+fi
+
+echo
+echo "== the gate reports on THIS repo =============================================="
+# SHELL SCOPE ONLY, and that is a statement about a BACKLOG, not a loophole.
+# Bringing YAML into scope surfaced 8 pre-existing instances in this repo's own
+# workflows (jq/`--version` producers, none of them reachable at today's data
+# sizes -- the same profile as the 19 instances backend#2264 converted before
+# arming). Converting them touches live board automation and belongs in its own
+# PR, so the fleet-facing job reports YAML findings at WARNING level for now
+# (`yaml-run-blocks-soft-fail`, the migration shape action-pins already uses).
+# Arming a red gate is what trains people to skip the tier (rule 4).
+OUT=$(PIPEFAIL_SCOPE=shell bash "$GATE_ABS"); RC=$?
+if [ "$RC" = 0 ]; then
+  record 0 "tracebloc/.github is itself clean under the SHELL rule" ""
+else
+  record 1 "tracebloc/.github is itself clean under the SHELL rule" "$OUT"
+fi
+
+# ...and the YAML scan must reach a VERDICT here, not an error. This is the
+# honest claim while the backlog stands: rc 2 would mean the extractor cannot
+# read this repo's own workflows, which is a different and much worse fact than
+# "there are findings". Asserting `rc = 0` instead would be a restated
+# expectation that goes stale the moment the backlog is cleared.
+OUT=$(PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" 2>&1); RC=$?
+if [ "$RC" = 0 ] || [ "$RC" = 1 ]; then
+  record 0 "the YAML scan reaches a verdict on this repo's own workflows (rc $RC)" ""
+else
+  record 1 "the YAML scan reaches a verdict on this repo's own workflows" "rc=$RC out=$OUT"
+fi
+
+# == THE SCOPE IS WHAT GITHUB PARSES, AND THAT CUTS BOTH WAYS =================
+#
+# @saadqbal measured the cost of offering every tracked YAML to `yaml.compose`:
+# an unparseable one is rc 2, a Helm chart template is not YAML, and rc 2 cannot
+# be softened because `code-quality.yml` exits on any rc outside {0,1} before it
+# consults the soft-fail switch. client 45/120, backend 14/54,
+# averaging-service 6/24 -- three repos red on every PR.
+#
+# Both directions are asserted, because a fix for the first alone is just a
+# blanket loosening: a Helm template must be SPARED, and an unparseable file
+# that GitHub really would execute must still REFUSE.
+mk_yaml_repo() {  # $1 = repo dir ; $2 = path for the unparseable YAML
+  local r="$1" p="$2"
+  mkdir -p "$r/.github/workflows" "$(dirname "$r/$p")"
+  # A clean, parseable workflow so the scan has something legitimate to do.
+  printf 'name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n' \
+    > "$r/.github/workflows/ok.yml"
+  # Go templating: not YAML, and `yaml.compose` cannot parse it.
+  printf '{{- if .Values.enabled }}\napiVersion: v1\nkind: ConfigMap\ndata:\n  x: {{ .Values.x | quote }}\n{{- end }}\n' \
+    > "$r/$p"
+  ( cd "$r" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+}
+
+rm -rf "$WORK/helm"; mk_yaml_repo "$WORK/helm" "charts/tracebloc/templates/cm.yaml"
+OUT=$(PIPEFAIL_ROOT="$WORK/helm" PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" 2>&1); RC=$?
+if [ "$RC" != 2 ] && ! grep -q 'templates/cm.yaml' <<<"$OUT"; then
+  record 0 "a Helm chart template is not a workflow and must not be parsed" ""
+else
+  record 1 "a Helm chart template is not a workflow and must not be parsed" "rc=$RC out=$OUT"
+fi
+
+# ...AND THE FAIL-CLOSED HALF SURVIVES. The same unparseable bytes under
+# `.github/workflows/` are a broken workflow, which is exactly what rc 2 is for.
+# Without this case the fix above is indistinguishable from deleting the refusal.
+rm -rf "$WORK/badwf"; mk_yaml_repo "$WORK/badwf" ".github/workflows/broken.yml"
+OUT=$(PIPEFAIL_ROOT="$WORK/badwf" PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" 2>&1); RC=$?
+if [ "$RC" = 2 ]; then
+  record 0 "...but an unparseable WORKFLOW still refuses (rc 2)" ""
+else
+  record 1 "...but an unparseable WORKFLOW still refuses (rc 2)" "rc=$RC out=$OUT"
+fi
+
+# A COMPOSITE ACTION IS IN SCOPE TOO, which is the shape the ticket asked about
+# and the reason the predicate is not just `.github/workflows/`.
+rm -rf "$WORK/act"; mkdir -p "$WORK/act"
+printf 'name: a\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: |\n        x=$(printf "%%s" "$Y" | head -1)\n' \
+  > "$WORK/act/action.yml"
+( cd "$WORK/act" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+OUT=$(PIPEFAIL_ROOT="$WORK/act" PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" 2>&1); RC=$?
+if [ "$RC" = 1 ] && grep -q 'action.yml' <<<"$OUT"; then
+  record 0 "a composite action's action.yml is still scanned" ""
+else
+  record 1 "a composite action's action.yml is still scanned" "rc=$RC out=$OUT"
+fi
+
+# AND THE ARGUMENT FORM MUST NOT DECIDE THE ANSWER (Bugbot, Medium). The scope
+# globs are literal relative prefixes, so `./.github/workflows/x.yml` and an
+# absolute path both missed, fell through to the non-workflow arm, and were
+# dropped from BOTH phases -- rc 0 with a live `| head -1` unscanned. Silent,
+# and only on the forms a caller is most likely to pass.
+rm -rf "$WORK/argform"; mkdir -p "$WORK/argform/.github/workflows"
+printf 'name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash\n        run: |\n          x=$(printf "%%s" "$Y" | head -1)\n' \
+  > "$WORK/argform/.github/workflows/hz.yml"
+( cd "$WORK/argform" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+while IFS= read -r form; do
+  [ -n "$form" ] || continue
+  case "$form" in ABS) arg="$WORK/argform/.github/workflows/hz.yml" ;;
+                  *)   arg="$form" ;; esac
+  OUT=$(cd "$WORK/argform" && PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" "$arg" 2>&1); RC=$?
+  if [ "$RC" = 1 ] && [ -n "$OUT" ]; then
+    record 0 "an explicit workflow path is scanned however it is spelled: $form" ""
+  else
+    record 1 "an explicit workflow path is scanned however it is spelled: $form" "rc=$RC out=$OUT"
+  fi
+done <<'FORMS'
+.github/workflows/hz.yml
+./.github/workflows/hz.yml
+ABS
+FORMS
+
+# ...and normalising must NOT drag a non-workflow back into scope.
+OUT=$(cd "$WORK/argform" && PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" "./charts/x/templates/cm.yaml" 2>&1); RC=$?
+if [ "$RC" != 2 ] && [ -z "$OUT" ]; then
+  record 0 "...but a './'-spelled Helm template is still out of scope" ""
+else
+  record 1 "...but a './'-spelled Helm template is still out of scope" "rc=$RC out=$OUT"
+fi
+
+# == DISCOVERY HAS A FLOOR, AND `.yaml` NEEDS ITS OWN FIXTURE ================
+#
+# @saadqbal asked for a numeric floor on YAML discovery, because the tail
+# assertion above is `rc = 0 || rc = 1` and passes whether the scan found forty
+# files or zero -- and specifically because "losing `.yaml` while keeping `.yml`"
+# is not caught by the arm's own mutation.
+#
+# Measured before writing it, and the measurement changed the answer: this repo
+# has **40** in-scope files and **0** of them end in `.yaml`. So a floor counted
+# here would stay green with `.yaml` support deleted outright -- vacuous for the
+# exact case it was asked for. The floor and the extension need separate cases.
+#
+# 1. THE EXTENSION, on a fixture that actually has one.
+rm -rf "$WORK/yamlext"; mkdir -p "$WORK/yamlext/.github/workflows"
+printf 'name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash\n        run: |\n          x=$(printf "%%s" "$Y" | head -1)\n' \
+  > "$WORK/yamlext/.github/workflows/hz.yaml"
+( cd "$WORK/yamlext" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+OUT=$(PIPEFAIL_ROOT="$WORK/yamlext" PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" 2>&1); RC=$?
+if [ "$RC" = 1 ] && grep -q 'hz.yaml' <<<"$OUT"; then
+  record 0 "a .yaml workflow is discovered, not just .yml" ""
+else
+  record 1 "a .yaml workflow is discovered, not just .yml" "rc=$RC out=$OUT"
+fi
+
+# 1b. THE COMPOSITE ARM'S OTHER THREE SPELLINGS, for the same reason one arm
+# over. `is_workflow_yaml` lists SIX globs, and counting what reaches each of
+# them: `.github/workflows/*.yml` has the f4d6fec regression,
+# `.github/workflows/*.yaml` now has `hz.yaml`, and `action.yml` has the
+# composite-action case above -- whose fixture sits at the fixture repo's ROOT,
+# so it matches the bare `action.yml` arm and not `*/action.yml`. That leaves
+# `action.yaml`, `*/action.yml` and `*/action.yaml` reached by nothing, and both
+# whole-arm mutations on the composite line are caught by the root `action.yml`
+# case, so deleting any one of the three left the suite green. Exactly the gap
+# @saadqbal named for `.yaml`, three arms further along.
+rm -rf "$WORK/actspell"; mkdir -p "$WORK/actspell/sub" "$WORK/actspell/sub2"
+act_hazard() {  # a composite action whose only step carries the head hazard
+  printf 'name: a\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: |\n        x=$(printf "%%s" "$Y" | head -1)\n'
+}
+act_hazard > "$WORK/actspell/action.yaml"
+act_hazard > "$WORK/actspell/sub/action.yml"
+act_hazard > "$WORK/actspell/sub2/action.yaml"
+( cd "$WORK/actspell" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm f )
+OUT=$(PIPEFAIL_ROOT="$WORK/actspell" PIPEFAIL_SCOPE=yaml bash "$GATE_ABS" 2>&1); RC=$?
+# ANCHORED, because `sub2/action.yaml:` CONTAINS `action.yaml:` -- an unanchored
+# needle for the root file is satisfied by the subdirectory one, and the arm
+# this case exists to pin would read as covered while nothing reached it.
+MISSED=""
+while IFS= read -r want; do
+  [ -n "$want" ] || continue
+  grep -qE "$want" <<<"$OUT" || MISSED="$MISSED $want"
+done <<'ACTSPELLINGS'
+^action\.yaml:
+^sub/action\.yml:
+^sub2/action\.yaml:
+ACTSPELLINGS
+if [ "$RC" = 1 ] && [ -z "$MISSED" ]; then
+  record 0 "every composite spelling is in scope (action.yaml, */action.yml, */action.yaml)" ""
+else
+  record 1 "every composite spelling is in scope" "rc=$RC missed=[$MISSED] out=$OUT"
+fi
+
+# 2. THE FLOOR, for the general case the extension check cannot see: discovery
+# collapsing wholesale. Counted from the extractor's own manifest rather than
+# from a hand-kept list of files, so a new workflow raises it for free.
+# Measured on this repo: 40 in-scope files -> 105 fragments across 30 of them.
+# The floor is deliberately well under that -- it is a "did discovery happen at
+# all" tripwire, not a coverage target that reddens whenever someone deletes a
+# `run:` block.
+YAML_FRAG_FLOOR=60
+FRAGDIR=$(mktemp -d)
+INSCOPE=$(git ls-files \
+  | grep -E '^\.github/workflows/.*\.ya?ml$|(^|/)action\.ya?ml$' || true)
+# shellcheck disable=SC2086
+if [ -n "$INSCOPE" ] \
+   && python3 "$(dirname "$GATE_ABS")/pipefail-early-close-yaml.py" \
+        --out "$FRAGDIR" $INSCOPE >/dev/null 2>&1; then
+  NFRAG=$(grep -c . "$FRAGDIR/manifest.tsv" 2>/dev/null || echo 0)
+  if [ "$NFRAG" -ge "$YAML_FRAG_FLOOR" ]; then
+    record 0 "YAML discovery is above its floor ($NFRAG >= $YAML_FRAG_FLOOR fragments)" ""
+  else
+    record 1 "YAML discovery is above its floor" \
+      "only $NFRAG fragment(s) from ${INSCOPE:+$(printf '%s\n' "$INSCOPE" | grep -c .)} in-scope file(s); floor is $YAML_FRAG_FLOOR"
+  fi
+else
+  # FAIL CLOSED: if the extractor cannot run here, the floor proves nothing and
+  # must not read as satisfied.
+  record 1 "YAML discovery is above its floor" "the extractor could not be run, so the floor is unverified"
+fi
+
+# --- the fail-closed MAPPING arm, driven directly ------------------------------
+# @saadqbal asked (on #402) that the unmapped-row refusal stay pinned. It cannot
+# be pinned with a MUTATION: the wrapper hands the scanner exactly the strings it
+# read out of column 1 of the manifest, so `FILENAME` is always a manifest key
+# and `!(frag in real)` cannot fire through that path -- the mutations file says
+# so, with the mechanism, and a mutation of an unreachable branch can only report
+# UNCAUGHT and train people to skip the tier (backend#1729, rules 4 and 8).
+#
+# But "unreachable from the wrapper" is not "unspecified". The arm is a
+# fail-closed assertion about an internal invariant, and nothing asserted it at
+# all. Driving the awk DIRECTLY pins the behaviour without claiming wrapper-level
+# coverage and without landing a permanently-red mutation.
+#
+# THE AWK IS EXTRACTED FROM THE SCRIPT, NOT COPIED HERE. A second copy would
+# drift and then prove that a program nobody runs behaves correctly (rule 9).
+MAP_AWK="$(mktemp)"
+python3 - "$GATE_ABS" "$MAP_AWK" <<'EXTRACT'
+import pathlib, sys
+src = pathlib.Path(sys.argv[1]).read_text()
+start = src.index('mapped=$(awk -F"\t" \'')
+body = src.index("'", start + len('mapped=$(awk -F"\t" ')) + 1
+end = src.index('\' "$MANIFEST" - <<<"$yout")', body)
+pathlib.Path(sys.argv[2]).write_text(src[body:end])
+EXTRACT
+
+if [ ! -s "$MAP_AWK" ]; then
+  record 1 "the mapping awk could be extracted from the gate" \
+    "found no awk program in $GATE_ABS -- this check proves nothing"
+else
+  record 0 "the mapping awk could be extracted from the gate" ""
+
+  MAP_MAN="$(mktemp)"
+  printf 'frag-a\treal/workflow.yml\t10\n' > "$MAP_MAN"
+
+  good_out=$(printf 'frag-a:3: something\n' | awk -F"	" -f "$MAP_AWK" "$MAP_MAN" - 2>/dev/null)
+  good_rc=$?
+  if [ "$good_rc" = 0 ] && [ "$good_out" = "real/workflow.yml:11: something" ]; then
+    record 0 "a mapped scanner row resolves to its source line" ""
+  else
+    record 1 "a mapped scanner row resolves to its source line" \
+      "rc=$good_rc out='$good_out' (wanted rc 0 and real/workflow.yml:11: something)"
+  fi
+
+  bad_err=$(printf 'frag-missing:3: something\n' | awk -F"	" -f "$MAP_AWK" "$MAP_MAN" - 2>&1 >/dev/null)
+  bad_rc=$?
+  if [ "$bad_rc" = 3 ] && grep -q "no manifest entry" <<<"$bad_err"; then
+    record 0 "an unmapped scanner row REFUSES instead of being dropped" ""
+  else
+    record 1 "an unmapped scanner row REFUSES instead of being dropped" \
+      "rc=$bad_rc (wanted 3) stderr='$bad_err'"
+  fi
+
+  ugly_err=$(printf 'no-colon-here\n' | awk -F"	" -f "$MAP_AWK" "$MAP_MAN" - 2>&1 >/dev/null)
+  ugly_rc=$?
+  if [ "$ugly_rc" = 3 ] && grep -q "unparseable scanner row" <<<"$ugly_err"; then
+    record 0 "an unparseable scanner row REFUSES instead of being dropped" ""
+  else
+    record 1 "an unparseable scanner row REFUSES instead of being dropped" \
+      "rc=$ugly_rc (wanted 3) stderr='$ugly_err'"
+  fi
+  rm -f "$MAP_MAN"
+fi
+rm -f "$MAP_AWK"
+
+# --- THIS FILE OBEYS ITS OWN HEADER RULE --------------------------------------
+#
+# The header (top of this file) forbids `printf … | grep -q` in an assertion,
+# because `grep -q` closes early, the producer takes SIGPIPE, the pipeline is
+# 141 under `set -uo pipefail`, and a real match then reads as ABSENT. It was
+# prose, and prose does not fail a build: the form was committed in eight
+# assertions at .github#300, fixed, and committed again in two more at
+# .github#404. Twice is a rule (org standards: a finding that recurs becomes a
+# rule, and this one is grep-expressible), so the rule is now a check.
+#
+# QUOTE-AWARE, because this file's own FIXTURES are the forbidden string --
+# `case_flag badq.sh … '  producer | grep -q needle'` is an INPUT to the scanner
+# and must stay exactly as written. A plain grep for the form would flag those
+# and would have to be silenced, which is how a guard becomes noise. So a
+# match counts only where it is real shell: outside single quotes, and not in a
+# comment.
+self_bad=$(awk '
+  { line = $0
+    sub(/#.*/, "", line)                 # strip comments
+    out = ""; inq = 0
+    n = length(line)
+    for (i = 1; i <= n; i++) {
+      c = substr(line, i, 1)
+      if (c == "\047") { inq = !inq; continue }
+      if (!inq) out = out c
+    }
+    # A REAL PIPE, not the second bar of a `||` -- the exact confusion the
+    # header of this file lists first, and which this check got wrong on its
+    # own fixtures before it was pinned. `|&` is a pipe too.
+    if (out ~ /(^|[^|])\|[ \t]*grep -q/ || out ~ /\|&[ \t]*grep -q/)
+      printf "%d: %s\n", NR, $0
+  }
+' "$0")
+if [ -z "$self_bad" ]; then
+  record 0 "this suite pipes nothing into grep -q outside a fixture" ""
+else
+  record 1 "this suite pipes nothing into grep -q outside a fixture" \
+    "use a here-string (grep -q PAT <<<\"\$var\"); offenders:
+$self_bad"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
