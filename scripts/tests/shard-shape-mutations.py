@@ -130,12 +130,12 @@ MUTATIONS = [
     # one, because the reviewer's proposed fix (blanking alone) closes the
     # whole-line spelling and leaves the trailing-comment one open.
     ("the derivation check goes back to reading raw text",
-     '            executable_text(shell_code_only(str(step.get("run") or ""))))',
-     '"print-mutation-targets" in str(step.get("run") or "")'),
+     '        DERIVES_MATRIX.search(\n            executable_text(shell_code_only(str(step.get("run") or ""))))',
+     '        "print-mutation-targets" in str(step.get("run") or "")'),
 
     ("the derivation token stops needing to be in command position",
-     '            executable_text(shell_code_only(str(step.get("run") or ""))))',
-     '"print-mutation-targets" in shell_code_only(str(step.get("run") or ""))'),
+     '        DERIVES_MATRIX.search(\n            executable_text(shell_code_only(str(step.get("run") or ""))))',
+     '        "print-mutation-targets" in shell_code_only(str(step.get("run") or ""))'),
 
     # --- SHAPE A: the serial arm, which had no cases and no mutations ------
     # It returned success on the RAW TEXT of any step naming `make mutations`,
