@@ -134,20 +134,29 @@ def not_executing(token, how):
 #: rather than a string somebody typed.
 MAKE_TOKEN = 'make "$TARGET"'
 EXIT_TOKEN = 'exit 1'
+#: The third token, added when @saadqbal reproduced Bugbot's finding that the
+#: derivation check was the last `run` scan still reading raw text. It is a
+#: TOKEN here rather than a fixture precisely so it inherits every spelling in
+#: `NON_EXECUTING` -- which is the generalisation the previous round bought.
+DERIVE_TOKEN = 'make --no-print-directory print-mutation-targets'
 
 
 def workflow(fanin=FANIN_ACCUMULATE, shard_run=SHARD_RUNS_MAKE,
              cond="always()", continue_on_error=False, derived=True,
              matrix=True, step_if=None, shard_continue=False,
-             make_step_if=None):
+             make_step_if=None, derive_run=None):
     """A `selftests.yml`-shaped document, one knob per rule under test."""
     matrix_job = {
         "runs-on": "ubuntu-latest",
         "steps": [{
             "name": "shards",
             "id": "plan",
-            "run": ("make --no-print-directory print-mutation-targets"
-                    if derived else "echo '[\"mutation-a\"]'"),
+            # `derive_run` overrides both branches, so a body that CONTAINS
+            # the token without executing it can be tested. `derived` alone
+            # could only ever say present-or-absent.
+            "run": (derive_run if derive_run is not None else
+                    ("make --no-print-directory print-mutation-targets"
+                     if derived else "echo '[\"mutation-a\"]'")),
         }],
         "outputs": {"shards": "${{ steps.plan.outputs.shards }}"},
     }
@@ -335,6 +344,29 @@ def _():
         assert rc == 1, (f"a fan-in whose only `{EXIT_TOKEN}` is a {how} "
                          f"certifies; nothing exits\n" + out)
         assert "can FAIL on it" in out, (how, out)
+
+
+@case("no non-executing spelling of the derivation certifies the matrix")
+def _():
+    """The third token, and the one that was still read as raw text.
+
+    @saadqbal reproduced Bugbot's finding: comment the `mapfile` out, source
+    the shard list from a file naming no member, and the guard printed
+    "matrix derived from make" and returned 0. The matrix was then hand-written
+    -- exactly what this rule exists to refuse -- while the rule certified it.
+
+    It is generated over `NON_EXECUTING` rather than pinned to the mapfile
+    spelling @saadqbal happened to drive, for the reason that block states: a
+    fixture pins the instance, and the next spelling waits to be found in
+    review.
+    """
+    for how in NON_EXECUTING:
+        rc, out = run(workflow(derive_run=not_executing(DERIVE_TOKEN, how)))
+        assert rc == 1, (
+            f"a matrix job with `{DERIVE_TOKEN}` as a {how} certifies as "
+            "derived; the shards are hand-written and drift the moment "
+            "MUTATION_TARGETS gains a runner\n" + out)
+        assert "not derived from" in out, (how, out)
 
 
 @case("a verdict comparison that lives only in a comment is refused")

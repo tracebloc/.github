@@ -100,6 +100,25 @@ MAKE_INVOCATION = re.compile(
 )
 
 
+#: The matrix must be DERIVED by actually running the target -- so the token
+#: has to sit in command position, exactly as `MAKE_INVOCATION` and
+#: `EXIT_NONZERO` do. @saadqbal reproduced Bugbot's finding by commenting the
+#: `mapfile` out and sourcing the list from a file: the check read the step's
+#: raw text, found the token in the dead line, and certified a hand-written
+#: matrix. Routing through `shell_code_only` closes that spelling; it does NOT
+#: close `echo nothing   # make ... print-mutation-targets`, because the
+#: blanking is whole-line by design. Anchoring is what closes the class, and it
+#: is the same answer round four reached for `exit`.
+#: `[^\n#]*` keeps a match from running off into a trailing comment.
+DERIVES_MATRIX = re.compile(
+    r"""(?mx)
+    (?: ^ | [;&|(`] | \bthen\b | \belse\b | \bdo\b | \{ )   # command position
+    \s* (?:\w+=\S*\s+)*                                      # env prefixes
+    make \b [^\n\#]* \b print-mutation-targets \b            # …running it
+    """
+)
+
+
 #: A step-level `if` that is safe to carry. Same allowlist as the job's, for
 #: the same reason: anything else can skip the step, and a skipped step does
 #: not red its job.
@@ -313,7 +332,7 @@ def main() -> int:
         )
 
     derived = any(
-        "print-mutation-targets" in str(step.get("run") or "")
+        DERIVES_MATRIX.search(shell_code_only(str(step.get("run") or "")))
         for jid in shard_ids
         for dep in ([jid] + needs_of(js[jid]))
         if isinstance(js.get(dep), dict)
