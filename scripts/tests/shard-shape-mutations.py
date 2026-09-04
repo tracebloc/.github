@@ -107,6 +107,11 @@ MUTATIONS = [
      "            if MAKE_INVOCATION.search(shell_code_only(str(step.get(\"run\") or \"\"))):",
      "            if \"make\" in str(step.get(\"run\") or \"\"):"),
 
+    # --- …and a leg that cannot report failure satisfies it by construction
+    ("a continue-on-error shard job stops being refused",
+     "        if job.get(\"continue-on-error\"):",
+     "        if False:"),
+
     # --- nothing-to-check must never read as everything-passed -------------
     ("an empty tier certifies in main",
      "    if not targets:\n        die(\"derived NO mutation targets; refusing to certify a tier that runs nothing\")\n\n    # SHAPE A",

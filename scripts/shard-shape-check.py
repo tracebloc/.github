@@ -351,7 +351,30 @@ def main() -> int:
         job = js.get(jid) or {}
         if "strategy" not in job:
             continue          # not a sharded leg; the matrix check above owns it
+        # …AND THE LEG MUST BE ABLE TO REPORT A FAILURE (@saadqbal, #412).
+        # `continue-on-error: true` on the shard job makes a failed leg report
+        # `success` to the fan-in, so the fan-in's assertion is satisfied BY
+        # CONSTRUCTION and every check above stays green over a red shard.
+        #
+        # The token was already disqualifying on the CERTIFYING step and not
+        # here -- same token, same meaning, checked in one place and not the
+        # other. The step-level form is refused too: it makes the leg's own
+        # failing step report success, with the same effect one level down.
+        if job.get("continue-on-error"):
+            die(
+                f"shard job {jid!r} is `continue-on-error`, so a failed leg "
+                "reports `success` to the fan-in and the verdict the fan-in "
+                "reads can never be anything else. The tier is then satisfied "
+                "by construction, which is a green required context over a red "
+                "shard -- the exact outcome every other check here refuses."
+            )
         for step in (job.get("steps") or []):
+            if step.get("continue-on-error"):
+                die(
+                    f"a step in shard job {jid!r} is `continue-on-error`, so "
+                    "its failure does not red the leg and the leg's `success` "
+                    "no longer means the mutations passed."
+                )
             # CODE ONLY, AND `make` MUST BE THE COMMAND (Bugbot, #412). The
             # first version of this check accepted any co-occurrence of `make`
             # and the matrix value in the RAW text -- so a whole-line comment

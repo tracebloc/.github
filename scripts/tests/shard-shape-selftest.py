@@ -106,9 +106,18 @@ echo "would run: make $TARGET"
 """
 
 
+#: The two other spellings @saadqbal drove: a trailing comment, and prose.
+SHARD_TRAILING_COMMENT = """set -euo pipefail
+echo skip   # make "$TARGET"
+"""
+SHARD_PROSE = """set -euo pipefail
+echo "we would make things happen for ${TARGET}"
+"""
+
+
 def workflow(fanin=FANIN_ACCUMULATE, shard_run=SHARD_RUNS_MAKE,
              cond="always()", continue_on_error=False, derived=True,
-             matrix=True, step_if=None):
+             matrix=True, step_if=None, shard_continue=False):
     """A `selftests.yml`-shaped document, one knob per rule under test."""
     matrix_job = {
         "runs-on": "ubuntu-latest",
@@ -131,6 +140,8 @@ def workflow(fanin=FANIN_ACCUMULATE, shard_run=SHARD_RUNS_MAKE,
         "env": {"TARGET": "${{ matrix.target }}"},
         "steps": [{"name": "make ${{ matrix.target }}", "run": shard_run}],
     }
+    if shard_continue:
+        shard_job["continue-on-error"] = True
     if matrix:
         shard_job["strategy"] = {
             "fail-fast": False,
@@ -267,6 +278,35 @@ def _():
         "$TARGET\"` both contain the tokens; neither executes anything. "
         "Co-occurrence is not invocation.\n" + out)
     assert "run no `make`" in out, out
+
+
+@case("a shard leg naming make in a TRAILING comment is refused")
+def _():
+    rc, out = run(workflow(shard_run=SHARD_TRAILING_COMMENT))
+    assert rc == 1, ("`echo skip   # make \"$TARGET\"` executes an echo\n" + out)
+    assert "run no `make`" in out, out
+
+
+@case("a shard leg with make and TARGET in PROSE is refused")
+def _():
+    rc, out = run(workflow(shard_run=SHARD_PROSE))
+    assert rc == 1, ("both tokens co-occur in an English sentence; "
+                     "co-occurrence is not invocation\n" + out)
+    assert "run no `make`" in out, out
+
+
+@case("a continue-on-error shard job is refused")
+def _():
+    """The third root: same token, checked in one place and not the other.
+
+    `continue-on-error` disqualified the CERTIFYING step from the start and
+    was unchecked on the shard job -- where it makes a failed leg report
+    `success` to the fan-in, satisfying the fan-in's assertion by
+    construction (@saadqbal, #412).
+    """
+    rc, out = run(workflow(shard_continue=True))
+    assert rc == 1, out
+    assert "continue-on-error" in out, out
 
 
 @case("a shard whose steps only echo is refused")
