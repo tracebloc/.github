@@ -72,9 +72,12 @@ MUTATIONS = [
     # unrelated reason certifies again. Deleting the mutation would have lost
     # that; leaving it pointed at the exit would have left an entry proving
     # nothing.
+    # STILL DISTINCT from the trailing-comment mutation below: this one
+    # removes comment handling ENTIRELY (whole-line comments come back),
+    # that one keeps the whole-line pass and restores only trailing ones.
     ("the verdict comparison is counted from a comment",
-     "        run = shell_code_only(str(step.get(\"run\") or \"\"))",
-     "        run = str(step.get(\"run\") or \"\")"),
+     '        run = executable_text(shell_code_only(str(step.get("run") or "")),\n                              blank_quotes=False)',
+     '        run = str(step.get("run") or "")'),
 
     # --- …and continue-on-error turns the failure back into a pass ---------
     ("continue-on-error stops disqualifying the certifying step",
@@ -163,11 +166,11 @@ MUTATIONS = [
      '    if False:'),
 
     ('the success literal stops needing a comparison',
-     '        (?: == | != | -eq | -ne | (?<=\\s)= )   # in a COMPARISON,\n        \\s* ["\']? \\b success \\b ["\']?         # …against `success` ITSELF',
+     '        \\[ \\[?                                 # inside a TEST…\n        [^\\]\\n]*\n        (?: == | != | -eq | -ne | (?<=\\s)= )    # …a COMPARISON…\n        \\s* ["\']? \\b success \\b ["\']?          # …against `success` ITSELF\n        [^\\]\\n]* \\]',
      '          ["\']?success["\']?'),
 
     ('the success literal is word-bounded but not compared',
-     '        (?: == | != | -eq | -ne | (?<=\\s)= )   # in a COMPARISON,\n        \\s* ["\']? \\b success \\b ["\']?         # …against `success` ITSELF',
+     '        \\[ \\[?                                 # inside a TEST…\n        [^\\]\\n]*\n        (?: == | != | -eq | -ne | (?<=\\s)= )    # …a COMPARISON…\n        \\s* ["\']? \\b success \\b ["\']?          # …against `success` ITSELF\n        [^\\]\\n]* \\]',
      '          ["\']? \\b success \\b ["\']?'),
 
     # A DRY RUN IS NOT THE TIER. `mutations-dry` resolves markers and
@@ -193,7 +196,7 @@ MUTATIONS = [
      '            shell_code_only(str(step.get("run") or "")))'),
 
     ('the decision accepts a bare result-variable test again',
-     '        (?: == | != | -eq | -ne | (?<=\\s)= )   # in a COMPARISON,\n        \\s* ["\']? \\b success \\b ["\']?         # …against `success` ITSELF',
+     '        \\[ \\[?                                 # inside a TEST…\n        [^\\]\\n]*\n        (?: == | != | -eq | -ne | (?<=\\s)= )    # …a COMPARISON…\n        \\s* ["\']? \\b success \\b ["\']?          # …against `success` ITSELF\n        [^\\]\\n]* \\]',
      '        (?: (?: == | != | -eq | -ne | (?<=\\s)= )\n            \\s* ["\']? \\b success \\b ["\']?\n          | \\[\\s+"?\\$\\{?\\w*(?:RESULT|result|rc)\\w*\\}?"? )'),
 
     # --- the DECISION half, through the same three spellings -------------
