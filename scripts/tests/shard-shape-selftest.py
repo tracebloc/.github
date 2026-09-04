@@ -38,7 +38,6 @@ import contextlib
 import importlib.util
 import io
 import pathlib
-import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]

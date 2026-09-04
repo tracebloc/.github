@@ -305,7 +305,8 @@ MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-triage-labels \
                    mutation-archive-baseline \
                    mutation-reusable-no-cancel \
-                   mutation-lint-targets
+                   mutation-lint-targets \
+                   mutation-shard-shape
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -361,6 +362,7 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-mutation-baseline \
                     selftest-conflict-gate \
                     selftest-fr-gate \
+                    selftest-shard-shape \
                     selftest-triage-labels \
                     selftest-archive-baseline \
                     selftest-reusable-no-cancel \
@@ -657,6 +659,21 @@ selftest-lint-targets: guard-pyyaml
 .PHONY: mutation-lint-targets mutation-lint-targets-dry
 mutation-lint-targets:
 	$(PYTHON) scripts/tests/lint-targets-mutations.py
+
+# The shard-shape audit's own tier (.github#412). It shipped with neither a
+# selftest nor a mutation runner while every sibling audit had both, and the
+# cost was four negative cases in two review rounds -- each a token the guard
+# read where it does not mean what it says.
+.PHONY: selftest-shard-shape
+selftest-shard-shape: guard-pyyaml
+	$(PYTHON) scripts/tests/shard-shape-selftest.py
+
+.PHONY: mutation-shard-shape mutation-shard-shape-dry
+mutation-shard-shape:
+	$(PYTHON) scripts/tests/shard-shape-mutations.py
+
+mutation-shard-shape-dry:
+	$(PYTHON) scripts/tests/shard-shape-mutations.py --dry
 
 mutation-lint-targets-dry:
 	$(PYTHON) scripts/tests/lint-targets-mutations.py --dry
