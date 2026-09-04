@@ -161,13 +161,5 @@ def main() -> int:
     return 0
 
 
-# TEMPORARY — backend#3157 proof that a failing SHARD reds the `selftests` context.
-# Reverted in the next commit. Placed here, at module level before the __main__
-# guard, because the first attempt landed inside the docstring and executed nothing:
-# the anchor did not apply and the 'proof' proved nothing (rc 0, not 1).
-import sys as _proof_sys
-print('backend#3157: deliberate shard failure — proving the fan-in reds selftests')
-_proof_sys.exit(1)
-
 if __name__ == "__main__":
     raise SystemExit(main())
