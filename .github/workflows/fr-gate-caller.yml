@@ -15,17 +15,33 @@ name: FR gate
 # is the only place a new gate runs against real board state before ten other
 # repos start consuming it at `@main`.
 #
-# `branches:` omits `master` — this repo has never had one, and listing a branch
-# that does not exist is how dead filters accumulate (backend#1428).
+# NO `branches:` FILTER, DELIBERATELY (backend#2840). The obvious shape here is
+# `branches: [staging, main]` — run the gate only where it can block. It is WRONG,
+# and the way it is wrong is invisible: `branches:` filters on the PR's base AT
+# EVENT TIME, so a PR retargeted OUT of the set (main -> develop) fires `edited`
+# with base=develop, the filter rejects it, and the gate never re-runs. The last
+# run stays FAILURE, welded to the head sha, and `gate` is a REQUIRED check — so
+# the PR is blocked forever with nothing able to clear it (`synchronize` needs a
+# push; a retarget has none). Measured on .github#388: three stale FAILUREs, and
+# only an unrelated commit to mint a fresh sha cleared it.
+#
+# So the trigger is unfiltered and the DECISION moves into the job, where it CAN
+# see the base: fr-gate.yml maps a non-promotion base to an empty `required`, and
+# every gating step is `if: steps.target.outputs.required != ''`, so on develop the
+# job does two echoes and reports `gate` SUCCESS — which is exactly what supersedes
+# the stale FAILURE on a retarget. "Derive, never restate": the base is read once,
+# in the one place that runs on every event. Costs a runner-second per develop PR;
+# removes the class.
+#
+# `edited` is still load-bearing for the half that DID work — main <-> staging
+# retargets, where the new base still gates (.github#237, backend#1945) — and is
+# now also the event that re-runs the gate green on a retarget out to develop.
+#
+# `master` never appears here: this repo has never had one, and the base filter
+# that would have listed it is gone regardless (backend#1428, backend#2840).
 
 on:
   pull_request:
-    branches: [staging, main]
-    # `edited` is load-bearing, not decoration: it is the ONLY event GitHub fires
-    # when a PR's BASE branch changes. Without it a retargeted PR keeps the verdict
-    # from its old base forever -- `synchronize` needs a push, and a retarget has
-    # nothing to push, so no event can ever re-run the gate. Measured on
-    # .github#237, where a required check sat stale for four hours (backend#1945).
     types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled, edited]
 
 jobs:

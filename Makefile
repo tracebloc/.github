@@ -301,6 +301,7 @@ MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-branch-owner mutation-reason-citations \
                    mutation-mutation-baseline mutation-standards-sync \
                    mutation-conflict-gate \
+                   mutation-fr-gate \
                    mutation-triage-labels \
                    mutation-archive-baseline \
                    mutation-reusable-no-cancel \
@@ -343,6 +344,7 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-branch-owner \
                     selftest-mutation-baseline \
                     selftest-conflict-gate \
+                    selftest-fr-gate \
                     selftest-triage-labels \
                     selftest-archive-baseline \
                     selftest-reusable-no-cancel \
@@ -567,6 +569,21 @@ mutation-conflict-gate:
 
 mutation-conflict-gate-dry:
 	$(PYTHON) scripts/tests/conflict-gate-mutations.py --dry
+
+# The FR gate's base decision and trigger (backend#2840). guard-pyyaml: the suite
+# parses fr-gate.yml and fr-gate-caller.yml -- it extracts the `case "$BASE"`
+# mapping out of the reusable and runs it verbatim, and reads the caller's trigger
+# from the same document. No token, no network: every case is bash in a temp dir.
+.PHONY: selftest-fr-gate
+selftest-fr-gate: guard-pyyaml
+	$(PYTHON) scripts/tests/fr-gate-selftest.py
+
+.PHONY: mutation-fr-gate mutation-fr-gate-dry
+mutation-fr-gate:
+	$(PYTHON) scripts/tests/fr-gate-mutations.py
+
+mutation-fr-gate-dry:
+	$(PYTHON) scripts/tests/fr-gate-mutations.py --dry
 
 # The closing-ref gate (backend#2364): a PR whose TITLE names a ticket must LINK
 # it. NO guard-pyyaml, for the same asserted reason as bugbot-gate above -- the
