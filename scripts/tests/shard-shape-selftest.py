@@ -139,6 +139,16 @@ EXIT_TOKEN = 'exit 1'
 #: TOKEN here rather than a fixture precisely so it inherits every spelling in
 #: `NON_EXECUTING` -- which is the generalisation the previous round bought.
 DERIVE_TOKEN = 'make --no-print-directory print-mutation-targets'
+#: …AND THE SAME TOKEN AS IT REALLY APPEARS (Bugbot, #412, high). The bare
+#: token above is not the shape that ships: the real line is a PROCESS
+#: SUBSTITUTION, and `DERIVES_MATRIX` must treat `(` as command position for it
+#: to match at all. A commented-out copy therefore carries its own `(` -- so
+#: the bare spelling was refused while the real one, commented out, certified.
+#: Every non-executing case runs against BOTH spellings now: a fixture that
+#: strips the token down to its name cannot see a hole that only the real
+#: punctuation opens.
+DERIVE_REAL = ('mapfile -t targets < '
+               '<(make --no-print-directory print-mutation-targets)')
 
 
 def workflow(fanin=FANIN_ACCUMULATE, shard_run=SHARD_RUNS_MAKE,
@@ -388,13 +398,14 @@ def _():
     fixture pins the instance, and the next spelling waits to be found in
     review.
     """
-    for how in NON_EXECUTING:
-        rc, out = run(workflow(derive_run=not_executing(DERIVE_TOKEN, how)))
-        assert rc == 1, (
-            f"a matrix job with `{DERIVE_TOKEN}` as a {how} certifies as "
-            "derived; the shards are hand-written and drift the moment "
-            "MUTATION_TARGETS gains a runner\n" + out)
-        assert "not derived from" in out, (how, out)
+    for token in (DERIVE_TOKEN, DERIVE_REAL):
+        for how in NON_EXECUTING:
+            rc, out = run(workflow(derive_run=not_executing(token, how)))
+            assert rc == 1, (
+                f"a matrix job with `{token}` as a {how} certifies as "
+                "derived; the shards are hand-written and drift the moment "
+                "MUTATION_TARGETS gains a runner\n" + out)
+            assert "not derived from" in out, (token, how, out)
 
 
 @case("a fan-in that only MENTIONS success is refused")
@@ -425,6 +436,31 @@ def _():
             f"a fan-in whose only `success` is {label} decides nothing about "
             "the shards, so the required context can go green over a red "
             "shard\n" + out)
+
+
+@case("a fan-in that enumerates FAILURE values is refused")
+def _():
+    """backend#1424, one level down (Bugbot, #412, high).
+
+    A fan-in comparing against a failure value passes everything that is not
+    that value -- and a SKIPPED shard reports `skipped`, not `failure`. GitHub
+    reports a skipped required job as SUCCESS, which is the precise hole this
+    required context exists to close, so a fan-in that closes it only against
+    `failure` leaves it open against the case that actually happens.
+
+    `success` is the only value meaning the tier passed, so it is the only one
+    worth comparing against.
+    """
+    for form in ('[ "$SHARDS_RESULT" = "failure" ]',
+                 '[ "$SHARDS_RESULT" = "cancelled" ]',
+                 '[ "$SHARDS_RESULT" != "success_maybe" ]'):
+        body = ("set -euo pipefail\n"
+                f"if {form}; then exit 1; fi\n")
+        rc, out = run(workflow(fanin=body))
+        assert rc == 1, (
+            f"`{form}` treats every other result -- `skipped` and `cancelled` "
+            "included -- as a pass, so a shard that never ran certifies the "
+            "tier\n" + out)
 
 
 @case("a real comparison against the literal still certifies")

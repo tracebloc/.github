@@ -90,12 +90,23 @@ EXIT_NONZERO = re.compile(
 #: the stronger one: the literal counts only next to `==`, `!=`, `-eq`, `-ne`
 #: or a spaced `=`. `[ "$res" != "success" ]` decides; an echo mentioning the
 #: word does not.
+#:
+#: AND THE COMPARISON MUST BE AGAINST `success`, NOT AGAINST A FAILURE VALUE
+#: (Bugbot, #412, high). A second arm used to accept any `[` test on a
+#: `*RESULT*`/`*rc*` variable, which never required the literal at all -- so
+#: `[ "$SHARDS_RESULT" = "failure" ]` certified, and a shard reporting
+#: `skipped` or `cancelled` sailed through as a pass. That is backend#1424
+#: exactly: GitHub reports a SKIPPED required job as SUCCESS, and enumerating
+#: failure values is how a fan-in comes to treat "not run" as "fine".
+#: `success` is the only value that means the tier passed, so it is the only
+#: one worth comparing against. The real fan-in already does
+#: (`[ "$res" != "success" ]`); its `[ "$rc" -eq 0 ]` accumulator is a
+#: CONSEQUENCE of that comparison and never stood on its own.
 DECIDES_ON_RESULT = re.compile(
-    r"""(?mx) (?:
-            (?: == | != | -eq | -ne | (?<=\s)= )   # …in a COMPARISON,
-            \s* ["']? \b success \b ["']?          # not merely co-located
-        | \[\s+"?\$\{?\w*(?:RESULT|result|rc)\w*\}?"?  # or tested as a variable
-    )"""
+    r"""(?mx)
+        (?: == | != | -eq | -ne | (?<=\s)= )   # in a COMPARISON,
+        \s* ["']? \b success \b ["']?         # …against `success` ITSELF
+    """
 )
 
 
@@ -137,6 +148,50 @@ DERIVES_MATRIX = re.compile(
 def step_runs_anyway(step: dict) -> bool:
     cond = normalise_if(str(step.get("if") or ""))
     return cond == "" or cond in RUNS_ANYWAY
+
+
+def executable_text(run: str) -> str:
+    """`run` with trailing comments cut AND quoted spans blanked.
+
+    THE DERIVATION SCAN NEEDS BOTH, and neither alone is enough (Bugbot, #412,
+    high, twice). The real invocation is a PROCESS SUBSTITUTION, so `(` must
+    count as command position for `DERIVES_MATRIX` to match it -- and that one
+    concession is what both holes walked through, because a commented-out copy
+    and an echoed copy of that same line each carry their own `(`:
+
+        mapfile -t targets < <(cat list.txt)   # <(make … print-mutation-targets)
+        echo "we would mapfile -t targets < <(make … print-mutation-targets)"
+
+    Anchoring cannot separate those from the real line; only knowing that the
+    text is a comment or a string can. Quoted spans are blanked rather than
+    removed so column positions -- and therefore the anchors -- do not shift.
+
+    ONLY A `#` PRECEDED BY WHITESPACE starts a comment, which is what keeps
+    `${pair#*:}` intact: parameter expansion has no space before its `#`.
+
+    NOT APPLIED TO `MAKE_INVOCATION`, deliberately. That one matches
+    `make "$TARGET"`, whose argument IS quoted -- blanking there would stop the
+    real shard leg certifying. Different scans, different notions of "the code".
+    """
+    out = []
+    for line in run.splitlines():
+        buf = list(line)
+        quote = ""
+        cut = None
+        for i, ch in enumerate(line):
+            if quote:
+                if ch == quote:
+                    quote = ""
+                else:
+                    buf[i] = " "
+            elif ch in "\"'":
+                quote = ch
+                buf[i] = " "
+            elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+                cut = i
+                break
+        out.append("".join(buf[:cut] if cut is not None else buf))
+    return "\n".join(out)
 
 
 def shell_code_only(run: str) -> str:
@@ -389,7 +444,8 @@ def main() -> int:
         )
 
     derived = any(
-        DERIVES_MATRIX.search(shell_code_only(str(step.get("run") or "")))
+        DERIVES_MATRIX.search(
+            executable_text(shell_code_only(str(step.get("run") or ""))))
         for jid in shard_ids
         for dep in ([jid] + needs_of(js[jid]))
         if isinstance(js.get(dep), dict)

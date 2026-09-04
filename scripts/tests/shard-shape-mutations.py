@@ -177,6 +177,25 @@ MUTATIONS = [
      '        make \\s+ mutations (?= \\s | $ )   # …as the command, and NOT',
      '        make \\s+ mutations \\b             # …as the command'),
 
+    # --- the two holes the PROCESS SUBSTITUTION concession opened ----------
+    # `DERIVES_MATRIX` must treat `(` as command position, because the real
+    # invocation is `<(make … print-mutation-targets)`. That one concession is
+    # what a commented-out copy AND an echoed copy of the same line each walk
+    # through, carrying their own `(`. Anchoring cannot tell them apart; only
+    # knowing the text is a comment or a string can.
+    #
+    # And the decision: a `[` test on any *RESULT*/*rc* variable never required
+    # the literal, so `[ "$SHARDS_RESULT" = "failure" ]` certified while a
+    # shard reporting `skipped` counted as a pass -- backend#1424 reopened by
+    # the very context that closes it.
+    ('the derivation scan reads comments and strings again',
+     '            executable_text(shell_code_only(str(step.get("run") or ""))))',
+     '            shell_code_only(str(step.get("run") or "")))'),
+
+    ('the decision accepts a bare result-variable test again',
+     '        (?: == | != | -eq | -ne | (?<=\\s)= )   # in a COMPARISON,\n        \\s* ["\']? \\b success \\b ["\']?         # …against `success` ITSELF',
+     '        (?: (?: == | != | -eq | -ne | (?<=\\s)= )\n            \\s* ["\']? \\b success \\b ["\']?\n          | \\[\\s+"?\\$\\{?\\w*(?:RESULT|result|rc)\\w*\\}?"? )'),
+
     # --- …and a leg that cannot report failure satisfies it by construction
     ("a continue-on-error shard job stops being refused",
      "        if job.get(\"continue-on-error\"):",
