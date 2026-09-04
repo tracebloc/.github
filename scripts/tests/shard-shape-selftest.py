@@ -438,6 +438,37 @@ def _():
             "shard\n" + out)
 
 
+@case("a fan-in whose only `success` comparison is not executed is refused")
+def _():
+    """The decision half, through the same three spellings as everything else.
+
+    `DECIDES_ON_RESULT` was read off `shell_code_only` text, which keeps
+    trailing comments AND quoted strings, and the pattern had no structural
+    anchor -- so `exit 1  # [ "$X" != "success" ]` and an echo mentioning the
+    comparison both certified (Bugbot, #412, high).
+
+    Two mechanisms are needed here and neither alone suffices, which is the
+    point worth pinning: the comparison must be inside a TEST (`[ … ]`), which
+    is what rejects the prose spelling, AND comments must be cut, which is what
+    rejects the commented-out spelling -- brackets and all. Quotes are
+    deliberately NOT blanked, because the legitimate form quotes its literal.
+    """
+    for label, line in (
+            ("a trailing comment", 'exit 1   # [ "$SHARDS_RESULT" != "success" ]'),
+            ("a whole-line comment", '# [ "$SHARDS_RESULT" != "success" ]\nexit 1'),
+            ("prose in an echo",
+             'echo "we compare != '+chr(39)+'success'+chr(39)+' further down"'),
+            ("prose with no quotes at all",
+             'echo "the shard result != success is what we check"')):
+        body = ("set -euo pipefail\n" + line + "\n"
+                "if [ ! -f report.json ]; then exit 1; fi\n")
+        rc, out = run(workflow(fanin=body))
+        assert rc == 1, (
+            f"a fan-in whose only `success` comparison is {label} decides "
+            "nothing; the required context can go green over a red shard\n"
+            + out)
+
+
 @case("a fan-in that enumerates FAILURE values is refused")
 def _():
     """backend#1424, one level down (Bugbot, #412, high).

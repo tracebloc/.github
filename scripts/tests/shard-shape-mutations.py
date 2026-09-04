@@ -196,6 +196,22 @@ MUTATIONS = [
      '        (?: == | != | -eq | -ne | (?<=\\s)= )   # in a COMPARISON,\n        \\s* ["\']? \\b success \\b ["\']?         # …against `success` ITSELF',
      '        (?: (?: == | != | -eq | -ne | (?<=\\s)= )\n            \\s* ["\']? \\b success \\b ["\']?\n          | \\[\\s+"?\\$\\{?\\w*(?:RESULT|result|rc)\\w*\\}?"? )'),
 
+    # --- the DECISION half, through the same three spellings -------------
+    # TWO mechanisms, and neither alone is enough -- which is why both are
+    # mutated separately. Cutting comments is what rejects
+    # `exit 1  # [ "$X" != "success" ]`, brackets and all; requiring the
+    # comparison to sit inside a TEST is what rejects an echo that merely
+    # mentions it. Quotes are deliberately NOT blanked here, because the
+    # legitimate form quotes its own literal -- the opposite of what the
+    # derivation scan needs from the same helper.
+    ('the fan-in scan reads commented-out text again',
+     '        run = executable_text(shell_code_only(str(step.get("run") or "")),\n                              blank_quotes=False)',
+     '        run = shell_code_only(str(step.get("run") or ""))'),
+
+    ('the success comparison stops needing to be inside a test',
+     '        \\[ \\[?                                 # inside a TEST…\n        [^\\]\\n]*\n        (?: == | != | -eq | -ne | (?<=\\s)= )    # …a COMPARISON…\n        \\s* ["\']? \\b success \\b ["\']?          # …against `success` ITSELF\n        [^\\]\\n]* \\]',
+     '        (?: == | != | -eq | -ne | (?<=\\s)= )    # a COMPARISON…\n        \\s* ["\']? \\b success \\b ["\']?          # …against `success` ITSELF'),
+
     # --- …and a leg that cannot report failure satisfies it by construction
     ("a continue-on-error shard job stops being refused",
      "        if job.get(\"continue-on-error\"):",

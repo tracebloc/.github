@@ -104,8 +104,11 @@ EXIT_NONZERO = re.compile(
 #: CONSEQUENCE of that comparison and never stood on its own.
 DECIDES_ON_RESULT = re.compile(
     r"""(?mx)
-        (?: == | != | -eq | -ne | (?<=\s)= )   # in a COMPARISON,
-        \s* ["']? \b success \b ["']?         # …against `success` ITSELF
+        \[ \[?                                 # inside a TEST…
+        [^\]\n]*
+        (?: == | != | -eq | -ne | (?<=\s)= )    # …a COMPARISON…
+        \s* ["']? \b success \b ["']?          # …against `success` ITSELF
+        [^\]\n]* \]
     """
 )
 
@@ -150,7 +153,7 @@ def step_runs_anyway(step: dict) -> bool:
     return cond == "" or cond in RUNS_ANYWAY
 
 
-def executable_text(run: str) -> str:
+def executable_text(run: str, blank_quotes: bool = True) -> str:
     """`run` with trailing comments cut AND quoted spans blanked.
 
     THE DERIVATION SCAN NEEDS BOTH, and neither alone is enough (Bugbot, #412,
@@ -182,11 +185,12 @@ def executable_text(run: str) -> str:
             if quote:
                 if ch == quote:
                     quote = ""
-                else:
+                elif blank_quotes:
                     buf[i] = " "
             elif ch in "\"'":
                 quote = ch
-                buf[i] = " "
+                if blank_quotes:
+                    buf[i] = " "
             elif ch == "#" and (i == 0 or line[i - 1].isspace()):
                 cut = i
                 break
@@ -371,7 +375,15 @@ def main() -> int:
         if not hits:
             continue
         read.extend(hits)
-        run = shell_code_only(str(step.get("run") or ""))
+        # COMMENTS CUT, QUOTES KEPT (Bugbot, #412, high). Both regexes below
+        # read text that still had trailing comments in it, so a step whose
+        # only decision is `exit 1  # [ "$X" != "success" ]` certified.
+        # Quotes must STAY: the real comparison is `[ "$res" != "success" ]`,
+        # and blanking them would delete the literal it anchors on -- which
+        # is exactly why the derivation scan blanks them and this one does
+        # not. Same helper, two callers, opposite needs, stated at both.
+        run = executable_text(shell_code_only(str(step.get("run") or "")),
+                              blank_quotes=False)
         # A non-zero exit is the only way a step reds its job from a shell. Also
         # refuse continue-on-error, which turns any failure back into a pass.
         #
