@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Mutation runner for reusable-no-cancel-selftest.py (tracebloc/backend#2756).
 
+# TEMPORARY — backend#3157 proof that a failing SHARD reds the `selftests` context.
+# The fan-in is the one property a reviewer cannot check by reading, so it is
+# demonstrated in CI on this branch and reverted in the next commit.
+import sys as _proof_sys
+print('backend#3157: deliberate shard failure, proving the fan-in reds selftests')
+_proof_sys.exit(1)
+
+
 Breaks scripts/reusable-no-cancel.py one behaviour at a time and asserts the
 suite REDDENS. A case that survives its own mutation is vacuous and worse than
 absent, because it makes the tier look staffed.
