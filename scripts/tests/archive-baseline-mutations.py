@@ -270,8 +270,12 @@ MUTATIONS = [
     # the pagination requirement assertion, or that assertion is decoration.
     (
         "the artifact listing reads only the first page (no --paginate)",
-        'if ! arts=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" --jq \'.artifacts[]\' 2>&1); then',
-        'if ! arts=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" 2>&1); then',
+        # RE-ANCHORED for backend#3068: the listing is now wrapped in `retry_read`
+        # and the trailing `2>&1` moved inside the helper, so the old literal is
+        # gone. Dropping `--paginate` (keeping the retry + `--jq`) is still the bug
+        # the wiring `--paginate` assertion catches.
+        'if ! arts=$(retry_read gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" --jq \'.artifacts[]\'); then',
+        'if ! arts=$(retry_read gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" --jq \'.artifacts[]\'); then',
     ),
     # AND THE SLURP. The paginated stream is one artifact per line; reading it with
     # a plain `jq '.artifacts[]'` (the single-page idiom) selects nothing, so live=0
@@ -281,6 +285,54 @@ MUTATIONS = [
         "the paginated artifact stream is read without -s, so it selects nothing",
         "live=$(printf '%s' \"$arts\" | jq -s '[.[] | select(.expired == false)] | length')",
         "live=$(printf '%s' \"$arts\" | jq '[.artifacts[] | select(.expired == false)] | length')",
+    ),
+    # --- (G) the baseline read retries a transient blip, then fails closed -----
+    # (backend#3068). A single attempt failed ~60% of this cron's runs, and each
+    # failure refuses the whole cross-run comparison -- a red run that hid a green
+    # archive. Retrying fixes that, but an EXHAUSTED read must STILL fail closed:
+    # an unreadable baseline that reads as "nothing to archive" is this ticket's
+    # own defect one layer in. The four mutations below break each half of each
+    # loop; the recall-read cases in the selftest are what catch them.
+    #
+    # The DOWNLOAD stops retrying: `-ge 1` gives up after the first attempt, so a
+    # transient blip within budget refuses instead of recovering. The
+    # "download recovers after two transient failures" case reddens.
+    (
+        "the baseline download gives up after the first attempt (no retry)",
+        '                if [ "$dl_attempt" -ge "${BASELINE_READ_RETRIES:-4}" ]; then',
+        '                if [ "$dl_attempt" -ge 1 ]; then',
+    ),
+    # The DOWNLOAD stops failing closed: exhausting the retries reports success,
+    # so a download that never lands reads as a clean baseline. The
+    # "download fails every attempt, so the read fails closed" case reddens.
+    (
+        "an exhausted baseline download reports success, so an unreadable read reads clean",
+        "                if [ \"$dl_attempt\" -ge \"${BASELINE_READ_RETRIES:-4}\" ]; then\n"
+        "                  break\n"
+        "                fi",
+        "                if [ \"$dl_attempt\" -ge \"${BASELINE_READ_RETRIES:-4}\" ]; then\n"
+        "                  dl_ok=1\n"
+        "                  break\n"
+        "                fi",
+    ),
+    # `retry_read` (the listing / reconcile reader) stops retrying: `-ge 1` gives
+    # up after the first attempt. The "listing recovers after one transient
+    # failure" case reddens.
+    (
+        "retry_read gives up after the first attempt, so a transient listing blip refuses",
+        '              if [ "$attempt" -ge "$max" ]; then',
+        '              if [ "$attempt" -ge 1 ]; then',
+    ),
+    # `retry_read` stops failing closed: it returns 0 on exhaustion, so a listing
+    # that never lands is treated as a successful (error-text) read and the run
+    # falls through to a clean first-run baseline. The "listing fails every
+    # attempt, so the read fails closed" case reddens.
+    (
+        "retry_read returns success on exhaustion, so an unreadable listing reads clean",
+        '                echo "::warning::a board-baseline read failed after $attempt attempt(s); failing closed." >&2\n'
+        '                return "$rc"',
+        '                echo "::warning::a board-baseline read failed after $attempt attempt(s); failing closed." >&2\n'
+        '                return 0',
     ),
 ]
 

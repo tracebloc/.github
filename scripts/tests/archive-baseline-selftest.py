@@ -86,6 +86,167 @@ def extract() -> str:
 BLOCK = extract()
 
 
+# THE BASELINE READ RETRIES A TRANSIENT FAILURE, THEN FAILS CLOSED (backend#3068).
+#
+# The reads in the recall step -- the artifact listing, the baseline download and
+# the reconcile probe -- are cross-run / API reads subject to eventual
+# consistency, brief 5xx / secondary-rate-limit blips and cross-run availability
+# races. A SINGLE attempt failed ~60% of this cron's runs, and each failure
+# refuses the whole cross-run comparison, so a momentary blip surfaced as a red
+# run that hid a green archive. The fix retries; but an EXHAUSTED read must still
+# fail closed -- an unreadable baseline that reads as "nothing to archive" is
+# this ticket's own defect one layer in (rule 3: cannot-tell is a finding).
+#
+# These cases run the REAL recall step verbatim -- extracted from the YAML like
+# BLOCK, so the workflow cannot drift while this file stays green (rule 9) --
+# against a stub `gh` that fails a controllable number of times per subcommand.
+# Both halves are asserted: a blip within the budget RECOVERS (a clean baseline),
+# and a read that never succeeds writes prev.error (fail closed), never an empty
+# first-run baseline.
+RECALL_STEP = "Recall the previous run's board size"
+
+
+def extract_recall() -> str:
+    doc = yaml.safe_load(open(WORKFLOW, encoding="utf-8"))
+    steps = doc["jobs"]["archive"]["steps"]
+    named = [s for s in steps if s.get("name") == RECALL_STEP]
+    if len(named) != 1:
+        sys.exit(
+            f"expected exactly one {RECALL_STEP!r} step, found {len(named)}. "
+            "The step was renamed or duplicated; the baseline-read retry cases "
+            "point at nothing."
+        )
+    return named[0]["run"]
+
+
+RECALL_BODY = extract_recall()
+
+# A stub `gh` placed first on PATH. It fails a controllable number of times per
+# subcommand -- decrementing a counter file -- so the retry loops are ACTUALLY
+# exercised rather than described, then behaves. Only `gh` is stubbed; the step's
+# jq/printf/tr/cp/sleep are the real tools. `board.total` content is fixed at 574.
+GH_STUB = r'''#!/usr/bin/env bash
+set -u
+# count_down <file>: returns 0 (i.e. "fail this call") while the counter is > 0,
+# decrementing it; returns 1 once it reaches 0. A missing file means 0.
+count_down() {
+  local f="$1" n=0
+  [ -f "$f" ] && n=$(cat "$f")
+  if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$f"; return 0; fi
+  return 1
+}
+case "$1 ${2:-}" in
+  "api "*)
+    case "$*" in
+      *actions/artifacts*)
+        if count_down "$WORKDIR/fail_artifacts"; then
+          echo "HTTP 503 (artifacts listing)" >&2; exit 1
+        fi
+        # One un-expired artifact, as `--jq '.artifacts[]'` would stream it.
+        printf '{"expired":false,"created_at":"2026-09-01T05:00:00Z","workflow_run":{"id":999}}\n'
+        exit 0 ;;
+      *kanban-reconcile.yml/runs*)
+        if count_down "$WORKDIR/fail_reconcile"; then
+          echo "HTTP 502 (reconcile probe)" >&2; exit 1
+        fi
+        printf '{"workflow_runs":[{"updated_at":""}]}\n'
+        exit 0 ;;
+    esac
+    echo "unexpected gh api call: $*" >&2; exit 3 ;;
+  "run download")
+    if count_down "$WORKDIR/fail_download"; then
+      echo "HTTP 500 (download)" >&2; exit 1
+    fi
+    mkdir -p prev; printf '574' > prev/board.total
+    exit 0 ;;
+esac
+echo "unexpected gh call: $*" >&2; exit 3
+'''
+
+
+def run_recall(fail_artifacts=0, fail_download=0, fail_reconcile=0, retries=4):
+    """Run the REAL recall step against the stub, and report what it left behind.
+
+    Returns (rc, output, prev_total, prev_error). The retry budget is small and
+    the delay is zeroed via env so the loop runs instantly.
+    """
+    work = tempfile.mkdtemp()
+    bindir = os.path.join(work, "bin")
+    os.makedirs(bindir)
+    stub = os.path.join(bindir, "gh")
+    with open(stub, "w") as fh:
+        fh.write(GH_STUB)
+    os.chmod(stub, 0o755)
+    for name, n in (("fail_artifacts", fail_artifacts),
+                    ("fail_download", fail_download),
+                    ("fail_reconcile", fail_reconcile)):
+        with open(os.path.join(work, name), "w") as fh:
+            fh.write(str(n))
+    env = {
+        **os.environ,
+        "PATH": bindir + os.pathsep + os.environ["PATH"],
+        "GITHUB_REPOSITORY": "tracebloc/backend",
+        "GH_REPO": "tracebloc/backend",
+        "GH_TOKEN": "x",
+        "WORKDIR": work,
+        "BASELINE_READ_RETRIES": str(retries),
+        "BASELINE_READ_DELAY": "0",
+    }
+    proc = subprocess.run(["bash", "-c", f"cd {work}\n{RECALL_BODY}"],
+                          capture_output=True, text=True, env=env)
+
+    def read(fname):
+        p = os.path.join(work, fname)
+        return open(p).read().strip() if os.path.exists(p) else ""
+
+    return proc.returncode, proc.stdout + proc.stderr, read("prev.total"), read("prev.error")
+
+
+# (name, fail_artifacts, fail_download, fail_reconcile, want_total, want_error)
+# want_total is the exact prev.total the step must leave; want_error is whether
+# prev.error must be non-empty. A recovered read records the baseline and leaves
+# no error; an exhausted read records NO baseline and leaves an error -- the two
+# are mutually exclusive, which is the fail-closed guarantee written down.
+RECALL_CASES = [
+    # WITHIN BUDGET -> RECOVERS. Two transient download blips, then success: the
+    # baseline is read cleanly and no error is left. Without the retry this is a
+    # red run over a green archive, which is the whole ticket.
+    ("the download recovers after two transient failures", 0, 2, 0, "574", False),
+    # The listing blips once and recovers. Exercises retry_read's own loop, which
+    # the download's inline loop does not.
+    ("the listing recovers after one transient failure", 1, 0, 0, "574", False),
+    # EXHAUSTED -> FAIL CLOSED. The download never succeeds: the retries run out
+    # and the step writes prev.error, NOT an empty first-run baseline. An
+    # unreadable baseline must never read as "nothing to archive".
+    ("the download fails every attempt, so the read fails closed", 0, 99, 0, "", True),
+    # The listing never succeeds: same fail-closed contract, the other read.
+    ("the listing fails every attempt, so the read fails closed", 99, 0, 0, "", True),
+]
+
+
+def recall_read_failures() -> list:
+    bad = []
+    for name, fa, fd, fr, want_total, want_error in RECALL_CASES:
+        rc, out, prev_total, prev_error = run_recall(fa, fd, fr)
+        if rc != 0:
+            bad.append(f"recall/{name}: the step exited {rc} instead of recording a "
+                       f"verdict\n     " + out.strip().replace("\n", "\n     "))
+            continue
+        if prev_total != want_total:
+            bad.append(f"recall/{name}: prev.total is {prev_total!r}, expected "
+                       f"{want_total!r} -- a retried read must recover the baseline, "
+                       "and an exhausted one must leave none")
+            continue
+        if bool(prev_error) != want_error:
+            did = "left an error" if prev_error else "left no error"
+            wants = "fail closed with an error" if want_error else "recover cleanly"
+            bad.append(f"recall/{name}: the step {did}, expected it to {wants}. An "
+                       "unreadable baseline that reads as 'nothing to archive' is the "
+                       "defect (backend#3068)")
+            continue
+    return bad
+
+
 def run_case(declared: int, previous, archived: int, unreadable: str = "",
              other_archiver: str = "", view_bad: int = 0,
              first_total=None, reread_total=None,
@@ -536,7 +697,8 @@ def main() -> int:
     # that a non-zero exit alone cannot distinguish -- a traceback is not
     # coverage and must never be logged as a catch.
     print("archive-baseline-selftest: %d case(s)"
-          % (len(CASES) + len(IDENTITY_CASES) + len(COMPLETENESS_CASES)))
+          % (len(CASES) + len(IDENTITY_CASES) + len(COMPLETENESS_CASES)
+             + len(RECALL_CASES)))
     failures = 0
     for (name, declared, previous, archived, must_refuse, unreadable,
          other_archiver, view_bad, must_record) in CASES:
@@ -663,13 +825,20 @@ def main() -> int:
     if not wiring:
         print("ok   the baseline survives a failing assert, and a dry run sets no floor")
 
+    recall = recall_read_failures()
+    for why in recall:
+        failures += 1
+        print(f"FAIL {why}")
+    if not recall:
+        print("ok   the baseline read retries a transient blip, then fails closed")
+
     print()
     if failures:
         print(f"{failures} check(s) failed.")
         return 1
     print(f"{len(CASES)} cross-run + {len(IDENTITY_CASES)} identity + "
-          f"{len(COMPLETENESS_CASES)} completeness cases "
-          "+ the detector anchors + the artifact wiring passed.")
+          f"{len(COMPLETENESS_CASES)} completeness + {len(RECALL_CASES)} recall-read "
+          "cases + the detector anchors + the artifact wiring passed.")
     return 0
 
 
