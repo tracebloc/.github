@@ -64,8 +64,8 @@ MUTATIONS = [
 
     # --- …and continue-on-error turns the failure back into a pass ---------
     ("continue-on-error stops disqualifying the certifying step",
-     "        if fails and decides and not step.get(\"continue-on-error\"):",
-     "        if fails and decides:"),
+     "        if fails and decides and runs_anyway and not step.get(\"continue-on-error\"):",
+     "        if fails and decides and runs_anyway:"),
 
     # --- the runs-anyway condition, EXACT and not a substring --------------
     ("a compound condition containing always() is accepted",
