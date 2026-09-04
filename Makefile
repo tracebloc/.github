@@ -438,32 +438,7 @@ selftests-cover:
 	  echo "  never run, because the workflow named one member of MUTATION_TARGETS"; \
 	  echo "  instead of the list (Bugbot, .github#300). Covered on paper, unrun in fact."; \
 	  fail=1; }; \
-	if grep -qE "^[[:space:]]*run:[[:space:]]*make[[:space:]]+mutations([[:space:]]|$$)" "$$wf"; then \
-	  :; \
-	elif grep -qF -- 'print-mutation-targets' "$$wf" \
-	     && grep -qF -- 'needs.mutation-shard.result' "$$wf"; then \
-	  for m in $(MUTATION_TARGETS); do \
-	    : "COMMENT LINES STRIPPED FIRST: this file's own header explains the"; \
-	    : ".github#300 incident BY NAMING mutation-house-rules, and prose recording"; \
-	    : "history is not an enumeration. Counting commented text as a real"; \
-	    : "invocation is the backend#2884 shape the lint-targets suite already tests."; \
-	    grep -v '^[[:space:]]*#' "$$wf" | grep -qF -- "$$m" && { \
-	      echo "$$wf names the individual runner '$$m'."; \
-	      echo "  The sharded tier must DERIVE its matrix from 'make print-mutation-targets',"; \
-	      echo "  never enumerate members. A hand-written matrix drifts the moment"; \
-	      echo "  MUTATION_TARGETS gains a runner, and the dropped runner still has a green"; \
-	      echo "  'selftests' beside it — .github#300 with extra steps."; \
-	      fail=1; }; \
-	  done; \
-	else \
-	  echo "$$wf runs the mutation tier in NEITHER supported shape."; \
-	  echo "  Either run 'make mutations' (serial), or shard it: derive the matrix from"; \
-	  echo "  'make print-mutation-targets' AND assert the shards through"; \
-	  echo "  'needs.mutation-shard.result' in the required job. The fan-in is not"; \
-	  echo "  optional — a shard whose verdict nothing reads is a runner that does not"; \
-	  echo "  execute, which is exactly .github#300."; \
-	  fail=1; \
-	fi; \
+	$(PYTHON) scripts/shard-shape-check.py || fail=1; \
 	[ "$$fail" = 0 ] || exit 1; \
 	echo "selftests-cover: all $(words $(SELFTEST_FILES)) selftests and $(words $(MUTATION_FILES)) mutation runner(s) are wired to a target, and CI runs both tiers"
 
