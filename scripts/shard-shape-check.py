@@ -166,8 +166,9 @@ def main() -> int:
     # this workflow's own header explains .github#300 by naming a runner, and counting
     # commented prose as an invocation is the backend#2884 shape.
     executable = "\n".join(
-        l for l in WORKFLOW.read_text(encoding="utf-8").splitlines()
-        if not l.lstrip().startswith("#")
+        line
+        for line in WORKFLOW.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
     )
     named = sorted(t for t in targets if t in executable)
     if named:
