@@ -325,6 +325,22 @@ MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
 mutations: $(MUTATION_TARGETS)
 mutations-dry: $(addsuffix -dry,$(MUTATION_TARGETS))
 
+.PHONY: print-mutation-targets
+# THE SHARD LIST, ASKED OF MAKE RATHER THAN RESTATED IN YAML (backend#3157).
+#
+# CI shards the mutation tier across MUTATION_TARGETS. A matrix written out by
+# hand in selftests.yml would be a second copy of this list, and the drift is
+# silent in the worst direction: the runner that fell off the matrix still has a
+# green `selftests` sitting beside it, so the tier reads covered while one member
+# never ran. That is the .github#300 shape -- naming ONE member of a list that
+# must move together -- which this Makefile has already been bitten by twice.
+#
+# make expands its own variable, so there is no parser here to drift either.
+# `printf '%s\n'` puts one target per line: the list is whitespace-separated
+# across continuations, and a single `echo` would hand CI one blob to re-split.
+print-mutation-targets:
+	@printf '%s\n' $(MUTATION_TARGETS)
+
 .PHONY: selftests
 # The targets that actually RUN a selftest. Named once: `selftests` depends on
 # them, and `selftests-cover` asks make what these would execute. Adding a
@@ -415,15 +431,39 @@ selftests-cover:
 	    echo "  silently — it happened twice in .github#300. Depend on the list."; \
 	    fail=1; }; \
 	done; \
-	for t in selftests mutations; do \
-	  grep -qE "^[[:space:]]*run:[[:space:]]*make[[:space:]]+$$t([[:space:]]|$$)" "$$wf" || { \
-	    echo "$$wf does not run 'make $$t'."; \
-	    echo "  Being wired to a Makefile target is only half of it: the tier also has to"; \
-	    echo "  EXECUTE in CI. mutation-pipefail-early-close was covered by this guard and"; \
-	    echo "  never run, because the workflow named one member of MUTATION_TARGETS"; \
-	    echo "  instead of the list (Bugbot, .github#300). Covered on paper, unrun in fact."; \
-	    fail=1; }; \
-	done; \
+	grep -qE "^[[:space:]]*run:[[:space:]]*make[[:space:]]+selftests([[:space:]]|$$)" "$$wf" || { \
+	  echo "$$wf does not run 'make selftests'."; \
+	  echo "  Being wired to a Makefile target is only half of it: the tier also has to"; \
+	  echo "  EXECUTE in CI. mutation-pipefail-early-close was covered by this guard and"; \
+	  echo "  never run, because the workflow named one member of MUTATION_TARGETS"; \
+	  echo "  instead of the list (Bugbot, .github#300). Covered on paper, unrun in fact."; \
+	  fail=1; }; \
+	if grep -qE "^[[:space:]]*run:[[:space:]]*make[[:space:]]+mutations([[:space:]]|$$)" "$$wf"; then \
+	  :; \
+	elif grep -qF -- 'print-mutation-targets' "$$wf" \
+	     && grep -qF -- 'needs.mutation-shard.result' "$$wf"; then \
+	  for m in $(MUTATION_TARGETS); do \
+	    : "COMMENT LINES STRIPPED FIRST: this file's own header explains the"; \
+	    : ".github#300 incident BY NAMING mutation-house-rules, and prose recording"; \
+	    : "history is not an enumeration. Counting commented text as a real"; \
+	    : "invocation is the backend#2884 shape the lint-targets suite already tests."; \
+	    grep -v '^[[:space:]]*#' "$$wf" | grep -qF -- "$$m" && { \
+	      echo "$$wf names the individual runner '$$m'."; \
+	      echo "  The sharded tier must DERIVE its matrix from 'make print-mutation-targets',"; \
+	      echo "  never enumerate members. A hand-written matrix drifts the moment"; \
+	      echo "  MUTATION_TARGETS gains a runner, and the dropped runner still has a green"; \
+	      echo "  'selftests' beside it — .github#300 with extra steps."; \
+	      fail=1; }; \
+	  done; \
+	else \
+	  echo "$$wf runs the mutation tier in NEITHER supported shape."; \
+	  echo "  Either run 'make mutations' (serial), or shard it: derive the matrix from"; \
+	  echo "  'make print-mutation-targets' AND assert the shards through"; \
+	  echo "  'needs.mutation-shard.result' in the required job. The fan-in is not"; \
+	  echo "  optional — a shard whose verdict nothing reads is a runner that does not"; \
+	  echo "  execute, which is exactly .github#300."; \
+	  fail=1; \
+	fi; \
 	[ "$$fail" = 0 ] || exit 1; \
 	echo "selftests-cover: all $(words $(SELFTEST_FILES)) selftests and $(words $(MUTATION_FILES)) mutation runner(s) are wired to a target, and CI runs both tiers"
 
