@@ -64,7 +64,9 @@ RUNS_ANYWAY = frozenset({"always()", "!cancelled()"})
 #: the maintainer who wrote the better version that the guard is broken. A
 #: guard that punishes an improvement gets deleted, not fixed.
 EXIT_NONZERO = re.compile(
-    r"""(?mx) \bexit \s+ (?:
+    r"""(?mx)
+    (?: ^ | [;&|] | \bthen\b | \belse\b | \bdo\b | \{ )  # command position
+    \s* exit \s+ (?:
           [1-9][0-9]*            # a non-zero literal
         | "?\$\{?[A-Za-z_]\w*\}?"?  # or a propagated status: exit "$rc"
     )"""
@@ -96,6 +98,14 @@ MAKE_INVOCATION = re.compile(
             | \$\{\{\s*matrix\.        # make ${{ matrix.target }}
         )"""
 )
+
+
+#: A step-level `if` that is safe to carry. Same allowlist as the job's, for
+#: the same reason: anything else can skip the step, and a skipped step does
+#: not red its job.
+def step_runs_anyway(step: dict) -> bool:
+    cond = normalise_if(str(step.get("if") or ""))
+    return cond == "" or cond in RUNS_ANYWAY
 
 
 def shell_code_only(run: str) -> str:
@@ -264,8 +274,7 @@ def main() -> int:
         #     same skip-reports-success path `RUNS_ANYWAY` exists to close,
         #     one level down, so it takes the same allowlist: no `if` at all,
         #     or one that is exactly a runs-anyway form.
-        step_cond = normalise_if(str(step.get("if") or ""))
-        runs_anyway = step_cond == "" or step_cond in RUNS_ANYWAY
+        runs_anyway = step_runs_anyway(step)
         fails = EXIT_NONZERO.search(run) is not None
         decides = DECIDES_ON_RESULT.search(run) is not None
         if fails and decides and runs_anyway and not step.get("continue-on-error"):
@@ -387,7 +396,18 @@ def main() -> int:
             # to this one. `MAKE_INVOCATION` anchors on the start of a line
             # (after optional `VAR=value` prefixes), so `echo`, `#` and any
             # other leading command no longer satisfy it.
-            if MAKE_INVOCATION.search(shell_code_only(str(step.get("run") or ""))):
+            # …AND THE STEP MUST NOT BE SKIPPABLE (@saadqbal, #412). The
+            # step-level `if` rule was added to the fan-in and not here, four
+            # lines below, while `continue-on-error` WAS read in both places.
+            # A skipped step does not red its job, so
+            # `if: ${{ github.event_name == 'push' }}` on the make step leaves
+            # every PR's leg green, the fan-in reads `success`, and the tier
+            # runs nothing behind a green required context. Same allowlist as
+            # the job's and the fan-in's -- `step_runs_anyway` is the one
+            # reader for all three, so they cannot drift.
+            if (step_runs_anyway(step)
+                    and MAKE_INVOCATION.search(
+                        shell_code_only(str(step.get("run") or "")))):
                 invoking.append(jid)
                 break
     sharded = [j for j in shard_ids

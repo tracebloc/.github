@@ -112,6 +112,27 @@ MUTATIONS = [
      "        if job.get(\"continue-on-error\"):",
      "        if False:"),
 
+    # --- the exit must be in COMMAND POSITION, not merely present ----------
+    #
+    # `shell_code_only` blanks WHOLE-LINE comments, which is right and is what
+    # its docstring says. `EXIT_NONZERO` was unanchored, so a TRAILING comment
+    # satisfied it: `echo "tier checked"   # exit 1` certified while nothing
+    # exited (@saadqbal, #412). The same trailing-comment case closed on the
+    # `make` side one function above, with the `#` moved to the end of a line.
+    ("the exit is counted wherever it appears, not where it runs",
+     "    (?: ^ | [;&|] | \\bthen\\b | \\belse\\b | \\bdo\\b | \\{ )  # command position",
+     "    (?: )  # command position"),
+
+    # --- …and the make step must not be skippable --------------------------
+    #
+    # The step-level `if` rule was added to the fan-in and not to the shard
+    # scan four lines below, while `continue-on-error` was read in both. A
+    # skipped step does not red its job, so a leg gated on
+    # `github.event_name == 'push'` is green on every PR.
+    ("the make step's own `if` stops being read",
+     "            if (step_runs_anyway(step)",
+     "            if (True"),
+
     # --- nothing-to-check must never read as everything-passed -------------
     ("an empty tier certifies in main",
      "    if not targets:\n        die(\"derived NO mutation targets; refusing to certify a tier that runs nothing\")\n\n    # SHAPE A",

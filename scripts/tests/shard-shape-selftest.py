@@ -106,18 +106,40 @@ echo "would run: make $TARGET"
 """
 
 
-#: The two other spellings @saadqbal drove: a trailing comment, and prose.
-SHARD_TRAILING_COMMENT = """set -euo pipefail
-echo skip   # make "$TARGET"
-"""
-SHARD_PROSE = """set -euo pipefail
-echo "we would make things happen for ${TARGET}"
-"""
+# ── DERIVED FROM THE PROPERTY, NOT TRANSCRIBED FROM A REVIEW ────────────────
+#
+# `SHARD_TRAILING_COMMENT` and `SHARD_PROSE` used to be the exact strings
+# @saadqbal drove, copied in. He named the cost on round four: "the guard fix
+# generalises; the fixtures pin the instances. That asymmetry is where both of
+# today's findings come from."
+#
+# The property is: **a token this guard asserts must be read where it
+# EXECUTES.** There are only so many ways a token can appear without executing,
+# and they are the same three wherever the token is — so they are generated
+# from one function and applied to every token, rather than written out per
+# instance. A fourth spelling added here is tested against every token at once.
+NON_EXECUTING = {
+    "whole-line comment": lambda t: f'# {t}\necho nothing\n',
+    "trailing comment": lambda t: f'echo nothing   # {t}\n',
+    "prose in an echo": lambda t: f'echo "we would {t} eventually"\n',
+}
+
+
+def not_executing(token, how):
+    """A `run` body that CONTAINS `token` and does not execute it."""
+    return "set -euo pipefail\n" + NON_EXECUTING[how](token)
+
+
+#: The token each side is asserted on, so the cases below name a property
+#: rather than a string somebody typed.
+MAKE_TOKEN = 'make "$TARGET"'
+EXIT_TOKEN = 'exit 1'
 
 
 def workflow(fanin=FANIN_ACCUMULATE, shard_run=SHARD_RUNS_MAKE,
              cond="always()", continue_on_error=False, derived=True,
-             matrix=True, step_if=None, shard_continue=False):
+             matrix=True, step_if=None, shard_continue=False,
+             make_step_if=None):
     """A `selftests.yml`-shaped document, one knob per rule under test."""
     matrix_job = {
         "runs-on": "ubuntu-latest",
@@ -138,7 +160,8 @@ def workflow(fanin=FANIN_ACCUMULATE, shard_run=SHARD_RUNS_MAKE,
         # false failures on the first run of this file.
         "needs": ["mutation-matrix"],
         "env": {"TARGET": "${{ matrix.target }}"},
-        "steps": [{"name": "make ${{ matrix.target }}", "run": shard_run}],
+        "steps": [dict({"name": "make ${{ matrix.target }}", "run": shard_run},
+                       **({"if": make_step_if} if make_step_if else {}))],
     }
     if shard_continue:
         shard_job["continue-on-error"] = True
@@ -280,19 +303,56 @@ def _():
     assert "run no `make`" in out, out
 
 
-@case("a shard leg naming make in a TRAILING comment is refused")
+@case("no non-executing spelling of `make` certifies a shard leg")
 def _():
-    rc, out = run(workflow(shard_run=SHARD_TRAILING_COMMENT))
-    assert rc == 1, ("`echo skip   # make \"$TARGET\"` executes an echo\n" + out)
-    assert "run no `make`" in out, out
+    """Every way a token can appear without executing, against the make token.
+
+    Generated rather than transcribed, so adding a fourth spelling to
+    `NON_EXECUTING` tests it here AND against the exit token below, with no
+    second edit. That is the asymmetry @saadqbal named: a fixture that pins
+    the instance leaves the next spelling to be found in review.
+    """
+    for how in NON_EXECUTING:
+        rc, out = run(workflow(shard_run=not_executing(MAKE_TOKEN, how)))
+        assert rc == 1, (f"a shard leg with `{MAKE_TOKEN}` as a {how} "
+                         f"certifies; co-occurrence is not invocation\n" + out)
+        assert "run no `make`" in out, (how, out)
 
 
-@case("a shard leg with make and TARGET in PROSE is refused")
+@case("no non-executing spelling of `exit` certifies the fan-in")
 def _():
-    rc, out = run(workflow(shard_run=SHARD_PROSE))
-    assert rc == 1, ("both tokens co-occur in an English sentence; "
-                     "co-occurrence is not invocation\n" + out)
-    assert "run no `make`" in out, out
+    """The same three spellings, against the token on the other side.
+
+    The trailing-comment case here is the one that shipped: `shell_code_only`
+    blanks WHOLE-LINE comments (correctly), and `EXIT_NONZERO` was unanchored,
+    so `echo "tier checked"   # exit 1` satisfied it while nothing exited.
+    """
+    for how in NON_EXECUTING:
+        body = ("set -euo pipefail\nrc=0\n"
+                'if [ "${SHARDS_RESULT}" != "success" ]; then rc=1; fi\n'
+                + NON_EXECUTING[how](EXIT_TOKEN))
+        rc, out = run(workflow(fanin=body))
+        assert rc == 1, (f"a fan-in whose only `{EXIT_TOKEN}` is a {how} "
+                         f"certifies; nothing exits\n" + out)
+        assert "can FAIL on it" in out, (how, out)
+
+
+@case("a make step skippable by its own `if` is refused")
+def _():
+    """The mirror of the fan-in rule, which the shard scan did not have.
+
+    A skipped step does not red its job, so a leg gated on
+    `github.event_name == 'push'` is green on every PR, the fan-in reads
+    `success`, and the tier runs nothing behind a green required context
+    (@saadqbal, #412). Both directions: `always()` on the same step certifies.
+    """
+    for cond in ("${{ github.event_name == 'push' }}", "${{ false }}"):
+        rc, out = run(workflow(make_step_if=cond))
+        assert rc == 1, (f"a make step gated on `{cond}` certifies\n" + out)
+        assert "run no `make`" in out, (cond, out)
+    rc, out = run(workflow(make_step_if="always()"))
+    assert rc == 0, ("a runs-anyway step condition must not disqualify the "
+                     "leg\n" + out)
 
 
 @case("a continue-on-error shard job is refused")
