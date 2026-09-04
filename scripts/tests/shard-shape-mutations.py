@@ -122,6 +122,21 @@ MUTATIONS = [
      '                        shell_code_only(str(step.get("run") or "")))):',
      '"make" in str(step.get("run") or "")):'),
 
+    # THE SAME SHAPE, ON THE THIRD SCAN. This one shipped: the derivation
+    # check was the last `run` scan reading raw text, so commenting the
+    # `mapfile` out and sourcing the shard list from a file naming no member
+    # left the guard printing "matrix derived from make" over a hand-written
+    # matrix -- the exact drift the rule exists to refuse. Two mutations, not
+    # one, because the reviewer's proposed fix (blanking alone) closes the
+    # whole-line spelling and leaves the trailing-comment one open.
+    ("the derivation check goes back to reading raw text",
+     'DERIVES_MATRIX.search(shell_code_only(str(step.get("run") or "")))',
+     '"print-mutation-targets" in str(step.get("run") or "")'),
+
+    ("the derivation token stops needing to be in command position",
+     'DERIVES_MATRIX.search(shell_code_only(str(step.get("run") or "")))',
+     '"print-mutation-targets" in shell_code_only(str(step.get("run") or ""))'),
+
     # --- …and a leg that cannot report failure satisfies it by construction
     ("a continue-on-error shard job stops being refused",
      "        if job.get(\"continue-on-error\"):",
