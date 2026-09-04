@@ -170,6 +170,13 @@ MUTATIONS = [
      '            (?: == | != | -eq | -ne | (?<=\\s)= )   # …in a COMPARISON,\n            \\s* ["\']? \\b success \\b ["\']?          # not merely co-located',
      '          ["\']? \\b success \\b ["\']?'),
 
+    # A DRY RUN IS NOT THE TIER. `mutations-dry` resolves markers and
+    # reddens nothing; `\b` accepts it because `s`->`-` is a boundary,
+    # which is how a fix for the arm's other holes blunted this one.
+    ('the serial arm accepts `make mutations-dry`',
+     '        make \\s+ mutations (?= \\s | $ )   # …as the command, and NOT',
+     '        make \\s+ mutations \\b             # …as the command'),
+
     # --- …and a leg that cannot report failure satisfies it by construction
     ("a continue-on-error shard job stops being refused",
      "        if job.get(\"continue-on-error\"):",

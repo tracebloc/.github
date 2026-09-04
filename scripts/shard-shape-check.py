@@ -226,7 +226,9 @@ def required_job(js: dict) -> tuple[str, dict]:
 #: replaces accepted every one of them.
 SERIAL_INVOCATION = re.compile(
     r"""(?mx) ^\s* (?:\w+=\S*\s+)*      # optional env prefixes
-        make \s+ mutations \b             # …as the command
+        make \s+ mutations (?= \s | $ )   # …as the command, and NOT
+                                          # `mutations-dry`, which proves
+                                          # only that markers resolve
         (?! [^\n]* \|\| )                 # and its failure not swallowed
     """
 )

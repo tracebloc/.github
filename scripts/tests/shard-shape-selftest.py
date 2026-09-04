@@ -462,6 +462,27 @@ def _():
     assert "serial tier" in out, out
 
 
+@case("`make mutations-dry` does not certify the serial tier")
+def _():
+    """A DRY RUN IS NOT THE TIER (Bugbot, #412, high -- and a regression I made).
+
+    CLAUDE.md is explicit: `make mutations-dry` "only proves the markers still
+    resolve and is NOT evidence that anything still reddens." The ORIGINAL
+    raw-text arm ended `mutations(\\s|$)` and rejected it correctly; rewriting
+    that as `\\b` while fixing the arm's other holes accepted it, because
+    `s`->`-` IS a word boundary. Every other tooth got sharper in that commit
+    and this one got blunter, which is why it is pinned here rather than just
+    corrected.
+    """
+    for target in ("make mutations-dry", "make mutations-dry --verbose"):
+        rc, out = run(serial_workflow(
+            run_body=f"set -euo pipefail\n{target}\n"))
+        assert rc == 1, (
+            f"`{target}` resolves markers and reddens nothing, so certifying "
+            "on it is a green required context over a tier that was never "
+            "actually run\n" + out)
+
+
 @case("a serial tier whose failure is swallowed is refused")
 def _():
     for tail in ("|| true", "|| :", "|| echo 'ignored'"):
