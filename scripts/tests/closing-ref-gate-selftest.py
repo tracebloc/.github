@@ -160,11 +160,18 @@ def pr_of(measured):
     return measured["data"]["repository"]["pullRequest"]
 
 
-def pr(title, links=(), is_draft=False, total=None, body=None):
+def pr(title, links=(), is_draft=False, total=None, body=None,
+       base="develop", default="develop"):
     """A payload in the MEASURED shape, with the values a case needs.
 
     Keys spelled as literals on purpose: they are the contract with GitHub, not
     with the module.
+
+    `base`/`default` default to AGREEING, which is the production case for every
+    train repo (measured 2026-08-23: every one defaults to `develop`) and is
+    what makes the inert check live for a case that does not mention them.
+    `default=None` drops `baseRepository` entirely, which is how a payload that
+    cannot answer "is this the default branch?" is spelled.
     """
     nodes = [
         {"number": number, "repository": {"nameWithOwner": full}}
@@ -175,6 +182,8 @@ def pr(title, links=(), is_draft=False, total=None, body=None):
         "title": title,
         "isDraft": is_draft,
         "body": body,
+        "baseRefName": base,
+        "baseRepository": None if default is None else {"defaultBranchRef": {"name": default}},
         "closingIssuesReferences": {
             "totalCount": len(nodes) if total is None else total,
             "nodes": nodes,
@@ -1220,6 +1229,305 @@ check(
     "closing-ref also only runs while the PR is OPEN, so a merged PR gets no "
     "late red X",
     "inputs.closing-ref-check && github.event.pull_request.state == 'open'" in HOST,
+)
+
+# ---------------------------------------------------------------------------
+# 9. THE SECOND DIRECTION: a body claim the link graph does not carry
+#    (tracebloc/design-system-v2#123).
+#
+# Everything above this section asserts the FIRST direction, title-to-reference,
+# and every one of its 160 assertions passed UNCHANGED when the second direction
+# was added -- which is the precise sense in which the old suite could not see
+# this defect. The gap was never a wrong answer; it was an unasked question.
+# ---------------------------------------------------------------------------
+
+# MEASURED, captured 2026-09-04 with the query this file's module now sends.
+# The body is truncated to its first line and that truncation is SAFE rather
+# than convenient: the full body is 49 lines / 3062 bytes and
+#   grep -nE '^[[:space:]>*+#`~_-]*(close[sd]?|fix(es|ed)?|resolve[sd]?)[[:space:]]*:?[[:space:]]+'
+# matches line 1 only, so no dropped line carries a second claim.
+#
+# This is tracebloc/.github#381, the shipped instance: `Closes #2767` bare-form,
+# resolved against `.github` where no #2767 exists, so GitHub registered
+# nothing. Its title names no ticket, which is why the gate passed it and
+# tracebloc/backend#2767 was closed by hand after the merge.
+MEASURED_381 = {
+    "number": 381,
+    "title": "fix(set-status): add a concurrency group so the newest title/body edit wins",
+    "isDraft": False,
+    "body": "Closes #2767\n",
+    "baseRefName": "develop",
+    "baseRepository": {"defaultBranchRef": {"name": "develop"}},
+    "closingIssuesReferences": {"totalCount": 0, "nodes": []},
+}
+
+check(
+    "MEASURED .github#381 FAILS: its body claims a close GitHub never registered, "
+    "and its title names no ticket -- the exact PR that shipped green",
+    ev(MEASURED_381)[0] == gate.FAIL,
+    "%r" % (ev(MEASURED_381)[0],),
+)
+check(
+    "and the finding NAMES the ticket the inert keyword claimed, so the author is "
+    "not left hunting for it",
+    any("#2767" in line for line in ev(MEASURED_381)[1]),
+    "%r" % (ev(MEASURED_381)[1],),
+)
+
+# --- the fail-open that must SURVIVE: a PR with no ticket and no claim --------
+#
+# The whole reason this direction is admissible is that it does NOT require a PR
+# to have a ticket. A docs-only or CI-only PR is the case the org actually has,
+# and reddening it would be reverting tracebloc/backend#2616 by another route.
+check(
+    "a docs-only PR with no ticket in the title and no claim in the body still "
+    "passes -- this direction fires on a CLAIM, never on the absence of one",
+    ev(pr("docs: fix a typo in the README", body="Tidy-up only."))[0] == gate.NOTHING_NAMED,
+    "%r" % (ev(pr("docs: fix a typo in the README", body="Tidy-up only."))[0],),
+)
+check(
+    "the measured backend#2333 shape -- no ticket in the title, a REGISTERED "
+    "link -- still passes",
+    ev(pr("chore(global_model): delete dead TF FLOPS path",
+          links=[("tracebloc/backend", 2288)],
+          body="Closes tracebloc/backend#2288"))[0] == gate.NOTHING_NAMED,
+)
+
+# --- rule A: the graph must be EMPTY ----------------------------------------
+#
+# Measured false positives, all prose about some OTHER ticket on a PR that
+# demonstrably knew how to write a working link: client#885, release-train#134,
+# .github#345, .github#360, frontend-app#948.
+check(
+    "rule A -- a PR that DID register a closing link is not reported for prose "
+    "keyword text about another ticket",
+    ev(pr("chore: tidy", links=[("tracebloc/backend", 1)],
+          body="Closes tracebloc/backend#1\n\nCloses #999 is what the docs example writes."))[0]
+    == gate.NOTHING_NAMED,
+    "%r" % (ev(pr("chore: tidy", links=[("tracebloc/backend", 1)],
+                  body="Closes tracebloc/backend#1\n\nCloses #999 is the docs example."))[0],),
+)
+check(
+    "rule A -- and this check NEVER requires the graph to be non-empty, which is "
+    "what keeps it from reverting tracebloc/backend#2616",
+    gate.inert_closing_refs("Closes #47", [("tracebloc", "backend", 99)], True) == [],
+)
+
+# --- rule C: the base must be the DEFAULT branch -----------------------------
+#
+# backend#2779 is why: a plain first-line `Closes #2775.`, empty graph, because
+# it is stacked onto `fix/2770-explicit-record-count`. GitHub populates
+# closingIssuesReferences only for default-branch PRs, so on a stacked PR or a
+# train promotion an HONEST claim registers nothing through no fault of anyone.
+# Title names NO ticket on purpose, so the FIRST direction cannot fire and this
+# case measures rule C alone. The same body on the default branch is the
+# must-fail control immediately below -- one input, two bases, opposite verdicts.
+STACKED = dict(title="fix(record-count): the stacked one", body="Closes #2775.")
+check(
+    "rule C -- the measured backend#2779 shape: a stacked PR's honest `Closes` is "
+    "not a finding, because GitHub registers no link off the default branch",
+    ev(pr(base="fix/2770-explicit-record-count", **STACKED))[0] == gate.NOTHING_NAMED,
+    "%r" % (ev(pr(base="fix/2770-explicit-record-count", **STACKED))[0],),
+)
+check(
+    "rule C -- and the SAME body on the default branch does fail, so the rule is "
+    "an exemption for stacked PRs and not a hole for everyone",
+    ev(pr(base="develop", **STACKED))[0] == gate.FAIL,
+    "%r" % (ev(pr(base="develop", **STACKED))[0],),
+)
+check(
+    "rule C -- inert_closing_refs itself declines on a non-default base",
+    gate.inert_closing_refs("Closes #2775.", [], False) == [],
+)
+check(
+    "rule C -- and declines when the payload cannot say (None), rather than "
+    "manufacturing a finding out of a missing field",
+    gate.inert_closing_refs("Closes #2775.", [], None) == [],
+)
+check(
+    "targets_default_branch reports True / False / None as three distinct answers",
+    (
+        gate.targets_default_branch(pr("t", base="develop", default="develop")),
+        gate.targets_default_branch(pr("t", base="staging", default="develop")),
+        gate.targets_default_branch(pr("t", default=None)),
+    ) == (True, False, None),
+    "%r" % ((gate.targets_default_branch(pr("t", base="develop", default="develop")),
+             gate.targets_default_branch(pr("t", base="staging", default="develop")),
+             gate.targets_default_branch(pr("t", default=None))),),
+)
+
+# --- rule B: the claim must OPEN its line ------------------------------------
+#
+# The rule the 300-PR measurement added. Without it the scan reported on 4 of
+# 300 and three were a past participle used adjectivally -- unavoidable while
+# GitHub's vocabulary contains `closed`/`fixed`/`resolved`.
+for prose, why in (
+    ("...and the closed backend#2643 audited that exact layer", "backend#3037"),
+    ("`RETRO.md` pointing at the closed backend#1680", "release-train#153"),
+    ("STAGE 1 (backend#2979) already closes #2976, so this PR does not",
+     "release-train#145 -- the negation TRAILS the keyword, so a backward negation window was the wrong shape; only this rule catches it"),
+):
+    check(
+        "rule B -- mid-line prose is not a claim (%s)" % why,
+        gate.inert_closing_refs(prose, [], True) == [],
+        "%r" % ([r.number for r in gate.inert_closing_refs(prose, [], True)],),
+    )
+for lead in ("", "  ", "- ", "* ", "> ", "`", "**", "#### "):
+    check(
+        "rule B -- markdown noise before the claim is still a claim: %r" % lead,
+        [r.number for r in gate.inert_closing_refs(lead + "Closes #47", [], True)] == [47],
+        "%r" % ([r.number for r in gate.inert_closing_refs(lead + "Closes #47", [], True)],),
+    )
+
+# --- the shapes GitHub does not parse, which is the point of the check --------
+for body, why in (
+    ("`Fixes #47`", "design-system-v2#119 verbatim: a code span, which GitHub ignores"),
+    ("Fixes: #47", "the colon form, which is not a GitHub closing keyword"),
+    ("Closes #2767", "bare form resolved against the wrong repo (.github#381)"),
+    ("```\nCloses #47\n```", "a fenced block, which GitHub ignores"),
+):
+    check(
+        "an inert keyword IS reported: %s" % why,
+        [r.number for r in gate.inert_closing_refs(body, [], True)] != [],
+        "%r -- %r" % (body, [r.number for r in gate.inert_closing_refs(body, [], True)]),
+    )
+
+# --- the inert finding does not depend on the TITLE, in either direction -----
+#
+# This is the assertion the ticket is named for. The SAME body must fail whether
+# or not the title names a ticket; a check whose verdict moves with the title is
+# the defect, not the fix.
+INERT_BODY = "Closes #2767"
+check(
+    "the verdict does not depend on the title: an inert body fails when the title "
+    "names NO ticket ...",
+    ev(pr("chore: tidy up", body=INERT_BODY))[0] == gate.FAIL,
+    "%r" % (ev(pr("chore: tidy up", body=INERT_BODY))[0],),
+)
+check(
+    "... and when the title names one it is STILL a FAIL, folded into the same "
+    "verdict rather than masked by it",
+    ev(pr("fix(2767): the same body (#2767)", body=INERT_BODY))[0] == gate.FAIL,
+    "%r" % (ev(pr("fix(2767): the same body (#2767)", body=INERT_BODY))[0],),
+)
+check(
+    "a title that names a ticket the body LINKS is unaffected by the new "
+    "direction -- no claim is inert when the graph carries it",
+    ev(pr("fix(47): real (#47)", links=[("tracebloc/design-system-v2", 47)],
+          body="Closes tracebloc/design-system-v2#47"))[0] == gate.PASS,
+    "%r" % (ev(pr("fix(47): real (#47)", links=[("tracebloc/design-system-v2", 47)],
+                  body="Closes tracebloc/design-system-v2#47"))[0],),
+)
+# THE CASE THAT PINS "FOLDED INTO THE SAME FAIL". A PR whose title IS satisfied
+# and which ALSO carries an inert claim must still be red -- otherwise the inert
+# finding is computed, printed, and then discarded by the pass that follows,
+# which is the exact shape of the defect this ticket reported one level up.
+check(
+    "a satisfied title does not MASK an inert claim elsewhere in the body: both "
+    "are the same defect, a reference the body asserts and the graph does not",
+    ev(pr("fix(88): partial (tracebloc/design-system-v2#88)",
+          body="Part of tracebloc/design-system-v2#88\n\nCloses #999\n"))[0] == gate.FAIL,
+    "%r" % (ev(pr("fix(88): partial (tracebloc/design-system-v2#88)",
+                  body="Part of tracebloc/design-system-v2#88\n\nCloses #999\n"))[0],),
+)
+check(
+    "... and the same body WITHOUT the inert line passes, so the case above is "
+    "measuring the inert claim and not the title",
+    ev(pr("fix(88): partial (tracebloc/design-system-v2#88)",
+          body="Part of tracebloc/design-system-v2#88\n"))[0] == gate.PASS,
+    "%r" % (ev(pr("fix(88): partial (tracebloc/design-system-v2#88)",
+                  body="Part of tracebloc/design-system-v2#88\n"))[0],),
+)
+
+check(
+    "a child PR with a truthful `Part of` and NO closing keyword still passes -- "
+    "backend#2616's shape is untouched",
+    ev(pr("fix(2284): partial (tracebloc/backend#2284)",
+          body="Part of tracebloc/backend#2284"))[0] == gate.PASS,
+    "%r" % (ev(pr("fix(2284): partial (tracebloc/backend#2284)",
+                  body="Part of tracebloc/backend#2284"))[0],),
+)
+
+# --- readable_text: HTML comments, and ONLY HTML comments --------------------
+check(
+    "the org's own PR template does not become a claim: `Closes #123` inside its "
+    "instruction comment is stripped (.github/pull_request_template.md)",
+    gate.inert_closing_refs(
+        "<!-- REQUIRED ... Same repo: Closes #123 - Cross-repo: Closes "
+        "tracebloc/backend#2364 -->\n\n## What\nA thing.\n", [], True) == [],
+    "%r" % ([r.number for r in gate.inert_closing_refs(
+        "<!-- Closes #123 -->", [], True)],),
+)
+check(
+    "an HTML-commented `Part of` no longer satisfies a title INVISIBLY -- the "
+    "second half of design-system-v2#123",
+    ev(pr("fix(47): something (tracebloc/backend#47)",
+          body="<!-- Part of tracebloc/backend#47 -->"))[0] == gate.FAIL,
+    "%r" % (ev(pr("fix(47): something (tracebloc/backend#47)",
+                  body="<!-- Part of tracebloc/backend#47 -->"))[0],),
+)
+check(
+    "a BACKTICKED `Part of` still satisfies a title: design-system-v2#227 and "
+    "#228 write it that way, honestly, and stripping code spans reddened both",
+    ev(pr("docs(tooltip): correct four statements (#89)",
+          body="`Part of tracebloc/design-system-v2#89` - `Refs #34`"))[0] == gate.PASS,
+    "%r" % (ev(pr("docs(tooltip): correct four statements (#89)",
+                  body="`Part of tracebloc/design-system-v2#89`"))[0],),
+)
+check(
+    "stripping a comment leaves a NON-WHITESPACE placeholder, so a keyword before "
+    "it cannot be spliced onto a `#N` after it -- a fail-open introduced by the "
+    "code that closes one",
+    gate.parse_body(gate.readable_text("Part of\n<!-- x -->\ntracebloc/backend#1"),
+                    ["Part of"]) == [],
+    "%r" % (gate.parse_body(
+        gate.readable_text("Part of\n<!-- x -->\ntracebloc/backend#1"), ["Part of"]),),
+)
+check(
+    "readable_text tolerates an absent body (GitHub returns null for an empty one)",
+    gate.readable_text(None) == "",
+)
+# A COMMENT MAY SPAN LINES -- that is HTML's rule, not a guess about this fleet,
+# and it is the shape a wrapped template instruction takes. Without DOTALL the
+# comment is left in place and its own example text becomes a claim, so the
+# stripping half-works in exactly the direction that manufactures findings.
+# (Measured: .github, backend and design-system-v2 all carry a SINGLE-line
+# instruction comment with `Closes #123` in it today, so this is the shape one
+# reflow away rather than one already present.)
+# The keyword opens its own line INSIDE the comment, which is what makes this
+# case bite: rule B would reject `Same repo: Closes #123` on prose grounds alone,
+# so a fixture written that way passes whether the comment was stripped or not.
+MULTILINE_COMMENT = (
+    "<!--\nREQUIRED when the title names a ticket. Same repo:\n"
+    "Closes #123\n-->\n\n## What\nA thing.\n"
+)
+check(
+    "an HTML comment that spans lines is stripped whole, so a wrapped template "
+    "instruction cannot become a claim",
+    gate.inert_closing_refs(MULTILINE_COMMENT, [], True) == [],
+    "%r" % ([r.number for r in gate.inert_closing_refs(MULTILINE_COMMENT, [], True)],),
+)
+
+# --- the read must actually ASK for the fields rule C depends on -------------
+#
+# Rule C fails OPEN when the payload cannot answer, so a query that silently
+# stopped requesting these fields would disarm the whole direction and report
+# nothing -- green, quiet, and wrong. Same reason `connections_missing_totalcount`
+# exists for the link graph.
+for field in ("baseRefName", "defaultBranchRef"):
+    check(
+        "the GraphQL query requests %s, without which rule C fails open and the "
+        "inert check silently disarms" % field,
+        field in gate.QUERY,
+    )
+
+# --- the annotation must name the direction that failed ----------------------
+check(
+    "main's annotation no longer claims `the title names a ticket` -- on "
+    ".github#381 the title names none, and an annotation pointing at the title "
+    "sends the author to the one field that is fine",
+    "the title names a ticket this PR does not reference"
+    not in pathlib.Path(ROOT / "scripts" / "closing-ref-gate.py").read_text(encoding="utf-8"),
 )
 
 # ---------------------------------------------------------------------------
