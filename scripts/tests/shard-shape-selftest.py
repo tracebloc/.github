@@ -205,6 +205,34 @@ def workflow(fanin=FANIN_ACCUMULATE, shard_run=SHARD_RUNS_MAKE,
     }
 
 
+#: The serial shape's token. `main` has TWO supported shapes and the selftest
+#: only ever built one of them, which is how the serial arm shipped as a
+#: bypass: every case here exercised SHAPE B and returned before SHAPE A.
+SERIAL_TOKEN = "make mutations"
+
+
+def serial_workflow(run_body=None, cond="always()", job_continue=False,
+                    step_continue=False, step_if=None):
+    """The OTHER supported shape: the required job runs `make mutations` itself.
+
+    No matrix and no shard job, so anything that stops SHAPE A certifying must
+    fall through to SHAPE B and be refused there -- which is the property the
+    cases below assert, and the reason a refusal here is never a false green.
+    """
+    step = {"name": "mutations (serial)",
+            "run": run_body if run_body is not None
+            else "set -euo pipefail\nmake mutations\n"}
+    if step_continue:
+        step["continue-on-error"] = True
+    if step_if is not None:
+        step["if"] = step_if
+    job = {"runs-on": "ubuntu-latest", "if": cond, "steps": [step]}
+    if job_continue:
+        job["continue-on-error"] = True
+    return {"name": "Selftests", "on": {"pull_request": None},
+            "jobs": {"selftests": job}}
+
+
 def run(doc, targets=("mutation-alpha", "mutation-beta")):
     """`(rc, output)` from the real `main()` over `doc`."""
     import yaml
@@ -367,6 +395,123 @@ def _():
             "derived; the shards are hand-written and drift the moment "
             "MUTATION_TARGETS gains a runner\n" + out)
         assert "not derived from" in out, (how, out)
+
+
+@case("a fan-in that only MENTIONS success is refused")
+def _():
+    """The literal must sit in a comparison, not merely in the step.
+
+    Bugbot raised this as `succeeded` satisfying the unbounded literal. That
+    example is wrong -- `succeeded` does not contain `success` -- but three
+    spellings it did not name do, and the third is the one a word boundary
+    cannot reach:
+
+      * `successful` / `successfully`  -- a boundary stops these
+      * the BARE WORD in prose         -- a boundary does NOT
+
+    and this repo's own fan-in carries the bare word one line above its real
+    decision. Each fixture exits non-zero for an UNRELATED reason, so
+    `EXIT_NONZERO` is satisfied and only the decision half is missing: that
+    isolates `DECIDES_ON_RESULT` instead of passing for its neighbour's reason.
+    """
+    for label, line in (
+            ("bare word in prose", 'echo "a shard did not report success"'),
+            ("successful",         'echo "the tier was successful"'),
+            ("successfully",       'echo "every shard ran successfully"')):
+        body = ("set -euo pipefail\n" + line + "\n"
+                "if [ ! -f report.json ]; then exit 1; fi\n")
+        rc, out = run(workflow(fanin=body))
+        assert rc == 1, (
+            f"a fan-in whose only `success` is {label} decides nothing about "
+            "the shards, so the required context can go green over a red "
+            "shard\n" + out)
+
+
+@case("a real comparison against the literal still certifies")
+def _():
+    """NON-VACUITY for the rule above: the legitimate shape must survive.
+
+    Without this, tightening `DECIDES_ON_RESULT` to something nothing can
+    satisfy would look identical to tightening it correctly.
+    """
+    for form in ('[ "$SHARDS_RESULT" != "success" ]',
+                 '[ "$SHARDS_RESULT" = success ]'):
+        body = ("set -euo pipefail\n"
+                f"if {form}; then exit 1; fi\n")
+        rc, out = run(workflow(fanin=body))
+        assert rc == 0, (f"`{form}` IS a decision on the shards' result and "
+                         "must certify\n" + out)
+
+
+# ── SHAPE A: the serial tier, which had no cases at all until Bugbot ────────
+#
+# `main` supports two shapes and returns 0 from the first one that matches.
+# Every case above builds the SHARDED shape, so the serial arm was never once
+# driven -- and it returned success on the raw text of any step naming the
+# token, skipping all four teeth the sharded shape is held to. An unexercised
+# arm of a guard is not a lesser risk than an unexercised guard; it is the
+# same risk behind a green suite.
+
+
+@case("a clean serial tier still certifies")
+def _():
+    """NON-VACUITY. Without this the five refusals below could all pass by
+    refusing everything, which is a guard nobody can satisfy."""
+    rc, out = run(serial_workflow())
+    assert rc == 0, "the serial shape is supported and must certify\n" + out
+    assert "serial tier" in out, out
+
+
+@case("a serial tier whose failure is swallowed is refused")
+def _():
+    for tail in ("|| true", "|| :", "|| echo 'ignored'"):
+        rc, out = run(serial_workflow(
+            run_body=f"set -euo pipefail\nmake mutations {tail}\n"))
+        assert rc == 1, (f"`make mutations {tail}` cannot red the job, so the "
+                         "required context is green over a failed tier\n" + out)
+
+
+@case("a continue-on-error serial job is refused")
+def _():
+    rc, out = run(serial_workflow(job_continue=True))
+    assert rc == 1, "a continue-on-error job reports success regardless\n" + out
+    assert "continue-on-error" in out, out
+
+
+@case("a continue-on-error serial step is refused")
+def _():
+    rc, out = run(serial_workflow(step_continue=True))
+    assert rc == 1, "the step's failure would not red the job\n" + out
+
+
+@case("a skippable serial step is refused")
+def _():
+    rc, out = run(serial_workflow(step_if="${{ github.event_name == 'push' }}"))
+    assert rc == 1, ("a skipped step does not red its job, so every PR would "
+                     "carry a green required context over a tier that never "
+                     "ran\n" + out)
+
+
+@case("a serial job that can be skipped wholesale is refused")
+def _():
+    rc, out = run(serial_workflow(cond="${{ github.event_name == 'push' }}"))
+    assert rc == 1, ("GitHub reports a skipped required job as SUCCESS "
+                     "(backend#1424)\n" + out)
+
+
+@case("no non-executing spelling of the serial invocation certifies")
+def _():
+    """The third token through `NON_EXECUTING`, for the third time.
+
+    Same generator as the make and exit tokens, so the serial arm inherits
+    every spelling the other two are tested against rather than getting its
+    own hand-written pair.
+    """
+    for how in NON_EXECUTING:
+        rc, out = run(serial_workflow(
+            run_body=not_executing(SERIAL_TOKEN, how)))
+        assert rc == 1, (f"`{SERIAL_TOKEN}` as a {how} certifies the serial "
+                         "tier; co-occurrence is not invocation\n" + out)
 
 
 @case("a verdict comparison that lives only in a comment is refused")

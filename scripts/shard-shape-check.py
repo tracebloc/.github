@@ -79,9 +79,21 @@ EXIT_NONZERO = re.compile(
 #: the variable holding a result. Shape, not proof of causation -- what it buys
 #: is that both halves of the decision have to be in the step, rather than one
 #: half and an exit that happens to be there.
+#: THE LITERAL MUST SIT IN A COMPARISON (Bugbot, #412 -- with a correction).
+#: Bugbot reported that `succeeded` in the fan-in echo satisfied the unbounded
+#: literal. That specific claim is false: `succeeded` is s-u-c-c-e-E-D, and
+#: does not contain `success`. The concern is real by two other spellings it
+#: did not name -- `successful` and `successfully` DO contain it, and so does
+#: the bare word in prose, which this file's own fan-in has on the line above
+#: its decision: `echo "…reported '${res}', not success — the mutation tier"`.
+#: A word boundary alone stops the first two and NOT the third, so the rule is
+#: the stronger one: the literal counts only next to `==`, `!=`, `-eq`, `-ne`
+#: or a spaced `=`. `[ "$res" != "success" ]` decides; an echo mentioning the
+#: word does not.
 DECIDES_ON_RESULT = re.compile(
     r"""(?mx) (?:
-          ["']?success["']?          # compared against the success literal
+            (?: == | != | -eq | -ne | (?<=\s)= )   # …in a COMPARISON,
+            \s* ["']? \b success \b ["']?          # not merely co-located
         | \[\s+"?\$\{?\w*(?:RESULT|result|rc)\w*\}?"?  # or tested as a variable
     )"""
 )
@@ -209,10 +221,53 @@ def required_job(js: dict) -> tuple[str, dict]:
     raise AssertionError  # unreachable, keeps type checkers quiet
 
 
+#: `make mutations` as a COMMAND whose failure is not swallowed. `|| true`,
+#: `|| :` and `|| echo …` all neutralise it, and the raw-text version this
+#: replaces accepted every one of them.
+SERIAL_INVOCATION = re.compile(
+    r"""(?mx) ^\s* (?:\w+=\S*\s+)*      # optional env prefixes
+        make \s+ mutations \b             # …as the command
+        (?! [^\n]* \|\| )                 # and its failure not swallowed
+    """
+)
+
+
 def runs_make_mutations(j: dict) -> bool:
+    """The serial tier, WITH the teeth the sharded shape is held to.
+
+    THIS ARM WAS A BYPASS (Bugbot, #412, high). It matched the raw text of any
+    step naming `make mutations`, and `main` returned 0 on the spot -- skipping
+    the job-`if`, continue-on-error, step-`if` and swallowed-failure checks the
+    sharded shape below is held to. So `make mutations || true`, a
+    `continue-on-error` job, or a step carrying `if: github.event_name ==
+    'push'` each certified the required context while the tier ran nothing, or
+    ran it and ignored the result.
+
+    It is the same defect the sharded half had TWICE and fixed twice. Three
+    call sites were corrected in this PR; this fourth sat one function above
+    them. That is what makes it worth naming rather than just fixing: the rule
+    was known here, and applied everywhere except the one arm that returns
+    early.
+    """
+    if j.get("continue-on-error"):
+        die("the required job is `continue-on-error`, so a failed `make "
+            "mutations` still reports success and the tier is satisfied by "
+            "construction.")
+    if normalise_if(str(j.get("if") or "")) not in RUNS_ANYWAY:
+        return False          # not a serial tier we can certify; SHAPE B decides
     for step in j.get("steps") or []:
-        if re.search(r"(?m)^\s*make\s+mutations(\s|$)", str(step.get("run") or "")):
-            return True
+        if not SERIAL_INVOCATION.search(shell_code_only(str(step.get("run") or ""))):
+            continue
+        if step.get("continue-on-error"):
+            die("the step running `make mutations` is `continue-on-error`, so "
+                "its failure does not red the job and the required context goes "
+                "green over a failed tier.")
+        if not step_runs_anyway(step):
+            die(f"the step running `make mutations` has `if: {step.get('if')}`, "
+                "so it can be skipped -- and a skipped step does not red its "
+                "job, leaving the required context green with the tier never "
+                "having run.")
+        return True
     return False
 
 
