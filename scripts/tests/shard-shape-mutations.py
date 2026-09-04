@@ -87,6 +87,26 @@ MUTATIONS = [
      "    if missing:",
      "    if False:"),
 
+    # --- the step's OWN `if` skips just as hard as the job's ---------------
+    #
+    # BUGBOT'S, #412. The job-level condition was checked and the step-level
+    # one was not, so a step conditioned on the shards having SUCCEEDED
+    # certified: it is skipped exactly when a shard fails, later steps run,
+    # and the required context reports success.
+    ("a step-level `if` that skips on a failed shard stops disqualifying it",
+     "        runs_anyway = step_cond == \"\" or step_cond in RUNS_ANYWAY",
+     "        runs_anyway = True"),
+
+    # --- …and the invocation check must read CODE, not co-occurrence -------
+    #
+    # ALSO BUGBOT'S, and the one worth being embarrassed about: this check was
+    # written one function below the fan-in scan that already blanks comments,
+    # and read raw text anyway. A commented-out `make "$TARGET"` and an
+    # `echo "would run: make $TARGET"` both certified.
+    ("the invocation check goes back to reading raw text",
+     "            if MAKE_INVOCATION.search(shell_code_only(str(step.get(\"run\") or \"\"))):",
+     "            if \"make\" in str(step.get(\"run\") or \"\"):"),
+
     # --- nothing-to-check must never read as everything-passed -------------
     ("an empty tier certifies in main",
      "    if not targets:\n        die(\"derived NO mutation targets; refusing to certify a tier that runs nothing\")\n\n    # SHAPE A",

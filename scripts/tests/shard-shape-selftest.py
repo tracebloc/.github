@@ -99,9 +99,16 @@ echo "would run $TARGET"
 """
 
 
+#: A shard leg that NAMES the invocation without performing it.
+SHARD_ECHOES_MAKE = """set -euo pipefail
+# make "$TARGET"   <- what this used to do
+echo "would run: make $TARGET"
+"""
+
+
 def workflow(fanin=FANIN_ACCUMULATE, shard_run=SHARD_RUNS_MAKE,
              cond="always()", continue_on_error=False, derived=True,
-             matrix=True):
+             matrix=True, step_if=None):
     """A `selftests.yml`-shaped document, one knob per rule under test."""
     matrix_job = {
         "runs-on": "ubuntu-latest",
@@ -137,6 +144,8 @@ def workflow(fanin=FANIN_ACCUMULATE, shard_run=SHARD_RUNS_MAKE,
     }
     if continue_on_error:
         step["continue-on-error"] = True
+    if step_if is not None:
+        step["if"] = step_if
     return {
         "name": "Selftests",
         "on": {"pull_request": None},
@@ -228,6 +237,36 @@ def _():
     rc, out = run(workflow(continue_on_error=True))
     assert rc == 1, ("continue-on-error turns the failure back into a pass, so "
                      "the exit is decorative\n" + out)
+
+
+@case("a certifying step skipped by its OWN `if` is refused")
+def _():
+    rc, out = run(workflow(
+        step_if="${{ needs.mutation-shard.result == 'success' }}"))
+    assert rc == 1, (
+        "a step conditioned on the shards having SUCCEEDED is skipped exactly "
+        "when one fails -- the only reader of the verdict does not run, later "
+        "steps do, and the job reports success. The job-level check cannot see "
+        "this because it looks at the JOB's `if`.\n" + out)
+    assert "can FAIL on it" in out, out
+
+
+@case("a runs-anyway step `if` is accepted")
+def _():
+    """The other direction: a step may carry a condition, just not that one."""
+    rc, out = run(workflow(step_if="always()"))
+    assert rc == 0, ("a step-level `always()` does not skip on a failed shard "
+                     "and must not disqualify the step\n" + out)
+
+
+@case("a shard leg that only NAMES the make invocation is refused")
+def _():
+    rc, out = run(workflow(shard_run=SHARD_ECHOES_MAKE))
+    assert rc == 1, (
+        "`# make \"$TARGET\"` in a comment and `echo \"would run: make "
+        "$TARGET\"` both contain the tokens; neither executes anything. "
+        "Co-occurrence is not invocation.\n" + out)
+    assert "run no `make`" in out, out
 
 
 @case("a shard whose steps only echo is refused")

@@ -85,6 +85,19 @@ DECIDES_ON_RESULT = re.compile(
 )
 
 
+#: `make` invoked ON the matrix value, as a COMMAND. Anchored at the start of a
+#: line (after optional `VAR=value` prefixes) so `echo "make $TARGET"` and a
+#: commented-out invocation cannot satisfy it -- co-occurrence of the two tokens
+#: anywhere in the block is not execution (Bugbot, #412).
+MAKE_INVOCATION = re.compile(
+    r"""(?mx) ^\s* (?:\w+=\S*\s+)*      # optional env prefixes
+        make \s+ ["']? (?:
+              \$\{?TARGET\}?            # make "$TARGET"
+            | \$\{\{\s*matrix\.        # make ${{ matrix.target }}
+        )"""
+)
+
+
 def shell_code_only(run: str) -> str:
     """`run` with whole-line shell comments blanked, line numbering intact.
 
@@ -243,9 +256,19 @@ def main() -> int:
         #     causation; what it buys is that a step certifying the tier has to
         #     contain both halves of the decision rather than one of them and an
         #     unrelated exit.
+        #  4. THE STEP'S OWN `if`. The job-level condition is checked below,
+        #     and a step-level one skips just as hard (Bugbot, #412). A step
+        #     conditioned on the shards having SUCCEEDED is skipped exactly
+        #     when a shard fails -- the only reader of the verdict does not
+        #     run, later steps do, and the job reports success. That is the
+        #     same skip-reports-success path `RUNS_ANYWAY` exists to close,
+        #     one level down, so it takes the same allowlist: no `if` at all,
+        #     or one that is exactly a runs-anyway form.
+        step_cond = normalise_if(str(step.get("if") or ""))
+        runs_anyway = step_cond == "" or step_cond in RUNS_ANYWAY
         fails = EXIT_NONZERO.search(run) is not None
         decides = DECIDES_ON_RESULT.search(run) is not None
-        if fails and decides and not step.get("continue-on-error"):
+        if fails and decides and runs_anyway and not step.get("continue-on-error"):
             enforcing.extend(hits)
     if not read:
         die(
@@ -262,7 +285,10 @@ def main() -> int:
             "a comparison of the shards' verdict against `success` or a test on the "
             "variable holding it; and no `continue-on-error`. A fan-in that only "
             "logs the verdict, or that exits non-zero for an unrelated reason, "
-            "enforces nothing and the required context goes green over a red shard."
+            "enforces nothing and the required context goes green over a red "
+            "shard. A step-level `if` outside "
+            f"{sorted(RUNS_ANYWAY)} disqualifies it for the same reason the "
+            "job-level one does: it skips precisely when a shard fails."
         )
 
     cond = normalise_if(str(rjob.get("if") or ""))
@@ -326,9 +352,19 @@ def main() -> int:
         if "strategy" not in job:
             continue          # not a sharded leg; the matrix check above owns it
         for step in (job.get("steps") or []):
-            run = str(step.get("run") or "")
-            if "make" in run and ("matrix." in run or "$TARGET" in run
-                                  or "${TARGET}" in run):
+            # CODE ONLY, AND `make` MUST BE THE COMMAND (Bugbot, #412). The
+            # first version of this check accepted any co-occurrence of `make`
+            # and the matrix value in the RAW text -- so a whole-line comment
+            # naming the target, or `echo "would run make $TARGET"`, certified
+            # a leg that executes nothing.
+            #
+            # Written one function below the fan-in scan that already blanks
+            # comments for exactly this reason, which is the whole lesson: the
+            # rule was known here and applied to the neighbouring check and not
+            # to this one. `MAKE_INVOCATION` anchors on the start of a line
+            # (after optional `VAR=value` prefixes), so `echo`, `#` and any
+            # other leading command no longer satisfy it.
+            if MAKE_INVOCATION.search(shell_code_only(str(step.get("run") or ""))):
                 invoking.append(jid)
                 break
     sharded = [j for j in shard_ids
