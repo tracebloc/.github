@@ -137,6 +137,39 @@ MUTATIONS = [
      'DERIVES_MATRIX.search(shell_code_only(str(step.get("run") or "")))',
      '"print-mutation-targets" in shell_code_only(str(step.get("run") or ""))'),
 
+    # --- SHAPE A: the serial arm, which had no cases and no mutations ------
+    # It returned success on the RAW TEXT of any step naming `make mutations`,
+    # and `main` returned 0 on the spot -- skipping every tooth the sharded
+    # shape is held to. Three mutations, one per tooth, because the arm can
+    # lose them independently.
+    #
+    # --- …and the decision literal, plus the WEAKER FIX that looks like one --
+    # Bugbot reported `succeeded` satisfying the unbounded literal. That
+    # example is wrong -- `succeeded` contains no `success` -- but `successful`
+    # and the BARE WORD in prose do satisfy it, and this repo's own fan-in has
+    # the bare word one line above its decision. The last mutation is the
+    # word-boundary-only version: it closes `successful` and leaves the bare
+    # word, so it reads as a fix and must still redden.
+    ('the serial arm stops refusing a swallowed failure',
+     '        (?! [^\\n]* \\|\\| )                 # and its failure not swallowed',
+     ''),
+
+    ('the serial arm stops refusing a skippable step',
+     'if not step_runs_anyway(step):',
+     'if False:'),
+
+    ('the serial arm stops refusing a continue-on-error job',
+     '    if j.get("continue-on-error"):',
+     '    if False:'),
+
+    ('the success literal stops needing a comparison',
+     '            (?: == | != | -eq | -ne | (?<=\\s)= )   # …in a COMPARISON,\n            \\s* ["\']? \\b success \\b ["\']?          # not merely co-located',
+     '          ["\']?success["\']?'),
+
+    ('the success literal is word-bounded but not compared',
+     '            (?: == | != | -eq | -ne | (?<=\\s)= )   # …in a COMPARISON,\n            \\s* ["\']? \\b success \\b ["\']?          # not merely co-located',
+     '          ["\']? \\b success \\b ["\']?'),
+
     # --- …and a leg that cannot report failure satisfies it by construction
     ("a continue-on-error shard job stops being refused",
      "        if job.get(\"continue-on-error\"):",
