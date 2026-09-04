@@ -901,6 +901,21 @@ yaml_flag shenvsplit "'env -S bash -eo pipefail {0}' IS armed (-S takes no separ
 # ...while `-C DIR` really does take one, so it must still be stepped over.
 yaml_flag shenvchdir "'env -C /tmp bash -eo pipefail {0}' IS armed (-C consumes its DIR)" \
   "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -C /tmp bash -eo pipefail {0}\n        $HAZ_BODY"
+# ...AND THE CARVE-OUT IS ONLY OBSERVABLE THROUGH A CLUSTER (backend#3085).
+# `env -S bash` above is armed WITH OR WITHOUT the carve-out, so it cannot pin
+# it: for a bare `-S` the flag loop falls through to "consumes nothing" either
+# way -- `S` is not in the value-flag set, and there is no further character to
+# decide. Delete the carve-out and that case stays green, which is how a
+# mutation of it came to be scored on a mutant that did not even parse.
+# `-Su` / `-SC` are where the carve-out decides: without it the trailing `u`/`C`
+# is read as the cluster's value-taking last character, the next token (`bash`,
+# the program) is consumed as its value, `basename("pipefail")` is not a POSIX
+# shell, and the step is SKIPPED with its `| head -1` unreported. These two are
+# the only evidence the carve-out is load-bearing.
+yaml_flag shenvsplitu "...and \`env -Su bash …\` — the cluster the -S carve-out is measured by" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -Su bash -eo pipefail {0}\n        $HAZ_BODY"
+yaml_flag shenvsplitc "...and \`env -SC bash …\`, the same for the other value-taking flag" \
+  "name: j\non:\n  push:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: /usr/bin/env -SC bash -eo pipefail {0}\n        $HAZ_BODY"
 # AND THE PEEL STOPS AT THE FIRST NON-`env`, so this is not "skip anything
 # before a shell name": `sudo` changes who runs the shell, and `env perl` is
 # still perl. Without these, a peel that swallowed everything would pass above.

@@ -43,6 +43,18 @@ Three properties shape the real defects here:
   per-branch rules endpoint omits it entirely, so an allowlist asserted from that
   endpoint asserts nothing.
 
+- **A mutation whose mutant does not parse.** In any `*-mutations.py` row, check that
+  the `new` string still leaves the target compilable: a literal `"\x00"` in a Python
+  replacement, or a `(0 && ` prepended at an anchor that stops mid-regex so the added
+  `)` closes nothing. Such a mutant reddens the WHOLE suite, the expected case is among
+  the failures by luck rather than by dependency, and the run scores `caught` about a
+  program that never ran — and `MISCAUGHT` cannot see it, because reddening everything
+  includes reddening the expected case. Four shipped this way in `.github#404`
+  (backend#3085). `pipefail-early-close-mutations.py` now parses every mutant first;
+  a harness that does not is worth flagging. Related: an anchor into a regex whose
+  character class carries quotes, backslashes or a `\001` should be GENERATED from the
+  real declaration, never retyped.
+
 - **A new input to a reusable that a caller starts passing in the same change.** See
   property 1 — land the callee first, flip the caller in a follow-up.
 
