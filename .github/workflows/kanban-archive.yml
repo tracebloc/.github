@@ -288,6 +288,44 @@ jobs:
           set -uo pipefail
           : > prev.total
           : > prev.error
+          # RETRY A TRANSIENT READ, THEN FAIL CLOSED (backend#3068). The reads
+          # in this step -- the artifact listing, the baseline download and the
+          # reconcile probe -- are cross-run / API reads subject to eventual
+          # consistency (an artifact is not queryable the instant it is uploaded),
+          # brief 5xx / secondary-rate-limit blips, and cross-run availability
+          # races. A SINGLE attempt failed ~60% of this cron's runs, and every one
+          # of those failures refuses the whole cross-run comparison below -- so a
+          # momentary blip became a red run that hid a green archive (backend#3068).
+          #
+          # `retry_read` runs its argument command; on a non-zero exit it waits and
+          # retries up to BASELINE_READ_RETRIES times, then returns the LAST
+          # attempt's status. Exhausting the retries therefore fails closed exactly
+          # as a single attempt did -- an unreadable baseline must NEVER read as
+          # "nothing to archive". It streams the wrapped command's own combined
+          # output on stdout, so `arts=$(retry_read gh api ...)` is unchanged, while
+          # its own progress notes go to stderr. Attempts and delay are
+          # env-overridable so the selftest can drive the loop without sleeping;
+          # the production defaults are 4 attempts, 3s apart.
+          retry_read() {
+            local attempt=1 max="${BASELINE_READ_RETRIES:-4}" delay="${BASELINE_READ_DELAY:-3}"
+            local out rc
+            while :; do
+              out=$("$@" 2>&1)
+              rc=$?
+              if [ "$rc" -eq 0 ]; then
+                printf '%s' "$out"
+                return 0
+              fi
+              if [ "$attempt" -ge "$max" ]; then
+                printf '%s' "$out"
+                echo "::warning::a board-baseline read failed after $attempt attempt(s); failing closed." >&2
+                return "$rc"
+              fi
+              echo "::warning::a board-baseline read failed (attempt $attempt/$max); retrying in ${delay}s." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+            done
+          }
           # ASK WHETHER A BASELINE EXISTS BEFORE ASKING FOR ITS CONTENT, because
           # those are the two answers this step must never conflate (Bugbot,
           # #383). The first draft walked `gh run list ... || true` and let an
@@ -319,7 +357,7 @@ jobs:
           # `$arts` is newline-delimited JSON that the `jq -s` reads below slurp back
           # into one array. A non-JSON body makes `--jq` fail and `gh` exit non-zero,
           # which the branch below catches and refuses -- fail-closed, no fall-through.
-          if ! arts=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" --jq '.artifacts[]' 2>&1); then
+          if ! arts=$(retry_read gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?name=board-baseline&per_page=100" --jq '.artifacts[]'); then
             # selftest:unreadable-path
             printf 'the artifact listing failed: %s\n' "$(printf '%s' "$arts" | tail -1)" > prev.error
             echo "::warning::could not list the board-baseline artifacts; the assert step will refuse."
@@ -350,7 +388,28 @@ jobs:
               # regardless, and one deprecation notice on stderr in a future gh is
               # all it would take. Decoupled unconditionally because it costs
               # nothing: only the failure branch can now populate prev.error.
-              if gh run download "$rid" -n board-baseline -D prev >/dev/null 2>prev.stderr && [ -s prev/board.total ]; then
+              # RETRIED INLINE (backend#3068). The download is a compound read --
+              # fetch, then require a non-empty board.total -- with its stderr routed
+              # to prev.stderr for the refusal branch below, so it does not fit the
+              # pure-command `retry_read` wrapper. It uses the same BASELINE_READ_*
+              # budget. Exhausting the retries falls through to the fail-closed
+              # refusal, NEVER to a clean first-run read: an unreadable baseline is
+              # not an absent one.
+              dl_attempt=1
+              dl_ok=0
+              while :; do
+                if gh run download "$rid" -n board-baseline -D prev >/dev/null 2>prev.stderr && [ -s prev/board.total ]; then
+                  dl_ok=1
+                  break
+                fi
+                if [ "$dl_attempt" -ge "${BASELINE_READ_RETRIES:-4}" ]; then
+                  break
+                fi
+                echo "::warning::the board-baseline download failed (attempt $dl_attempt); retrying." >&2
+                sleep "${BASELINE_READ_DELAY:-3}"
+                dl_attempt=$((dl_attempt + 1))
+              done
+              if [ "$dl_ok" = 1 ]; then
                 cp prev/board.total prev.total
                 echo "Baseline: run $rid saw $(cat prev.total) item(s)."
                 # IS THIS JOB THE ONLY ARCHIVER SINCE? It is not, and assuming
@@ -376,7 +435,7 @@ jobs:
                 # the baseline, which is the same red-that-cannot-clear this whole
                 # block exists to avoid. What matters is whether reconcile RAN
                 # since the baseline, not whether it finished happy.
-                if ! rec=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/kanban-reconcile.yml/runs?status=completed&per_page=1" 2>&1); then
+                if ! rec=$(retry_read gh api "repos/$GITHUB_REPOSITORY/actions/workflows/kanban-reconcile.yml/runs?status=completed&per_page=1"); then
                   # selftest:unreadable-path
                   printf 'could not tell whether kanban-reconcile archived since the baseline: %s\n' "$(printf '%s' "$rec" | tail -1)" > prev.error
                 else
