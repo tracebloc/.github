@@ -74,23 +74,53 @@ file refuses to read in a TITLE for measured reasons (backend#2309, below). An
 explicit declared keyword is a statement of relationship; an incidental mention
 is not, and that difference is the whole value of this gate.
 
-WHAT IT DOES NOT CHECK, said here so nobody reads more into a green run.
-A title that names NO ticket is reported and PASSES. The guard cannot tell a
-PR that genuinely has no ticket from one whose author wrote a bare-prose title,
-and refusing both would be a rule about titles rather than about links -- with
-legitimate casualties: `chore(global_model): delete dead TF FLOPS path`
-(backend#2333) names no ticket in its title and links backend#2288 correctly.
-Requiring a ticket per PR is a separate decision from requiring the link, and
-this file only implements the second.
+THE CHECK RUNS IN BOTH DIRECTIONS (tracebloc/design-system-v2#123). Until that
+ticket, everything above was conditional on the TITLE naming a ticket -- so on
+the majority of PRs, whose titles name none, this file asserted nothing at all
+and said `nothing-named`. That is a one-way check, and its silent failure
+shipped: `tracebloc/.github#381` merged 2026-08-29 with `Closes #2767` in its
+body, bare-form and therefore resolved against `.github`, where no #2767 exists.
+It registered nothing, this gate went green because the title
+(`fix(set-status): ...`) names no ticket, and `tracebloc/backend#2767` was closed
+by hand afterwards. `design-system-v2#119` is the same shape with the keyword
+inside backticks, which GitHub also does not parse.
 
-DERIVED, NOT RESTATED (CLAUDE.md rule 1). Two readings, no third:
+  So the second direction: THE BODY MAY NOT CLAIM A CLOSE THE GRAPH DOES NOT
+  CARRY. A closing keyword in the body with no matching `closingIssuesReferences`
+  entry is `INERT` and FAILS, whatever the title says. See `inert_closing_refs`,
+  which holds the three measured narrowing rules that make it quiet enough to
+  arm -- measured on 300 recent PRs across six repos, where the armed scan
+  reports on exactly one, and that one is `.github#381`.
+
+WHAT IT STILL DOES NOT CHECK, said here so nobody reads more into a green run.
+A title that names NO ticket, on a PR whose body claims nothing, is reported and
+PASSES. The guard cannot tell a PR that genuinely has no ticket from one whose
+author wrote a bare-prose title, and refusing both would be a rule about titles
+rather than about links -- with legitimate casualties: `chore(global_model):
+delete dead TF FLOPS path` (backend#2333) names no ticket in its title and links
+backend#2288 correctly, and a docs-only or CI-only PR may honestly have no ticket
+at all. Requiring a ticket per PR is a separate decision from requiring the link,
+and this file still only implements the second. The new direction does not change
+that: it fires on a CLAIM THE AUTHOR MADE, never on the absence of one.
+
+  This is also why the fix for design-system-v2#123 is NOT the one that ticket's
+  description proposed -- "if the title names a ticket, require
+  `closingIssuesReferences` to be non-empty". That is what this file did until
+  2026-08-27 and it was changed on purpose (backend#2616, `MENTIONED` above);
+  restoring it would leave a child PR the same two remedies it had then, a false
+  `Closes` or a deleted title number, and four PRs in one day took the second.
+  Nothing below ever requires the graph to be non-empty.
+
+DERIVED, NOT RESTATED (CLAUDE.md rule 1). Three readings, no fourth:
 
   * the PR's real TITLE, parsed for the forms the fleet actually writes
+  * the PR's real BODY, for keywords GitHub's own vocabulary defines and for the
+    non-closing form the canon declares
   * the PR's real `closingIssuesReferences`, the same graph
     `kanban-closure-router.yml` consumes
 
 There is no list of tickets, no list of repos and no list of authors in this
-file. The comparison is between two live reads.
+file. The comparison is between live reads.
 
 THE FOUR TITLE FORMS ARE MEASURED, NOT IMAGINED. Sampled across .github,
 backend, release-train and client-runtime:
@@ -236,6 +266,15 @@ MENTIONED = "mentioned"    # a declared non-closing keyword names it in the body
 MISSING = "missing"        # referenced no way at all -- the real defect
 WRONG_REPO = "wrong-repo"  # that NUMBER is linked, in the wrong repository
 
+# A finding about the BODY rather than about a title reference, so it is not a
+# per-ref classification and does not appear in `classify`. It is the OTHER
+# DIRECTION of the same property, and the direction nothing checked until
+# tracebloc/design-system-v2#123: the body writes one of GitHub's own closing
+# keywords and GitHub registered no closing link for it. The keyword is inert --
+# it reads to a human as a promise to close the ticket, the promise is not in the
+# graph, and on merge nothing closes. See `inert_closing_refs`.
+INERT = "inert"
+
 # GITHUB'S CLOSING VOCABULARY. The one list in this file that CANNOT be derived
 # from anything in this org: it is GitHub's, documented under "Linking a pull
 # request to an issue", and no file here declares it. It is used only to
@@ -272,6 +311,84 @@ BODY_TAIL_RE = (
     r"(?:(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([A-Za-z0-9.][A-Za-z0-9._-]*))?#(\d+)"
 )
 
+# GitHub's OWN closing vocabulary, shaped as a body scan, for the inert check.
+# Longest alternative first so `closes #1` cannot be matched as `close` plus a
+# tail that then fails -- correct either way through backtracking, but a regex
+# whose correctness depends on backtracking order is a regex nobody should have
+# to reason about twice.
+#
+# `\s*:?\s+` admits the COLON FORM deliberately. `Fixes: #47` is not a GitHub
+# closing keyword (GitHub wants `Fixes #47`), so it is one of the shapes that
+# reads as a promise and registers nothing -- exactly what this scan is for.
+#
+# The `(?<![A-Za-z0-9])` lookbehind is SUBSUMED TODAY by LINE_LEAD_RE, which
+# admits no alphanumeric between the line start and the keyword, so `preclose #1`
+# is already rejected there and no case can distinguish the two. It stays anyway,
+# and for the reason SCOPE_REPO_RE records at length: the last time a property
+# here held only by coincidence with another pattern's reach, narrowing that
+# other pattern would have silently disabled detection. Neither should depend on
+# the other. The mutation for it was removed rather than faked, because a
+# mutation that cannot be caught is not coverage.
+CLOSING_IN_BODY_RE = re.compile(
+    r"(?<![A-Za-z0-9])("
+    + "|".join(sorted(GITHUB_CLOSING_KEYWORDS, key=lambda word: (-len(word), word)))
+    + r")\s*:?\s+"
+    + BODY_TAIL_RE,
+    re.IGNORECASE,
+)
+
+# An HTML comment. STRIPPED FROM EVERY BODY SCAN, and this is a measurement
+# rather than tidiness: `.github/pull_request_template.md` puts
+# `Closes #123 · Cross-repo: Closes tracebloc/backend#2364` inside a comment as
+# instructions to the author. A PR that leaves the template's comment in place --
+# which is the default, since a comment is invisible in the rendered body -- would
+# otherwise report an inert `Closes` the author never wrote. The org's own
+# template would have been the largest single source of false positives.
+HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+# The placeholder a stripped span leaves behind. It MUST NOT be whitespace, and
+# that is the whole point rather than a detail: every body pattern joins its
+# keyword to its tail with `\s+`, which crosses newlines, so replacing a fenced
+# block with "" or " " can SPLICE a keyword before the fence onto a `#N` after it
+# and manufacture a reference nobody wrote -- a fail-open introduced by the code
+# that was meant to close one. U+FFFD is in none of the character classes above,
+# so it terminates any match that tries to cross it.
+STRIPPED = "�"
+
+# EVERYTHING A CLOSING CLAIM MAY BE PRECEDED BY ON ITS OWN LINE: list bullets,
+# blockquote markers, heading hashes, emphasis, and the backtick that made
+# design-system-v2#119 inert in the first place. Nothing else -- a keyword with
+# WORDS in front of it on the same line is prose, not a claim.
+#
+# THIS IS THE RULE THE 300-PR MEASUREMENT ADDED, and it is doing most of the
+# work: without it the scan reported on 4 of 300 recent PRs and only ONE was
+# real. The other three are all the same English, a past participle used
+# adjectivally, which is unavoidable while GitHub's vocabulary contains
+# `closed`/`fixed`/`resolved`:
+#
+#   backend#3037       "...and the closed backend#2643 audited that exact layer"
+#   release-train#153  "...pointing at the closed backend#1680"
+#   release-train#145  "STAGE 1 (backend#2979) already closes #2976 ... so this
+#                       PR does not"
+#
+# IT ALSO REPLACED A RULE THAT LOOKED NECESSARY AND WAS NOT. An earlier draft
+# skipped any keyword with a negation (`not`, `never`, `n't`, `without`) within
+# 40 characters behind it, aimed at exactly the prose above. Re-measured with
+# this rule in place, that one changed the verdict on 0 of the same 300 PRs --
+# every negated instance in the fleet is mid-sentence, so this rule had already
+# rejected it -- and the mutation harness said so by refusing to be caught when
+# the negation skip was deleted. It is gone rather than kept as insurance: a
+# narrowing rule nothing can break is a rule nobody can reason about, and
+# release-train#145 shows why a backward window was the wrong shape anyway (its
+# negation TRAILS the keyword).
+#
+# The rule costs no recall on either known true positive, both of which write
+# the claim where GitHub's own documentation puts it -- at the start of a line:
+# `.github#381` has `Closes #2767` as line 1, design-system-v2#119 has
+# `Fixes #47` opening its line. Precision over recall, the same bargain
+# PAREN_BARE_RE strikes in a title.
+LINE_LEAD_RE = re.compile(r"^[\s>*+\-#`_~]*$")
+
 QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
@@ -280,6 +397,8 @@ query($owner: String!, $name: String!, $number: Int!) {
       title
       isDraft
       body
+      baseRefName
+      baseRepository { defaultBranchRef { name } }
       closingIssuesReferences(first: 50) {
         totalCount
         nodes {
@@ -448,6 +567,123 @@ def reference_keywords(root=None):
     return keywords
 
 
+def readable_text(body):
+    """The body with HTML comments removed. Both body scans read this.
+
+    AN HTML COMMENT IS THE ONE THING STRIPPED, and the boundary is measured
+    rather than chosen. It cost 300 PRs to find, so it is written down:
+
+      * A COMMENT IS INVISIBLE TO A REVIEWER, so nothing inside one can be the
+        author's statement about the PR. Both scans need it gone, for opposite
+        reasons -- `<!-- Part of tracebloc/backend#47 -->` satisfying a title
+        invisibly is the second half of tracebloc/design-system-v2#123, and the
+        `Closes #123` in `.github/pull_request_template.md`'s own instruction
+        comment would otherwise be read as a claim on every PR that leaves the
+        template in place.
+      * A BACKTICKED OR FENCED SPAN IS NOT STRIPPED, and an earlier draft of
+        this function that stripped both was wrong in a way only the corpus
+        showed: `design-system-v2#227` and `#228` write their declaration as
+        `` `Part of tracebloc/design-system-v2#89` ``, in backticks, on the
+        first line -- an honest, in-use convention that stripping code spans
+        turns from `MENTIONED` into `MISSING`. Two of 300 recent PRs, both
+        merged, both correct. GitHub parses `Part of` not at all, so backticks
+        change nothing about who can read it: a human, and a human reads a
+        code-formatted line perfectly well.
+
+    THE COST IS STATED RATHER THAN HIDDEN: a `Part of ...#N` inside a FENCED
+    block -- a pasted review, a quoted docs example -- still satisfies a title,
+    which is `design-system-v2#123`'s case D and remains open. It is a fenced
+    block's visibility that keeps it open: a reviewer sees it, and every
+    measured instance of a code-formatted declaration in this fleet is an honest
+    one. Closing it needs evidence of the dishonest shape actually occurring,
+    which nobody has.
+    """
+    if body is None:
+        return ""
+    return HTML_COMMENT_RE.sub(STRIPPED, str(body))
+
+
+def targets_default_branch(pr):
+    """True / False / None -- does this PR target its base repo's default branch?
+
+    `None` means the payload did not say. It is a distinct answer from `False`
+    because the caller treats them the same way for opposite reasons, and a
+    two-valued return would have hidden one of them.
+
+    WHY THIS IS LOAD-BEARING FOR THE INERT CHECK, and not a taste: GitHub
+    populates `closingIssuesReferences` only for a PR whose base is the
+    repository's DEFAULT branch. So on a stacked PR or a train promotion the
+    graph is empty BY GITHUB'S DESIGN, and a perfectly honest `Closes #N` in the
+    body registers nothing through no fault of the author. `backend#2779` is the
+    measured case: a plain first-line `Closes #2775.`, empty graph, because it is
+    stacked onto `fix/2770-explicit-record-count`. Without this rule every
+    stacked PR and every promotion PR in the fleet reports.
+    """
+    base = pr.get("baseRefName")
+    default = ((pr.get("baseRepository") or {}).get("defaultBranchRef") or {}).get("name")
+    if not isinstance(base, str) or not isinstance(default, str) or not base or not default:
+        return None
+    return base == default
+
+
+def inert_closing_refs(body, links, base_default):
+    """The closing keywords in the BODY that GitHub registered nothing for.
+
+    THE ONE FUNCTION the inert assertions and the inert mutations both go
+    through (CLAUDE.md rule 9). Three narrowing rules live here, each derived
+    from a measured false positive rather than imagined, because the naive scan
+    is far too noisy to arm. MEASURED over 300 recent PRs across
+    `.github`/`backend`/`client`/`release-train`/`frontend-app`/`design-system-v2`:
+    with all three armed the scan reports on exactly ONE, and that one is the
+    real finding (`.github#381`). A fourth candidate rule was measured and
+    DELETED for adding nothing; see LINE_LEAD_RE.
+
+      A. THE GRAPH MUST BE EMPTY. An author whose PR already registered a closing
+         link demonstrably knows how to write one, so remaining keyword text is
+         prose about some OTHER ticket -- `client#885` and `release-train#134`
+         quote docs examples, `.github#345`/`#360` and `frontend-app#948` discuss
+         other PRs. It is also what keeps this check from reverting
+         tracebloc/backend#2616: it NEVER requires the graph to be non-empty. It
+         fires on the author's own claim, never on the absence of one, so a
+         docs-only or CI-only PR with no ticket and no keyword stays green --
+         which is the `NOTHING_NAMED` fail-open this file has always documented,
+         left exactly as it was.
+      B. THE CLAIM MUST OPEN ITS LINE. See LINE_LEAD_RE, which carries the
+         measurement: it is what took a 4-in-300 report rate with three prose
+         false positives down to the one real finding.
+      C. THE BASE MUST BE THE DEFAULT BRANCH, or be readable at all. See
+         `targets_default_branch`. A `None` skips too: with no base information
+         the check cannot tell an inert keyword from GitHub's by-design empty
+         graph on a non-default base, and manufacturing a finding out of a
+         missing field would put the defect in this file. That is the second
+         deliberate fail-open here, alongside DRAFT, and the mutation harness
+         pins it in both directions for the reason stated there -- a fail-open
+         nobody can break is a fail-open nobody notices.
+
+    Rule A is why no per-ref comparison against `links` is needed below: with an
+    EMPTY graph, every keyword-shaped body reference matches nothing in it by
+    construction.
+    """
+    if links:
+        return []
+    if base_default is not True:
+        return []
+    text = readable_text(body)
+    refs = []
+    seen = set()
+    for match in CLOSING_IN_BODY_RE.finditer(text):
+        lead = text[text.rfind("\n", 0, match.start()) + 1:match.start()]
+        if LINE_LEAD_RE.match(lead) is None:
+            continue
+        ref = TicketRef(match.group(2), match.group(3), int(match.group(4)), "body-closing")
+        key = ((ref.owner or "").lower(), (ref.repo or "").lower(), ref.number)
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(ref)
+    return refs
+
+
 def parse_body(body, keywords):
     """Every ticket the BODY references with a declared non-closing keyword.
 
@@ -575,6 +811,34 @@ def _remedy_forms(keywords, target):
     return " or ".join("`%s %s`" % (word, target) for word in keywords)
 
 
+def _why_lines():
+    """The standing explanation every FAIL ends with.
+
+    ONE COPY, because there are now two paths that fail -- a title reference the
+    body does not make good, and a body claim the graph does not carry -- and a
+    second copy of this argument would be the drift `_remedy_forms` exists to
+    avoid.
+    """
+    return [
+        "",
+        "Why this matters, one link at a time: a CLOSING link is what makes GitHub "
+        "close the issue when the PR merges (every train repo's default branch is "
+        "`develop`, measured 2026-08-23, so a closing keyword DOES fire there); "
+        "that close is the event `kanban-closure-router.yml` routes on, mirroring "
+        "the PR's base to the card. With no reference at all, a PR that DOES finish "
+        "its ticket closes nothing, the router never runs, and the card sits where "
+        "it was while every check is green (tracebloc/backend#2364).",
+        "That argument is about the PR that FINISHES a ticket, and this check no "
+        "longer pretends it covers the others: a child PR's own card is routed from "
+        "its base with no closing keyword involved, so for a child the requirement "
+        "is traceability, not closure -- which a declared body reference gives "
+        "truthfully (tracebloc/backend#2616).",
+        "Edit the PR TITLE or BODY and this check re-runs by itself: its callers "
+        "listen for `edited`, which is the event both fields fire "
+        "(tracebloc/backend#2556). No push and no manual re-run is needed.",
+    ]
+
+
 def evaluate(pr, standards_root=None):
     """(verdict, lines) for one PR payload. Raises Unreadable on a cannot-tell.
 
@@ -593,19 +857,64 @@ def evaluate(pr, standards_root=None):
     refs = parse_title(pr.get("title"))
     links = closing_refs(pr)
     keywords = reference_keywords(root=standards_root)
-    mentions = parse_body(pr.get("body"), keywords)
+    mentions = parse_body(readable_text(pr.get("body")), keywords)
+    inert = inert_closing_refs(pr.get("body"), links, targets_default_branch(pr))
     linked_text = ", ".join("%s/%s#%d" % triple for triple in links) or "none"
     keyword_text = ", ".join("`%s`" % word for word in keywords)
     mention_text = ", ".join(_spell(ref) for ref in mentions) or "none"
 
+    # THE SECOND DIRECTION, ASSERTED BEFORE THE TITLE IS CONSULTED AT ALL
+    # (tracebloc/design-system-v2#123). Until this block, the whole check was
+    # conditional on `parse_title` returning something, so a PR whose title
+    # names no ticket -- most PRs -- had nothing asserted about it. The measured
+    # consequence was not hypothetical: `tracebloc/.github#381` merged
+    # 2026-08-29 with `Closes #2767` in its body, resolved against `.github`
+    # where no #2767 exists, registered nothing, went green on this very check
+    # because its title (`fix(set-status): ...`) names no ticket -- and
+    # `backend#2767` had to be closed by hand. `design-system-v2#119` is the
+    # same shape with the keyword backticked.
+    #
+    # It is deliberately NOT a rule about titles, and so does not touch the
+    # `NOTHING_NAMED` fail-open below: it fires on a CLAIM THE AUTHOR MADE, never
+    # on the absence of one. A docs-only or CI-only PR with no ticket writes no
+    # closing keyword and stays green, which is why this could be armed without
+    # first deciding the separate question of whether every PR needs a ticket.
+    inert_lines = []
+    for ref in inert:
+        inert_lines.append(
+            "%s -- the body writes a closing keyword for this, and GitHub "
+            "registered NO closing link. The keyword is inert: it reads as a "
+            "promise to close the ticket, and on merge nothing will close. "
+            "GitHub parses a closing keyword only in PLAIN body text, only in "
+            "the exact form `Closes <owner>/<repo>#N` (no colon after the "
+            "keyword, not inside backticks or a fenced block), and a bare "
+            "`Closes #%d` resolves against THIS repo -- which registers nothing "
+            "at all when the ticket lives elsewhere."
+            % (_spell(ref), ref.number)
+        )
+        inert_lines.append(
+            "    IF THIS PR DOES NOT FINISH THAT TICKET, that is fine and the "
+            "remedy is not a working `Closes`: say what is true instead -- %s. "
+            "Only remove the claim or make it real; do not leave a promise the "
+            "graph does not carry."
+            % _remedy_forms(keywords, "<owner>/<repo>#%d" % ref.number)
+        )
+
     if not refs:
-        return NOTHING_NAMED, [
-            "The title names no ticket, so there is nothing to assert about the "
-            "link graph. This check compares a title against the links; it does "
-            "not require that a PR have a ticket.",
-            "",
+        if not inert:
+            return NOTHING_NAMED, [
+                "The title names no ticket, so there is nothing to assert about "
+                "the link graph from the title. This check compares a title "
+                "against the links; it does not require that a PR have a ticket.",
+                "",
+                "closingIssuesReferences: %s" % linked_text,
+            ]
+        return FAIL, [
+            "The title names no ticket, but the BODY claims to close one and "
+            "GitHub registered no closing link.",
             "closingIssuesReferences: %s" % linked_text,
-        ]
+            "",
+        ] + inert_lines + _why_lines()
 
     results = [(ref, classify(ref, links, mentions)) for ref in refs]
     bad = [(ref, verdict) for ref, verdict in results if verdict not in (LINKED, MENTIONED)]
@@ -615,6 +924,11 @@ def evaluate(pr, standards_root=None):
         "Body references (%s): %s" % (keyword_text, mention_text),
         "",
     ]
+    if inert:
+        # FOLDED INTO THE SAME FAIL rather than reported separately, so a PR that
+        # satisfies its title AND carries an inert keyword is still red. Both are
+        # the same defect: a reference the body asserts and the graph does not.
+        return FAIL, lines + inert_lines + _why_lines()
     if not bad:
         # SAY WHICH FORM SATISFIED EACH REF. A green run that cannot distinguish
         # "promises to close it" from "says it is part of it" hides the very
@@ -682,29 +996,7 @@ def evaluate(pr, standards_root=None):
                 "your title (tracebloc/backend#2616)."
                 % _remedy_forms(keywords, "<owner>/<repo>#%d" % ref.number)
             )
-    lines.append("")
-    lines.append(
-        "Why this matters, one link at a time: a CLOSING link is what makes GitHub "
-        "close the issue when the PR merges (every train repo's default branch is "
-        "`develop`, measured 2026-08-23, so a closing keyword DOES fire there); "
-        "that close is the event `kanban-closure-router.yml` routes on, mirroring "
-        "the PR's base to the card. With no reference at all, a PR that DOES finish "
-        "its ticket closes nothing, the router never runs, and the card sits where "
-        "it was while every check is green (tracebloc/backend#2364)."
-    )
-    lines.append(
-        "That argument is about the PR that FINISHES a ticket, and this check no "
-        "longer pretends it covers the others: a child PR's own card is routed from "
-        "its base with no closing keyword involved, so for a child the requirement "
-        "is traceability, not closure -- which a declared body reference gives "
-        "truthfully (tracebloc/backend#2616)."
-    )
-    lines.append(
-        "Edit the PR TITLE or BODY and this check re-runs by itself: its callers "
-        "listen for `edited`, which is the event both fields fire "
-        "(tracebloc/backend#2556). No push and no manual re-run is needed."
-    )
-    return FAIL, lines
+    return FAIL, lines + _why_lines()
 
 
 # ------------------------------------------------------------------- read ----
@@ -823,7 +1115,12 @@ def main(argv=None):
     # the header grew by one row when body references started being reported, and
     # a hardcoded `lines[3:]` silently began quoting a header row as a finding.
     body_start = lines.index("") + 1 if "" in lines else 0
-    print("::%s::%s: the title names a ticket this PR does not reference. %s"
+    # THE HEADLINE MUST NAME THE DIRECTION THAT FAILED. There are two now, and a
+    # single sentence about titles was the whole defect
+    # tracebloc/design-system-v2#123 reported: an annotation that says "the title
+    # names a ticket" on a PR whose title names none is worse than no annotation,
+    # because the author looks at the title and finds nothing wrong.
+    print("::%s::%s: this PR's title and body disagree with its link graph. %s"
           % (level, HEADING, " ".join(lines[body_start:])[:600]))
     return 0 if soft else 1
 
