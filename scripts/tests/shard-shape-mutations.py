@@ -58,7 +58,21 @@ MUTATIONS = [
      "        decides = True"),
 
     # --- …in EXECUTABLE shell. A comment is prose. -------------------------
-    ("an `exit 1` surviving only in a comment certifies",
+    #
+    # RETARGETED ONTO THE `decides` HALF, and the reason is worth recording.
+    # This mutation used to be about the EXIT surviving in a comment -- and
+    # once `EXIT_NONZERO` was anchored in command position (@saadqbal, #412),
+    # a commented-out `exit 1` stopped matching whether or not comments were
+    # blanked, so the mutation went UNCAUGHT for a good reason: the anchoring
+    # subsumed it.
+    #
+    # `shell_code_only` still does real work on the OTHER half. A fan-in whose
+    # only `!= "success"` comparison sits in a comment satisfies
+    # `DECIDES_ON_RESULT` without it, so a step that exits non-zero for an
+    # unrelated reason certifies again. Deleting the mutation would have lost
+    # that; leaving it pointed at the exit would have left an entry proving
+    # nothing.
+    ("the verdict comparison is counted from a comment",
      "        run = shell_code_only(str(step.get(\"run\") or \"\"))",
      "        run = str(step.get(\"run\") or \"\")"),
 
@@ -94,7 +108,7 @@ MUTATIONS = [
     # certified: it is skipped exactly when a shard fails, later steps run,
     # and the required context reports success.
     ("a step-level `if` that skips on a failed shard stops disqualifying it",
-     "        runs_anyway = step_cond == \"\" or step_cond in RUNS_ANYWAY",
+     "        runs_anyway = step_runs_anyway(step)",
      "        runs_anyway = True"),
 
     # --- …and the invocation check must read CODE, not co-occurrence -------
@@ -104,8 +118,9 @@ MUTATIONS = [
     # and read raw text anyway. A commented-out `make "$TARGET"` and an
     # `echo "would run: make $TARGET"` both certified.
     ("the invocation check goes back to reading raw text",
-     "            if MAKE_INVOCATION.search(shell_code_only(str(step.get(\"run\") or \"\"))):",
-     "            if \"make\" in str(step.get(\"run\") or \"\"):"),
+     'MAKE_INVOCATION.search(\n'
+     '                        shell_code_only(str(step.get("run") or "")))):',
+     '"make" in str(step.get("run") or "")):'),
 
     # --- …and a leg that cannot report failure satisfies it by construction
     ("a continue-on-error shard job stops being refused",
