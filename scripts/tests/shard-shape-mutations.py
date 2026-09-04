@@ -130,11 +130,11 @@ MUTATIONS = [
     # one, because the reviewer's proposed fix (blanking alone) closes the
     # whole-line spelling and leaves the trailing-comment one open.
     ("the derivation check goes back to reading raw text",
-     'DERIVES_MATRIX.search(shell_code_only(str(step.get("run") or "")))',
+     '            executable_text(shell_code_only(str(step.get("run") or ""))))',
      '"print-mutation-targets" in str(step.get("run") or "")'),
 
     ("the derivation token stops needing to be in command position",
-     'DERIVES_MATRIX.search(shell_code_only(str(step.get("run") or "")))',
+     '            executable_text(shell_code_only(str(step.get("run") or ""))))',
      '"print-mutation-targets" in shell_code_only(str(step.get("run") or ""))'),
 
     # --- SHAPE A: the serial arm, which had no cases and no mutations ------
@@ -163,11 +163,11 @@ MUTATIONS = [
      '    if False:'),
 
     ('the success literal stops needing a comparison',
-     '            (?: == | != | -eq | -ne | (?<=\\s)= )   # …in a COMPARISON,\n            \\s* ["\']? \\b success \\b ["\']?          # not merely co-located',
+     '        (?: == | != | -eq | -ne | (?<=\\s)= )   # in a COMPARISON,\n        \\s* ["\']? \\b success \\b ["\']?         # …against `success` ITSELF',
      '          ["\']?success["\']?'),
 
     ('the success literal is word-bounded but not compared',
-     '            (?: == | != | -eq | -ne | (?<=\\s)= )   # …in a COMPARISON,\n            \\s* ["\']? \\b success \\b ["\']?          # not merely co-located',
+     '        (?: == | != | -eq | -ne | (?<=\\s)= )   # in a COMPARISON,\n        \\s* ["\']? \\b success \\b ["\']?         # …against `success` ITSELF',
      '          ["\']? \\b success \\b ["\']?'),
 
     # A DRY RUN IS NOT THE TIER. `mutations-dry` resolves markers and
