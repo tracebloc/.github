@@ -42,7 +42,26 @@ WORKFLOW = ROOT / ".github" / "workflows" / "selftests.yml"
 REQUIRED_CONTEXT = "selftests"
 # `always()` keeps the job running through a failure; `!cancelled()` does the same for
 # a failure while still yielding to a real cancellation. Either satisfies (3).
-RUNS_ANYWAY = ("always()", "!cancelled()")
+# EXACT conditions, not substrings. `always() && needs.<shard>.result == 'success'`
+# CONTAINS `always()` and still evaluates FALSE when a shard fails -- so the job is
+# skipped and the skipped required check reports SUCCESS (Bugbot, .github#412). A
+# substring test cannot tell a runs-anyway guard from a runs-anyway guard that has
+# been ANDed with the very condition it exists to survive.
+#
+# So the whole expression must BE a runs-anyway form. Anything else is refused rather
+# than interpreted: statically evaluating arbitrary GitHub expressions is not something
+# this script can do honestly, and "cannot tell" must be a finding, not a pass. A
+# compound condition that is genuinely safe can be added here deliberately, which is
+# the point -- it becomes a reviewed decision instead of an accident.
+RUNS_ANYWAY = frozenset({"always()", "!cancelled()"})
+
+
+def normalise_if(cond: str) -> str:
+    """Strip `${{ }}` and whitespace so the comparison is about the EXPRESSION."""
+    c = cond.strip()
+    if c.startswith("${{") and c.endswith("}}"):
+        c = c[3:-2]
+    return " ".join(c.split())
 
 
 def mutation_targets() -> list[str]:
@@ -130,22 +149,48 @@ def main() -> int:
             "The tier is not enforced by the required context in either supported shape."
         )
 
-    body = yaml.dump(rjob)
-    read = [s for s in shard_ids if f"needs.{s}.result" in body]
+    # The step that READS the aggregate must also be able to FAIL on it. Presence of
+    # the token is not enforcement: a step that echoes the result and exits 0 -- a
+    # log-only fan-in -- mentions `needs.<shard>.result` and enforces nothing
+    # (Bugbot, .github#412).
+    read: list[str] = []
+    enforcing: list[str] = []
+    for step in rjob.get("steps") or []:
+        text = yaml.dump(step)
+        hits = [s for s in shard_ids if f"needs.{s}.result" in text]
+        if not hits:
+            continue
+        read.extend(hits)
+        run = str(step.get("run") or "")
+        # A non-zero exit is the only way a step reds its job from a shell. Also
+        # refuse continue-on-error, which turns any failure back into a pass.
+        fails = re.search(r"(?m)\bexit\s+[1-9][0-9]*\b", run) is not None
+        if fails and not step.get("continue-on-error"):
+            enforcing.extend(hits)
     if not read:
         die(
-            f"{REQUIRED_CONTEXT} needs {shard_ids} but reads no `needs.<job>.result`. "
-            "A shard whose verdict nothing reads is a runner that does not execute."
+            f"{REQUIRED_CONTEXT} needs {shard_ids} but no step reads "
+            "`needs.<job>.result`. A shard whose verdict nothing reads is a runner "
+            "that does not execute."
+        )
+    if not enforcing:
+        die(
+            f"{REQUIRED_CONTEXT} reads {sorted(set(read))} but no such step can FAIL "
+            "on it -- none contains a non-zero `exit`, or the step is "
+            "`continue-on-error`. A fan-in that only logs the shards' verdict "
+            "enforces nothing, and the required context goes green over a red shard."
         )
 
-    cond = str(rjob.get("if") or "")
-    if not any(tok in cond for tok in RUNS_ANYWAY):
+    cond = normalise_if(str(rjob.get("if") or ""))
+    if cond not in RUNS_ANYWAY:
         die(
-            f"{REQUIRED_CONTEXT} has `if: {cond or '<none>'}`, which does not contain "
-            f"any of {list(RUNS_ANYWAY)}. A job whose `needs` FAILED is SKIPPED, and "
-            "GitHub reports a skipped required check as SUCCESS (backend#1424) -- so a "
-            "red shard would produce a green required context and the tier would be "
-            "decorative."
+            f"{REQUIRED_CONTEXT} has `if: {cond or '<none>'}`, which is not exactly one "
+            f"of {sorted(RUNS_ANYWAY)}. A job whose `needs` FAILED is SKIPPED and "
+            "GitHub reports a skipped required check as SUCCESS (backend#1424). Note a "
+            "condition that merely CONTAINS always() is not enough: "
+            "`always() && needs.<shard>.result == 'success'` is false exactly when a "
+            "shard fails, so it skips precisely in the case it was meant to survive. "
+            "Refusing rather than interpreting the expression."
         )
 
     derived = any(
@@ -178,9 +223,9 @@ def main() -> int:
         )
 
     print(
-        f"shard-shape: {REQUIRED_CONTEXT} enforces the sharded tier -- needs {shard_ids}, "
-        f"reads {['needs.%s.result' % s for s in read]}, `if` contains a runs-anyway "
-        f"guard, matrix derived from make, {len(targets)} runner(s), none enumerated."
+        f"shard-shape: {REQUIRED_CONTEXT} enforces the sharded tier -- needs {shard_ids}; "
+        f"a step reads {sorted(set(read))} and can fail on it; `if` is exactly "
+        f"`{cond}`; matrix derived from make; {len(targets)} runner(s), none enumerated."
     )
     return 0
 
