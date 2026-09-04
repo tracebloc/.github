@@ -55,6 +55,53 @@ REQUIRED_CONTEXT = "selftests"
 # the point -- it becomes a reviewed decision instead of an accident.
 RUNS_ANYWAY = frozenset({"always()", "!cancelled()"})
 
+#: A step reds its job from a shell only by exiting non-zero, and there are two
+#: shapes of that. `exit 0` is not one of them.
+#:
+#: THE PROPAGATED FORM WAS BEING REFUSED (@saadqbal, #412), which is the
+#: expensive direction of wrong: `exit "$rc"` after accumulating is idiomatic
+#: and enforces harder than `[ "$rc" -eq 0 ] || exit 1`, and refusing it tells
+#: the maintainer who wrote the better version that the guard is broken. A
+#: guard that punishes an improvement gets deleted, not fixed.
+EXIT_NONZERO = re.compile(
+    r"""(?mx) \bexit \s+ (?:
+          [1-9][0-9]*            # a non-zero literal
+        | "?\$\{?[A-Za-z_]\w*\}?"?  # or a propagated status: exit "$rc"
+    )"""
+)
+
+#: …and the exit has to be ABOUT the shards' verdict. A bare echo plus an
+#: unrelated `[ -f Makefile ] || exit 1` satisfied a presence-only test, so a
+#: certifying step must also carry the comparison that makes the decision:
+#: either the `success` literal it is compared against, or a `[ ... ]` test on
+#: the variable holding a result. Shape, not proof of causation -- what it buys
+#: is that both halves of the decision have to be in the step, rather than one
+#: half and an exit that happens to be there.
+DECIDES_ON_RESULT = re.compile(
+    r"""(?mx) (?:
+          ["']?success["']?          # compared against the success literal
+        | \[\s+"?\$\{?\w*(?:RESULT|result|rc)\w*\}?"?  # or tested as a variable
+    )"""
+)
+
+
+def shell_code_only(run: str) -> str:
+    """`run` with whole-line shell comments blanked, line numbering intact.
+
+    The same rule the member-enumeration check applies to the workflow, one
+    layer down inside a step body: a token in a comment is prose, and counting
+    it as executable is how `# previously: exit 1` certified a step whose teeth
+    were gone (@saadqbal, #412).
+
+    Whole-line only, deliberately. A trailing comment on an executable line
+    (`make "$TARGET"  # the tier`) leaves the line executable, and stripping
+    from the first `#` would also eat a `#` inside a quoted string.
+    """
+    return "\n".join(
+        "" if line.lstrip().startswith("#") else line
+        for line in run.splitlines()
+    )
+
 
 def normalise_if(cond: str) -> str:
     """Strip `${{ }}` and whitespace so the comparison is about the EXPRESSION."""
@@ -134,6 +181,15 @@ def main() -> int:
     js = jobs(doc)
     rid, rjob = required_job(js)
     targets = mutation_targets()
+    # AND `main` REFUSES AN EMPTY TIER ITSELF, rather than trusting that its
+    # producer did. `mutation_targets` already dies on zero, so this is
+    # defence in depth -- and the selftest found it worth having: with the
+    # producer stubbed, `main` printed "0 runner(s), none enumerated" and
+    # returned 0. "Nothing to check" reading as "everything passed" is the one
+    # shape this whole file exists to refuse, so it is refused at both the
+    # place that derives the list and the place that reports on it.
+    if not targets:
+        die("derived NO mutation targets; refusing to certify a tier that runs nothing")
 
     # SHAPE A: the serial target, still perfectly valid.
     if runs_make_mutations(rjob):
@@ -161,11 +217,35 @@ def main() -> int:
         if not hits:
             continue
         read.extend(hits)
-        run = str(step.get("run") or "")
+        run = shell_code_only(str(step.get("run") or ""))
         # A non-zero exit is the only way a step reds its job from a shell. Also
         # refuse continue-on-error, which turns any failure back into a pass.
-        fails = re.search(r"(?m)\bexit\s+[1-9][0-9]*\b", run) is not None
-        if fails and not step.get("continue-on-error"):
+        #
+        # THREE THINGS THIS GOT WRONG, all found on #412 and all the same shape:
+        # the token was being read where it does not mean what it says.
+        #
+        #  1. COMMENTS. The scan read the raw `run` text, so a step whose teeth
+        #     were gone but which still carried `# previously: exit 1` in a
+        #     shell comment certified. That is the same comment-versus-executable
+        #     distinction the member-enumeration check already makes one layer
+        #     up, so `shell_code_only` above is that rule applied here too.
+        #  2. A PROPAGATED STATUS IS ALSO A FAILURE, and refusing it was the
+        #     costlier direction. `exit "$rc"` -- accumulate then propagate -- is
+        #     the idiomatic form and enforces HARDER than `[ "$rc" -eq 0 ] ||
+        #     exit 1`, and a literal-only regex told the maintainer who wrote it
+        #     that the check was broken. That is how a guard gets deleted rather
+        #     than fixed. `exit 0` still does not count.
+        #  3. THE EXIT MUST BE ABOUT THE RESULT. A bare echo plus an unrelated
+        #     `[ -f Makefile ] || exit 1` in the same step satisfied a
+        #     presence-only test. So the step must ALSO compare the shards'
+        #     verdict to something -- the `success` literal, or a test on the
+        #     variable carrying it. This is a shape check and not a proof of
+        #     causation; what it buys is that a step certifying the tier has to
+        #     contain both halves of the decision rather than one of them and an
+        #     unrelated exit.
+        fails = EXIT_NONZERO.search(run) is not None
+        decides = DECIDES_ON_RESULT.search(run) is not None
+        if fails and decides and not step.get("continue-on-error"):
             enforcing.extend(hits)
     if not read:
         die(
@@ -176,9 +256,13 @@ def main() -> int:
     if not enforcing:
         die(
             f"{REQUIRED_CONTEXT} reads {sorted(set(read))} but no such step can FAIL "
-            "on it -- none contains a non-zero `exit`, or the step is "
-            "`continue-on-error`. A fan-in that only logs the shards' verdict "
-            "enforces nothing, and the required context goes green over a red shard."
+            "on it. A certifying step needs THREE things and is missing one: an "
+            "`exit` with a non-zero literal or a propagated status (`exit \"$rc\"` "
+            "counts, `exit 0` does not), in EXECUTABLE shell rather than a comment; "
+            "a comparison of the shards' verdict against `success` or a test on the "
+            "variable holding it; and no `continue-on-error`. A fan-in that only "
+            "logs the verdict, or that exits non-zero for an unrelated reason, "
+            "enforces nothing and the required context goes green over a red shard."
         )
 
     cond = normalise_if(str(rjob.get("if") or ""))
@@ -222,10 +306,55 @@ def main() -> int:
             "sharded tier must derive its matrix, never enumerate members."
         )
 
+    # AND THE SHARD MUST ACTUALLY RUN THE TARGET (Bugbot, #412). Everything
+    # above establishes that the tier is WIRED: a derived matrix, a fan-in that
+    # reads the shards' result and can fail on it, an `if` that survives a
+    # failed dependency. None of it looks inside the shard for work. A matrix
+    # of twelve legs whose steps only `echo` satisfies every check so far, and
+    # the required `selftests` context would certify the tier as enforced.
+    #
+    # That is this repo's own defect class -- a mechanism that appears to
+    # verify something and is connected to nothing -- in the guard written to
+    # find it. The check is deliberately shallow: SOME step in the shard job
+    # must invoke `make` on the matrix value. It does not try to prove the
+    # invocation is correct, only that one exists; the `mutation-*` case guard
+    # in that step is what constrains WHICH target, and `make` itself is what
+    # fails when the target does not exist.
+    invoking = []
+    for jid in shard_ids:
+        job = js.get(jid) or {}
+        if "strategy" not in job:
+            continue          # not a sharded leg; the matrix check above owns it
+        for step in (job.get("steps") or []):
+            run = str(step.get("run") or "")
+            if "make" in run and ("matrix." in run or "$TARGET" in run
+                                  or "${TARGET}" in run):
+                invoking.append(jid)
+                break
+    sharded = [j for j in shard_ids
+               if "strategy" in (js.get(j) or {})]
+    missing = sorted(set(sharded) - set(invoking))
+    if missing:
+        die(
+            f"shard job(s) {missing} run no `make` on their matrix value, so the "
+            "tier is wired to legs that do no work. Every check above would "
+            "still pass -- a derived matrix of steps that only echo reports the "
+            "same green as one that runs the mutations, which is the "
+            "appears-to-verify-nothing shape this script exists to refuse."
+        )
+    if not sharded:
+        die(
+            "no shard job carries a `strategy:` matrix, so the invocation check "
+            "above compared an empty set against an empty set. A tier with no "
+            "sharded leg is not the shape this script is written for -- say so "
+            "rather than passing."
+        )
+
     print(
         f"shard-shape: {REQUIRED_CONTEXT} enforces the sharded tier -- needs {shard_ids}; "
         f"a step reads {sorted(set(read))} and can fail on it; `if` is exactly "
-        f"`{cond}`; matrix derived from make; {len(targets)} runner(s), none enumerated."
+        f"`{cond}`; matrix derived from make; {len(targets)} runner(s), none enumerated; "
+        f"shard leg(s) {sorted(set(invoking))} invoke make on the matrix value."
     )
     return 0
 
