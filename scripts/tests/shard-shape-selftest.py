@@ -337,6 +337,26 @@ def _():
         assert "can FAIL on it" in out, (how, out)
 
 
+@case("a verdict comparison that lives only in a comment is refused")
+def _():
+    """The half `shell_code_only` still protects on the fan-in side.
+
+    Once `EXIT_NONZERO` was anchored in command position, a commented-out
+    `exit 1` stopped matching whether or not comments were blanked -- the
+    anchoring subsumed that case. `DECIDES_ON_RESULT` is where the blanking
+    still does work: a step whose only `!= "success"` sits in a comment, with
+    a real but UNRELATED exit, would certify without it.
+    """
+    body = ("set -euo pipefail\n"
+            'echo "shards=${SHARDS_RESULT}"\n'
+            '# if [ "$res" != "success" ]; then rc=1; fi\n'
+            "[ -f Makefile ] || exit 1\n")
+    rc, out = run(workflow(fanin=body))
+    assert rc == 1, ("the only comparison against `success` is commented out, "
+                     "so nothing here decides on the shards' verdict\n" + out)
+    assert "can FAIL on it" in out, out
+
+
 @case("a make step skippable by its own `if` is refused")
 def _():
     """The mirror of the fan-in rule, which the shard scan did not have.
