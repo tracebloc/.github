@@ -271,17 +271,28 @@ MUTATIONS = [
      '    while i < len(tokens) and os.path.basename(tokens[i]) == "env":',
      '    while False:',
      "'/usr/bin/env bash -eo pipefail {0}' IS armed, not skipped"),
+    # THE MUTANT MUST PARSE (backend#3085). This dropped the `== "env"` test by
+    # comparing against a literal NUL, which Python refuses to compile at all
+    # ("source code string cannot contain null bytes"): every YAML case reddened,
+    # the named case was among them by luck rather than by dependency, and the
+    # run scored `caught` while proving only that a NUL breaks Python. Dropping
+    # the condition outright says the same thing and compiles.
     ("the peel walks past ANY program, so `sudo bash` reads as bash", YML,
      '    while i < len(tokens) and os.path.basename(tokens[i]) == "env":',
-     '    while i < len(tokens) and os.path.basename(tokens[i]) != "\x00":',
+     '    while i < len(tokens):',
      "'sudo bash -eo pipefail {0}' is NOT treated as plain bash"),
     # And the value-flag list, which is wrong in both directions too: `-S`
     # takes no separate value (its argument is the rest of the command), while
     # `-C DIR` does.
+    # SAME DEFECT, AND A SECOND ONE UNDERNEATH IT (backend#3085). The NUL made
+    # the mutant unparseable, as above; and the expected case named the BARE
+    # `-S`, which is armed with or without the carve-out -- the flag loop falls
+    # through to "consumes nothing" either way, so it could never pin this.
+    # `if False:` compiles, and the cluster cases are the ones that decide.
     ("`-S` eats the program, so `env -S bash` is skipped", YML,
      '            if char == "S":\n                return False',
-     '            if char == "\x00":\n                return False',
-     "'env -S bash -eo pipefail {0}' IS armed (-S takes no separate value)"),
+     '            if False:\n                return False',
+     "the cluster the -S carve-out is measured by"),
     ("`-C` stops consuming its DIR, so the DIR becomes the program", YML,
      '    _VALUE_SHORT = "uC"',
      '    _VALUE_SHORT = ""',
@@ -333,12 +344,21 @@ MUTATIONS = [
             return 2''',
      '''            continue'''),
     # --- the arms added for the two MEASURED gaps (backend#2967) -----------
+    # THE ANCHOR SPANS THE REGEX'S CLOSING `/`, so the `)` has something to
+    # close (backend#3085). Copied from the `grep` rows above but anchored
+    # MID-REGEX at `q(` / `read(`, the `(0 && ` these prepend was never closed:
+    # awk rejected the mutant (rc 2, BSD awk and gawk alike), the whole suite
+    # reddened, and the run scored `caught` on a program that never ran.
+    # GENERATED, not retyped -- the terminator class carries a quote, a
+    # backslash and a \001, and mis-escaping it by hand is exactly how the
+    # first version of these two rows came to be inert.
     ("the sed q arm never fires", AWK,
-     '|| probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q(',
-     '|| (0 && probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q('),
+     '|| probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q([[:space:]]|$|[)"\'\\\'\'`;|&\\001])/',
+     '|| (0 && probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q([[:space:]]|$|[)"\'\\\'\'`;|&\\001])/)'),
+    # ...and the same fix on the read arm, whose anchor stopped at `read(`.
     ("the read arm never fires", AWK,
-     '|| probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read(',
-     '|| (0 && probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read('),
+     '|| probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read([[:space:]]|$|[)"\'\\\'\'`;|&\\001])/',
+     '|| (0 && probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read([[:space:]]|$|[)"\'\\\'\'`;|&\\001])/)'),
     # THE SED ARM'S TERMINATOR, which is the part that actually discriminates.
     # The mutation here used to loosen the script TOKEN and was reported
     # UNCAUGHT -- correctly, because the token shape changes nothing: the `q`
