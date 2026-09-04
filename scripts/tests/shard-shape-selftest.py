@@ -322,8 +322,19 @@ def _():
     assert "failed" in buf.getvalue(), buf.getvalue()
 
 
-@case("an unreadable workflow is a finding, not a pass")
+@case("an unreadable workflow is a CLEAN finding, not a traceback")
 def _():
+    """A refusal, with its own message -- not an exception escaping `main`.
+
+    CATCHES BROADLY ON PURPOSE. Delete the `is_file()` guard and the module
+    raises `FileNotFoundError` out of `main` instead of dying with its own
+    words. Catching only `SystemExit` let that escape, and the mutation runner
+    then reported "harness broke, not detected" -- an uncaught mutation for a
+    reason that was really this case being too narrow. A guard that crashes has
+    not "reported a finding": the operator sees a traceback rather than a
+    sentence naming what could not be read, which is precisely the difference
+    between refusing and falling over.
+    """
     mod = _load()
     mod.WORKFLOW = pathlib.Path("/nonexistent/selftests.yml")
     buf = io.StringIO()
@@ -332,6 +343,12 @@ def _():
             rc = mod.main()
         except SystemExit as exc:
             rc = exc.code if isinstance(exc.code, int) else 1
+        except BaseException as exc:            # noqa: BLE001 - see docstring
+            raise AssertionError(
+                f"`main` raised {type(exc).__name__} instead of refusing with a "
+                "message. An unreadable workflow must be a stated finding, not "
+                "a traceback."
+            ) from None
     assert rc == 1, buf.getvalue()
     assert "unreadable" in buf.getvalue(), buf.getvalue()
 
