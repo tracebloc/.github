@@ -185,7 +185,7 @@ FNR == 1 {
   # pipefail` becomes its own segment, carries no pipe, and cannot produce a
   # false positive. And `set +e; producer | head -1` still spares correctly,
   # because e_on is already 0 by the time the second segment is judged.
-  if (line ~ /^[[:space:]]*set[[:space:]]/) { apply_set(line); next }
+  if (line ~ /^[[:space:]]*set[[:space:]]/) apply_set(line)
 
   if (line ~ /#[[:space:]]*pipefail-guard:[[:space:]]*allow/) next
   # (No separate full-line-comment skip. `strip_trailing_comment` reduces a
