@@ -463,6 +463,41 @@ def check_author_identity(token: str) -> "str | None":
     return None
 
 
+def probe_pr_capability(token: str, org: str, repo: str) -> "str | None":
+    """Exercise the GraphQL surface `gh pr create` needs, or say why it can't.
+
+    RESOLVES IS NOT CAN-OPEN-A-PR (tracebloc/backend#3187, run 33868935395).
+    `check_author_identity` proves the token exists, resolves, and is not the
+    reviewer -- and none of that proves it can reach the target repos. The
+    measured failure was a fine-grained PAT with no grant on the fleet: it
+    passed every identity check and then died on the first `gh pr create` with
+    `Resource not accessible by personal access token (repository.defaultBranchRef)`
+    -- AFTER remediate() had already pushed a branch. `gh pr create` issues that
+    `repository.defaultBranchRef` query before it opens anything, so reading it
+    here against one real target reproduces the exact denial in the pre-flight,
+    before any branch is pushed.
+
+    BOUNDED, NOT A PROOF -- the same honesty as AuthorUnusable. A successful
+    read shows the token can reach this repo's refs; it does NOT prove
+    `pull_requests: write`, which only opening a PR proves. So this closes the
+    #3187 gap (a token refused at defaultBranchRef) while claiming no more than
+    it establishes: a token that reads the ref but cannot create still fails at
+    the first `pr create`, and AuthorUnusable bounds that to one orphan branch.
+    Probes `targets[0]` only, so a token covering some repos but not a later one
+    is still caught at that repo mid-sweep, not here.
+    """
+    query = ("query($owner:String!,$name:String!)"
+             "{repository(owner:$owner,name:$name){defaultBranchRef{name}}}")
+    code, _, err = gh("api", "graphql", "-f", f"query={query}",
+                      "-f", f"owner={org}", "-f", f"name={repo}", token=token)
+    if code == 0:
+        return None
+    return (f"{AUTHOR_TOKEN_ENV} resolves but cannot read repository.defaultBranchRef "
+            f"on {org}/{repo}: {err.strip() or 'empty error'}. `gh pr create` makes "
+            "this exact query first, so it would fail mid-rollout after a branch was "
+            "already pushed. Refusing before any branch is pushed (backend#3187).")
+
+
 def _ensure_pr(full: str, head: str, base: str, issue: int,
                author_token: str) -> "str | None":
     # THE AUTHOR IS READ, NOT ASSUMED (Bugbot, #348). The number alone was
@@ -610,6 +645,15 @@ def main() -> int:
     if args.create_prs:
         author_token = os.environ.get(AUTHOR_TOKEN_ENV, "").strip()
         author_refusal = check_author_identity(author_token) or ""
+        if not author_refusal and targets:
+            # RESOLVES != CAN-OPEN-A-PR (backend#3187). The identity checks above
+            # cannot see a token with no grant on the fleet -- the measured fault
+            # was a fine-grained PAT that passed them all and then died on the
+            # first `gh pr create` at `repository.defaultBranchRef`, after a
+            # branch had already been pushed. Probe that exact surface against one
+            # real target here, so the same denial disarms remediation in the
+            # pre-flight instead of half-rolling out.
+            author_refusal = probe_pr_capability(author_token, org, targets[0]) or ""
         if author_refusal:
             sys.stderr.write(f"::error::{author_refusal}\n")
             sys.stderr.write("::error::Remediation is disabled for this run; the "

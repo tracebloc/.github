@@ -49,10 +49,17 @@
 # repos, not a classic `repo` one. Tracked as its own decision rather than
 # smuggled in here.
 #
-# The script still fails closed (exit 2) on the first refused write, and since
-# #348 it validates the PAT -- present, resolvable, and NOT the same identity
-# as `SYNC_REVIEWER` -- before the first branch is pushed, so a bad credential
-# cannot produce a partial rollout.
+# The script still fails closed (exit 2) on the first refused write. Before the
+# first branch is pushed it validates the PAT -- present, resolvable, NOT the
+# same identity as `SYNC_REVIEWER` (since #348), and, since backend#3187, able
+# to read `repository.defaultBranchRef` on a real target: the exact GraphQL
+# surface `gh pr create` is refused at when the token has no grant on the fleet
+# (which is how the 2026-09-04 create-prs dispatch died after pushing one
+# branch). That read is necessary, not sufficient -- only opening a PR proves
+# `pull_requests: write` -- so at most ONE orphan branch can still precede a
+# `pr create` refusal, and the AuthorUnusable path bounds the blast radius to
+# that one repo. "Cannot produce a partial rollout" was the earlier claim and
+# was false; this is what the code actually enforces.
 #
 # All interpolations reach shell through `env:` and are read as quoted
 # variables, never spliced into a command line. No event-controlled text

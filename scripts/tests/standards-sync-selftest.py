@@ -559,6 +559,49 @@ try:
 finally:
     sync.gh, sync.author_login = _real_gh, _real_login
 
+# ---------------- the pre-flight PROBES pr-create capability, not just identity
+#
+# backend#3187. check_author_identity proves the token exists, resolves and is
+# not the reviewer -- none of which proves it can reach the fleet. The measured
+# fault (run 33868935395) was a fine-grained PAT that passed all three and then
+# died on the first `gh pr create` at `repository.defaultBranchRef`, AFTER a
+# branch was pushed. probe_pr_capability reads that exact GraphQL surface
+# against one target, so the denial is caught before any write.
+_real_gh = sync.gh
+try:
+    stub = GhScript([(0, '{"data":{"repository":{"defaultBranchRef":{"name":"develop"}}}}', "")])
+    sync.gh = stub
+    refusal = sync.probe_pr_capability("pat", "tracebloc", "averaging-service")
+    record(refusal is None,
+           "probe_pr_capability: a token that can read defaultBranchRef passes",
+           f"got {refusal!r} -- the surface `gh pr create` needs is reachable")
+
+    # AS THE TOKEN, not the ambient App. Probing the App's reach would prove
+    # nothing about the PAT that actually opens the PR (the same split as
+    # author_login and `pr create`).
+    record(stub.kwargs_for("graphql") == {"token": "pat"},
+           "probe_pr_capability: probes as the PAT, not the ambient identity",
+           f"kwargs={stub.kwargs_for('graphql')} -- the App's reach is the wrong question")
+
+    # THE MEASURED DENIAL. Exactly what a fine-grained PAT with no grant returns;
+    # it must become a refusal naming the variable and the surface, not a pass.
+    stub = GhScript([(1, "", "GraphQL: Resource not accessible by personal "
+                             "access token (repository.defaultBranchRef)")])
+    sync.gh = stub
+    refusal = sync.probe_pr_capability("pat", "tracebloc", "averaging-service")
+    record(refusal is not None and sync.AUTHOR_TOKEN_ENV in refusal
+           and "defaultBranchRef" in refusal,
+           "probe_pr_capability: the measured pr-create denial becomes a refusal",
+           f"got {refusal!r} -- this is what killed the 2026-09-04 create-prs dispatch")
+
+    # NOT VACUOUS: the stub can tell a graphql call from one that never happened,
+    # so the token= assertion above is not passing blind.
+    record(stub.kwargs_for("nonexistent-verb") is None,
+           "probe_pr_capability: the probe assertions are not vacuous",
+           "a call that never happened reads as None, so a dropped token= reddens")
+finally:
+    sync.gh = _real_gh
+
 # ------------------- a PAT that RESOLVES but cannot CREATE stops the fleet
 #
 # Bugbot on #348. `check_author_identity` proves the token exists, resolves and
@@ -743,7 +786,7 @@ finally:
 # above the secret: aborting before the audit turns "PRs could not be opened"
 # into "fleet state unknown", which is strictly less information. So the run
 # must still classify and report the whole fleet, push nothing, and exit 2.
-def _run_main(argv, token, remediate_calls, targets=("alpha",), remediate=None):
+def _run_main(argv, token, remediate_calls, targets=("alpha",), remediate=None, probe=None):
     """`main()` with the fleet reads stubbed. Returns (exit_code, report).
 
     `targets` and `remediate` are parameters because backend#2690 is a
@@ -753,7 +796,7 @@ def _run_main(argv, token, remediate_calls, targets=("alpha",), remediate=None):
     """
     saved = {name: getattr(sync, name)
              for name in ("load_canon", "load_targets", "resolve_branch",
-                          "fetch_claude_md", "remediate")}
+                          "fetch_claude_md", "remediate", "probe_pr_capability")}
     saved_argv, saved_env = sys.argv, os.environ.get(sync.AUTHOR_TOKEN_ENV)
     saved_summary = os.environ.pop("GITHUB_STEP_SUMMARY", None)
 
@@ -768,6 +811,9 @@ def _run_main(argv, token, remediate_calls, targets=("alpha",), remediate=None):
     # the remediation branch at all.
     sync.fetch_claude_md = lambda _o, _r, _b: "# CLAUDE.md\n\nrepo-owned prose.\n"
     sync.remediate = remediate or _remediate
+    # The pr-capability probe (backend#3187) hits the network for real, so it is
+    # neutralised by default and a test that wants a refusal passes `probe=`.
+    sync.probe_pr_capability = probe or (lambda *_a, **_k: None)
     os.environ[sync.AUTHOR_TOKEN_ENV] = token
     sys.argv = ["standards-sync.py", *argv]
     buf = io.StringIO()
@@ -837,6 +883,44 @@ try:
            "main: report-only runs never consult the PAT",
            f"code={code} calls={calls} -- a read-only audit must not be gated "
            "on a credential it does not use")
+
+    # ------------------------------------------------------------------
+    # backend#3187. A PAT that PASSES check_author_identity but cannot open a PR
+    # (no grant on the fleet -> `gh pr create` refused at defaultBranchRef) must
+    # disarm the writes in the pre-flight, exactly like an identity refusal:
+    # classify and report the whole fleet, push nothing, exit 2. Before the probe
+    # existed this half-rolled-out -- a branch on repo 1 and no PRs anywhere.
+    _real_check = sync.check_author_identity
+    try:
+        sync.check_author_identity = lambda _t: None   # identity is fine ...
+        calls = []
+        code, report = _run_main(
+            ["--create-prs"], "resolves-but-cannot-create", calls,
+            probe=lambda *_a, **_k: (            # ... but it cannot open a PR
+                f"{sync.AUTHOR_TOKEN_ENV} resolves but cannot read "
+                "repository.defaultBranchRef on tracebloc/alpha (backend#3187)."),
+        )
+        record(not calls,
+               "main: a token refused by the pr-capability probe pushes nothing",
+               f"calls={calls} -- the probe must disarm writes before the sweep")
+        record("REMEDIATION DISABLED" in report and "| alpha |" in report,
+               "main: a probe refusal still audits the fleet and says writes were skipped",
+               f"report={report.strip()[-200:]!r}")
+        record(code == 2,
+               "main: a probe refusal exits 2, not the --create-prs 0",
+               f"code={code} -- 0 would claim every drifted repo has a PR open")
+
+        # NOT VACUOUS: a probe that passes (None) must let the usable PAT
+        # remediate, or the three checks above would pass over a script that had
+        # simply stopped remediating.
+        calls = []
+        code, report = _run_main(["--create-prs"], "a-usable-pat", calls,
+                                 probe=lambda *_a, **_k: None)
+        record(code == 0 and len(calls) == 1 and "REMEDIATION DISABLED" not in report,
+               "main: the probe disarm is not vacuous -- a passing probe remediates",
+               f"code={code} calls={len(calls)}")
+    finally:
+        sync.check_author_identity = _real_check
 
     # ------------------------------------------------------------------
     # backend#2690. A `pr create` refusal used to `break` the target loop, so a
