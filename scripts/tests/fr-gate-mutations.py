@@ -86,6 +86,19 @@ CALLER_MUTATIONS = [
     ("the caller drops `edited`, so no base change ever re-runs the gate",
      ', unlabeled, edited]',
      ', unlabeled]'),
+
+    # backend#3228: the same retarget-out / never-arrive weld in `branches:`'s
+    # three siblings. Each must be caught by the selftest's per-filter checks, or
+    # a required gate can be skipped in a spelling this suite never exercised.
+    ("the caller reacquires the weld as `branches-ignore:` instead of `branches:`",
+     '  pull_request:\n    types:',
+     '  pull_request:\n    branches-ignore: [develop]\n    types:'),
+    ("the caller adds a `paths:` filter, so the required gate never arrives",
+     '  pull_request:\n    types:',
+     "  pull_request:\n    paths: ['**.py']\n    types:"),
+    ("the caller adds a `paths-ignore:` filter, so the required gate never arrives",
+     '  pull_request:\n    types:',
+     "  pull_request:\n    paths-ignore: ['docs/**']\n    types:"),
 ]
 
 ALL_MUTATIONS = ([("reusable", *m) for m in REUSABLE_MUTATIONS]

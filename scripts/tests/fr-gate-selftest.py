@@ -176,6 +176,19 @@ check("caller carries NO `branches:` filter (else a retarget-out is never seen)"
       "branches" not in PR,
       f"branches = {PR.get('branches')!r} — this is exactly backend#2840")
 
+# THE SAME WELD IN ITS OTHER SPELLINGS (Bugbot, backend#3228). `branches:` is not
+# the only filter that skips a required check: `branches-ignore: [develop]` rejects
+# the retarget-out identically, and `paths:` / `paths-ignore:` make the required
+# `gate` context never ARRIVE on a PR that touches the wrong files — a permanent
+# pending that blocks the merge exactly as the stale FAILURE did, with nothing to
+# clear it. The mutation harness only reintroduced `branches:`, so these three
+# spellings would have welded the gate while this suite stayed green (rule 6:
+# derive the input domain and test all of it). None may appear on the trigger.
+for _skip_filter in ("branches-ignore", "paths", "paths-ignore"):
+    check(f"caller carries NO `{_skip_filter}:` filter (skips the required gate too)",
+          _skip_filter not in PR,
+          f"{_skip_filter} = {PR.get(_skip_filter)!r} — welds the required gate like backend#2840")
+
 # THE #1945 HALF. `edited` is the only event a base change fires; without it even
 # the main<->staging retargets go stale.
 check("caller keeps `edited` in its trigger types",
