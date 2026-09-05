@@ -209,8 +209,10 @@ MUTATIONS = [
     # of these reverts one piece of it and must redden a named case.
 
     # The whole fix, reverted: stop reading the body at all.
+    # Anchor updated when the body scan started stripping HTML comments
+    # (design-system-v2#123). Same property, same mutation: read no body.
     ("the body is never read, so a child PR is back to `Closes or nothing`",
-     '    mentions = parse_body(pr.get("body"), keywords)',
+     '    mentions = parse_body(readable_text(pr.get("body")), keywords)',
      "    mentions = []"),
     # The query stops asking for the body. EVERY evaluate case hands the body in
     # directly, so without the query assertion this is invisible -- which is the
@@ -234,6 +236,93 @@ MUTATIONS = [
     ("a green run stops saying WHICH form satisfied the ref",
      '               else "declared body reference (does not close it)")',
      '               else "closing link")'),
+
+    # --- THE SECOND DIRECTION (tracebloc/design-system-v2#123) ---------------
+    # A body claim the graph does not carry. Two halves have to be mutated
+    # separately and BOTH matter: the assertion itself, and each of the four
+    # narrowing rules that keep it quiet enough to arm. A narrowing rule that
+    # nothing breaks is a rule that can be deleted for looking arbitrary --
+    # which is exactly how a guard becomes noisy and then gets turned off.
+
+    # The whole direction, reverted: compute it and throw it away. This is the
+    # gate as it shipped, and .github#381's measured case must redden.
+    ("the inert check never fires, so a body claim the graph does not carry "
+     "passes again (the one-way check design-system-v2#123 reported)",
+     '    inert = inert_closing_refs(pr.get("body"), links, targets_default_branch(pr))',
+     "    inert = []"),
+    # The verdict stops depending on it while the scan still runs -- the shape
+    # the ticket describes: a check that reads the right thing and does not act.
+    ("the inert finding is reported but does not fail, so the run stays green",
+     "        return FAIL, lines + inert_lines + _why_lines()",
+     "        pass"),
+    # And the same on the path that has no title reference, which is where
+    # .github#381 and design-system-v2#119 both lived.
+    ("a PR whose title names nothing is exempt from the inert check, restoring "
+     "the exact hole: the assertion is conditional on the title again",
+     "        if not inert:\n            return NOTHING_NAMED, [",
+     "        if True:\n            return NOTHING_NAMED, ["),
+    # The query stops asking for what rule C reads. Rule C fails OPEN, so this
+    # disarms the direction silently in production while every synthetic case
+    # that hands the fields in directly stays green.
+    ("the query stops asking for the base branch, so rule C fails open and the "
+     "inert check silently disarms live",
+     "      baseRefName\n      baseRepository { defaultBranchRef { name } }\n",
+     ""),
+
+    # Rule A -- the graph must be empty. Deleting it makes prose about other
+    # tickets a finding on any PR that already links one correctly.
+    ("rule A goes, so a PR that DID register a link is reported for prose about "
+     "another ticket",
+     "    if links:\n        return []",
+     "    if False:\n        return []"),
+    # Rule C -- both directions, because it is a fail-open.
+    ("rule C goes, so every stacked PR and every train promotion with an honest "
+     "`Closes` is reported",
+     "    if base_default is not True:\n        return []",
+     "    if False:\n        return []"),
+    ("rule C swallows everything instead, so the direction never fires at all -- "
+     "the fail-open nobody can break is the fail-open nobody notices",
+     "    if base_default is not True:\n        return []",
+     "    if base_default is not None:\n        return []"),
+    ("a non-default base reads as the default, so rule C's exemption evaporates",
+     "    return base == default",
+     "    return True"),
+    # Rule B -- line-initial. The rule the 300-PR measurement added.
+    ("rule B goes, so a past participle used adjectivally (`the closed "
+     "backend#2643`) is a finding again -- 3 of 4 measured false positives",
+     "        if LINE_LEAD_RE.match(lead) is None:\n            continue",
+     "        if False:\n            continue"),
+    ("rule B admits words before the claim, which is the same thing by another "
+     "route",
+     r'LINE_LEAD_RE = re.compile(r"^[\s>*+\-#`_~]*$")',
+     r'LINE_LEAD_RE = re.compile(r"^.*$")'),
+    ("rule B stops admitting the backtick, so design-system-v2#119's measured "
+     "code-span shape stops being detected",
+     r'LINE_LEAD_RE = re.compile(r"^[\s>*+\-#`_~]*$")',
+     r'LINE_LEAD_RE = re.compile(r"^[\s>*+\-#_~]*$")'),
+
+    # The keyword scan itself.
+    ("the colon form stops being detected, so `Fixes: #47` reads as a working "
+     "closing keyword",
+     r'    + r")\s*:?\s+"',
+     r'    + r")\s+"'),
+
+    # --- the body a scan is allowed to see (readable_text) -------------------
+    # HTML comments. Both directions: leaving them in makes the org's own PR
+    # template a claim on every PR; and not stripping them at all restores the
+    # invisible-satisfaction half of the ticket.
+    ("HTML comments stop being stripped, so the PR template's own instruction "
+     "comment (`Closes #123`) becomes a claim on every PR that keeps it",
+     '    return HTML_COMMENT_RE.sub(STRIPPED, str(body))',
+     "    return str(body)"),
+    ("a stripped comment collapses to whitespace, so a keyword before it splices "
+     "onto a `#N` after it and the fix manufactures a reference nobody wrote",
+     'STRIPPED = "\N{REPLACEMENT CHARACTER}"',
+     'STRIPPED = " "'),
+    ("the comment pattern stops spanning newlines, so a multi-line template "
+     "comment is only half removed",
+     'HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)',
+     'HTML_COMMENT_RE = re.compile(r"<!--.*?-->")'),
 
     # --- the derived vocabulary (rule 1) ------------------------------------
     ("the non-closing vocabulary is hardcoded instead of parsed from the canon",

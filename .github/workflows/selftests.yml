@@ -44,8 +44,118 @@ permissions:
   contents: read
 
 jobs:
+  # THE MUTATION TIER IS SHARDED, AND `selftests` STAYS THE ONLY REQUIRED CONTEXT
+  # (backend#3157).
+  #
+  # `make mutations` ran all 15 runners serially, and each runner re-runs its whole
+  # selftest suite once per mutation row -- so the job's wall time grew with every
+  # row added anywhere in the fleet, with nothing about adding a row making that
+  # visible. Measured on the `mutation-check` step on develop: 3m08s (Sep 2) ->
+  # 9m03s (Sep 3) -> 9m26s (Sep 4), the last one taking the job to 10m13s and being
+  # CANCELLED on its timeout -- on develop's own tip (a57b3960, the #409 merge), so a
+  # REQUIRED check was red on the default branch. #410 raised the bound to 25 as a
+  # stopgap and said to shard rather than bid the number up if it recurred.
+  #
+  # WHY NOT A NEW REQUIRED CONTEXT. Two jobs below produce new contexts, and neither
+  # is required -- deliberately. A new required context has to be armed by hand in
+  # branch protection, and `LukasWodka` is the sole org admin, so "arm it later" is a
+  # single point of failure rather than a plan. Instead the shards' verdict is
+  # enforced through the EXISTING `selftests` context by the fan-in step in that job:
+  # branch protection needs no change, and an unarmed shard context cannot matter,
+  # because a red shard reds `selftests`.
+  #
+  # WHY THE FAN-IN CANNOT BE A BARE `needs:`. GitHub reports a SKIPPED required check
+  # as success, and a job whose `needs` failed is skipped -- so a bare dependency
+  # would turn a red shard into a green `selftests`. That is this repo's own
+  # promote.yml lesson (backend#1424): "A failing STEP is red and auditable; a
+  # skipped job would report green and hide the denial." Hence `if: always()` on
+  # `selftests` plus an explicit result assertion, with `skipped` and `cancelled`
+  # treated as failures rather than as the absence of a finding.
+  mutation-matrix:
+    name: mutation shard list
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.derive.outputs.shards }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Ask make for MUTATION_TARGETS
+        id: derive
+        run: |
+          set -euo pipefail
+          # ASKED OF MAKE, never restated here. A hand-written matrix would be a
+          # second copy of MUTATION_TARGETS, and the drift is silent in the worst
+          # direction: the runner that fell off still has a green `selftests` beside
+          # it (.github#300, twice). See the Makefile target's own comment.
+          mapfile -t targets < <(make --no-print-directory print-mutation-targets)
+          # FAIL CLOSED ON EMPTY. Zero shards means the matrix job never runs, and
+          # "nothing to check" must not read as "everything passed".
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "::error::derived NO mutation targets from the Makefile. Refusing to" \
+                 "report a sharded tier that would run nothing." >&2
+            exit 1
+          fi
+          for t in "${targets[@]}"; do
+            case "$t" in
+              mutation-*) ;;
+              *)
+                echo "::error::'${t}' is not a mutation-* target. The derivation read" \
+                     "something other than MUTATION_TARGETS; refusing to build a" \
+                     "matrix from it." >&2
+                exit 1 ;;
+            esac
+          done
+          printf 'derived %d shard(s):\n' "${#targets[@]}"
+          printf '  %s\n' "${targets[@]}"
+          shards="$(printf '%s\n' "${targets[@]}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
+          echo "shards=${shards}" >> "$GITHUB_OUTPUT"
+
+  mutation-shard:
+    # One runner per job. `fail-fast: false` so a red shard does not cancel the
+    # others -- the whole point is to learn about every failure in one run, and a
+    # cancelled sibling is indistinguishable from a passing one in the fan-in.
+    name: mutation ${{ matrix.target }}
+    needs: mutation-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.mutation-matrix.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install what the suites need
+        run: |
+          python -m pip install --quiet 'pyyaml==6.0.2'
+
+      - name: make ${{ matrix.target }}
+        env:
+          # Through env, never interpolated into the run line. The values come from
+          # our own Makefile, but a matrix value spliced into a shell command is the
+          # shape that stops being safe the moment the source changes.
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            mutation-*) ;;
+            *) echo "::error::refusing to run '${TARGET}': not a mutation-* target." >&2; exit 1 ;;
+          esac
+          make "$TARGET"
+
   selftests:
     name: selftests
+    # The mutation tier runs in the shards above; this job asserts their verdict, so
+    # `selftests` remains the single required context for the whole tier.
+    needs: [mutation-matrix, mutation-shard]
+    # `always()`, or a failed shard would SKIP this job and GitHub would report the
+    # skipped required check as success (backend#1424).
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     # 25, NOT 10, AND THE 10 WAS ALREADY FAILING (backend#3085). `make
     # mutations` re-runs a suite once per mutation row, so this job's cost grows
@@ -64,6 +174,28 @@ jobs:
     # the answer is to shard `make mutations`, not to keep bidding the number up.
     timeout-minutes: 25
     steps:
+      # FIRST, so a red shard fails this job before spending a minute on the rest.
+      # Every non-success result is a failure here, `skipped` and `cancelled`
+      # included: a shard that did not report is not a shard that passed.
+      - name: mutation tier — every shard succeeded (fan-in)
+        env:
+          MATRIX_RESULT: ${{ needs.mutation-matrix.result }}
+          SHARDS_RESULT: ${{ needs.mutation-shard.result }}
+        run: |
+          set -euo pipefail
+          rc=0
+          for pair in "mutation-matrix:${MATRIX_RESULT}" "mutation-shard:${SHARDS_RESULT}"; do
+            job="${pair%%:*}"; res="${pair#*:}"
+            if [ "$res" != "success" ]; then
+              echo "::error::${job} reported '${res}', not success — the mutation tier" \
+                   "did not pass. This context stays red so a failed shard cannot merge" \
+                   "behind a green required check (backend#1424)." >&2
+              rc=1
+            fi
+          done
+          [ "$rc" -eq 0 ] || exit 1
+          echo "mutation tier: matrix derived and every shard succeeded."
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -194,5 +326,3 @@ jobs:
           fi
           make reason-citations
 
-      - name: mutation-check (every runner in MUTATION_TARGETS)
-        run: make mutations
