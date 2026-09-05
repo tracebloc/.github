@@ -86,6 +86,20 @@ CALLER_MUTATIONS = [
     ("the caller drops `edited`, so no base change ever re-runs the gate",
      ', unlabeled, edited]',
      ', unlabeled]'),
+
+    # THE OTHER THREE SKIP-FILTERS (Bugbot, backend#3161). `branches:` above is one
+    # of GitHub's four trigger filters; `branches-ignore`, `paths` and `paths-ignore`
+    # weld the gate on a retarget the same way. One mutation each proves the selftest
+    # now rejects the whole class, not just `branches:`.
+    ("the caller reacquires a `branches-ignore:` filter it cannot re-run through",
+     '  pull_request:\n    types:',
+     '  pull_request:\n    branches-ignore: [develop]\n    types:'),
+    ("the caller reacquires a `paths:` filter it cannot re-run through",
+     '  pull_request:\n    types:',
+     '  pull_request:\n    paths: ["**"]\n    types:'),
+    ("the caller reacquires a `paths-ignore:` filter it cannot re-run through",
+     '  pull_request:\n    types:',
+     '  pull_request:\n    paths-ignore: ["docs/**"]\n    types:'),
 ]
 
 ALL_MUTATIONS = ([("reusable", *m) for m in REUSABLE_MUTATIONS]
