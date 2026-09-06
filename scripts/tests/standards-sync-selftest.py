@@ -786,7 +786,8 @@ finally:
 # above the secret: aborting before the audit turns "PRs could not be opened"
 # into "fleet state unknown", which is strictly less information. So the run
 # must still classify and report the whole fleet, push nothing, and exit 2.
-def _run_main(argv, token, remediate_calls, targets=("alpha",), remediate=None, probe=None):
+def _run_main(argv, token, remediate_calls, targets=("alpha",), remediate=None,
+              probe=None, fetch=None):
     """`main()` with the fleet reads stubbed. Returns (exit_code, report).
 
     `targets` and `remediate` are parameters because backend#2690 is a
@@ -808,8 +809,11 @@ def _run_main(argv, token, remediate_calls, targets=("alpha",), remediate=None, 
     sync.load_targets = lambda _p: ("tracebloc", list(targets))
     sync.resolve_branch = lambda _o, _r: "develop"
     # No markers, so it classifies as drifted -- the only state that reaches
-    # the remediation branch at all.
-    sync.fetch_claude_md = lambda _o, _r, _b: "# CLAUDE.md\n\nrepo-owned prose.\n"
+    # the remediation branch at all. `fetch` overrides per-repo (org, repo, branch)
+    # so a test can put some targets IN_SYNC and others drifted -- needed to prove
+    # the pr-capability probe fires on the first *drifted* repo, not `targets[0]`.
+    sync.fetch_claude_md = fetch or (
+        lambda _o, _r, _b: "# CLAUDE.md\n\nrepo-owned prose.\n")
     sync.remediate = remediate or _remediate
     # The pr-capability probe (backend#3187) hits the network for real, so it is
     # neutralised by default and a test that wants a refusal passes `probe=`.
@@ -919,6 +923,45 @@ try:
         record(code == 0 and len(calls) == 1 and "REMEDIATION DISABLED" not in report,
                "main: the probe disarm is not vacuous -- a passing probe remediates",
                f"code={code} calls={len(calls)}")
+
+        # #419 nit 2: THE PROBE IS FIRST-DRIFT, NOT EVERY-RUN. An in-sync fleet
+        # has nothing to remediate, so the pr-capability canary must not fire --
+        # a probe refusal reddening a no-op run (exit 2 where the pre-probe code
+        # returned 0) was the regression. Every target IN_SYNC, and a probe that
+        # WOULD refuse: it must never be consulted, and the run exits 0.
+        in_sync = sync.build_desired(None, CANON, sync.NO_FILE)
+        probe_seen: list = []
+        calls = []
+        code, report = _run_main(
+            ["--create-prs"], "a-usable-pat", calls, targets=("alpha", "bravo"),
+            fetch=lambda _o, _r, _b: in_sync,
+            probe=lambda _t, _o, r: probe_seen.append(r) or "would refuse",
+        )
+        record(code == 0 and not probe_seen and not calls
+               and "REMEDIATION DISABLED" not in report,
+               "main: an in-sync fleet never fires the pr-capability probe (exit 0)",
+               f"code={code} probe_seen={probe_seen} calls={calls} -- a no-op run "
+               "must not redden on a credential it never needed")
+
+        # #419 nit 1: THE CANARY MATCHES THE FIRST REAL WRITE. `targets[0]` is
+        # alphabetically-first, not necessarily the first *drifted* repo, so a PAT
+        # that cannot read `targets[0]` but can write the drifted repos was
+        # disarming the whole fleet. The probe must hit the first drifted target
+        # (`bravo` here, with `alpha` IN_SYNC) -- the repo `remediate()` writes
+        # first -- so the canary and the first write are the same repo.
+        drifted = "# CLAUDE.md\n\nrepo-owned prose.\n"
+        by_repo = {"alpha": in_sync, "bravo": drifted}
+        probe_seen = []
+        calls = []
+        code, report = _run_main(
+            ["--create-prs"], "a-usable-pat", calls, targets=("alpha", "bravo"),
+            fetch=lambda _o, r, _b: by_repo[r],
+            probe=lambda _t, _o, r: probe_seen.append(r) or None,
+        )
+        record(probe_seen == ["bravo"] and code == 0 and len(calls) == 1,
+               "main: the pr-capability probe hits the first DRIFTED target, not targets[0]",
+               f"probe_seen={probe_seen} code={code} calls={len(calls)} -- alpha is "
+               "IN_SYNC and targets[0]; the canary must match bravo, the first write")
     finally:
         sync.check_author_identity = _real_check
 
