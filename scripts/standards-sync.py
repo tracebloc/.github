@@ -463,6 +463,44 @@ def check_author_identity(token: str) -> "str | None":
     return None
 
 
+def probe_pr_capability(token: str, org: str, repo: str) -> "str | None":
+    """Exercise the GraphQL surface `gh pr create` needs, or say why it can't.
+
+    RESOLVES IS NOT CAN-OPEN-A-PR (tracebloc/backend#3187, run 33868935395).
+    `check_author_identity` proves the token exists, resolves, and is not the
+    reviewer -- and none of that proves it can reach the target repos. The
+    measured failure was a fine-grained PAT with no grant on the fleet: it
+    passed every identity check and then died on the first `gh pr create` with
+    `Resource not accessible by personal access token (repository.defaultBranchRef)`
+    -- AFTER remediate() had already pushed a branch. `gh pr create` issues that
+    `repository.defaultBranchRef` query before it opens anything, so reading it
+    here against one real target reproduces the exact denial in the pre-flight,
+    before any branch is pushed.
+
+    BOUNDED, NOT A PROOF -- the same honesty as AuthorUnusable. A successful
+    read shows the token can reach this repo's refs; it does NOT prove
+    `pull_requests: write`, which only opening a PR proves. So this closes the
+    #3187 gap (a token refused at defaultBranchRef) while claiming no more than
+    it establishes: a token that reads the ref but cannot create still fails at
+    the first `pr create`, and AuthorUnusable bounds that to one orphan branch.
+    Probes ONE repo -- the caller passes the first *drifted* target, i.e. the
+    repo `remediate()` will write first (@saqlainsyed007, #419), so the canary
+    matches the first real write. A token covering the drifted repos but not some
+    other target is not disarmed here, and a token that reads this repo's ref but
+    is refused on a *later* drifted one is still caught at that repo mid-sweep.
+    """
+    query = ("query($owner:String!,$name:String!)"
+             "{repository(owner:$owner,name:$name){defaultBranchRef{name}}}")
+    code, _, err = gh("api", "graphql", "-f", f"query={query}",
+                      "-f", f"owner={org}", "-f", f"name={repo}", token=token)
+    if code == 0:
+        return None
+    return (f"{AUTHOR_TOKEN_ENV} resolves but cannot read repository.defaultBranchRef "
+            f"on {org}/{repo}: {err.strip() or 'empty error'}. `gh pr create` makes "
+            "this exact query first, so it would fail mid-rollout after a branch was "
+            "already pushed. Refusing before any branch is pushed (backend#3187).")
+
+
 def _ensure_pr(full: str, head: str, base: str, issue: int,
                author_token: str) -> "str | None":
     # THE AUTHOR IS READ, NOT ASSUMED (Bugbot, #348). The number alone was
@@ -605,6 +643,18 @@ def main() -> int:
     # switches remediation off, the fleet is still classified and reported, and
     # the run exits 2 naming the credential. No branch is pushed either way,
     # which is the whole of what the move to `main()` bought.
+    #
+    # IDENTITY IS PRE-LOOP; PR-CAPABILITY IS FIRST-DRIFT (@saqlainsyed007, #419).
+    # `check_author_identity` is a pure property of the token (exists, resolves,
+    # is not the reviewer), so it stays here -- a token that fails it disarms
+    # before the audit at no cost. The `probe_pr_capability` canary is NOT such a
+    # property: probing `targets[0]` before the audit fired on every run, so an
+    # in-sync fleet (drifted == 0) reddened to exit 2 where it used to return 0,
+    # and it probed the alphabetically-first repo rather than the one that will
+    # actually be written -- disarming the fleet when the PAT could not read
+    # `targets[0]` but could write the drifted repos. Deferred into the loop
+    # (below), it fires once, against the first drifted target, only when there
+    # is drift to remediate.
     author_token = ""
     author_refusal = ""
     if args.create_prs:
@@ -615,6 +665,7 @@ def main() -> int:
             sys.stderr.write("::error::Remediation is disabled for this run; the "
                              "read-only audit below still ran.\n")
     remediating = args.create_prs and not author_refusal
+    pr_probe_done = False
 
     rows: "list[tuple[str, str, str, str]]" = []
     drifted = unreadable = write_errors = 0
@@ -636,6 +687,23 @@ def main() -> int:
             action = "unpaired/duplicated markers — repair by hand, never auto-spliced"
         elif state != IN_SYNC:
             drifted += 1
+            if remediating and not pr_probe_done:
+                # THE PR-CAPABILITY CANARY, FIRED ON THE FIRST DRIFT (#419). This
+                # is the first repo `remediate()` is about to write, so probing
+                # its `defaultBranchRef` -- the exact surface `gh pr create`
+                # queries first -- reproduces a pr-create denial before any branch
+                # is pushed, matching the real first write. Runs once: a refusal
+                # sets `author_refusal`, flips `remediating` off, and every later
+                # drifted repo takes the NOT-REMEDIATED path via that flag, just
+                # as the old pre-loop probe short-circuited the whole sweep. An
+                # in-sync fleet never reaches here, so it returns 0 as before.
+                pr_probe_done = True
+                author_refusal = probe_pr_capability(author_token, org, repo) or ""
+                if author_refusal:
+                    sys.stderr.write(f"::error::{author_refusal}\n")
+                    sys.stderr.write("::error::Remediation is disabled for this "
+                                     "run; the read-only audit below still ran.\n")
+                    remediating = False
             if args.create_prs and not remediating:
                 # NAMED PER ROW, so the report cannot be mistaken for a plain
                 # audit that nobody asked to remediate. Not counted as a write
