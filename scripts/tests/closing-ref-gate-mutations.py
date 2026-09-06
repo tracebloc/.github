@@ -119,7 +119,7 @@ MUTATIONS = [
     # --- the three reported states stay three --------------------------------
     ("a title naming no ticket is treated as a checked PASS",
      "    if not named:",
-     "    if False and not refs:"),
+     "    if False and not named:"),
     ("the wrong-repo finding is reported as a plain missing link",
      "        elif verdict == WRONG_REPO:",
      "        elif False and verdict == WRONG_REPO:"),
