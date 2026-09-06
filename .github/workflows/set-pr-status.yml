@@ -406,11 +406,22 @@ jobs:
           owner: ${{ github.repository_owner }}
           permission-pull-requests: read
           permission-issues: read
+          # NO `contents` scope, on purpose (backend#3240). The gate used to read
+          # `baseRepository { defaultBranchRef { name } }` over GraphQL; a Ref is
+          # a contents object, world-readable on a public repo and gated on a
+          # private one, and from 2026-09-06 06:29Z that single field made every
+          # private-repo run fail with "Resource not accessible by integration"
+          # while public repos passed in the same minute. This token is
+          # org-scoped (`owner:` + an all-repositories installation), so adding
+          # contents:read here would have widened it on every repo for a value
+          # the event payload already carries: it is passed in below as
+          # PR_BASE_DEFAULT_BRANCH instead, and the query no longer asks.
 
       - name: The title names a ticket, so the PR must link it
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_DEFAULT_BRANCH: ${{ github.event.pull_request.base.repo.default_branch }}
           SOFT_FAIL: ${{ inputs.closing-ref-soft-fail && 'true' || 'false' }}
         run: python3 .closing-ref-tools/scripts/closing-ref-gate.py
