@@ -301,10 +301,12 @@ MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-branch-owner mutation-reason-citations \
                    mutation-mutation-baseline mutation-standards-sync \
                    mutation-conflict-gate \
+                   mutation-fr-gate \
                    mutation-triage-labels \
                    mutation-archive-baseline \
                    mutation-reusable-no-cancel \
-                   mutation-lint-targets
+                   mutation-lint-targets \
+                   mutation-shard-shape
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -323,6 +325,22 @@ MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
 .PHONY: mutations mutations-dry
 mutations: $(MUTATION_TARGETS)
 mutations-dry: $(addsuffix -dry,$(MUTATION_TARGETS))
+
+.PHONY: print-mutation-targets
+# THE SHARD LIST, ASKED OF MAKE RATHER THAN RESTATED IN YAML (backend#3157).
+#
+# CI shards the mutation tier across MUTATION_TARGETS. A matrix written out by
+# hand in selftests.yml would be a second copy of this list, and the drift is
+# silent in the worst direction: the runner that fell off the matrix still has a
+# green `selftests` sitting beside it, so the tier reads covered while one member
+# never ran. That is the .github#300 shape -- naming ONE member of a list that
+# must move together -- which this Makefile has already been bitten by twice.
+#
+# make expands its own variable, so there is no parser here to drift either.
+# `printf '%s\n'` puts one target per line: the list is whitespace-separated
+# across continuations, and a single `echo` would hand CI one blob to re-split.
+print-mutation-targets:
+	@printf '%s\n' $(MUTATION_TARGETS)
 
 .PHONY: selftests
 # The targets that actually RUN a selftest. Named once: `selftests` depends on
@@ -343,6 +361,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-branch-owner \
                     selftest-mutation-baseline \
                     selftest-conflict-gate \
+                    selftest-fr-gate \
+                    selftest-shard-shape \
                     selftest-triage-labels \
                     selftest-archive-baseline \
                     selftest-reusable-no-cancel \
@@ -413,15 +433,14 @@ selftests-cover:
 	    echo "  silently — it happened twice in .github#300. Depend on the list."; \
 	    fail=1; }; \
 	done; \
-	for t in selftests mutations; do \
-	  grep -qE "^[[:space:]]*run:[[:space:]]*make[[:space:]]+$$t([[:space:]]|$$)" "$$wf" || { \
-	    echo "$$wf does not run 'make $$t'."; \
-	    echo "  Being wired to a Makefile target is only half of it: the tier also has to"; \
-	    echo "  EXECUTE in CI. mutation-pipefail-early-close was covered by this guard and"; \
-	    echo "  never run, because the workflow named one member of MUTATION_TARGETS"; \
-	    echo "  instead of the list (Bugbot, .github#300). Covered on paper, unrun in fact."; \
-	    fail=1; }; \
-	done; \
+	grep -qE "^[[:space:]]*run:[[:space:]]*make[[:space:]]+selftests([[:space:]]|$$)" "$$wf" || { \
+	  echo "$$wf does not run 'make selftests'."; \
+	  echo "  Being wired to a Makefile target is only half of it: the tier also has to"; \
+	  echo "  EXECUTE in CI. mutation-pipefail-early-close was covered by this guard and"; \
+	  echo "  never run, because the workflow named one member of MUTATION_TARGETS"; \
+	  echo "  instead of the list (Bugbot, .github#300). Covered on paper, unrun in fact."; \
+	  fail=1; }; \
+	$(PYTHON) scripts/shard-shape-check.py || fail=1; \
 	[ "$$fail" = 0 ] || exit 1; \
 	echo "selftests-cover: all $(words $(SELFTEST_FILES)) selftests and $(words $(MUTATION_FILES)) mutation runner(s) are wired to a target, and CI runs both tiers"
 
@@ -568,6 +587,21 @@ mutation-conflict-gate:
 mutation-conflict-gate-dry:
 	$(PYTHON) scripts/tests/conflict-gate-mutations.py --dry
 
+# The FR gate's base decision and trigger (backend#2840). guard-pyyaml: the suite
+# parses fr-gate.yml and fr-gate-caller.yml -- it extracts the `case "$BASE"`
+# mapping out of the reusable and runs it verbatim, and reads the caller's trigger
+# from the same document. No token, no network: every case is bash in a temp dir.
+.PHONY: selftest-fr-gate
+selftest-fr-gate: guard-pyyaml
+	$(PYTHON) scripts/tests/fr-gate-selftest.py
+
+.PHONY: mutation-fr-gate mutation-fr-gate-dry
+mutation-fr-gate:
+	$(PYTHON) scripts/tests/fr-gate-mutations.py
+
+mutation-fr-gate-dry:
+	$(PYTHON) scripts/tests/fr-gate-mutations.py --dry
+
 # The closing-ref gate (backend#2364): a PR whose TITLE names a ticket must LINK
 # it. NO guard-pyyaml, for the same asserted reason as bugbot-gate above -- the
 # checker imports only the standard library, and its job in `set-pr-status.yml`
@@ -625,6 +659,21 @@ selftest-lint-targets: guard-pyyaml
 .PHONY: mutation-lint-targets mutation-lint-targets-dry
 mutation-lint-targets:
 	$(PYTHON) scripts/tests/lint-targets-mutations.py
+
+# The shard-shape audit's own tier (.github#412). It shipped with neither a
+# selftest nor a mutation runner while every sibling audit had both, and the
+# cost was four negative cases in two review rounds -- each a token the guard
+# read where it does not mean what it says.
+.PHONY: selftest-shard-shape
+selftest-shard-shape: guard-pyyaml
+	$(PYTHON) scripts/tests/shard-shape-selftest.py
+
+.PHONY: mutation-shard-shape mutation-shard-shape-dry
+mutation-shard-shape:
+	$(PYTHON) scripts/tests/shard-shape-mutations.py
+
+mutation-shard-shape-dry:
+	$(PYTHON) scripts/tests/shard-shape-mutations.py --dry
 
 mutation-lint-targets-dry:
 	$(PYTHON) scripts/tests/lint-targets-mutations.py --dry

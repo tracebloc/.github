@@ -30,12 +30,25 @@ anchor matching zero times is stale and fails the run, exactly like an uncaught
 mutation. `--dry` resolves every anchor without running the suite, which is the
 cheap check that belongs in `make lint`.
 
+AND EVERY MUTANT MUST PARSE, checked before it is trusted (backend#3085). A
+mutant that does not parse reddens the WHOLE suite -- the expected case is then
+among the failures by luck rather than by dependency, and the run scores
+`caught` about a program that never ran. Four rows shipped that way: two wrote a
+literal NUL into the Python target, two anchored mid-regex in the awk and left
+an unclosed `(`. `MISCAUGHT` cannot catch this class, by construction: it asks
+whether the expected case was among the failures, and reddening EVERYTHING
+includes reddening the expected case. So the parse is a separate gate, its
+verdict is STALE for the same reason a dead anchor's is -- the row is not
+exercising what it claims -- and it runs on `--dry` too, which is what
+`make check` runs on every push.
+
   pipefail-early-close-mutations.py          run them all
   pipefail-early-close-mutations.py --dry    resolve anchors only
 """
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -271,17 +284,28 @@ MUTATIONS = [
      '    while i < len(tokens) and os.path.basename(tokens[i]) == "env":',
      '    while False:',
      "'/usr/bin/env bash -eo pipefail {0}' IS armed, not skipped"),
+    # THE MUTANT MUST PARSE (backend#3085). This dropped the `== "env"` test by
+    # comparing against a literal NUL, which Python refuses to compile at all
+    # ("source code string cannot contain null bytes"): every YAML case reddened,
+    # the named case was among them by luck rather than by dependency, and the
+    # run scored `caught` while proving only that a NUL breaks Python. Dropping
+    # the condition outright says the same thing and compiles.
     ("the peel walks past ANY program, so `sudo bash` reads as bash", YML,
      '    while i < len(tokens) and os.path.basename(tokens[i]) == "env":',
-     '    while i < len(tokens) and os.path.basename(tokens[i]) != "\x00":',
+     '    while i < len(tokens):',
      "'sudo bash -eo pipefail {0}' is NOT treated as plain bash"),
     # And the value-flag list, which is wrong in both directions too: `-S`
     # takes no separate value (its argument is the rest of the command), while
     # `-C DIR` does.
+    # SAME DEFECT, AND A SECOND ONE UNDERNEATH IT (backend#3085). The NUL made
+    # the mutant unparseable, as above; and the expected case named the BARE
+    # `-S`, which is armed with or without the carve-out -- the flag loop falls
+    # through to "consumes nothing" either way, so it could never pin this.
+    # `if False:` compiles, and the cluster cases are the ones that decide.
     ("`-S` eats the program, so `env -S bash` is skipped", YML,
      '            if char == "S":\n                return False',
-     '            if char == "\x00":\n                return False',
-     "'env -S bash -eo pipefail {0}' IS armed (-S takes no separate value)"),
+     '            if False:\n                return False',
+     "the cluster the -S carve-out is measured by"),
     ("`-C` stops consuming its DIR, so the DIR becomes the program", YML,
      '    _VALUE_SHORT = "uC"',
      '    _VALUE_SHORT = ""',
@@ -333,12 +357,21 @@ MUTATIONS = [
             return 2''',
      '''            continue'''),
     # --- the arms added for the two MEASURED gaps (backend#2967) -----------
+    # THE ANCHOR SPANS THE REGEX'S CLOSING `/`, so the `)` has something to
+    # close (backend#3085). Copied from the `grep` rows above but anchored
+    # MID-REGEX at `q(` / `read(`, the `(0 && ` these prepend was never closed:
+    # awk rejected the mutant (rc 2, BSD awk and gawk alike), the whole suite
+    # reddened, and the run scored `caught` on a program that never ran.
+    # GENERATED, not retyped -- the terminator class carries a quote, a
+    # backslash and a \001, and mis-escaping it by hand is exactly how the
+    # first version of these two rows came to be inert.
     ("the sed q arm never fires", AWK,
-     '|| probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q(',
-     '|| (0 && probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q('),
+     '|| probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q([[:space:]]|$|[)"\'\\\'\'`;|&\\001])/',
+     '|| (0 && probe ~ /\\|&?[[:space:]]*sed[^|\\001]*q([[:space:]]|$|[)"\'\\\'\'`;|&\\001])/)'),
+    # ...and the same fix on the read arm, whose anchor stopped at `read(`.
     ("the read arm never fires", AWK,
-     '|| probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read(',
-     '|| (0 && probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read('),
+     '|| probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read([[:space:]]|$|[)"\'\\\'\'`;|&\\001])/',
+     '|| (0 && probe ~ /\\|&?[[:space:]]*([A-Za-z_][A-Za-z_0-9]*=[^[:space:]|\\001]*[[:space:]]+)*read([[:space:]]|$|[)"\'\\\'\'`;|&\\001])/)'),
     # THE SED ARM'S TERMINATOR, which is the part that actually discriminates.
     # The mutation here used to loosen the script TOKEN and was reported
     # UNCAUGHT -- correctly, because the token shape changes nothing: the `q`
@@ -385,6 +418,64 @@ MUTATIONS = [
 ]
 
 
+# HOW EACH TARGET LANGUAGE IS PARSED, keyed by suffix rather than by which
+# module-level name holds the path -- a fourth target added above then arrives
+# here as "no parser" (a finding) instead of silently unchecked. Each was
+# measured against the real file and against a deliberate syntax error: rc 0 and
+# silent on the real program, non-zero on the break.
+def _parse_python(src: str) -> "str | None":
+    try:
+        compile(src, "<mutant>", "exec")
+    except (SyntaxError, ValueError) as exc:  # ValueError: NUL, on older 3.x
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+def _parse_external(argv: "list[str]", suffix: str) -> "callable":
+    def check(src: str) -> "str | None":
+        with tempfile.NamedTemporaryFile("w", suffix=suffix, encoding="utf-8",
+                                         delete=False) as fh:
+            fh.write(src)
+            path = fh.name
+        try:
+            run = subprocess.run(argv + [path], capture_output=True, text=True,
+                                 stdin=subprocess.DEVNULL)
+        finally:
+            Path(path).unlink(missing_ok=True)
+        if run.returncode == 0:
+            return None
+        err = (run.stderr or run.stdout).strip().replace(path, "<mutant>")
+        return f"rc {run.returncode}: {' / '.join(err.splitlines())[:180]}"
+    return check
+
+
+# `awk -f PROG` with stdin on /dev/null parses and then runs against empty
+# input, so it needs no fixture -- measured rc 0 and silent on the real
+# `.awk`, rc 2 on a syntax error. `bash -n` parses without executing at all.
+# Both take the mutant through a temp file because neither reads a program
+# from stdin while stdin is also the input stream.
+PARSERS = {
+    ".py": _parse_python,
+    ".sh": _parse_external(["bash", "-n"], ".sh"),
+    ".awk": _parse_external(["awk", "-f"], ".awk"),
+}
+
+
+def mutant_syntax_error(target: Path, src: str) -> "str | None":
+    """Whether this mutant of `target` will not even parse.
+
+    An unparseable mutant is the same defect as a dead anchor -- it does not
+    exercise what the row claims -- so it gets the same verdict. It is NOT
+    detectable downstream: it reddens every case, which satisfies both "the
+    suite noticed" and "the expected case was among the failures".
+    """
+    parse = PARSERS.get(target.suffix)
+    if parse is None:
+        # Fail closed: "cannot tell" is a finding, not evidence of agreement.
+        return f"no parser is declared for a {target.suffix or 'suffix-less'} target"
+    return parse(src)
+
+
 def apply_one(src: str, old: str, new: str) -> "str | None":
     n = src.count(old)
     if n != 1:
@@ -418,6 +509,14 @@ def main() -> int:
             continue
         if mutated is None:
             stale.append((label, "NO-OP: the mutation changed nothing"))
+            continue
+        # BEFORE THE MUTANT IS TRUSTED (backend#3085), and before `--dry`
+        # reports the anchor good: an anchor can resolve exactly once and still
+        # produce a program that does not parse.
+        broken = mutant_syntax_error(target, mutated)
+        if broken:
+            stale.append((label, f"INVALID MUTANT: {broken}"))
+            print(f"  INVALID MUTANT  {label}\n                  {broken}")
             continue
         if dry:
             print(f"  anchor ok  {label}")
