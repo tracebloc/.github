@@ -407,12 +407,15 @@ jobs:
           permission-pull-requests: read
           permission-issues: read
           # `contents: read` is for ONE field of the gate's query,
-          # `baseRepository { defaultBranchRef { name } }`: a Ref is a contents
-          # object, and from 2026-09-06 06:29Z every closing-ref run in the org
-          # failed with "Resource not accessible by integration" while the
-          # set-status job above, same App, same run, kept passing
-          # (backend#3240). The App holds contents:write at install time, so
-          # this widens the minted token by a read it already had the right to.
+          # `baseRepository { defaultBranchRef { name } }`. A Ref is a contents
+          # object: world-readable on a public repo, gated on a private one.
+          # From 2026-09-06 06:29Z every closing-ref run in a PRIVATE repo
+          # failed with "Resource not accessible by integration" while public
+          # repos (client, .github) kept passing in the same minute, and the
+          # set-status job above -- same App, same run, no Ref read -- never
+          # failed anywhere (backend#3240). The App holds contents:write at
+          # install time, so this widens the minted token by a read it already
+          # had the right to.
           permission-contents: read
 
       - name: The title names a ticket, so the PR must link it
