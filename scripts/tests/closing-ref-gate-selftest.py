@@ -1531,6 +1531,186 @@ check(
 )
 
 # ---------------------------------------------------------------------------
+# 9. THE HOUSE SHORTHAND, resolved against the org's declared repo list
+#    (tracebloc/.github#416). `engine#898` in a title was read as repo
+#    `tracebloc/engine`, so `Part of tracebloc/tracebloc-engine#898` in the body
+#    did not satisfy it and the gate went red on tracebloc-engine#900. The map is
+#    DERIVED from repo-inventory.yml (rule 1); an unknown short name is a
+#    finding, never a guess and never a silent pass.
+#
+#    THE INPUTS ARE WRITTEN DOWN INDEPENDENTLY OF THE PARSER (rule 9's corollary):
+#    the inventory text below is typed here, and the names expected out of it are
+#    typed here, so the module is never checked against its own constants.
+# ---------------------------------------------------------------------------
+
+_INVENTORY_TEXT = """# a comment before anything
+schema_version: 2
+org: acme   # trailing comment must not become part of the name
+reusables:
+  set-pr-status.yml: {}
+repos:
+  # a comment inside the block
+  .dotted:
+    visibility: private
+    callers:
+      set-pr-status.yml: required
+  acme-engine:
+    visibility: private
+
+  backend:
+    protection: {}
+shared_reasons:
+  not_a_repo: "this block comes AFTER repos and must not be read"
+"""
+
+_org, _names = value(lambda: gate.declared_repos(_INVENTORY_TEXT))
+check("the inventory's declared `org:` is read, without its trailing comment",
+      _org == "acme", "%r" % (_org,))
+check("the `repos:` block's 2-space keys are the repo names, in file order; nested "
+      "keys, comments, blank lines and the following block are not",
+      _names == [".dotted", "acme-engine", "backend"], "%r" % (_names,))
+check("an inventory with no `repos:` block declares no repositories",
+      value(lambda: gate.declared_repos("org: acme\nreusables: {}\n")) == ("acme", []))
+check("an inventory with no `org:` reports None for it",
+      value(lambda: gate.declared_repos("repos:\n  backend: {}\n")) == (None, ["backend"]))
+
+# The REAL inventory, as the production path reads it. The literals here are a
+# floor typed independently of the file: the header of repo-inventory.yml says
+# "ALL 20 repos", and these four are the ones this ticket and its neighbours turn
+# on. A rename or removal reddens this by name rather than by count.
+_real_org, _real_names = value(lambda: gate.known_repos())
+check("the real inventory declares org `tracebloc`", _real_org == "tracebloc", "%r" % (_real_org,))
+check("the real inventory is read as the org's fleet (>= 20 repos), not a fragment",
+      isinstance(_real_names, list) and len(_real_names) >= 20, "%r" % (_real_names,))
+for _name in ("tracebloc-engine", "client-runtime", "backend", ".github"):
+    check("the real inventory declares `%s`" % _name, _name in _real_names, "%r" % (_real_names,))
+check("no repo named `engine` or `runtime` exists: the shorthand MUST be resolved, "
+      "it is not a repo", "engine" not in _real_names and "runtime" not in _real_names)
+
+# Fail closed, by name (rule 3, rule 10).
+_TMP_INV = pathlib.Path(tempfile.mkdtemp(prefix="closing-ref-inventory-"))
+expect_unreadable("an unreadable inventory is a cannot-tell, not an empty fleet",
+                  lambda: gate.known_repos(root=_TMP_INV / "no-such-dir"),
+                  "repo-inventory.yml could not be read")
+(_TMP_INV / gate.INVENTORY_FILE).write_text("org: acme\nreusables: {}\n", encoding="utf-8")
+expect_unreadable("an inventory declaring no repositories refuses rather than calling "
+                  "every title's repo unknown",
+                  lambda: gate.known_repos(root=_TMP_INV),
+                  "declares no repositories")
+(_TMP_INV / gate.INVENTORY_FILE).write_text("repos:\n  backend: {}\n", encoding="utf-8")
+expect_unreadable("an inventory declaring no `org:` refuses",
+                  lambda: gate.known_repos(root=_TMP_INV),
+                  "declares no `org:`")
+
+# Resolution, against the real inventory. Inputs: the shorthand the org writes.
+def _resolved(owner, repo, number=898):
+    out = value(lambda: gate.resolve_repo(gate.TicketRef(owner, repo, number, "scope"),
+                                          (_real_org, _real_names)))
+    if isinstance(out, str):
+        return out
+    return (out.owner, out.repo, out.number)
+
+check("`engine` resolves to `tracebloc-engine` because the inventory declares it",
+      _resolved(None, "engine") == (None, "tracebloc-engine", 898), "%r" % (_resolved(None, "engine"),))
+check("`Engine` resolves too: the shorthand is case-insensitive like GitHub's names",
+      _resolved(None, "Engine") == (None, "tracebloc-engine", 898))
+check("`tracebloc/engine` (the org spelled out) resolves the same way",
+      _resolved("tracebloc", "engine") == ("tracebloc", "tracebloc-engine", 898))
+check("`py-package` resolves to `tracebloc-py-package`",
+      _resolved(None, "py-package") == (None, "tracebloc-py-package", 898))
+check("a declared name is returned in the inventory's own spelling",
+      _resolved(None, "BACKEND") == (None, "backend", 898))
+check("`runtime` resolves to NOTHING: there is no `tracebloc-runtime`, and guessing "
+      "`client-runtime` would be a table nobody declared",
+      _resolved(None, "runtime") == (None, "runtime", 898))
+check("another org's repo is left alone: the inventory says nothing about it",
+      _resolved("otherorg", "engine", 5) == ("otherorg", "engine", 5))
+check("a bare number has no repo to resolve",
+      _resolved(None, None) == (None, None, 898))
+
+_inv = (_real_org, _real_names)
+check("classify: an unresolved short name is UNKNOWN_REPO even when some repo links that number",
+      value(lambda: gate.classify(gate.TicketRef(None, "runtime", 123, "scope"),
+                                  [("tracebloc", "client-runtime", 123)], (), _inv)) == gate.UNKNOWN_REPO)
+check("classify: another org's repo is not unknown; it is simply not linked",
+      value(lambda: gate.classify(gate.TicketRef("otherorg", "engine", 5, "scope"), [], (), _inv)) == gate.MISSING)
+check("classify: without an inventory the historical verdicts stand",
+      value(lambda: gate.classify(gate.TicketRef(None, "runtime", 123, "scope"),
+                                  [("tracebloc", "client-runtime", 123)], ())) == gate.WRONG_REPO)
+
+# The measured shape (tracebloc-engine#900, 2026-09-05): shorthand in the title,
+# the long form in the body, and NO closing link -- a child PR.
+_ENGINE_TITLE = "feat(sharding): every rank reads its own shard (engine#898)"
+verdict, lines = ev(pr(_ENGINE_TITLE, body="Part of tracebloc/tracebloc-engine#898"))
+check("#416: `engine#898` in the title is satisfied by `Part of tracebloc/tracebloc-engine#898`",
+      verdict == gate.PASS, "%s %r" % (verdict, lines))
+check("#416: the report names the repo as the inventory spells it",
+      any(line.startswith("Title names: tracebloc-engine#898") for line in lines), "%r" % (lines,))
+check("#416: the report says what was resolved and from which file",
+      any("Shorthand resolved against repo-inventory.yml: engine -> tracebloc-engine" in line
+          for line in lines), "%r" % (lines,))
+check("#416: it is reported as a declared body reference, not a closing link",
+      any("tracebloc-engine#898 -- declared body reference" in line for line in lines), "%r" % (lines,))
+
+verdict, lines = ev(pr(_ENGINE_TITLE, links=[("tracebloc/tracebloc-engine", 898)]))
+check("#416: `engine#898` is satisfied by a closing link to tracebloc/tracebloc-engine#898",
+      verdict == gate.PASS, "%s %r" % (verdict, lines))
+check("#416: ... and reported as the closing link it is",
+      any("tracebloc-engine#898 -- closing link" in line for line in lines), "%r" % (lines,))
+
+verdict, lines = ev(pr(_ENGINE_TITLE, body="Part of engine#898"))
+check("#416: shorthand in the BODY resolves through the same map, so the two agree",
+      verdict == gate.PASS, "%s %r" % (verdict, lines))
+
+verdict, lines = ev(pr(_ENGINE_TITLE, links=[("tracebloc/backend", 898)]))
+check("#416: a link to backend#898 does not satisfy the resolved tracebloc-engine#898 (wrong repo)",
+      verdict == gate.FAIL and any("wrong repository" in line for line in lines), "%s %r" % (verdict, lines))
+check("#416: the wrong-repo remedy spells the RESOLVED repo",
+      any("Closes tracebloc/tracebloc-engine#898" in line for line in lines), "%r" % (lines,))
+
+# An unknown short name is a FINDING -- in both directions a silent pass could hide.
+verdict, lines = ev(pr("fix(runtime#123): a title naming a repo that does not exist"))
+_advice = " ".join(lines)
+check("an unknown short repo name FAILS", verdict == gate.FAIL, "%s" % verdict)
+check("the finding says the repo is not in the inventory and names the file",
+      "not a repository in the org inventory (repo-inventory.yml declares:" in _advice, "%r" % (lines,))
+check("the finding lists the declared repos, so the author can pick the real one",
+      "client-runtime" in _advice and "tracebloc-engine" in _advice, "%r" % (lines,))
+check("the finding names the one resolution it tried",
+      "no `tracebloc-runtime` is declared" in _advice, "%r" % (lines,))
+check("the finding does NOT advise closing a repo that does not exist",
+      "Closes tracebloc/runtime#123" not in _advice, "%r" % (lines,))
+verdict, lines = ev(pr("fix(runtime#123): x", links=[("tracebloc/client-runtime", 123)]))
+check("an unknown short name is still a finding when some repo links that number -- "
+      "the link cannot vouch for a name the org does not have",
+      verdict == gate.FAIL and "not a repository in the org inventory" in " ".join(lines),
+      "%s %r" % (verdict, lines))
+
+# Another org's repo: untouched by the inventory, and the remedy spells ITS owner.
+verdict, lines = ev(pr("fix(otherorg/engine#5): x"))
+check("another org's repo is a plain missing link, not an unknown-repo finding",
+      verdict == gate.FAIL and "not a repository in the org inventory" not in " ".join(lines),
+      "%s %r" % (verdict, lines))
+check("the remedy spells the ref's own owner, not `tracebloc/engine#5`",
+      any("Closes otherorg/engine#5" in line for line in lines)
+      and "tracebloc/engine#5" not in " ".join(lines), "%r" % (lines,))
+
+# evaluate reads the inventory from the same root as the canon, and refuses by name.
+_TMP_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="closing-ref-root-"))
+(_TMP_ROOT / gate.STANDARDS_FILE).write_text(STANDARDS, encoding="utf-8")
+expect_unreadable("evaluate with no inventory beside the canon is a cannot-tell",
+                  lambda: gate.evaluate(pr(_ENGINE_TITLE), standards_root=_TMP_ROOT),
+                  "repo-inventory.yml could not be read")
+(_TMP_ROOT / gate.INVENTORY_FILE).write_text(
+    "org: acme\nrepos:\n  acme-engine: {}\n  backend: {}\n", encoding="utf-8")
+verdict, lines = ev(pr("fix(engine#7): x", links=[("acme/acme-engine", 7)]), standards_root=_TMP_ROOT)
+check("the map follows the inventory it is handed: under org `acme`, `engine` is `acme-engine`",
+      verdict == gate.PASS, "%s %r" % (verdict, lines))
+verdict, lines = ev(pr("fix(engine#7): x", links=[("tracebloc/tracebloc-engine", 7)]), standards_root=_TMP_ROOT)
+check("... and `tracebloc-engine` is then the WRONG repo, not a resolution",
+      verdict == gate.FAIL and "wrong repository" in " ".join(lines), "%s %r" % (verdict, lines))
+
+# ---------------------------------------------------------------------------
 if FAILURES:
     print("closing-ref-gate-selftest: %d/%d FAILED" % (len(FAILURES), COUNT))
     for f in FAILURES:

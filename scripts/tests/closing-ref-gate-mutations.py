@@ -121,8 +121,8 @@ MUTATIONS = [
      "    if not refs:",
      "    if False and not refs:"),
     ("the wrong-repo finding is reported as a plain missing link",
-     "        if verdict == WRONG_REPO:",
-     "        if False and verdict == WRONG_REPO:"),
+     "        elif verdict == WRONG_REPO:",
+     "        elif False and verdict == WRONG_REPO:"),
 
     # --- the one deliberate fail-open, pinned in BOTH directions -------------
     ("every PR is treated as a draft, so the check never fires",
@@ -212,7 +212,8 @@ MUTATIONS = [
     # Anchor updated when the body scan started stripping HTML comments
     # (design-system-v2#123). Same property, same mutation: read no body.
     ("the body is never read, so a child PR is back to `Closes or nothing`",
-     '    mentions = parse_body(readable_text(pr.get("body")), keywords)',
+     '    mentions = [\n        resolve_repo(ref, inventory)\n'
+     '        for ref in parse_body(readable_text(pr.get("body")), keywords)\n    ]',
      "    mentions = []"),
     # The query stops asking for the body. EVERY evaluate case hands the body in
     # directly, so without the query assertion this is invisible -- which is the
@@ -339,8 +340,10 @@ MUTATIONS = [
      "    if not keywords:",
      "    if False and not keywords:"),
     ("an unreadable canon is folded into `declares nothing`, losing the refusal's name",
-     '    except OSError as exc:\n        raise Unreadable(',
-     '    except OSError as exc:\n        text = ""\n        _ = Unreadable('),
+     '    except OSError as exc:\n        raise Unreadable(\n'
+     '            "%s could not be read (%s), so the org\'s declared non-closing "',
+     '    except OSError as exc:\n        text = ""\n        _ = Unreadable(\n'
+     '            "%s could not be read (%s), so the org\'s declared non-closing "'),
 
     # --- what counts as a body reference ------------------------------------
     ("a loose `#N` in the body counts, so any prose mention satisfies the title",
@@ -357,6 +360,45 @@ MUTATIONS = [
     ("a body reference in a different REPO satisfies a repo-named title ref",
      "    if ref.repo.lower() != other.repo.lower():",
      "    if False and ref.repo.lower() != other.repo.lower():"),
+    # --- the shorthand map is DERIVED from repo-inventory.yml (.github#416) ---
+    ("shorthand resolution goes, so `engine#898` is repo `engine` again and a "
+     "correctly linked tracebloc-engine PR is red",
+     '    candidates = [name for name in names if name.lower() == full]',
+     '    candidates = []'),
+    ("an unknown short repo name is no longer a finding: the gate guesses a repo "
+     "that does not exist, silently",
+     "    if inventory is not None and not is_known_repo(ref, inventory):\n        return UNKNOWN_REPO",
+     "    if False:\n        return UNKNOWN_REPO"),
+    ("the repo list is hardcoded instead of parsed from the inventory",
+     "    org, names = declared_repos(text)",
+     '    org, names = ("tracebloc", ["backend", ".github"])'),
+    ("an inventory declaring no repositories no longer refuses, so every short "
+     "name in every title reads as unknown",
+     "    if len(names) == 0:",
+     "    if False:"),
+    ("a missing `org:` no longer refuses",
+     "    if org is None:\n        raise Unreadable(",
+     '    org = org or "tracebloc"\n    if False:\n        raise Unreadable('),
+    ("another org's repo is resolved against OUR inventory, so `otherorg/engine#5` "
+     "becomes a finding about this org",
+     "    if ref.owner is not None and ref.owner.lower() != org.lower():\n        return ref\n    short",
+     "    if False:\n        return ref\n    short"),
+    ("the unknown-repo verdict is reported as a plain missing link, so the remedy "
+     "names a repo that does not exist",
+     "        if verdict == UNKNOWN_REPO:",
+     "        if False:"),
+    ("nested inventory keys are read as repos, so an entry's properties become "
+     "repo names",
+     'INVENTORY_REPO_KEY_RE = re.compile(r"^  ([A-Za-z0-9.][A-Za-z0-9._-]*):(?:\\s.*)?$")',
+     'INVENTORY_REPO_KEY_RE = re.compile(r"^ +([A-Za-z0-9.][A-Za-z0-9._-]*):(?:\\s.*)?$")'),
+    ("the `repos:` block no longer ends at the next column-0 key, so a later "
+     "block's members are read as repos",
+     '            if not line.startswith(" "):\n                break',
+     '            if not line.startswith(" "):\n                continue'),
+    ("the remedy hardcodes the org again, so `otherorg/engine#5` is told to "
+     "close `tracebloc/engine#5`",
+     '    return "%s/%s#%d" % (ref.owner or org, ref.repo, ref.number)',
+     '    return "%s/%s#%d" % (org, ref.repo, ref.number)'),
 ]
 
 # MUTATIONS IN THE WORKFLOW FILES, not the checker (tracebloc/backend#2556).
