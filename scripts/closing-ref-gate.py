@@ -311,6 +311,16 @@ INVENTORY_FILE = "repo-inventory.yml"
 # members are its 2-space-indented keys; nested keys sit deeper and are not
 # repos. Read with the stdlib on purpose -- this script has no dependency the
 # host workflow would have to install, and it must stay that way.
+#
+# THIS IS A SECOND PARSER OF A CONTRACT FILE, and the trade is deliberate
+# (Saqlain, .github#425): `caller-drift.py` reads the same file with
+# `yaml.safe_load`, which tolerates a re-indent, a flow mapping or a `---` split
+# that these positional patterns would read as an empty list -- and an empty
+# list is refused, not passed (`known_repos`). The selftest is the backstop in
+# both directions: it asserts `known_repos()` against the REAL inventory by
+# name and count, and where PyYAML is importable it asserts this parser and
+# `yaml.safe_load` agree on that file, so a drift between the two tolerances
+# is a red test rather than a quiet cannot-tell.
 INVENTORY_ORG_RE = re.compile(r"^org:\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:#.*)?$", re.MULTILINE)
 INVENTORY_REPOS_HEAD_RE = re.compile(r"^repos:\s*(?:#.*)?$", re.MULTILINE)
 INVENTORY_REPO_KEY_RE = re.compile(r"^  ([A-Za-z0-9.][A-Za-z0-9._-]*):(?:\s.*)?$")
@@ -999,24 +1009,9 @@ def evaluate(pr, standards_root=None):
     named = parse_title(pr.get("title"))
     links = closing_refs(pr)
     keywords = reference_keywords(root=standards_root)
-    # SHORTHAND IS RESOLVED ONCE, HERE, for the title and the body alike, so a
-    # `Part of engine#898` in the body satisfies an `engine#898` in the title
-    # through the same declared name (tracebloc/.github#416).
-    inventory = known_repos(root=standards_root)
-    refs = [resolve_repo(ref, inventory) for ref in named]
-    resolved = [
-        (before, after) for before, after in zip(named, refs)
-        if before.repo is not None and after.repo is not None
-        and before.repo.lower() != after.repo.lower()
-    ]
-    mentions = [
-        resolve_repo(ref, inventory)
-        for ref in parse_body(readable_text(pr.get("body")), keywords)
-    ]
     inert = inert_closing_refs(pr.get("body"), links, targets_default_branch(pr))
     linked_text = ", ".join("%s/%s#%d" % triple for triple in links) or "none"
     keyword_text = ", ".join("`%s`" % word for word in keywords)
-    mention_text = ", ".join(_spell(ref) for ref in mentions) or "none"
 
     # THE SECOND DIRECTION, ASSERTED BEFORE THE TITLE IS CONSULTED AT ALL
     # (tracebloc/design-system-v2#123). Until this block, the whole check was
@@ -1055,7 +1050,13 @@ def evaluate(pr, standards_root=None):
             % _remedy_forms(keywords, "<owner>/<repo>#%d" % ref.number)
         )
 
-    if not refs:
+    # THE TICKET-LESS PATH NEEDS NO INVENTORY, so it does not read one (Saqlain,
+    # .github#425). Both returns below consume only the link graph and the inert
+    # check; the inventory is read AFTER them, so a docs/ci/chore PR that names
+    # no ticket cannot be turned into a cannot-tell by a reformatted
+    # repo-inventory.yml it never needed. The selftest pins that with an absent
+    # inventory on both of these returns.
+    if not named:
         if not inert:
             return NOTHING_NAMED, [
                 "The title names no ticket, so there is nothing to assert about "
@@ -1071,6 +1072,21 @@ def evaluate(pr, standards_root=None):
             "",
         ] + inert_lines + _why_lines()
 
+    # SHORTHAND IS RESOLVED ONCE, HERE, for the title and the body alike, so a
+    # `Part of engine#898` in the body satisfies an `engine#898` in the title
+    # through the same declared name (tracebloc/.github#416).
+    inventory = known_repos(root=standards_root)
+    refs = [resolve_repo(ref, inventory) for ref in named]
+    resolved = [
+        (before, after) for before, after in zip(named, refs)
+        if before.repo is not None and after.repo is not None
+        and before.repo.lower() != after.repo.lower()
+    ]
+    mentions = [
+        resolve_repo(ref, inventory)
+        for ref in parse_body(readable_text(pr.get("body")), keywords)
+    ]
+    mention_text = ", ".join(_spell(ref) for ref in mentions) or "none"
     results = [(ref, classify(ref, links, mentions, inventory)) for ref in refs]
     bad = [(ref, verdict) for ref, verdict in results if verdict not in (LINKED, MENTIONED)]
     lines = [

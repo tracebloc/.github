@@ -118,7 +118,7 @@ MUTATIONS = [
 
     # --- the three reported states stay three --------------------------------
     ("a title naming no ticket is treated as a checked PASS",
-     "    if not refs:",
+     "    if not named:",
      "    if False and not refs:"),
     ("the wrong-repo finding is reported as a plain missing link",
      "        elif verdict == WRONG_REPO:",
@@ -395,6 +395,10 @@ MUTATIONS = [
      "block's members are read as repos",
      '            if not line.startswith(" "):\n                break',
      '            if not line.startswith(" "):\n                continue'),
+    ("the inventory is read on the ticket-less path again, so a docs/ci/chore PR "
+     "becomes a cannot-tell when the inventory it never needed is unreadable",
+     "    if not named:\n        if not inert:",
+     "    if not named and known_repos(root=standards_root):\n        if not inert:"),
     ("the remedy hardcodes the org again, so `otherorg/engine#5` is told to "
      "close `tracebloc/engine#5`",
      '    return "%s/%s#%d" % (ref.owner or org, ref.repo, ref.number)',

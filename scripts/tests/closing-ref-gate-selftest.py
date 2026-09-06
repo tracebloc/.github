@@ -1587,6 +1587,26 @@ for _name in ("tracebloc-engine", "client-runtime", "backend", ".github"):
 check("no repo named `engine` or `runtime` exists: the shorthand MUST be resolved, "
       "it is not a repo", "engine" not in _real_names and "runtime" not in _real_names)
 
+# TWO PARSERS, ONE FILE (Saqlain, .github#425): caller-drift.py reads the
+# inventory with yaml.safe_load and this gate with positional patterns, which
+# tolerate less. Where PyYAML is importable, assert the two agree on the real
+# file -- org and the repo name list -- so a re-indent or a flow mapping that
+# one reads and the other does not is a red test, not a quiet cannot-tell. The
+# stdlib suite stays stdlib: without PyYAML this records a skip, by name.
+try:
+    import yaml as _yaml  # noqa: E402 - optional cross-check, see above
+except ImportError:  # pragma: no cover - depends on the host
+    _yaml = None
+if _yaml is not None:
+    _loaded = _yaml.safe_load((ROOT / gate.INVENTORY_FILE).read_text(encoding="utf-8"))
+    check("the positional parser and yaml.safe_load agree on the real inventory's org",
+          _real_org == _loaded.get("org"), "%r vs %r" % (_real_org, _loaded.get("org")))
+    check("the positional parser and yaml.safe_load agree on the real inventory's repo names",
+          sorted(_real_names) == sorted((_loaded.get("repos") or {}).keys()),
+          "%r vs %r" % (sorted(_real_names), sorted((_loaded.get("repos") or {}).keys())))
+else:
+    print("closing-ref-gate-selftest: SKIP yaml cross-check of the inventory parser (PyYAML not importable)")
+
 # Fail closed, by name (rule 3, rule 10).
 _TMP_INV = pathlib.Path(tempfile.mkdtemp(prefix="closing-ref-inventory-"))
 expect_unreadable("an unreadable inventory is a cannot-tell, not an empty fleet",
@@ -1701,6 +1721,18 @@ _TMP_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="closing-ref-root-"))
 expect_unreadable("evaluate with no inventory beside the canon is a cannot-tell",
                   lambda: gate.evaluate(pr(_ENGINE_TITLE), standards_root=_TMP_ROOT),
                   "repo-inventory.yml could not be read")
+
+# ... but ONLY for a title that names a ticket (Saqlain, .github#425). A PR that
+# names none consumes no inventory, so an absent or reformatted one must not
+# turn the majority of docs/ci/chore PRs into a cannot-tell. Both ticket-less
+# returns are pinned with NO inventory in the root: the clean one and the
+# inert-claim one.
+verdict, lines = ev(pr("docs: a title naming no ticket"), standards_root=_TMP_ROOT)
+check("a ticket-less title with no inventory present is NOTHING_NAMED, not a cannot-tell",
+      verdict == gate.NOTHING_NAMED, "%s %r" % (verdict, lines))
+verdict, lines = ev(pr("docs: a title naming no ticket", body="Closes #2767"), standards_root=_TMP_ROOT)
+check("a ticket-less title with an inert body claim still FAILS on the claim, with no inventory present",
+      verdict == gate.FAIL and any("inert" in line for line in lines), "%s %r" % (verdict, lines))
 (_TMP_ROOT / gate.INVENTORY_FILE).write_text(
     "org: acme\nrepos:\n  acme-engine: {}\n  backend: {}\n", encoding="utf-8")
 verdict, lines = ev(pr("fix(engine#7): x", links=[("acme/acme-engine", 7)]), standards_root=_TMP_ROOT)
