@@ -265,6 +265,15 @@ LINKED = "linked"          # a closing keyword links it: the strongest form
 MENTIONED = "mentioned"    # a declared non-closing keyword names it in the body
 MISSING = "missing"        # referenced no way at all -- the real defect
 WRONG_REPO = "wrong-repo"  # that NUMBER is linked, in the wrong repository
+# The title names a repo the org does not have (tracebloc/.github#416). The house
+# shorthand `engine#898` used to be read as repo `tracebloc/engine`, which does
+# not exist, so a body line `Part of tracebloc/tracebloc-engine#898` did not
+# satisfy it and the gate went red on a correctly linked PR -- teaching authors
+# to write the long form only where the gate looks, which is rule 7's shape (a
+# check that teaches the bypass). Shorthand is now RESOLVED against the org's
+# declared repo list (`resolve_repo`), and a short name that resolves to nothing
+# is this verdict: a finding that says so, never a silent pass and never a guess.
+UNKNOWN_REPO = "unknown-repo"
 
 # A finding about the BODY rather than about a title reference, so it is not a
 # per-ref classification and does not appear in `classify`. It is the OTHER
@@ -291,6 +300,30 @@ GITHUB_CLOSING_KEYWORDS = frozenset(
 # `scripts/`, and the host workflow checks this whole repo out, so it is present
 # wherever this script runs.
 STANDARDS_FILE = "org-standards.md"
+# The org's declared repo list, beside the canon and checked out with it. The
+# shorthand map is DERIVED from this file (rule 1): `engine` resolves to
+# `tracebloc-engine` because the inventory declares a repo of that name under
+# the declared `org:`, not because a table here says so. A hand-typed table
+# would be this file's own copy of the org's repo list, agreeing with itself
+# while a repo is added, renamed or archived.
+INVENTORY_FILE = "repo-inventory.yml"
+# The two lines this file reads out of the inventory. The `repos:` block's
+# members are its 2-space-indented keys; nested keys sit deeper and are not
+# repos. Read with the stdlib on purpose -- this script has no dependency the
+# host workflow would have to install, and it must stay that way.
+#
+# THIS IS A SECOND PARSER OF A CONTRACT FILE, and the trade is deliberate
+# (Saqlain, .github#425): `caller-drift.py` reads the same file with
+# `yaml.safe_load`, which tolerates a re-indent, a flow mapping or a `---` split
+# that these positional patterns would read as an empty list -- and an empty
+# list is refused, not passed (`known_repos`). The selftest is the backstop in
+# both directions: it asserts `known_repos()` against the REAL inventory by
+# name and count, and where PyYAML is importable it asserts this parser and
+# `yaml.safe_load` agree on that file, so a drift between the two tolerances
+# is a red test rather than a quiet cannot-tell.
+INVENTORY_ORG_RE = re.compile(r"^org:\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:#.*)?$", re.MULTILINE)
+INVENTORY_REPOS_HEAD_RE = re.compile(r"^repos:\s*(?:#.*)?$", re.MULTILINE)
+INVENTORY_REPO_KEY_RE = re.compile(r"^  ([A-Za-z0-9.][A-Za-z0-9._-]*):(?:\s.*)?$")
 
 # A backticked span in the canon shaped `<keyword> <ref>#<number>`:
 #   `Part of tracebloc/backend#N`  -> keyword "Part of"  (admissible)
@@ -566,6 +599,106 @@ def reference_keywords(root=None):
     return keywords
 
 
+def declared_repos(inventory_text):
+    """(org, [repo names]) as `repo-inventory.yml` DECLARES them.
+
+    Names are the 2-space-indented keys of the top-level `repos:` block, in file
+    order; the block ends at the next column-0 line. Comment and blank lines are
+    skipped, deeper keys are the entries' properties and are not repos. Returns
+    an empty list when the block is absent or empty and `None` for a missing
+    `org:` -- `known_repos` turns both into refusals.
+    """
+    text = inventory_text or ""
+    org_match = INVENTORY_ORG_RE.search(text)
+    org = org_match.group(1) if org_match is not None else None
+    names = []
+    head = INVENTORY_REPOS_HEAD_RE.search(text)
+    if head is not None:
+        for line in text[head.end():].splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if not line.startswith(" "):
+                break
+            key = INVENTORY_REPO_KEY_RE.match(line)
+            if key is not None:
+                names.append(key.group(1))
+    return org, names
+
+
+def known_repos(root=None):
+    """`declared_repos` against the real inventory on disk: (org, names).
+
+    FAILS CLOSED IN BOTH DIRECTIONS (rule 3), exactly as `reference_keywords`
+    does for the canon: an unreadable inventory is a cannot-tell, and so is one
+    that declares no `org:` or no repos -- with an empty list every short name
+    in every title would be "unknown", which is a finding about this check
+    wearing the author's name.
+    """
+    root = pathlib.Path(__file__).resolve().parents[1] if root is None else pathlib.Path(root)
+    path = root / INVENTORY_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise Unreadable(
+            "%s could not be read (%s), so the org's declared repository list "
+            "cannot be derived and a short repo name in the title cannot be "
+            "resolved. This check parses that file rather than holding its own "
+            "copy of the list." % (INVENTORY_FILE, exc)
+        )
+    org, names = declared_repos(text)
+    if org is None:
+        raise Unreadable(
+            "%s declares no `org:`, so a short repo name cannot be resolved "
+            "against the org's repositories." % INVENTORY_FILE
+        )
+    if len(names) == 0:
+        raise Unreadable(
+            "%s declares no repositories under `repos:`, so every repo name a "
+            "title could carry would read as unknown. Refusing rather than "
+            "reporting the org's whole fleet as a finding." % INVENTORY_FILE
+        )
+    return org, names
+
+
+def resolve_repo(ref, inventory):
+    """The reference with its repo spelled as the inventory declares it, or as-is.
+
+    THREE OUTCOMES, one function, so `classify` and the report agree on which
+    happened (rule 9):
+      * a repo the inventory declares, in any case -> its declared spelling;
+      * `<org>-<short>` declared -> that repo: `engine` is `tracebloc-engine`
+        because the inventory has one and only because of that (.github#416);
+      * anything else -> returned unchanged, and `classify` reports UNKNOWN_REPO.
+    A reference that names ANOTHER owner is left alone: the inventory says
+    nothing about other orgs' repositories, and pretending it does would turn a
+    correctly written `otherorg/engine#5` into a finding about this org.
+    """
+    if ref.repo is None:
+        return ref
+    org, names = inventory
+    if ref.owner is not None and ref.owner.lower() != org.lower():
+        return ref
+    short = ref.repo.lower()
+    exact = [name for name in names if name.lower() == short]
+    if exact:
+        return ref._replace(repo=exact[0])
+    full = "%s-%s" % (org.lower(), short)
+    candidates = [name for name in names if name.lower() == full]
+    if len(candidates) == 1:
+        return ref._replace(repo=candidates[0])
+    return ref
+
+
+def is_known_repo(ref, inventory):
+    """Whether `ref` names a repo the inventory declares (or another owner's)."""
+    if ref.repo is None:
+        return True
+    org, names = inventory
+    if ref.owner is not None and ref.owner.lower() != org.lower():
+        return True
+    return ref.repo.lower() in [name.lower() for name in names]
+
+
 def readable_text(body):
     """The body with HTML comments removed. Both body scans read this.
 
@@ -775,8 +908,14 @@ def same_ticket(ref, other):
     return True
 
 
-def classify(ref, links, mentions=()):
-    """LINKED / WRONG_REPO / MENTIONED / MISSING for one title reference.
+def classify(ref, links, mentions=(), inventory=None):
+    """LINKED / WRONG_REPO / MENTIONED / MISSING / UNKNOWN_REPO for one title reference.
+
+    `inventory` is `known_repos()`'s (org, names); when given, a repo-named ref
+    that resolves to no declared repo is UNKNOWN_REPO BEFORE the graph is
+    consulted -- a link at that number in some repo cannot vouch for a name
+    this org does not have, and neither can a body mention (.github#416). `None`
+    keeps the historical behaviour for callers that have no inventory.
 
     THE ONE FUNCTION the assertions and the mutations both go through
     (CLAUDE.md rule 9). No caller re-implements this comparison.
@@ -788,6 +927,8 @@ def classify(ref, links, mentions=()):
     make the firing link right. `MENTIONED` only ever rescues a ref that is
     linked NOWHERE -- which was the sole defect this gate was built to catch.
     """
+    if inventory is not None and not is_known_repo(ref, inventory):
+        return UNKNOWN_REPO
     number_seen = False
     for owner, name, number in links:
         if number != ref.number:
@@ -817,6 +958,17 @@ def _spell(ref):
     if ref.owner is None:
         return "%s#%d" % (ref.repo, ref.number)
     return "%s/%s#%d" % (ref.owner, ref.repo, ref.number)
+
+
+def _full(ref, org):
+    """`<owner>/<repo>#N` for a repo-named ref: its own owner, else the inventory's org.
+
+    The remedies used to spell `tracebloc/%s` for every repo-named ref, so a
+    title naming `otherorg/engine#5` was advised to add `Closes tracebloc/engine#5`
+    -- a repo in the wrong org that does not exist. The org is the inventory's
+    declared one, not a literal here (tracebloc/.github#416).
+    """
+    return "%s/%s#%d" % (ref.owner or org, ref.repo, ref.number)
 
 
 def _remedy_forms(keywords, target):
@@ -871,14 +1023,12 @@ def evaluate(pr, standards_root=None, default_branch=None):
     if pr.get("isDraft"):
         return DRAFT, ["This PR is a draft; the link is checked when it is marked ready."]
 
-    refs = parse_title(pr.get("title"))
+    named = parse_title(pr.get("title"))
     links = closing_refs(pr)
     keywords = reference_keywords(root=standards_root)
-    mentions = parse_body(readable_text(pr.get("body")), keywords)
     inert = inert_closing_refs(pr.get("body"), links, targets_default_branch(pr, default_branch))
     linked_text = ", ".join("%s/%s#%d" % triple for triple in links) or "none"
     keyword_text = ", ".join("`%s`" % word for word in keywords)
-    mention_text = ", ".join(_spell(ref) for ref in mentions) or "none"
 
     # THE SECOND DIRECTION, ASSERTED BEFORE THE TITLE IS CONSULTED AT ALL
     # (tracebloc/design-system-v2#123). Until this block, the whole check was
@@ -917,7 +1067,13 @@ def evaluate(pr, standards_root=None, default_branch=None):
             % _remedy_forms(keywords, "<owner>/<repo>#%d" % ref.number)
         )
 
-    if not refs:
+    # THE TICKET-LESS PATH NEEDS NO INVENTORY, so it does not read one (Saqlain,
+    # .github#425). Both returns below consume only the link graph and the inert
+    # check; the inventory is read AFTER them, so a docs/ci/chore PR that names
+    # no ticket cannot be turned into a cannot-tell by a reformatted
+    # repo-inventory.yml it never needed. The selftest pins that with an absent
+    # inventory on both of these returns.
+    if not named:
         if not inert:
             return NOTHING_NAMED, [
                 "The title names no ticket, so there is nothing to assert about "
@@ -933,14 +1089,37 @@ def evaluate(pr, standards_root=None, default_branch=None):
             "",
         ] + inert_lines + _why_lines()
 
-    results = [(ref, classify(ref, links, mentions)) for ref in refs]
+    # SHORTHAND IS RESOLVED ONCE, HERE, for the title and the body alike, so a
+    # `Part of engine#898` in the body satisfies an `engine#898` in the title
+    # through the same declared name (tracebloc/.github#416).
+    inventory = known_repos(root=standards_root)
+    refs = [resolve_repo(ref, inventory) for ref in named]
+    resolved = [
+        (before, after) for before, after in zip(named, refs)
+        if before.repo is not None and after.repo is not None
+        and before.repo.lower() != after.repo.lower()
+    ]
+    mentions = [
+        resolve_repo(ref, inventory)
+        for ref in parse_body(readable_text(pr.get("body")), keywords)
+    ]
+    mention_text = ", ".join(_spell(ref) for ref in mentions) or "none"
+    results = [(ref, classify(ref, links, mentions, inventory)) for ref in refs]
     bad = [(ref, verdict) for ref, verdict in results if verdict not in (LINKED, MENTIONED)]
     lines = [
         "Title names: %s" % ", ".join(_spell(ref) for ref in refs),
         "closingIssuesReferences: %s" % linked_text,
         "Body references (%s): %s" % (keyword_text, mention_text),
-        "",
     ]
+    if resolved:
+        # SAY WHAT WAS RESOLVED AND FROM WHERE, so a reader can check the map
+        # against the file it came from rather than against this script.
+        lines.append(
+            "Shorthand resolved against %s: %s"
+            % (INVENTORY_FILE, ", ".join(
+                "%s -> %s" % (before.repo, after.repo) for before, after in resolved))
+        )
+    lines.append("")
     if inert:
         # FOLDED INTO THE SAME FAIL rather than reported separately, so a PR that
         # satisfies its title AND carries an inert keyword is still red. Both are
@@ -959,30 +1138,46 @@ def evaluate(pr, standards_root=None, default_branch=None):
             for ref, verdict in results
         ]
 
+    org, names = inventory
     for ref, verdict in bad:
-        if verdict == WRONG_REPO:
+        if verdict == UNKNOWN_REPO:
+            # NO GUESS. The old behaviour advised `Closes tracebloc/<short>#N` for
+            # a repo that does not exist, which no author could follow and which
+            # GitHub registers as nothing. Name the list the check derived from,
+            # name the one resolution it tried, and send the author to the
+            # spelling the org actually declares.
+            lines.append(
+                "%s -- the title names repo `%s`, which is not a repository in the "
+                "org inventory (%s declares: %s), and no `%s-%s` is declared to "
+                "resolve the shorthand to. This check cannot tell which ticket "
+                "that is, so it does not guess: write the repo's declared name "
+                "(`<repo>#%d`) or the bare `#%d`."
+                % (_spell(ref), ref.repo, INVENTORY_FILE, ", ".join(names),
+                   org, ref.repo, ref.number, ref.number)
+            )
+        elif verdict == WRONG_REPO:
             lines.append(
                 "%s -- an issue numbered %d IS linked, but in the wrong repository. "
                 "This is the cross-repo trap: a bare `Closes #%d` resolves against "
                 "THIS repo, so it links (and on merge closes) the wrong issue. Use "
-                "the full form: `Closes tracebloc/%s#%d`."
-                % (_spell(ref), ref.number, ref.number, ref.repo, ref.number)
+                "the full form: `Closes %s`."
+                % (_spell(ref), ref.number, ref.number, _full(ref, org))
             )
         elif ref.repo is not None:
             lines.append(
                 "%s -- named in the title, linked nowhere. A title reference is "
                 "inert: GitHub creates a closing link only from a keyword in the "
-                "PR BODY. Add `Closes tracebloc/%s#%d` to the body -- and note that "
+                "PR BODY. Add `Closes %s` to the body -- and note that "
                 "a bare `Closes #%d` would resolve against THIS repo, not the "
                 "ticket's."
-                % (_spell(ref), ref.repo, ref.number, ref.number)
+                % (_spell(ref), _full(ref, org), ref.number)
             )
             lines.append(
                 "    IF THIS PR DOES NOT FINISH THAT TICKET, do not write `Closes` "
                 "-- say what is true instead: %s. That satisfies this check "
                 "without promising a close, and without deleting the number from "
                 "your title (tracebloc/backend#2616)."
-                % _remedy_forms(keywords, "tracebloc/%s#%d" % (ref.repo, ref.number))
+                % _remedy_forms(keywords, _full(ref, org))
             )
         else:
             # THE REMEDY MUST NOT NAME A REPO THE CHECK CANNOT KNOW. A bare title

@@ -262,6 +262,15 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CODE: ${{ steps.audit.outputs.exit_code }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # The drift signal is worthless on a CLOSED issue (backend#3186): a
+          # comment there notifies nobody and never surfaces on the board, so a
+          # red audit sat four days with 19 repos behind and no one paged. The
+          # report target is a variable, and the step below asserts it is OPEN
+          # before posting -- reopening it if closed, failing closed if it
+          # cannot be made open -- so this delivery hop can never silently
+          # regress into the void again.
+          REPORT_ISSUE: "1602"
+          REPORT_REPO: tracebloc/backend
         run: |
           set -euo pipefail
           code="${CODE:-}"
@@ -297,7 +306,34 @@ jobs:
             fi
             printf '[Run log](%s)\n' "$RUN_URL"
           } > body.md
-          gh issue comment 1602 --repo tracebloc/backend --body-file body.md
+          # ENSURE THE TARGET IS OPEN BEFORE POSTING (backend#3186). A comment on
+          # a closed, archived issue reaches nobody and does not reach the board;
+          # the guard's entire value is that a human sees the red audit and fires
+          # the create-prs dispatch. Read the state, reopen if closed, and FAIL
+          # LOUD if it cannot be read or made open -- an undeliverable report must
+          # redden the run, never post silently into a closed issue.
+          state="$(gh issue view "$REPORT_ISSUE" --repo "$REPORT_REPO" --json state --jq .state 2>/dev/null || true)"
+          if [ -z "$state" ]; then
+            echo "::error::Cannot read tracking issue ${REPORT_REPO}#${REPORT_ISSUE};" \
+                 "refusing to post the drift report where it cannot be seen." >&2
+            exit 1
+          fi
+          if [ "$state" != "OPEN" ]; then
+            echo "::notice::Tracking issue ${REPORT_REPO}#${REPORT_ISSUE} is ${state};" \
+                 "reopening so the drift report is visible (backend#3186)."
+            if ! gh issue reopen "$REPORT_ISSUE" --repo "$REPORT_REPO"; then
+              echo "::error::${REPORT_REPO}#${REPORT_ISSUE} is ${state} and could not be" \
+                   "reopened; the drift report would be invisible. Failing closed." >&2
+              exit 1
+            fi
+            state="$(gh issue view "$REPORT_ISSUE" --repo "$REPORT_REPO" --json state --jq .state 2>/dev/null || true)"
+            if [ "$state" != "OPEN" ]; then
+              echo "::error::${REPORT_REPO}#${REPORT_ISSUE} did not reopen (still ${state:-unknown});" \
+                   "failing closed rather than posting into a non-open issue." >&2
+              exit 1
+            fi
+          fi
+          gh issue comment "$REPORT_ISSUE" --repo "$REPORT_REPO" --body-file body.md
 
       - name: Fail the run unless the audit came back clean
         # Green must mean "fleet in sync" (or "every sync PR opened"), never
