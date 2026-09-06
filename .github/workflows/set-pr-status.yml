@@ -406,22 +406,22 @@ jobs:
           owner: ${{ github.repository_owner }}
           permission-pull-requests: read
           permission-issues: read
-          # `contents: read` is for ONE field of the gate's query,
-          # `baseRepository { defaultBranchRef { name } }`. A Ref is a contents
-          # object: world-readable on a public repo, gated on a private one.
-          # From 2026-09-06 06:29Z every closing-ref run in a PRIVATE repo
-          # failed with "Resource not accessible by integration" while public
-          # repos (client, .github) kept passing in the same minute, and the
-          # set-status job above -- same App, same run, no Ref read -- never
-          # failed anywhere (backend#3240). The App holds contents:write at
-          # install time, so this widens the minted token by a read it already
-          # had the right to.
-          permission-contents: read
+          # NO `contents` scope, on purpose (backend#3240). The gate used to read
+          # `baseRepository { defaultBranchRef { name } }` over GraphQL; a Ref is
+          # a contents object, world-readable on a public repo and gated on a
+          # private one, and from 2026-09-06 06:29Z that single field made every
+          # private-repo run fail with "Resource not accessible by integration"
+          # while public repos passed in the same minute. This token is
+          # org-scoped (`owner:` + an all-repositories installation), so adding
+          # contents:read here would have widened it on every repo for a value
+          # the event payload already carries: it is passed in below as
+          # PR_BASE_DEFAULT_BRANCH instead, and the query no longer asks.
 
       - name: The title names a ticket, so the PR must link it
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_DEFAULT_BRANCH: ${{ github.event.pull_request.base.repo.default_branch }}
           SOFT_FAIL: ${{ inputs.closing-ref-soft-fail && 'true' || 'false' }}
         run: python3 .closing-ref-tools/scripts/closing-ref-gate.py

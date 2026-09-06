@@ -943,12 +943,17 @@ def run_main(payload=None, raises=None, **env):
     """Run main() with the read seam stubbed. Its stdout is captured, not printed:
     a suite log full of the gate's own reports makes the mutation harness's own
     output unreadable, and the text is asserted below instead of skimmed."""
-    saved_env = {k: os.environ.get(k) for k in ("REPO", "PR_NUMBER", "SOFT_FAIL", "GITHUB_STEP_SUMMARY")}
+    saved_env = {k: os.environ.get(k) for k in ("REPO", "PR_NUMBER", "SOFT_FAIL", "GITHUB_STEP_SUMMARY", "PR_BASE_DEFAULT_BRANCH")}
     saved_fetch = gate.fetch
     os.environ.pop("GITHUB_STEP_SUMMARY", None)
     os.environ["REPO"] = env.get("REPO", "tracebloc/release-train")
     os.environ["PR_NUMBER"] = env.get("PR_NUMBER", "109")
     os.environ["SOFT_FAIL"] = env.get("SOFT_FAIL", "false")
+    # Unset unless the case sets it: the workflow passes the event's value, and a
+    # case that wants "the payload cannot say" must not inherit the shell's.
+    os.environ.pop("PR_BASE_DEFAULT_BRANCH", None)
+    if "PR_BASE_DEFAULT_BRANCH" in env:
+        os.environ["PR_BASE_DEFAULT_BRANCH"] = env["PR_BASE_DEFAULT_BRANCH"]
 
     def fake_fetch(owner, name, number, env=None, runner=None):
         if raises is not None:
@@ -1345,6 +1350,42 @@ check(
     gate.inert_closing_refs("Closes #2775.", [], None) == [],
 )
 check(
+    "targets_default_branch prefers the event's default branch over the payload: "
+    "a payload with no baseRepository answers once the workflow hands the value in",
+    (
+        gate.targets_default_branch(pr("t", base="develop", default=None), "develop"),
+        gate.targets_default_branch(pr("t", base="staging", default=None), "develop"),
+        gate.targets_default_branch(pr("t", base="develop", default="staging"), "develop"),
+    ) == (True, False, True),
+    "%r" % ((gate.targets_default_branch(pr("t", base="develop", default=None), "develop"),
+             gate.targets_default_branch(pr("t", base="staging", default=None), "develop"),
+             gate.targets_default_branch(pr("t", base="develop", default="staging"), "develop")),),
+)
+check(
+    "an empty PR_BASE_DEFAULT_BRANCH is 'cannot tell', not 'the default branch is "
+    "named the empty string' -- it falls back to the payload and then to None",
+    (
+        gate.targets_default_branch(pr("t", base="develop", default="develop"), ""),
+        gate.targets_default_branch(pr("t", base="develop", default=None), ""),
+    ) == (True, None),
+)
+# END-TO-END through main(): the same inert claim is a finding when the event
+# says the PR targets the default branch, and a decline when nothing says so.
+# This is the case that catches main() silently dropping the env read -- a
+# mutation the unit checks above cannot see, because they hand the value in.
+INERT_NO_GRAPH_FIELD = pr("t", body="Closes #2775.\n", base="develop", default=None)
+check(
+    "main reads PR_BASE_DEFAULT_BRANCH from the event and reports the inert claim",
+    run_main(INERT_NO_GRAPH_FIELD, PR_BASE_DEFAULT_BRANCH="develop") == 1,
+    "%r" % (LAST_OUTPUT["text"][-300:],),
+)
+check(
+    "without PR_BASE_DEFAULT_BRANCH and without the graph field, main declines "
+    "rather than manufacturing a finding",
+    run_main(INERT_NO_GRAPH_FIELD) == 0,
+    "%r" % (LAST_OUTPUT["text"][-300:],),
+)
+check(
     "targets_default_branch reports True / False / None as three distinct answers",
     (
         gate.targets_default_branch(pr("t", base="develop", default="develop")),
@@ -1514,12 +1555,34 @@ check(
 # stopped requesting these fields would disarm the whole direction and report
 # nothing -- green, quiet, and wrong. Same reason `connections_missing_totalcount`
 # exists for the link graph.
-for field in ("baseRefName", "defaultBranchRef"):
+for field in ("baseRefName",):
     check(
         "the GraphQL query requests %s, without which rule C fails open and the "
         "inert check silently disarms" % field,
         field in gate.QUERY,
     )
+# The OTHER half of rule C's input no longer comes from the graph (backend#3240):
+# `defaultBranchRef` is a Ref read, gated by contents:read on a private repo, and
+# it took every private-repo run down on 2026-09-06. The value comes from the
+# event payload instead. Both halves are asserted: the query must not ask, and
+# the workflow must hand it in -- a query that quietly asked again would need a
+# scope the mint does not grant, and a workflow that quietly stopped passing it
+# would disarm rule C in production while every unit case stayed green.
+check(
+    "the GraphQL query does NOT read baseRepository.defaultBranchRef (a contents "
+    "read the closing-ref token cannot make on a private repo, backend#3240)",
+    "defaultBranchRef" not in gate.QUERY and "baseRepository" not in gate.QUERY,
+)
+check(
+    "the workflow hands the event's base default branch to the checker as "
+    "PR_BASE_DEFAULT_BRANCH",
+    "PR_BASE_DEFAULT_BRANCH: ${{ github.event.pull_request.base.repo.default_branch }}" in HOST,
+)
+check(
+    "the closing-ref mint asks for no contents scope -- the reason the value "
+    "travels in the payload",
+    "permission-contents" not in HOST,
+)
 
 # --- the annotation must name the direction that failed ----------------------
 check(

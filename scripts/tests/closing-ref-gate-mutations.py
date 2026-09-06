@@ -248,7 +248,7 @@ MUTATIONS = [
     # gate as it shipped, and .github#381's measured case must redden.
     ("the inert check never fires, so a body claim the graph does not carry "
      "passes again (the one-way check design-system-v2#123 reported)",
-     '    inert = inert_closing_refs(pr.get("body"), links, targets_default_branch(pr))',
+     '    inert = inert_closing_refs(pr.get("body"), links, targets_default_branch(pr, default_branch))',
      "    inert = []"),
     # The verdict stops depending on it while the scan still runs -- the shape
     # the ticket describes: a check that reads the right thing and does not act.
@@ -266,8 +266,21 @@ MUTATIONS = [
     # that hands the fields in directly stays green.
     ("the query stops asking for the base branch, so rule C fails open and the "
      "inert check silently disarms live",
-     "      baseRefName\n      baseRepository { defaultBranchRef { name } }\n",
+     "      baseRefName\n",
      ""),
+    # backend#3240: the default branch travels in the event payload. main() that
+    # stops reading it leaves every unit case green (they hand the value in) and
+    # rule C declining on every live PR -- only the end-to-end case sees it.
+    ("main stops reading PR_BASE_DEFAULT_BRANCH, so rule C declines on every "
+     "live PR while the unit cases stay green",
+     '    default_branch = os.environ.get("PR_BASE_DEFAULT_BRANCH") or None\n',
+     '    default_branch = None\n'),
+    # And the query quietly asking GitHub for it again is the exact read that
+    # took every private repo down; it must stay out of the query.
+    ("the query asks for baseRepository.defaultBranchRef again -- the private-repo "
+     "contents read backend#3240 removed",
+     "      baseRefName\n",
+     "      baseRefName\n      baseRepository { defaultBranchRef { name } }\n"),
 
     # Rule A -- the graph must be empty. Deleting it makes prose about other
     # tickets a finding on any PR that already links one correctly.
@@ -376,6 +389,18 @@ WORKFLOW_MUTATIONS = [
      "set-status loses its open-state guard, so editing a merged PR demotes its card",
      "  set-status:\n    if: ${{ github.event.pull_request.state == 'open' }}\n",
      "  set-status:\n"),
+    # backend#3240: the default branch reaches the checker through the payload.
+    # A workflow that stops passing it disarms rule C live with every unit case
+    # green; a mint that grows contents:read again widens an org-scoped token on
+    # every repo for a value the event already carries.
+    (".github/workflows/set-pr-status.yml",
+     "the workflow stops handing PR_BASE_DEFAULT_BRANCH to the checker",
+     "          PR_BASE_DEFAULT_BRANCH: ${{ github.event.pull_request.base.repo.default_branch }}\n",
+     ""),
+    (".github/workflows/set-pr-status.yml",
+     "the closing-ref mint grows a contents scope again",
+     "          permission-issues: read\n          # NO `contents` scope",
+     "          permission-issues: read\n          permission-contents: read\n          # NO `contents` scope"),
     (".github/workflows/set-pr-status.yml",
      "closing-ref loses its open-state guard, so a merged PR gets a late red X",
      "    if: ${{ inputs.closing-ref-check && github.event.pull_request.state == 'open' }}",
