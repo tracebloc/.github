@@ -897,6 +897,28 @@ expect_unreadable(
     lambda: gate.fetch("tracebloc", "release-train", 1, env={}, runner=runner_of(Proc(err="boom", code=1))),
     because="GraphQL read failed",
 )
+# backend#3240: a refused read must NAME the field GitHub denied. `gh api graphql`
+# exits 1 on a GraphQL-level error but still prints the body, and the body's
+# `errors[].path` is the only place the denied field appears -- stderr says
+# "Resource not accessible by integration" and nothing else. Measured on
+# backend#3262 (run 34101669658), where the log could not say which field.
+DENIED = json.dumps({"data": None, "errors": [{
+    "type": "FORBIDDEN",
+    "path": ["repository", "pullRequest", "closingIssuesReferences"],
+    "message": "Resource not accessible by integration",
+}]})
+expect_unreadable(
+    "a refused read names the denied field from the body's errors[].path",
+    lambda: gate.fetch("tracebloc", "backend", 3262, env={},
+                       runner=runner_of(Proc(out=DENIED, err="gh: Resource not accessible by integration", code=1))),
+    because="repository.pullRequest.closingIssuesReferences (FORBIDDEN",
+)
+expect_unreadable(
+    "a refused read with a non-JSON body still refuses with the summary, and does not crash",
+    lambda: gate.fetch("tracebloc", "backend", 3262, env={},
+                       runner=runner_of(Proc(out="<html>gateway</html>", err="gh: HTTP 502", code=1))),
+    because="GraphQL read failed (exit 1): gh: HTTP 502",
+)
 expect_unreadable(
     "a non-JSON body is refused",
     lambda: gate.fetch("tracebloc", "release-train", 1, env={}, runner=runner_of(Proc(out="<html>"))),
