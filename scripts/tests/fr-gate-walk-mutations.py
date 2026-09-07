@@ -125,6 +125,18 @@ def apply_one(src, old, new):
     return None if out == src else out
 
 
+def parses(text):
+    """`bash -n` over the mutant text: True when it is syntactically shell."""
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as tf:
+        tf.write(text)
+        path = tf.name
+    try:
+        return subprocess.run(["bash", "-n", path], capture_output=True).returncode == 0
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
 def main():
     dry = "--dry" in sys.argv
 
@@ -144,6 +156,14 @@ def main():
             continue
         if mutated is None:
             stale.append((label, "NO-OP: the mutation changed nothing"))
+            continue
+        # A MUTANT MUST PARSE BEFORE IT IS SCORED (Bugbot on #432). A syntax-broken
+        # `new` reddens every case -- the suite prints its summary, the walk never
+        # ran -- and would be recorded as "caught" while proving nothing about the
+        # rule it names. `bash -n` on the mutant text, in both tiers, so `--dry`
+        # cannot report an anchor as good when the edit it makes is not shell.
+        if not parses(mutated):
+            stale.append((label, "the mutant does not parse (bash -n); it is not a behavioural mutation"))
             continue
         if dry:
             print("  anchor ok  %s" % label)

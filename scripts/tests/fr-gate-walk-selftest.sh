@@ -454,11 +454,17 @@ expect_kv blockers "#16(FR on staging)"
 expect "first blocker: #16(FR on staging)"
 # The fixture really has the shape the claim needs: d4 is NOT on staging's
 # first-parent chain, so this case can only pass card-granular.
-if git -C "$R" rev-list --first-parent main..staging | grep -qxF "$D4"; then
-  no "fixture: d4 is off staging's first-parent chain" "d4 is first-parent; the case proves nothing"
-else
-  ok "fixture: d4 is off staging's first-parent chain"
-fi
+# Captured, then matched -- never `rev-list | grep -q` under pipefail: an early
+# close can SIGPIPE the producer and read a match as "no match" (Bugbot on #432).
+fp_chain=$(git -C "$R" rev-list --first-parent main..staging)
+case "
+$fp_chain
+" in
+  *"
+$D4
+"*) no "fixture: d4 is off staging's first-parent chain" "d4 is first-parent; the case proves nothing" ;;
+  *)  ok "fixture: d4 is off staging's first-parent chain" ;;
+esac
 
 # F3 the un-FR'd card is a merged PR (#13 = M3 with f1,f2): everything from M3
 # on is tainted; the frontier is S1, hop 1's mirror merge.
