@@ -205,7 +205,6 @@ def cross_check(found: "dict[str, set[str]]", options: "set[str]") -> "list[str]
 # Exemptions for `unlisted_namers`, at module level so `stale_exemptions` reads the
 # SAME copy -- two lists that must agree is the drift this file keeps finding.
 EXEMPT_NAMERS = {
-    "fr-gate.yml": "its rank table is covered by the fr-gate selftest",
     "kanban-reconcile.yml": "its DEST names come from branch_status_map.py, whose "
                            "vocabulary is imported above",
 }
