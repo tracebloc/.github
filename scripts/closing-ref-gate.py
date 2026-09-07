@@ -431,7 +431,6 @@ query($owner: String!, $name: String!, $number: Int!) {
       isDraft
       body
       baseRefName
-      baseRepository { defaultBranchRef { name } }
       closingIssuesReferences(first: 50) {
         totalCount
         nodes {
@@ -736,8 +735,24 @@ def readable_text(body):
     return HTML_COMMENT_RE.sub(STRIPPED, str(body))
 
 
-def targets_default_branch(pr):
+def targets_default_branch(pr, default_branch=None):
     """True / False / None -- does this PR target its base repo's default branch?
+
+    `default_branch` is the base repository's default branch AS THE EVENT PAYLOAD
+    STATES IT (`github.event.pull_request.base.repo.default_branch`), handed in by
+    the workflow as `PR_BASE_DEFAULT_BRANCH`. It is preferred over anything in
+    `pr`, and the query no longer asks GitHub for it. WHY (backend#3240): reading
+    `baseRepository { defaultBranchRef { name } }` is a Ref read, which is a
+    `contents` object -- world-readable on a public repository, gated by
+    `contents: read` on a private one. The closing-ref token is minted with
+    `pull-requests: read` + `issues: read` only, and from 2026-09-06 06:29Z that
+    one field made every private-repo run fail with "Resource not accessible by
+    integration" while public repos passed in the same minute. The token is
+    org-scoped (`owner:` + an all-repositories installation), so widening it
+    would have landed `contents: read` on every repo for a value the event
+    already carries for free. A payload-shaped `pr` that still carries the field
+    is honoured when no `default_branch` is given, so callers that hand the
+    payload in directly keep working.
 
     `None` means the payload did not say. It is a distinct answer from `False`
     because the caller treats them the same way for opposite reasons, and a
@@ -753,7 +768,9 @@ def targets_default_branch(pr):
     stacked PR and every promotion PR in the fleet reports.
     """
     base = pr.get("baseRefName")
-    default = ((pr.get("baseRepository") or {}).get("defaultBranchRef") or {}).get("name")
+    default = default_branch if isinstance(default_branch, str) and default_branch else None
+    if default is None:
+        default = ((pr.get("baseRepository") or {}).get("defaultBranchRef") or {}).get("name")
     if not isinstance(base, str) or not isinstance(default, str) or not base or not default:
         return None
     return base == default
@@ -991,7 +1008,7 @@ def _why_lines():
     ]
 
 
-def evaluate(pr, standards_root=None):
+def evaluate(pr, standards_root=None, default_branch=None):
     """(verdict, lines) for one PR payload. Raises Unreadable on a cannot-tell.
 
     `standards_root` overrides where the canon is read from, for the selftest
@@ -1009,7 +1026,7 @@ def evaluate(pr, standards_root=None):
     named = parse_title(pr.get("title"))
     links = closing_refs(pr)
     keywords = reference_keywords(root=standards_root)
-    inert = inert_closing_refs(pr.get("body"), links, targets_default_branch(pr))
+    inert = inert_closing_refs(pr.get("body"), links, targets_default_branch(pr, default_branch))
     linked_text = ", ".join("%s/%s#%d" % triple for triple in links) or "none"
     keyword_text = ", ".join("`%s`" % word for word in keywords)
 
@@ -1273,6 +1290,10 @@ def main(argv=None):
     repo = os.environ.get("REPO", "")
     number = os.environ.get("PR_NUMBER", "")
     soft = (os.environ.get("SOFT_FAIL") or "").strip().lower() == "true"
+    # The base repo's default branch comes from the event payload, not from the
+    # graph: see `targets_default_branch` for why (backend#3240). Absent means
+    # "cannot tell", which rule C already treats as a decline, never a finding.
+    default_branch = os.environ.get("PR_BASE_DEFAULT_BRANCH") or None
 
     if "/" not in repo or not number.isdigit():
         _emit(FAIL, [], "REPO must be owner/name and PR_NUMBER a number; got %r / %r"
@@ -1293,7 +1314,7 @@ def main(argv=None):
 
     try:
         pr = fetch(owner, name, int(number))
-        verdict, lines = evaluate(pr)
+        verdict, lines = evaluate(pr, default_branch=default_branch)
     except Unreadable as exc:
         # A malfunction, not a finding: SOFT_FAIL deliberately does NOT cover
         # this. Same split as action-pins in code-quality.yml.
