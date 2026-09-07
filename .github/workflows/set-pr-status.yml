@@ -59,16 +59,17 @@ on:
         default: true
       closing-ref-soft-fail:
         description: >-
-          Report a closing-ref finding but exit 0. Defaults FALSE: the finding is
-          fixed by adding one line to the PR body, not by clearing a backlog, so
-          there is nothing to migrate -- and this job is a required context
-          nowhere, so a red job blocks no merge. Flip it per caller if a repo
-          wants the annotation without the red X. It governs FINDINGS ONLY: a
-          malfunction of the check (an unreadable title, an unreadable link
-          graph, an API error) exits nonzero either way, which is the same split
-          `action-pins-soft-fail` keeps in code-quality.yml.
+          Report a closing-ref finding but exit 0. Defaults TRUE (advisory) since
+          2026-09-07 (tracebloc/backend#3355): this job is a required context
+          nowhere, so a red job never blocked a merge -- it only made every PR
+          look blocked, while the daily kanban-archive and weekly kanban-reconcile
+          already clean up drifted cards. The annotation still posts the guidance;
+          set this false per caller to restore the red X. It governs FINDINGS
+          ONLY: a malfunction of the check (an unreadable title, an unreadable
+          link graph, an API error) exits nonzero either way, which is the same
+          split `action-pins-soft-fail` keeps in code-quality.yml.
         type: boolean
-        default: false
+        default: true
       quality-ref:
         description: >-
           Ref of tracebloc/.github the closing-ref checker is taken from. Callers
