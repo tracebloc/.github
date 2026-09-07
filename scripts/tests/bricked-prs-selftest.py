@@ -41,6 +41,7 @@ _spec.loader.exec_module(bp)
 # this file's own subject matter.
 REAL_OPEN_PRS = bp.open_prs
 REAL_HEAD_AGE = bp.head_age_minutes
+REAL_FULL_CONTEXTS = bp.full_context_names
 
 RESULTS: "list[tuple[bool, str, str]]" = []
 
@@ -56,11 +57,17 @@ class FakeProtection:
         self.error = error
 
 
-def install(protection, prs, age=999.0):
-    """Point the module at canned answers for one scenario."""
+def install(protection, prs, age=999.0, full=None):
+    """Point the module at canned answers for one scenario.
+
+    `full` is the complete, paginated context set returned by
+    `full_context_names` when a rollup is truncated -- a set (the real contexts),
+    or None to simulate the paginated read itself failing. Only consulted for a
+    PR at/over the page cap, so it is irrelevant to the many sub-cap cases."""
     bp.CD.read_protection = lambda org, name, branch: protection
     bp.open_prs = lambda org, name, base: list(prs)
     bp.head_age_minutes = lambda org, name, sha: age
+    bp.full_context_names = lambda org, name, oid: full
 
 
 def pr(number=1, draft=False, contexts=(), state="CLEAN", review="APPROVED",
@@ -307,25 +314,46 @@ record(not findings and not errors,
        "yet' is not a finding and must not become one")
 
 
-# --- a rollup at the page size is UNKNOWN, never a finding -----------------
-# `gh` asks for `contexts(first: 100)` and does not say when it truncated, so a
-# context dropped by pagination looks exactly like a context that never ran. That
-# is fail-open in the one direction this whole file exists to close.
+# --- a rollup at the page size is PAGINATED, not refused (backend#3243) -----
+# `gh pr list` asks `contexts(first: 100)` and says nothing when it truncated, so
+# a context dropped by pagination looks exactly like one that never ran. The old
+# code refused the whole run here; now it reads the head's contexts directly and
+# with pagination (`full_context_names`) and decides against the COMPLETE set.
 #
-# The fixture is built so that WITHOUT the guard it yields two findings -- no
-# Bugbot and the required check missing -- and both are confident and wrong. So a
-# green result here cannot come from the scenario being harmless.
-big = pr(number=90, contexts=[f"filler-{i}" for i in range(bp.ROLLUP_CONTEXT_CAP)],
-         bugbot=False)
-install(FakeProtection(["build"]), [big])
+# The partial fixture is built so that WITHOUT a full read it yields two findings
+# -- no Bugbot and the required `build` missing -- both confident and wrong. So a
+# green result below can only come from the paginated read, not from a harmless
+# fixture.
+big_partial = [f"filler-{i}" for i in range(bp.ROLLUP_CONTEXT_CAP)]
+
+# (a) THE FIX: the full paginated set is COMPLETE (build + Bugbot present), so the
+#     two partial-list findings are cleared -- no finding AND no error. This is the
+#     exact client#989 shape that demoted every fleet run to "could not audit".
+big = pr(number=90, contexts=big_partial, bugbot=False)
+install(FakeProtection(["build"]), [big],
+        full=set(big_partial) | {"build", "Cursor Bugbot"})
 findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
-record(not findings and len(errors) == 1,
-       "a rollup at the page size produces an ERROR and no findings",
-       f"findings={[f['cause'] for f in findings]} errors={errors} — "
-       "without the guard this is bugbot-absent + never-reported, both false")
-record(errors and "NOT audited" in errors[0] and "#90" in errors[0],
-       "the error names the PR and says it was not audited",
-       f"errors={errors} — a silent skip is the same fail-open with better manners")
+record(not findings and not errors,
+       "a truncated rollup whose full set is complete is silent, not a run-killing error",
+       f"findings={[f['cause'] for f in findings]} errors={errors} — the paginated "
+       "read shows build + Bugbot present, so the partial-list findings were false")
+
+# (b) The full set is STILL missing build and Bugbot -> a REAL finding (not an
+#     error): pagination confirmed the absence rather than explaining it away.
+install(FakeProtection(["build"]), [big], full=set(big_partial))
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not errors and {f["cause"] for f in findings} == {"bugbot-absent", "never-reported"},
+       "a truncated rollup still missing on the full set is a real finding",
+       f"findings={[f['cause'] for f in findings]} errors={errors}")
+
+# (c) The paginated read itself FAILS (full=None) -> fail-closed: an error naming
+#     the PR as NOT audited, out of the findings table -- but only this PR, not
+#     the run's exit code from a phantom absence.
+install(FakeProtection(["build"]), [big], full=None)
+findings, errors = bp.audit_repo("o", "r", {"prod": "main"})
+record(not findings and len(errors) == 1 and "NOT audited" in errors[0] and "#90" in errors[0],
+       "a truncated rollup whose paginated read fails is refused, naming the PR",
+       f"findings={[f['cause'] for f in findings]} errors={errors}")
 
 # One under the cap is a NORMAL audit. Without this the guard could be `>= 0` and
 # the test above would still pass; this is what makes the boundary mean something.
@@ -360,6 +388,36 @@ record(bp.rollup_truncated({"statusCheckRollup": [{"name": "x"}]}) is False
        and bp.rollup_truncated({"statusCheckRollup": []}) is False,
        "a small rollup is not truncated",
        "the polarity, asserted directly rather than only through audit_repo")
+
+# --- full_context_names itself, not a stub of it (backend#3243) -------------
+# The audit_repo cases above stub full_context_names, so they prove the WIRING
+# but never run the real reader. Exercise it directly here: it must union the two
+# paginated surfaces (check-run `name` + legacy status `context`, one name per
+# line from `gh api --paginate --jq`) and fail CLOSED to None on any GhError.
+bp.full_context_names = REAL_FULL_CONTEXTS
+_real_gh = bp.CD.gh
+def _gh_contexts(args):
+    # args ends with the --jq filter naming which surface is being read.
+    jq = args[-1]
+    if jq == ".check_runs[].name":
+        return "build\nCursor Bugbot\nbuild\n"   # duplicates across pages collapse
+    if jq == ".[].context":
+        return "legacy-status\n\n"               # blank lines are skipped
+    raise AssertionError(f"unexpected gh api call: {args}")
+bp.CD.gh = _gh_contexts
+try:
+    got = bp.full_context_names("o", "r", "deadbeef")
+    record(got == {"build", "Cursor Bugbot", "legacy-status"},
+           "full_context_names unions check-run names and legacy status contexts",
+           f"got={got}")
+    def _gh_boom(args):
+        raise bp.CD.GhError(502, "bad gateway")
+    bp.CD.gh = _gh_boom
+    record(bp.full_context_names("o", "r", "deadbeef") is None,
+           "full_context_names fails closed to None on a read error",
+           "a 502 must not read as an empty (healthy) context set")
+finally:
+    bp.CD.gh = _real_gh
 
 
 def _boom(org, name, base):
