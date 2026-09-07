@@ -476,6 +476,38 @@ def mutant_syntax_error(target: Path, src: str) -> "str | None":
     return parse(src)
 
 
+# A per-language token that turns any otherwise-valid source unparseable: an
+# unmatched opener for the two brace/paren grammars, a header with no body for
+# bash. Appending it to a real target's source is the smallest guaranteed way to
+# manufacture the exact defect `mutant_syntax_error` exists to catch.
+_SYNTAX_BREAKER = {".py": "\n(\n", ".sh": "\nif\n", ".awk": "\nBEGIN {\n"}
+
+
+def prove_parse_gate(pristine: "dict[Path, str]") -> "str | None":
+    """Prove `mutant_syntax_error` still discriminates, in BOTH directions.
+
+    Bugbot (backend#3192): none of the MUTATIONS below produces an unparseable
+    mutant, so `broken` is always empty and the parse gate is never exercised --
+    stub it to `None` and every anchor still reports good. This drives the gate
+    head-on against each real target: the pristine source must parse (no false
+    positive that would redden every honest anchor), and a deliberately-broken
+    mutant of it must be rejected (the gate actually fires). Derived from the
+    targets and the real parsers -- it holds no copy of the rule (rule 9).
+    Returns the first disagreement, or None when the gate discriminates.
+    """
+    for target, text in pristine.items():
+        breaker = _SYNTAX_BREAKER.get(target.suffix)
+        if breaker is None:
+            return f"no syntax-breaker declared for a {target.suffix} target"
+        if mutant_syntax_error(target, text) is not None:
+            return (f"{target.name}: the pristine source is reported unparseable, so "
+                    "the gate would redden every honest anchor")
+        if mutant_syntax_error(target, text + breaker) is None:
+            return (f"{target.name}: an unparseable mutant was NOT rejected -- the parse "
+                    "gate no longer fires")
+    return None
+
+
 def apply_one(src: str, old: str, new: str) -> "str | None":
     n = src.count(old)
     if n != 1:
@@ -497,6 +529,14 @@ def main() -> int:
             return rc
 
     pristine = {t: t.read_text(encoding="utf-8") for t in (AWK, SH, YML)}
+
+    # Prove the parse gate discriminates before trusting it below (backend#3192).
+    # Runs in `--dry` too -- it writes nothing and is the check `make check` runs.
+    gate_broken = prove_parse_gate(pristine)
+    if gate_broken:
+        sys.stderr.write(f"::error::parse gate is not proven to fire: {gate_broken}\n")
+        return 2
+
     stale, uncaught, miscaught = [], [], []
 
     for entry in MUTATIONS:

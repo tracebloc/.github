@@ -172,9 +172,18 @@ PR = CALLER_ON.get("pull_request") or {}
 
 # THE FIX. A `branches:` filter rejects base=develop, so the gate never re-runs on
 # the retarget out — the entire backend#2840 mechanism. It must be absent.
-check("caller carries NO `branches:` filter (else a retarget-out is never seen)",
-      "branches" not in PR,
-      f"branches = {PR.get('branches')!r} — this is exactly backend#2840")
+#
+# ALL FOUR OF GITHUB'S TRIGGER SKIP-FILTERS, not just `branches:` (Bugbot,
+# backend#3161). `branches-ignore`, `paths` and `paths-ignore` each fail the same
+# way: any of them can stop the caller re-running on a retarget out of staging/main,
+# leaving the required `gate` check welded to the last FAILURE. `branches:` was the
+# measured regression (.github#388); the other three are the rest of that class, so
+# the whole `on: pull_request:` filter surface must stay empty. These are GitHub's
+# fixed filter vocabulary, enumerated here because that is the producer's surface.
+for _flt in ("branches", "branches-ignore", "paths", "paths-ignore"):
+    check(f"caller carries NO `{_flt}:` filter (else a retarget-out is never seen)",
+          _flt not in PR,
+          f"{_flt} = {PR.get(_flt)!r} — this is exactly backend#2840")
 
 # THE #1945 HALF. `edited` is the only event a base change fires; without it even
 # the main<->staging retargets go stale.

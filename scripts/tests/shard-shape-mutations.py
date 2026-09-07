@@ -308,6 +308,20 @@ def main():
         if mutated is None:
             stale.append((label, "NO-OP: the mutation changed nothing"))
             continue
+        # PARSE-FIRST (Bugbot, backend#3220). A mutation whose `new` does not even
+        # parse tests nothing about the guard's LOGIC -- it just breaks Python. Run
+        # unguarded it would reach the SUITE as an import-time SyntaxError, which
+        # this harness files as UNCAUGHT ("the suite did not report -- mutation
+        # broke the harness") and, on `--dry`, waves through as "anchor ok". Both
+        # are wrong: an unparseable mutant is a STALE row (rule 3: cannot-evaluate
+        # is a finding, not coverage). Reject it up front, in BOTH modes, so a
+        # syntactically invalid mutant can never masquerade as a caught mutation or
+        # as a genuine coverage gap.
+        try:
+            compile(mutated, str(GUARD), "exec")
+        except SyntaxError as exc:
+            stale.append((label, "MUTANT DOES NOT PARSE (%s) -- fix the mutation" % exc))
+            continue
         if dry:
             print("  anchor ok  %s" % label)
             continue
