@@ -917,7 +917,13 @@ expect_unreadable(
     "a refused read with a non-JSON body still refuses with the summary, and does not crash",
     lambda: gate.fetch("tracebloc", "backend", 3262, env={},
                        runner=runner_of(Proc(out="<html>gateway</html>", err="gh: HTTP 502", code=1))),
-    because="GraphQL read failed (exit 1): gh: HTTP 502",
+    because="body: '<html>gateway</html>'",
+)
+expect_unreadable(
+    "a refused read with EMPTY stdout says so, instead of printing nothing (backend#3284)",
+    lambda: gate.fetch("tracebloc", "backend", 3284, env={},
+                       runner=runner_of(Proc(out="", err="gh: Resource not accessible by integration", code=1))),
+    because="(empty stdout)",
 )
 expect_unreadable(
     "a non-JSON body is refused",

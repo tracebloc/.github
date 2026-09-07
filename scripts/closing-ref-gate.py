@@ -1227,17 +1227,24 @@ def _denied_fields(stdout):
     (CLAUDE.md rule 3). Empty when stdout is not JSON or carries no `errors`, so
     the summary this decorates is never worse than before.
     """
+    raw = (stdout or "").strip()
     try:
-        errors = json.loads(stdout or "").get("errors") or []
+        errors = json.loads(raw).get("errors") or []
     except (ValueError, TypeError, AttributeError):
-        return ""
+        errors = []
+    if not errors:
+        # No per-field errors[] to name -- an endpoint-level refusal, a non-JSON
+        # body, or nothing at all. Say WHICH, bounded, so the run is never blind
+        # (backend#3284: the first instrument printed nothing here and could not
+        # distinguish "field denied" from "endpoint denied").
+        return " -- body: %s" % (repr(raw[:300]) if raw else "(empty stdout)")
     parts = []
     for err in errors:
         if not isinstance(err, dict):
             continue
         path = ".".join(str(p) for p in (err.get("path") or [])) or "<no path>"
         parts.append("%s (%s: %s)" % (path, err.get("type") or "?", (err.get("message") or "")[:120]))
-    return (" -- denied: " + "; ".join(parts)) if parts else ""
+    return (" -- denied: " + "; ".join(parts)) if parts else " -- body: %s" % repr(raw[:300])
 
 
 def _run_gh(args, env):
