@@ -306,7 +306,8 @@ MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-archive-baseline \
                    mutation-reusable-no-cancel \
                    mutation-lint-targets \
-                   mutation-shard-shape
+                   mutation-shard-shape \
+                   mutation-fr-gate-walk
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -366,7 +367,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-triage-labels \
                     selftest-archive-baseline \
                     selftest-reusable-no-cancel \
-                    selftest-lint-targets
+                    selftest-lint-targets \
+                    selftest-fr-gate-walk
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -601,6 +603,22 @@ mutation-fr-gate:
 
 mutation-fr-gate-dry:
 	$(PYTHON) scripts/tests/fr-gate-mutations.py --dry
+
+# The gate's attribution WALK, extracted into scripts/fr-gate-walk.sh with a
+# frontier mode (backend#3323, RFC-0075 D6). Bash, like git-reap: every case
+# builds a throwaway git repo with real merges and stubs `gh` on PATH, so no
+# token and no network. FR_WALK_RETRY_UNIT=0 inside the suite -- the retry
+# COUNTS are the gate's, only the sleeps are scaled away.
+.PHONY: selftest-fr-gate-walk
+selftest-fr-gate-walk:
+	bash scripts/tests/fr-gate-walk-selftest.sh
+
+.PHONY: mutation-fr-gate-walk mutation-fr-gate-walk-dry
+mutation-fr-gate-walk:
+	$(PYTHON) scripts/tests/fr-gate-walk-mutations.py
+
+mutation-fr-gate-walk-dry:
+	$(PYTHON) scripts/tests/fr-gate-walk-mutations.py --dry
 
 # The closing-ref gate (backend#2364): a PR whose TITLE names a ticket must LINK
 # it. NO guard-pyyaml, for the same asserted reason as bugbot-gate above -- the
