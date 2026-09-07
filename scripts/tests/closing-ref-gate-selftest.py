@@ -877,7 +877,7 @@ check("the query asks whether the PR is a draft", "isDraft" in gate.QUERY)
 # ---------------------------------------------------------------------------
 
 
-class Proc(object):
+class Proc:
     def __init__(self, out="", err="", code=0):
         self.stdout = out
         self.stderr = err
@@ -1679,7 +1679,7 @@ check("no repo named `engine` or `runtime` exists: the shorthand MUST be resolve
 # one reads and the other does not is a red test, not a quiet cannot-tell. The
 # stdlib suite stays stdlib: without PyYAML this records a skip, by name.
 try:
-    import yaml as _yaml  # noqa: E402 - optional cross-check, see above
+    import yaml as _yaml
 except ImportError:  # pragma: no cover - depends on the host
     _yaml = None
 if _yaml is not None:
