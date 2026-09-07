@@ -36,6 +36,14 @@ on:
       org:
         type: string
         default: tracebloc
+      quality-ref:
+        description: >-
+          Ref of tracebloc/.github the walk script (scripts/fr-gate-walk.sh) is
+          taken from. Callers pin this workflow at `@main`, so `main` is the
+          matching version. Override only to test a change to the walk before
+          it merges. The release train pins the same file by COMMIT SHA.
+        type: string
+        default: "main"
 
 jobs:
   gate:
@@ -99,6 +107,23 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
+      # THE WALK LIVES HERE, NOT IN THE CALLING REPO (backend#3323, RFC-0075 D6).
+      # The two steps below used to carry it inline; the release train needs the
+      # same walk to cut the prod hop at the FR frontier, and a second copy in
+      # release-train is the drift rule 9 forbids. So the script is checked out
+      # of tracebloc/.github -- same shape as bugbot-gate.yml and code-quality.yml
+      # -- into a path beside the caller's checkout. `.github` is public, so this
+      # needs no token; `persist-credentials: false` because the walk reads with
+      # the App token below, never with the checkout's.
+      - name: Check out the shared walk script
+        if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tracebloc/.github
+          ref: ${{ inputs.quality-ref }}
+          path: .fr-gate-tools
+          persist-credentials: false
+
       # Authenticates as the tracebloc-release-train App (backend#2036) instead of a
       # human's PAT. `owner:` yields an ORG-scoped installation token, which this gate
       # needs: it reads the org PROJECT, and a repo-scoped token cannot.
@@ -160,155 +185,13 @@ jobs:
           # Make the base branch tip available locally for the diff.
           git fetch origin "$BASE_REF":"refs/remotes/origin/$BASE_REF" --depth=200 2>/dev/null || true
           BASE_SHA=$(git rev-parse "origin/$BASE_REF")
-
-          # -- Build the item list AUTHORITATIVELY from GitHub's commit->PR
-          # attribution, NOT from commit subjects. --------------------------------
-          # Scraping "(#N)" from subjects is unreliable three ways, all seen in real
-          # ranges (backend#1228): this org's convention is "<subject> (#issue) (#PR)",
-          # so it (a) picks up ISSUE numbers, which fail the later pullRequest() lookup
-          # and used to fail the gate CLOSED; (b) picks up bare "#N" MENTIONS of
-          # unrelated PRs; and (c) MISSES a commit's real PR when the (#PR) is not in
-          # the subject at all (rebase-merges, or a squash whose subject kept only the
-          # issue ref) -- letting un-reviewed code ride in unevaluated (fail OPEN).
-          #
-          # repos/{owner}/{repo}/commits/{sha}/pulls returns the actual MERGED PR(s)
-          # that introduced a commit -- the source of truth for both "which PRs are in
-          # this range" (PRS) and "is every commit attributable" (UNATTRIB). One call
-          # per commit not already vouched by a PR-merge in range; retry, and fail
-          # CLOSED on a persistent API error (an unverifiable commit must never pass).
-          # The base fetch is --depth=200, so the commit set -- and the call count --
-          # is bounded.
-          fetch_pulls() {   # $1=sha; echoes the commits/pulls JSON array; rc 1 = API error
-            for attempt in 1 2 3; do
-              if out=$(gh api "repos/$REPO/commits/$1/pulls" 2>/dev/null); then
-                printf '%s' "$out"
-                return 0
-              fi
-              sleep $((attempt * 2))
-            done
-            return 1
-          }
-
-          ATTRIBUTED=""   # real merged PR numbers (deduped at the end)
-          UNATTRIB=""     # commits introduced by no merged PR -- i.e. a direct push
-
-          # Pass 1: a merge commit vouches for its merged-in range (M^1..M^2) and
-          # contributes its PR ONLY IF it is that PR's actual merge_commit_sha.
-          # commits/pulls returns EVERY PR whose branch CONTAINS the commit, so a
-          # sync merge ("Merge branch 'develop' into feature") also lists the feature
-          # PR; without the merge_commit_sha match it would enter MERGES and mark a
-          # direct-push-to-base it happened to pull in as "covered", skipping Pass 2
-          # and reopening the fail-open hole (Bugbot #73). Requiring merge_commit_sha
-          # ==sha admits only true PR merges -- verified on real history: the sync
-          # merge ba80b3a (backend #1128 back-merge) yields no merge_commit_sha match
-          # and drops to Pass 2, while every "Merge pull request #N" matches #N. A
-          # routine or non-PR merge neither vouches nor contributes; any push it
-          # carries is caught by Pass 2.
-          MERGES=""
-          while IFS= read -r msha; do
-            [ -z "$msha" ] && continue
-            if raw=$(fetch_pulls "$msha"); then
-              # Promotion PRs (head release-train/*) are the train's own plumbing:
-              # they never vouch for their range and are never gated items -- their
-              # cargo is attributed individually (inner merges here, non-merge
-              # commits in Pass 2).
-              mprs=$(printf '%s' "${raw:-[]}" | jq -r --arg s "$msha" \
-                '[.[] | select(.merged_at != null and .merge_commit_sha == $s
-                         and (((.head.ref // "") | startswith("release-train/")) | not))
-                  | .number] | join(" ")')
-              if [ -n "$mprs" ]; then
-                ATTRIBUTED="$ATTRIBUTED $mprs"
-                MERGES="$MERGES $msha"
-              fi
-            else
-              echo "  BLOCKED ${msha} -- merge commit unverifiable via API after 3 attempts (failing closed)"
-              UNATTRIB="$UNATTRIB ${msha}"
-            fi
-          done < <(git log --merges --format='%H' "$BASE_SHA..$HEAD_SHA")
-
-          # Pass 2: non-merge commits not already vouched by a true PR-merge above. A
-          # merge M introduces a commit only if it is in M^1..M^2 -- on the merged-in
-          # side and NOT already on the mainline side; requiring "not ancestor of ^1"
-          # stops a base-branch push being laundered into attribution once a feature
-          # branch merges the base in (Bugbot #72).
-          while IFS= read -r csha; do
-            [ -z "$csha" ] && continue
-            covered=0
-            for msha in $MERGES; do
-              p2=$(git rev-parse --verify --quiet "${msha}^2") || continue
-              p1=$(git rev-parse --verify --quiet "${msha}^1") || continue
-              if git merge-base --is-ancestor "$csha" "$p2" 2>/dev/null \
-                 && ! git merge-base --is-ancestor "$csha" "$p1" 2>/dev/null; then
-                covered=1
-                break
-              fi
-            done
-            [ "$covered" -eq 1 ] && continue
-            if raw=$(fetch_pulls "$csha"); then
-              # commits/pulls lists every PR whose branch contains the commit, so a
-              # promotion PR (head release-train/*) shows up for every commit it
-              # carried. Filter it out; a commit whose ONLY merged PR is a promotion
-              # PR is a direct push that rode the train -- correctly unattributed.
-              cprs=$(printf '%s' "${raw:-[]}" | jq -r \
-                '[.[] | select(.merged_at != null
-                         and (((.head.ref // "") | startswith("release-train/")) | not))
-                  | .number] | join(" ")')
-              if [ -z "$cprs" ]; then
-                UNATTRIB="$UNATTRIB ${csha}"   # no merged PR introduced it: a direct push
-              else
-                ATTRIBUTED="$ATTRIBUTED $cprs"
-              fi
-            else
-              echo "  BLOCKED ${csha} -- could not verify via API after 3 attempts (failing closed)"
-              UNATTRIB="$UNATTRIB ${csha}"
-            fi
-          done < <(git log --no-merges --format='%H' "$BASE_SHA..$HEAD_SHA")
-
-          PRS=$(echo "$ATTRIBUTED" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -un | tr '\n' ' ' || true)
-          echo "Items in promotion (commit->PR attribution): $PRS"
-          echo "prs=$PRS" >> "$GITHUB_OUTPUT"
-          echo "unattributed=$UNATTRIB" >> "$GITHUB_OUTPUT"
-
-          # Does this range change any FILE at all? A promotion can be
-          # ancestry-only: the train's mirror merge records that a branch's
-          # history is contained, while the base already holds every byte of
-          # that content (data-ingestors 2026-07-30 -- 1 commit ahead, 0 files
-          # changed, because a manual promotion had already carried the content
-          # to master). There is nothing reviewable in such a range, which is
-          # different from "we failed to attribute real content" -- and the
-          # fallback below depends on telling those apart.
-          # Ask the compare API, three-dot semantics: "what did HEAD contribute
-          # relative to the merge base", NOT "how do the two tips differ".
-          #
-          # A two-dot `git diff BASE..HEAD` counts files the BASE moved on
-          # alone, which is wrong here and would have defeated this whole fix:
-          # on data-ingestors two-dot reports 6 files (master's own commits
-          # that staging lacks) while three-dot reports 0 -- so the
-          # ancestry-only branch would never have been taken and the deadlock
-          # would have survived (Bugbot, .github#109).
-          #
-          # The API is used rather than local three-dot git because this repo's
-          # history has multiple merge bases after the mirror reconciliations,
-          # and `git diff A...B` silently picks one of them. FAIL CLOSED on any
-          # error: an uncounted range must never be treated as empty.
-          DIFF_FILES=""
-          for attempt in 1 2 3; do
-            DIFF_FILES=$(gh api "repos/$REPO_FULL/compare/$BASE_SHA...$HEAD_SHA" \
-                           --jq '.files | length' 2>/dev/null) && break
-            DIFF_FILES=""
-            sleep $((attempt * 2))
-          done
-          case "${DIFF_FILES:-}" in
-            ''|*[!0-9]*)
-              echo "::warning::could not count changed files for this range - treating it as non-empty (fail closed)."
-              DIFF_FILES=-1
-              ;;
-          esac
-          echo "changed_files=$DIFF_FILES" >> "$GITHUB_OUTPUT"
-          echo "Range contributes $DIFF_FILES file(s) relative to the merge base."
-          if [ -n "$UNATTRIB" ]; then
-            echo "Unattributable commits (introduced by no merged PR):$UNATTRIB"
-          fi
+          export BASE_SHA
+          # Commit->PR attribution, the promotion-PR transparency, the two-pass
+          # merge handling (Bugbot #72/#73) and the three-dot file count all live
+          # in the script's header and body -- one implementation, shared with the
+          # train's frontier resolver. It writes prs= / unattributed= /
+          # changed_files= to $GITHUB_OUTPUT exactly as this step always did.
+          bash .fr-gate-tools/scripts/fr-gate-walk.sh discover
 
       - name: Verify each item is in required Status
         if: steps.target.outputs.required != '' && steps.skip.outputs.skip != 'true'
@@ -323,220 +206,7 @@ jobs:
           PROMOTION_PR: ${{ github.event.pull_request.number }}
           CHANGED_FILES: ${{ steps.items.outputs.changed_files }}
         run: |
-          set -euo pipefail
-          REPO_NAME="${REPO_FULL#*/}"
-          UNATTRIB="${UNATTRIB:-}"
-
-          # No attributable items. Two very different causes, and conflating
-          # them deadlocked the train (data-ingestors 2026-07-30):
-          #
-          #  a) ANCESTRY-ONLY range - the only new commit is the train's own
-          #     mirror merge and the base already contains every byte of its
-          #     content (0 files changed). Nothing shipped, so there is nothing
-          #     to gate. Gating the promotion PR here is unsatisfiable BY
-          #     CONSTRUCTION: set-pr-status parks it in "Code review", and it
-          #     can only leave that column by merging - which this gate blocks.
-          #
-          #  b) Real content we could not attribute - fall back to gating the
-          #     promotion PR, which fails closed and forces a human look. Never
-          #     let unreviewed content through just because attribution broke.
-          NUMBERS="$PRS"
-          if [ -z "$(echo "$NUMBERS" | tr -d ' ')" ]; then
-            # UNATTRIB must ALSO be empty. Its fail-closed check lives further
-            # down this step, so exiting here would jump over it: a
-            # tree-identical range that contains a commit we could not verify
-            # (e.g. commits/{sha}/pulls erroring three times) would pass the
-            # gate. 0 files changed means "nothing shipped" only if we
-            # successfully accounted for every commit (Bugbot, .github#109).
-            if [ "${CHANGED_FILES:-1}" = "0" ] \
-               && [ -z "$(echo "${UNATTRIB}" | tr -d ' ')" ]; then
-              echo "No attributable items, no unattributable commits, and the range changes no files — ancestry-only promotion, nothing to gate."
-              echo "::notice::FR gate PASSED (ancestry-only promotion: 0 files changed, every commit accounted for)."
-              exit 0
-            fi
-            echo "No PR refs in commit subjects — falling back to gating the promotion PR (#$PROMOTION_PR) itself."
-            NUMBERS="$PROMOTION_PR"
-          fi
-
-          # Pipeline rank for each kanban Status. An item satisfies the gate when
-          # it is AT OR BEYOND the required stage — e.g. an item already in "Prod"
-          # trivially satisfies an "On dev" gate. Strict equality used to
-          # falsely block already-promoted items that reappear in a later promotion's
-          # commit range. Unknown statuses return empty and fall
-          # through to the strict-equality path below, preserving the old behavior.
-          rank() {
-            case "$1" in
-              "Backlog")           echo 1  ;;
-              "North Stars")       echo 2  ;;
-              "Ready")             echo 3  ;;
-              "In progress")       echo 4  ;;
-              "Code review")       echo 5  ;;
-              "On dev")            echo 6  ;;
-              # RANK 7: the agent stage, between `On dev` and human FR. READ-ONLY for
-              # now -- nothing writes this value yet (#1578 does that, in a LATER
-              # hop). An unknown Status returns "" here, the guard below fails, and
-              # evaluation falls through to strict equality: the card BLOCKS every
-              # prod promotion carrying it. That is the backend#1411 shape, and the
-              # column already EXISTS on the board, so this was a live landmine
-              # waiting for the first card to land in it (#1577, RFC-BACKEND-1552 D5).
-              "Staging (agent review)")  echo 7  ;;
-              # Both names, for the #1592 rename window.
-              "Staging (human review)"|"FR on staging")     echo 8  ;;
-              "Ready for prod")    echo 9  ;;
-              "Prod")              echo 10 ;;
-              # Terminal, and therefore NOT blocking. Both fell through to "" and then
-              # to the strict-equality path, so a single Done card blocked every prod
-              # promotion that carried it (RFC-BACKEND-1405 D8, backend#1411).
-              "Done")              echo 11 ;;
-              "Cancelled")         echo 11 ;;
-              *)                   echo "" ;;
-            esac
-          }
-
-          BLOCKED=""
-          MISSING=""
-          UNREADABLE=""
-          PASSED=""
-
-          # Read one PR's Status column, retrying on both an API failure and an
-          # empty result.
-          #
-          # The empty case needs retrying because it is usually a RACE, not an
-          # absence: fr-gate-caller.yml and add-to-kanban.yml both fire on
-          # `pull_request: opened` and run concurrently, so the gate regularly
-          # queries the board before the card has been created. Observed on
-          # tracebloc/.github#61 — the gate finished at 16:48:09 and the card
-          # appeared at 16:48:14. It won the race by one second and passed.
-          #
-          # Echoes the column on success. Returns 1 if the API never answered,
-          # 2 if the API answered but the PR has no card. The caller must treat
-          # both as blocking; neither is evidence that review happened.
-          resolve_status() {
-            num="$1"
-            attempt=0
-            api_ok=0
-            while [ "$attempt" -lt 5 ]; do
-              attempt=$((attempt + 1))
-              # shellcheck disable=SC2016  # $names are GraphQL variables, not shell - keep literal
-              if resp=$(gh api graphql -f query='
-                query($org: String!, $repo: String!, $num: Int!) {
-                  repository(owner: $org, name: $repo) {
-                    pullRequest(number: $num) {
-                      projectItems(first: 10) {
-                        nodes {
-                          project { number }
-                          fieldValueByName(name: "Status") {
-                            ... on ProjectV2ItemFieldSingleSelectValue { name }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }' -F org="$ORG" -F repo="$REPO_NAME" -F num="$num" 2>/dev/null); then
-                api_ok=1
-                # Parse is deliberately non-fatal. Under `set -euo pipefail` a jq
-                # error or a SIGPIPE from `head` closing the pipe early would
-                # otherwise abort resolve_status mid-loop, skipping the remaining
-                # retries and returning an ambiguous code. `2>/dev/null` + `|| true`
-                # turn any parse failure into an empty result, which just falls
-                # through to the next attempt. (The gh call above is captured with
-                # `2>/dev/null`, not `2>&1`, so a stderr warning can never be fed
-                # into jq as if it were the JSON body.)
-                status=$(printf '%s' "$resp" \
-                  | jq -r --arg n "$PROJECT_NUMBER" '.data.repository.pullRequest.projectItems.nodes[]?
-                      | select(.project.number == ($n | tonumber)) | .fieldValueByName.name // ""' 2>/dev/null \
-                  | head -1 || true)
-                if [ -n "$status" ]; then
-                  printf '%s' "$status"
-                  return 0
-                fi
-              else
-                echo "    (attempt $attempt/5: API call failed for #$num)" >&2
-              fi
-              if [ "$attempt" -lt 5 ]; then sleep $((attempt * 2)); fi
-            done
-            [ "$api_ok" -eq 1 ] && return 2
-            return 1
-          }
-
-          for num in $NUMBERS; do
-            STATUS=""
-            rc=0
-            STATUS=$(resolve_status "$num") || rc=$?
-
-            if [ "$rc" -eq 1 ]; then
-              echo "  ⛔ #$num — Status unreadable after 5 attempts (API failure)"
-              UNREADABLE="$UNREADABLE #$num"
-              continue
-            fi
-            if [ "$rc" -eq 2 ] || [ -z "$STATUS" ]; then
-              echo "  ⛔ #$num — not on the kanban board after 5 attempts"
-              MISSING="$MISSING #$num"
-              continue
-            fi
-
-            SR=$(rank "$STATUS")
-            RR=$(rank "$REQUIRED")
-            if { [ -n "$SR" ] && [ -n "$RR" ] && [ "$SR" -ge "$RR" ]; } || [ "$STATUS" = "$REQUIRED" ]; then
-              if [ "$STATUS" = "$REQUIRED" ]; then
-                echo "  ✅ #$num — Status='$REQUIRED'"
-              else
-                echo "  ✅ #$num — Status='$STATUS' (beyond '$REQUIRED')"
-              fi
-              PASSED="$PASSED #$num"
-            else
-              echo "  ❌ #$num — Status='$STATUS', required '$REQUIRED' or later"
-              BLOCKED="$BLOCKED #$num($STATUS)"
-            fi
-          done
-
-          echo ""
-
-          # FAIL CLOSED. An item the gate could not evaluate is not evidence that
-          # review happened, and until now it was treated as one: an unreadable
-          # or absent Status hit `continue`, and if every item was unreadable the
-          # gate printed "PASSED". A missing token, an expired token, a repo-level
-          # secret shadowing the org one, or a transient 5xx all collapsed into a
-          # silent pass — the only promotion gate disarming itself, with failure
-          # indistinguishable from success.
-          if [ -n "$BLOCKED" ] || [ -n "$MISSING" ] || [ -n "$UNREADABLE" ] || [ -n "${UNATTRIB// /}" ]; then
-            if [ -n "$BLOCKED" ]; then
-              echo "::error::FR gate FAILED. Items not yet at '$REQUIRED' (or later):$BLOCKED"
-              echo ""
-              echo "How to unblock:"
-              echo "  1. Run /fr-pass on each PR once functional review passes on the previous env, OR"
-              echo "  2. Drag each card to '$REQUIRED' on the engineer kanban."
-            fi
-            if [ -n "$MISSING" ]; then
-              echo "::error::FR gate FAILED. Not on the kanban board:$MISSING"
-              echo ""
-              echo "These items were queried 5 times and never appeared. Either the PR"
-              echo "was never added to project #$PROJECT_NUMBER, or its card was removed."
-              echo "Add it to the board, then re-run this check."
-            fi
-            if [ -n "$UNREADABLE" ]; then
-              echo "::error::FR gate FAILED. Status unreadable:$UNREADABLE"
-              echo ""
-              echo "The board could not be queried after 5 attempts. This is an"
-              echo "infrastructure failure, not a review failure — this gate"
-              echo "authenticates as the tracebloc-release-train App, so check the"
-              echo "installation still covers this repo and still holds the"
-              echo "organization Projects permission (backend#2036)."
-            fi
-            if [ -n "${UNATTRIB// /}" ]; then
-              echo "::error::FR gate FAILED. Commits with no attributable PR:$UNATTRIB"
-              echo ""
-              echo "These commits are in the promotion range but carry no (#N) and did"
-              echo "not arrive via a PR merge — a direct push, or a release branch edited"
-              echo "after its last PR. The gate can only vouch for reviewed commits, so"
-              echo "an unattributable commit rides in unevaluated (RFC-0008 D27-L1)."
-              echo "Open a PR for the change, or if it is a legitimate release-mechanics"
-              echo "commit, add the 'skip-fr-gate' label with a written reason."
-            fi
-            echo ""
-            echo "Emergency override: add the 'skip-fr-gate' label to this PR, with a"
-            echo "written reason in a comment."
-            exit 1
-          fi
-
-          echo "✓ FR gate PASSED. All items are at '$REQUIRED' or later."
+          # The rank() ordering, resolve_status's race-aware retries and the
+          # fail-closed verdict (blocked / missing / unreadable / unattributable
+          # all block) are the script's `verify` mode. Same text, same exit code.
+          bash .fr-gate-tools/scripts/fr-gate-walk.sh verify

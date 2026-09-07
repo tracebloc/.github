@@ -1214,6 +1214,39 @@ def evaluate(pr, standards_root=None, default_branch=None):
 # ------------------------------------------------------------------- read ----
 
 
+def _denied_fields(stdout):
+    """The GraphQL `errors[]` a failed read carried, as ` -- denied: <path> (<type>: <msg>)`.
+
+    `gh api graphql` still prints the response body to stdout when it exits 1 on
+    a GraphQL-level error, so the field GitHub refused is in hand -- while its
+    stderr line, "Resource not accessible by integration", names no field at all.
+    Measured on backend#3262 (run 34101669658): with the `defaultBranchRef` read
+    already gone (#424) the gate still failed, and nothing in the log said on
+    WHICH field, so the next fix had to be guessed. A "cannot tell" that names
+    what it could not read is a finding; one that does not is a shrug
+    (CLAUDE.md rule 3). Empty when stdout is not JSON or carries no `errors`, so
+    the summary this decorates is never worse than before.
+    """
+    raw = (stdout or "").strip()
+    try:
+        errors = json.loads(raw).get("errors") or []
+    except (ValueError, TypeError, AttributeError):
+        errors = []
+    if not errors:
+        # No per-field errors[] to name -- an endpoint-level refusal, a non-JSON
+        # body, or nothing at all. Say WHICH, bounded, so the run is never blind
+        # (backend#3284: the first instrument printed nothing here and could not
+        # distinguish "field denied" from "endpoint denied").
+        return " -- body: %s" % (repr(raw[:300]) if raw else "(empty stdout)")
+    parts = []
+    for err in errors:
+        if not isinstance(err, dict):
+            continue
+        path = ".".join(str(p) for p in (err.get("path") or [])) or "<no path>"
+        parts.append("%s (%s: %s)" % (path, err.get("type") or "?", (err.get("message") or "")[:120]))
+    return (" -- denied: " + "; ".join(parts)) if parts else " -- body: %s" % repr(raw[:300])
+
+
 def _run_gh(args, env):
     return subprocess.run(args, capture_output=True, text=True, env=env, check=False)
 
@@ -1233,8 +1266,9 @@ def fetch(owner, name, number, env=None, runner=_run_gh):
     )
     if proc.returncode != 0:
         raise Unreadable(
-            "GraphQL read failed (exit %d): %s"
-            % (proc.returncode, (proc.stderr or "").strip()[:400])
+            "GraphQL read failed (exit %d): %s%s"
+            % (proc.returncode, (proc.stderr or "").strip()[:400],
+               _denied_fields(proc.stdout))
         )
     try:
         payload = json.loads(proc.stdout)
