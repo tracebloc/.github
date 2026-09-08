@@ -132,14 +132,14 @@ MUTATIONS = [
      '        return [], [f"{name}: PR list unreadable ({exc.detail})"]',
      '        return [], []'),
 
-    ("a status that failed to write is swallowed, so the PR stays empty-green",
+    ("a check run that failed to write is swallowed, so the PR stays empty-green",
      "            errors.append(\n"
-     "                f\"{name}#{st['number']}: could not write the {st['state']} status \"",
+     "                f\"{name}#{st['number']}: could not write the {st['state']} check run \"",
      "            _swallowed = (\n"
-     "                f\"{name}#{st['number']}: could not write the {st['state']} status \""),
+     "                f\"{name}#{st['number']}: could not write the {st['state']} check run \""),
 
     ("a PR with no head sha is skipped silently",
-     '            errors.append(f"{name}#{st[\'number\']}: no head sha, so no status could be written")',
+     '            errors.append(f"{name}#{st[\'number\']}: no head sha, so no check run could be written")',
      '            pass'),
 
     # --- (F) the exit-code ranking -----------------------------------------
@@ -165,30 +165,35 @@ MUTATIONS = [
      '        if st["existing"] == st["state"]:',
      '        if st["existing"] != st["state"]:'),
 
-    # REST answers lower case, GraphQL upper. Unfolded, an upper-case state never
-    # matches and the dedup silently does nothing -- invisible, because everything
-    # still works, it just writes every time until the cap.
+    # The check-runs REST endpoint answers lower case. Unfolded, an upper-case
+    # conclusion never matches and the dedup silently does nothing -- invisible,
+    # because everything still works, it just writes every time.
     ("the case fold goes, so an upper-case state never matches",
-     '            return state.lower() if isinstance(state, str) else None',
-     '            return state if isinstance(state, str) else None'),
+     '    state = check_run_state(latest)\n'
+     '    return state.lower() if isinstance(state, str) else None',
+     '    state = check_run_state(latest)\n'
+     '    return state if isinstance(state, str) else None'),
 
-    ("existing_state matches ANY context, so another check's state is read as ours",
-     '        if entry.get("context") == CONTEXT:',
-     '        if entry.get("context") is not None:'),
+    ("existing_state matches ANY check-run name, so another check's state is read as ours",
+     '        if run.get("name") == CONTEXT:',
+     '        if run.get("name") is not None:'),
 
-    # THE BUGBOT FINDING ON THIS PR (#359, high). The rollup resolves
-    # `commit.status` in GraphQL, which a token without `actions: read` is REFUSED
-    # on a private repo -- so reading the current state that way would break every
-    # private repo in the org while passing every other case here.
-    ("the current state is read from the rollup again, not the REST endpoint",
-     '        combined = CD.gh_json(["api", f"repos/{org}/{name}/commits/{sha}/status"])',
-     '        combined = CD.gh_json(["pr", "view", sha, "--json", "statusCheckRollup"])'),
+    # THE PERMISSION CLASS THIS GATE TURNS ON (backend#3242). Reading the current
+    # verdict from ANY commit-status source -- the rollup (which resolves
+    # `commit.status` in GraphQL, .github#359) or the combined-status REST
+    # endpoint -- needs `statuses: read`, the scope the App does not hold and the
+    # whole reason the commit-status design never ran. The read must stay on
+    # check-runs, so a mutation back to a status source must redden.
+    ("the current state is read from the rollup again, not the check-runs endpoint",
+     '        listing = CD.gh_json(["api", f"repos/{org}/{name}/commits/{sha}/check-runs",\n'
+     '                              "-f", f"check_name={CONTEXT}"])',
+     '        listing = CD.gh_json(["pr", "view", sha, "--json", "statusCheckRollup"])'),
 
     # An unreadable current state must produce a WRITE. Turning it into a skip
-    # would silently stop reporting whenever the status read flakes.
-    ("an unreadable current state is treated as agreeing, so no status is written",
-     '    except CD.GhError:\n        return None\n    if not isinstance(combined, dict):',
-     '    except CD.GhError:\n        return "success"\n    if not isinstance(combined, dict):'),
+    # would silently stop reporting whenever the check-runs read flakes.
+    ("an unreadable current state is treated as agreeing, so no check run is written",
+     '    except CD.GhError:\n        return None\n    if not isinstance(listing, dict):',
+     '    except CD.GhError:\n        return "success"\n    if not isinstance(listing, dict):'),
 
     # --- (G) the retry loop -------------------------------------------------
     ("every PR is re-read, not only the ones GitHub would not answer",
@@ -224,16 +229,19 @@ WORKFLOW_MUTATIONS = [
      '  cancel-in-progress: false',
      '  cancel-in-progress: true'),
 
-    # Without statuses:write every sweep finds conflicts it cannot report: a green
+    # Without checks:write every sweep finds conflicts it cannot report: a green
     # run, no red row, and the fail-open perfectly intact.
-    ("the mint loses statuses: write, so no finding can ever reach a PR",
-     '          permission-statuses: write',
-     '          permission-statuses: read'),
+    ("the mint loses checks: write, so no finding can ever reach a PR",
+     '          permission-checks: write',
+     '          permission-checks: read'),
 
-    ("the mint grows a permission this job has no use for",
-     '          permission-pull-requests: read\n          permission-statuses: write',
-     '          permission-pull-requests: read\n          permission-statuses: write\n'
-     '          permission-contents: write'),
+    # The class regression: someone re-adds `statuses`, the scope the App's
+    # installation does not grant -- reintroducing the mint refused fleet-wide
+    # (backend#3242).
+    ("the mint re-adds statuses: write, the scope the App cannot grant",
+     '          permission-pull-requests: read\n          permission-checks: write',
+     '          permission-pull-requests: read\n          permission-checks: write\n'
+     '          permission-statuses: write'),
 ]
 
 # One flat list of (target, label, old, new). Derived from the two lists rather
