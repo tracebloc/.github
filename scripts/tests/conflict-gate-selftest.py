@@ -450,6 +450,46 @@ try:
     finally:
         gate.CD.gh_json = _real_ghjson
 
+    # --- (13c) post_status UPDATES the one run in place, CREATEs only when absent -
+    #
+    # Check runs APPEND, and statusCheckRollup (what branch protection reads) is
+    # worst-of across EVERY same-name run on the sha (backend#3242, Bugbot). A
+    # fresh POST can never clear an earlier failure, and an in_progress POST left
+    # uncompleted keeps the rollup pending forever. So post_status must PATCH the
+    # run it already has and POST only when there is none. Exercises the REAL
+    # post_status via a stubbed gh/gh_json.
+    _cg_gh = gate.CD.gh
+    _cg_ghjson = gate.CD.gh_json
+    try:
+        cap = {}
+        gate.CD.gh = lambda args: cap.__setitem__("args", list(args))
+
+        # A run already exists -> PATCH repos/.../check-runs/<id>, never a new POST.
+        gate.CD.gh_json = lambda args: {"check_runs": [
+            {"name": gate.CONTEXT, "id": 4242, "status": "completed",
+             "conclusion": "failure"}]}
+        _real_post("tracebloc", "x", "abc", "success", "resolved", None)
+        a = cap.get("args") or []
+        check("post_status PATCHes when our run already exists",
+              "PATCH" in a and "repos/tracebloc/x/check-runs/4242" in a,
+              "got %r" % (a,))
+        check("the in-place update carries the new conclusion",
+              "conclusion=success" in a, "got %r" % (a,))
+        check("the update does NOT append a second run",
+              "POST" not in a and "head_sha=abc" not in a, "got %r" % (a,))
+
+        # No run yet -> POST a fresh one carrying name + head_sha.
+        cap.clear()
+        gate.CD.gh_json = lambda args: {"check_runs": []}
+        _real_post("tracebloc", "x", "abc", "failure", "conflict", None)
+        a = cap.get("args") or []
+        check("post_status POSTs a new run when none exists yet",
+              "POST" in a and "repos/tracebloc/x/check-runs" in a
+              and "head_sha=abc" in a, "got %r" % (a,))
+    finally:
+        gate.CD.gh = _cg_gh
+        gate.CD.gh_json = _cg_ghjson
+
     # From here the lookup is stubbed at the function, so the sweep cases below
     # exercise the SKIP/WRITE decision rather than the endpoint again.
     def with_existing(value, **kw):

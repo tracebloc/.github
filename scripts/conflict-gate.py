@@ -311,6 +311,29 @@ def check_run_state(run: dict) -> "str | None":
     return None
 
 
+def _latest_own_run(org: str, name: str, sha: str) -> "dict | None":
+    """Our own check run with the greatest id on this head, or None.
+
+    None both when we have none AND when the read failed -- callers treat that as
+    "no known run", the safe direction (see the cap note above). Shared by
+    `existing_state` (reads the verdict) and `post_status` (needs the id to UPDATE
+    the one run in place rather than append another).
+    """
+    try:
+        listing = CD.gh_json(["api", f"repos/{org}/{name}/commits/{sha}/check-runs",
+                              "-f", f"check_name={CONTEXT}"])
+    except CD.GhError:
+        return None
+    if not isinstance(listing, dict):
+        return None
+    ours = [run for run in (listing.get("check_runs") or [])
+            if isinstance(run, dict) and run.get("name") == CONTEXT]
+    if not ours:
+        return None
+    # The newest run by check-run id is the current verdict -- see the cap note.
+    return max(ours, key=lambda r: r.get("id") or 0)
+
+
 def existing_state(org: str, name: str, sha: str) -> "str | None":
     """The state our own check run already carries on this head, lowercased.
 
@@ -322,23 +345,9 @@ def existing_state(org: str, name: str, sha: str) -> "str | None":
     unfolded comparison silently disables the whole dedup, and that failure is
     invisible -- everything still works, it just writes every time.
     """
-    try:
-        listing = CD.gh_json(["api", f"repos/{org}/{name}/commits/{sha}/check-runs",
-                              "-f", f"check_name={CONTEXT}"])
-    except CD.GhError:
+    latest = _latest_own_run(org, name, sha)
+    if latest is None:
         return None
-    if not isinstance(listing, dict):
-        return None
-    ours = []
-    for run in listing.get("check_runs") or []:
-        if not isinstance(run, dict):
-            continue
-        if run.get("name") == CONTEXT:
-            ours.append(run)
-    if not ours:
-        return None
-    # The newest run by check-run id is the current verdict -- see the cap note.
-    latest = max(ours, key=lambda r: r.get("id") or 0)
     state = check_run_state(latest)
     return state.lower() if isinstance(state, str) else None
 
@@ -442,13 +451,27 @@ def post_status(org: str, name: str, sha: str, state: str, description: str,
     check-run status/conclusion here, the one place that mapping lives.
     """
     status, conclusion = STATUS_FOR_STATE[state]
-    args = [
-        "api", "--method", "POST", f"repos/{org}/{name}/check-runs",
-        "-f", f"name={CONTEXT}",
-        "-f", f"head_sha={sha}",
-        "-f", f"status={status}",
-        # A check run's output.title caps at 255; the summary carries the same
-        # text uncut. The cap is stated so a future edit does not find it in prod.
+    # UPDATE our one run in place when it already exists; only CREATE when it does
+    # not. Check runs APPEND -- unlike a commit status, which was one slot per
+    # context that `success` overwrote -- and `statusCheckRollup` (what branch
+    # protection reads) is worst-of across EVERY same-name run on the sha. So a
+    # fresh POST cannot clear an earlier `failure`, and an `in_progress` (pending)
+    # POST never completed keeps the rollup pending forever; a later `success`
+    # would sit alongside them, not replace them. PATCHing the single run lets it
+    # transition success<->failure<->in_progress in one slot (backend#3242, Bugbot).
+    existing = _latest_own_run(org, name, sha)
+    if existing is not None and existing.get("id"):
+        args = ["api", "--method", "PATCH",
+                f"repos/{org}/{name}/check-runs/{existing['id']}",
+                "-f", f"status={status}"]
+    else:
+        args = ["api", "--method", "POST", f"repos/{org}/{name}/check-runs",
+                "-f", f"name={CONTEXT}",
+                "-f", f"head_sha={sha}",
+                "-f", f"status={status}"]
+    # A check run's output.title caps at 255; the summary carries the same text
+    # uncut. The cap is stated so a future edit does not find it in prod.
+    args += [
         "-f", f"output[title]={description[:255]}",
         "-f", f"output[summary]={description}",
     ]
