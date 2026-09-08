@@ -52,6 +52,11 @@ def _load(name, path):
     return mod
 
 
+def _in_ci() -> bool:
+    """True when running under CI (fresh, must-be-clean checkout)."""
+    return bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+
+
 def _guard_is_dirty() -> bool:
     """True iff standards-sync.py has uncommitted changes vs HEAD.
 
@@ -79,10 +84,25 @@ def main() -> int:
         return 1
 
     if _guard_is_dirty():
+        # A dirty guard file cannot be mutation-tested (the harness refuses it). For a
+        # developer editing standards-sync.py that is benign, so a LOCAL run skips.
+        # In CI the checkout is fresh and must be clean: a dirty guard there means an
+        # interrupted or broken run left it mutated, and skipping would pass `make
+        # check` green having verified nothing -- the silent no-verify the pin must
+        # never have. So CI fails loud instead of skipping.
+        msg = (
+            "%s has uncommitted changes, so the mutation harness cannot run against it"
+            % GUARD_REL
+        )
+        if _in_ci():
+            sys.stderr.write(
+                "ERROR  %s. In CI the checkout must be clean for the pin to be "
+                "verified -- restore the file. Nothing was asserted.\n" % msg
+            )
+            return 1
         print(
-            "SKIP  %s has uncommitted changes; the mutation harness refuses to run "
-            "against a dirty tree (by design). Commit or stash it to exercise this "
-            "regression. Nothing asserted this run." % GUARD_REL
+            "SKIP  %s (by design). Commit or stash it to exercise this regression "
+            "locally; nothing asserted this run." % msg
         )
         return 0
 
@@ -115,20 +135,39 @@ def main() -> int:
                          % (proc.stdout, proc.stderr))
         return 1
 
+    stale = int(verdict.group(2))
+    malformed = int(verdict.group(3))
     uncaught = int(verdict.group(4))
-    if proc.returncode == 0 and uncaught == 0:
+
+    if uncaught == 0 and stale == 0 and malformed == 0 and proc.returncode == 0:
         print(
             "PASS  harness reports 0 uncaught with GITHUB_ACTOR=%s; the pin makes "
             "the verdict actor-independent" % poison
         )
         return 0
 
+    if uncaught > 0:
+        # The one outcome that IS the condition under test: a mutation the pin should
+        # have kept catchable slipped through, so the pin is missing or defeated.
+        sys.stderr.write(
+            "FAIL  with GITHUB_ACTOR=%s the harness reported %d uncaught mutation(s).\n"
+            "  The GITHUB_ACTOR pin in standards-sync-mutations.selftest_env() is missing "
+            "or defeated, so a real login in the\n  environment leaks into the 'reviewer "
+            "reverts to GITHUB_ACTOR' mutation and it goes uncaught (backend#3422).\n"
+            % (poison, uncaught)
+        )
+        sys.stderr.write("---- harness stdout ----\n%s\n" % proc.stdout)
+        return 1
+
+    # 0 uncaught but stale/malformed rows (or a non-zero exit for any other reason):
+    # anchors that no longer match, a mutation that would not compile, a restore that
+    # failed. These are harness-integrity / environment failures, NOT a pin regression
+    # -- blaming the pin for them is the conflation the learned rule warns against.
     sys.stderr.write(
-        "FAIL  with GITHUB_ACTOR=%s the harness reported %d uncaught mutation(s) "
-        "(exit %d).\n  The GITHUB_ACTOR pin in standards-sync-mutations.selftest_env() "
-        "is missing or defeated, so a real login in the environment leaks into the\n  "
-        "'reviewer reverts to GITHUB_ACTOR' mutation and it goes uncaught (backend#3422).\n"
-        % (poison, uncaught, proc.returncode)
+        "ERROR  the harness did not run cleanly with GITHUB_ACTOR=%s: %d stale, %d "
+        "malformed, exit %d, but 0 uncaught.\n  This is a harness/environment failure, "
+        "not a GITHUB_ACTOR-pin regression -- fix the harness anchors or mutations.\n"
+        % (poison, stale, malformed, proc.returncode)
     )
     sys.stderr.write("---- harness stdout ----\n%s\n" % proc.stdout)
     return 1
