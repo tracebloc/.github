@@ -782,15 +782,22 @@ expect_unreadable(
 # volume, and a cut page of them cannot hide a Bugbot check -- refusing would be
 # a false "cannot tell", which is as wrong as a false pass even though it fails
 # in the safe direction.
-v = ev(
-    pr(contexts=[check_run(), check_run(slug="github-actions", name="Unit tests")],
-       run_total=None),
-    "high",
-)
+# The cut page has to be on the FOREIGN suite ALONE, which is why this reaches
+# in per suite instead of passing `run_total`: that truncates every suite,
+# including the producer's, and the case would then refuse for the opposite
+# reason while still looking like it passed for this one. Caught by Bugbot on
+# this PR -- the first draft passed `run_total=None`, so nothing was truncated
+# at all and the assertion held whether or not foreign suites are read. A test
+# that cannot fail is the same defect as the stripper above, one file over.
+mixed = pr(contexts=[check_run(), check_run(slug="github-actions", name="Unit tests")])
+for suite in mixed["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"]:
+    if suite["app"]["slug"] != "cursor":
+        suite["checkRuns"]["totalCount"] = 40
+v = ev(mixed, "high")
 check(
-    "a foreign app's suite is not read at all",
+    "a cut run page on a FOREIGN app's suite is not refused",
     v == gate.PASS,
-    "got %r" % v,
+    "got %r -- a foreign suite's truncation must not become a false 'cannot tell'" % v,
 )
 
 # A check suite whose app GitHub does not name is skipped, not crashed on.
