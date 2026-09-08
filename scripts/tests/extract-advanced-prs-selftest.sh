@@ -6,9 +6,12 @@
 # The defect this pins: attributing a card by grepping the commit SUBJECT reads a
 # TICKET (or nothing) instead of the PR whenever the author put the ticket in the
 # `(#N)` slot or edited the squash subject. The two fixtures below are the two real
-# 2026-09-07 misses; each asserts the API-derived number wins and the subject
-# number does NOT. Nothing here talks to GitHub — the stub returns canned
-# `/pulls` JSON keyed by commit sha and applies the caller's `--jq` with real jq.
+# 2026-09-07 misses, WITH THEIR REAL BASES: both feature PRs merged to `develop`,
+# and the miss showed up on the `staging` hop. A base filter would reject them
+# there (that was the first cut's bug, @saadqbal on .github#438) -- so these carry
+# `base: develop` and must still be attributed, which is exactly what a base-free
+# read gives. Nothing here talks to GitHub: the stub returns canned `/pulls` JSON
+# keyed by commit sha and applies the caller's `--jq` with real jq.
 #
 # Run: bash scripts/tests/extract-advanced-prs-selftest.sh
 set -uo pipefail
@@ -23,8 +26,9 @@ no() { printf '  FAIL  %s\n     %s\n' "$1" "$2"; fail=$((fail + 1)); }
 assert_out()     { if grep -qF -- "$2" <<<"$3"; then ok "$1"; else no "$1" "expected: $2 -- got: $3"; fi; }
 assert_not_out() { if grep -qF -- "$2" <<<"$3"; then no "$1" "must NOT contain: $2 -- got: $3"; else ok "$1"; fi; }
 
-# A `gh` stub: `gh api repos/<repo>/commits/<sha>/pulls --jq <expr>` -> apply
-# <expr> with real jq over $STUB_DIR/<sha>.json (an empty array if none written).
+# A `gh` stub. `gh api repos/<repo>/commits/<sha>/pulls --jq <expr>`:
+#   * $STUB_DIR/<sha>.fail present -> exit 1 (a FAILED read, e.g. a 403)
+#   * else apply <expr> with real jq over $STUB_DIR/<sha>.json (empty array if none)
 # Anything else exits non-zero so an unexpected call is loud, not silently empty.
 make_gh_stub() {
   local bin="$1"
@@ -37,9 +41,9 @@ if [ "${1:-}" = api ]; then
   jqexpr='.'
   while [ $# -gt 0 ]; do case "$1" in --jq) jqexpr="$2"; shift 2;; *) shift;; esac; done
   sha="$(printf '%s' "$path" | sed -nE 's#.*/commits/([0-9a-f]+)/pulls#\1#p')"
+  [ -f "$STUB_DIR/${sha}.fail" ] && { echo "gh: HTTP 403 rate limit" >&2; exit 1; }
   f="$STUB_DIR/${sha}.json"
-  [ -f "$f" ] || f=/dev/stdin
-  if [ "$f" = /dev/stdin ]; then echo '[]' | jq -r "$jqexpr"; else jq -r "$jqexpr" "$f"; fi
+  if [ -f "$f" ]; then jq -r "$jqexpr" "$f"; else echo '[]' | jq -r "$jqexpr"; fi
   exit 0
 fi
 echo "gh stub: unexpected args: $*" >&2
@@ -49,6 +53,8 @@ STUB
 }
 
 # make_repo <dir> -> a repo with a base commit on `staging`; echoes the base sha.
+# The pushed branch is `staging`: the real hop where the bug showed, and the one a
+# base filter would have broken.
 make_repo() {
   local work="$1"
   git init -q --initial-branch=staging "$work"
@@ -66,76 +72,90 @@ commit() {
   git -C "$work" rev-parse HEAD
 }
 
-# run the extractor over BEFORE..SHA on `staging`, with the stub on PATH.
+# run the extractor over BEFORE..SHA, with the stub on PATH. No BRANCH: the script
+# is base-free, so the pushed branch never enters the attribution.
 run_extract() {
   local work="$1" before="$2" sha="$3" bin="$4"
   ( cd "$work" && PATH="$bin:$PATH" STUB_DIR="$STUB_DIR" \
-      BEFORE="$before" SHA="$sha" BRANCH=staging GITHUB_REPOSITORY=tracebloc/x \
+      BEFORE="$before" SHA="$sha" GITHUB_REPOSITORY=tracebloc/x \
       bash "$SCRIPT" 2>&1 )
 }
 
 # ---------------------------------------------------------------------------
-# FIXTURE 1: client#985 — subject names ISSUE #979, the merged PR is #985.
-# The old grep read 979; the API read must win with 985.
+# FIXTURE 1: client#985 — subject names ISSUE #979; the merged PR is #985, base
+# develop, on a STAGING hop. The real base is what makes this the regression test:
+# a base==staging filter would reject it and fall back to the #979 miss.
 # ---------------------------------------------------------------------------
 root="$(mktemp -d)"; STUB_DIR="$(mktemp -d)"; bin="$(mktemp -d)"
 make_gh_stub "$bin"
 base="$(make_repo "$root")"
 a="$(commit "$root" 'fix(tests): bound the k3d cleanup in all seven e2e EXIT traps (#979)')"
-printf '[{"number":985,"merged_at":"2026-09-07T00:00:00Z","base":{"ref":"staging"}}]\n' >"$STUB_DIR/${a}.json"
+printf '[{"number":985,"merged_at":"2026-09-07T08:22:52Z","base":{"ref":"develop"},"head":{"ref":"fix/979-k3d-cleanup"}}]\n' >"$STUB_DIR/${a}.json"
 out="$(run_extract "$root" "$base" "$a" "$bin")"
-assert_out     "client#985: the API-derived PR wins"        "Found PRs: 985" "$out"
-assert_not_out "client#985: the subject issue is NOT used"  "979"            "$out"
+assert_out     "client#985: the develop-based feature PR is attributed on a staging hop" "Found PRs: 985" "$out"
+assert_not_out "client#985: the subject issue is NOT used"                               "979"            "$out"
 
 # ---------------------------------------------------------------------------
 # FIXTURE 2: tracebloc-engine#914 — subject names ticket backend#3013 in the
-# (#N) slot, the merged PR is #914. The old grep matched nothing.
+# (#N) slot; merged PR #914, base develop. The old grep matched nothing.
 # ---------------------------------------------------------------------------
 root="$(mktemp -d)"; STUB_DIR="$(mktemp -d)"; bin="$(mktemp -d)"
 make_gh_stub "$bin"
 base="$(make_repo "$root")"
 b="$(commit "$root" 'sec(deps): torch 2.13.0 + torchvision 0.28.0 on the cu129 index (backend#3013)')"
-printf '[{"number":914,"merged_at":"2026-09-07T00:00:00Z","base":{"ref":"staging"}}]\n' >"$STUB_DIR/${b}.json"
+printf '[{"number":914,"merged_at":"2026-09-07T00:00:00Z","base":{"ref":"develop"},"head":{"ref":"sec/3013-torch"}}]\n' >"$STUB_DIR/${b}.json"
 out="$(run_extract "$root" "$base" "$b" "$bin")"
-assert_out     "engine#914: the API-derived PR wins"       "Found PRs: 914" "$out"
-assert_not_out "engine#914: the subject ticket is NOT used" "3013"          "$out"
+assert_out     "engine#914: the develop-based feature PR is attributed on a staging hop" "Found PRs: 914" "$out"
+assert_not_out "engine#914: the subject ticket is NOT used"                              "3013"           "$out"
 
 # ---------------------------------------------------------------------------
-# FALLBACK: the API returns no PR, but the subject carries a real (#N) -> use it
-# and WARN, so the attribution is visible rather than silent.
+# PROMOTION PR EXCLUDED: a commit whose /pulls names a merged release-train/*
+# promotion PR must NOT be attributed (those carry no card); fall to the subject.
+# ---------------------------------------------------------------------------
+root="$(mktemp -d)"; STUB_DIR="$(mktemp -d)"; bin="$(mktemp -d)"
+make_gh_stub "$bin"
+base="$(make_repo "$root")"
+p="$(commit "$root" 'chore(promote): develop -> staging (#900)')"
+printf '[{"number":901,"merged_at":"2026-09-07T00:00:00Z","base":{"ref":"staging"},"head":{"ref":"release-train/develop-to-staging"}}]\n' >"$STUB_DIR/${p}.json"
+out="$(run_extract "$root" "$base" "$p" "$bin")"
+assert_not_out "promotion: the release-train PR is not attributed"       "901"            "$out"
+assert_out     "promotion: it falls through to the subject"              "Found PRs: 900" "$out"
+
+# ---------------------------------------------------------------------------
+# EMPTY API -> subject fallback, with the "API names none" warning.
 # ---------------------------------------------------------------------------
 root="$(mktemp -d)"; STUB_DIR="$(mktemp -d)"; bin="$(mktemp -d)"
 make_gh_stub "$bin"
 base="$(make_repo "$root")"
 c="$(commit "$root" 'chore: tidy the makefile (#777)')"   # no stub file -> API returns []
 out="$(run_extract "$root" "$base" "$c" "$bin")"
-assert_out "fallback: the subject PR is used when the API is empty" "Found PRs: 777"          "$out"
-assert_out "fallback: it warns that the attribution is a fallback"  "attributed from its SUBJECT" "$out"
+assert_out "empty API: the subject PR is used"          "Found PRs: 777"       "$out"
+assert_out "empty API: it warns the API named none"     "the API names no merged PR" "$out"
 
 # ---------------------------------------------------------------------------
-# UNATTRIBUTABLE: API empty AND subject names nothing -> no PR, and a warning
-# so the un-advanced card is visible.
+# FAILED API read (403/5xx) -> distinct from empty: its own warning, NOT the
+# "API names none" wording (@saadqbal on .github#438).
+# ---------------------------------------------------------------------------
+root="$(mktemp -d)"; STUB_DIR="$(mktemp -d)"; bin="$(mktemp -d)"
+make_gh_stub "$bin"
+base="$(make_repo "$root")"
+q="$(commit "$root" 'fix(x): a thing (#654)')"
+touch "$STUB_DIR/${q}.fail"                                # stub exits 1
+out="$(run_extract "$root" "$base" "$q" "$bin")"
+assert_out     "failed read: falls back to the subject as a last resort" "Found PRs: 654"           "$out"
+assert_out     "failed read: warns the read FAILED, distinctly"          "API read FAILED"          "$out"
+assert_not_out "failed read: does NOT claim the API named none"          "the API names no merged"  "$out"
+
+# ---------------------------------------------------------------------------
+# UNATTRIBUTABLE: empty API AND subject names nothing -> no PR, warning only.
 # ---------------------------------------------------------------------------
 root="$(mktemp -d)"; STUB_DIR="$(mktemp -d)"; bin="$(mktemp -d)"
 make_gh_stub "$bin"
 base="$(make_repo "$root")"
 d="$(commit "$root" 'docs: fix a typo')"
 out="$(run_extract "$root" "$base" "$d" "$bin")"
-assert_out "unattributable: no PR is attributed"           "Found PRs: "              "$out"
+assert_out "unattributable: no PR is attributed"           "Found PRs: "               "$out"
 assert_out "unattributable: it warns the card was skipped" "no PR could be attributed" "$out"
-
-# ---------------------------------------------------------------------------
-# BASE FILTER: a merged PR whose base is DEVELOP (not this staging push) must be
-# ignored, falling through to the subject. Proves the base.ref filter is load-bearing.
-# ---------------------------------------------------------------------------
-root="$(mktemp -d)"; STUB_DIR="$(mktemp -d)"; bin="$(mktemp -d)"
-make_gh_stub "$bin"
-base="$(make_repo "$root")"
-e="$(commit "$root" 'fix(x): a thing (#555)')"
-printf '[{"number":222,"merged_at":"2026-09-07T00:00:00Z","base":{"ref":"develop"}}]\n' >"$STUB_DIR/${e}.json"
-out="$(run_extract "$root" "$base" "$e" "$bin")"
-assert_not_out "base filter: a develop-based PR is not attributed to a staging push" "222" "$out"
-assert_out     "base filter: it falls through to the subject PR"                     "Found PRs: 555" "$out"
 
 echo
 echo "extract-advanced-prs selftest: $pass passed, $fail failed"

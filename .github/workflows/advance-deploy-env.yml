@@ -106,7 +106,6 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
           SHA: ${{ github.sha }}
-          BRANCH: ${{ github.ref_name }}
           # The caller's own workflow token: `/commits/{sha}/pulls` is a READ on the
           # caller's repo, which the token already has. The App token minted below is
           # only for the PROJECT (cross-repo) writes.

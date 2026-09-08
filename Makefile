@@ -368,7 +368,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-archive-baseline \
                     selftest-reusable-no-cancel \
                     selftest-lint-targets \
-                    selftest-fr-gate-walk
+                    selftest-fr-gate-walk \
+                    selftest-extract-advanced-prs
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -768,6 +769,10 @@ mutation-triage-labels-dry: guard-pyyaml
 .PHONY: selftest-git-reap
 selftest-git-reap:
 	bash scripts/tests/git-reap-selftest.sh
+
+.PHONY: selftest-extract-advanced-prs
+selftest-extract-advanced-prs:
+	bash scripts/tests/extract-advanced-prs-selftest.sh
 
 # Branch OWNERSHIP, which git-reap above deliberately does not need: it reaps the
 # caller's OWN local branches, so "whose is it" never arises. Anything that
