@@ -256,7 +256,21 @@ def main():
     pristine = GUARD.read_text(encoding="utf-8")
     stale, malformed, uncaught = [], [], []
 
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    # Pin GITHUB_ACTOR to a sentinel that can NEVER equal a real login (and so
+    # never SYNC_REVIEWER) for every mutated selftest run. The "reviewer reverts
+    # to GITHUB_ACTOR" mutation swaps the reviewer for os.environ["GITHUB_ACTOR"];
+    # its catching assertion is `SYNC_REVIEWER in reviewer_edit[0]`, so when the
+    # CI run's actor happens to BE SYNC_REVIEWER (saqlainsyed007) the substring
+    # still holds, the mutation goes uncaught, and this shard reddens — for that
+    # one person's .github PRs only, on files their PR never touched (backend#3422).
+    # Overriding the actor here makes the verdict actor-independent and fixes the
+    # class: any future mutation that reads the environment inherits a value that
+    # cannot collide with a login the catching assertion checks for.
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        GITHUB_ACTOR="mutation-harness-sentinel-actor",  # not a real GitHub login
+    )
     try:
         for label, old, new, expect in MUTATIONS:
             try:
