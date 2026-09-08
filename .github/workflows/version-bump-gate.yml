@@ -162,16 +162,21 @@ name: Version bump gate
 #   GITHUB_TOKEN, which has no access to it. Handing five repos a cross-repo PAT
 #   to run a PR check costs more than the drift it would close, so the caller
 #   declares the values instead and this job echoes both into the summary on
-#   every run, where a wrong one is visible rather than silent. Keeping them in
-#   step is a two-file edit, exactly like repos.yml vs repo-inventory.yml's
-#   `release_train` flag. Measured from repos.yml@main on 2026-08-06, the five
-#   version_file repos and their exact values are:
+#   every run, where a wrong one is visible rather than silent. That echo was not
+#   enough on its own: measured 2026-09-01, five of the six version_file repos'
+#   callers had drifted NARROWER than repos.yml, each dropping a published path
+#   the gate then stopped watching, and a summary is only seen by whoever opens
+#   the run (backend#2953).
 #
-#     tracebloc-py-package  pyproject.toml                  tracebloc/* pyproject.toml
-#     cli                   VERSION                         cmd/* internal/* go.mod go.sum VERSION
-#     design-system         package.json                    src/*
-#     data-ingestors        tracebloc_ingestor/__init__.py  tracebloc_ingestor/*
-#     client                client/Chart.yaml               client/*
+#   THE CROSS-CHECK THAT CLOSES THAT lives where both sides can be read at once,
+#   which is NOT here: tracebloc/.github's caller-drift audit runs under an
+#   org-wide-read PAT that can see the private repos.yml, DERIVES each repo's
+#   version-file/publish-paths from it, and fails when a caller disagrees
+#   (scripts/caller-drift.py, `version_bump_input_findings`). Keeping the caller
+#   in step is still a two-file edit, but a wrong one is now caught rather than
+#   merely echoed. A per-repo table used to sit here; it was itself a hand-copy
+#   that went stale, so it is gone rather than refreshed - the authority is
+#   repos.yml and the guard reads it directly.
 #
 # OUT OF SCOPE, on purpose
 #   version_preflight also refuses a PRERELEASE version on a prod hop. That is a

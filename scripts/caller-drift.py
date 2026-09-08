@@ -197,6 +197,10 @@ ORG_USES = re.compile(
 )
 HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 
+# The reusable whose caller inputs are derived from repos.yml rather than trusted
+# (backend#2953). Matches the `reusables` list and the `?P<name>` group of ORG_USES.
+VERSION_BUMP_GATE = "version-bump-gate.yml"
+
 # The repo that holds the authoritative release-train membership list.
 TRAIN_REPO = "release-train"
 TRAIN_FILE = "repos.yml"
@@ -1063,8 +1067,23 @@ def list_active_repos(org: str) -> "dict[str, dict]":
     return active
 
 
-def load_release_train(org: str) -> "set[str]":
-    """Authoritative train membership: release-train/repos.yml (RFC-BACKEND-0008 D14)."""
+def load_release_train(org: str) -> "dict[str, dict]":
+    """Authoritative train membership: release-train/repos.yml (RFC-BACKEND-0008 D14).
+
+    Returns {name: {"version_file": str|None, "publish_paths": str|None}}. The KEYS
+    are the membership set the audit reads as `name in train`; the values carry the
+    two fields the version-bump-gate caller must not disagree with (backend#2953).
+
+    THOSE TWO FIELDS ARE READ HERE AND HELD NOWHERE ELSE. repos.yml is the single
+    source of `version_file`/`publish_paths`; the version-bump-gate caller in each
+    repo restates them, and five of six had drifted NARROWER than the source, so a
+    PR touching only an unwatched published path shipped green. The audit derives
+    the expected values from this read and compares -- the env-vocabulary-agreement
+    shape the issue names, holding no copy of its own. The reusable itself cannot do
+    this: repos.yml is PRIVATE and a reusable runs with the caller repo's token
+    (see version-bump-gate.yml's header), which is why the check lives in this
+    privileged audit rather than in the gate.
+    """
     for ref in ("develop", None):
         path = f"repos/{org}/{TRAIN_REPO}/contents/{TRAIN_FILE}"
         if ref:
@@ -1089,14 +1108,37 @@ def load_release_train(org: str) -> "set[str]":
                 f"{TRAIN_REPO}/{TRAIN_FILE} has no non-empty `repos:` list. An empty "
                 "train list would silently clear release_train for every repo."
             )
-        names = set()
+        members: "dict[str, dict]" = {}
         for item in entries:
             if not isinstance(item, dict) or not item.get("name"):
                 die(f"{TRAIN_REPO}/{TRAIN_FILE}: entry {item!r} has no `name`.")
-            names.add(item["name"])
-        return names
+            name = item["name"]
+            version_file = item.get("version_file")
+            publish_paths = item.get("publish_paths")
+            # A version_file with no publish_paths cannot be audited and would break
+            # the gate itself (both are `required: true` on the reusable), so this is
+            # a malformed source, not a repo to skip -- fail closed rather than derive
+            # an empty expectation that agrees with any caller.
+            if version_file is not None:
+                if not isinstance(version_file, str) or not version_file.strip():
+                    die(
+                        f"{TRAIN_REPO}/{TRAIN_FILE}: {name} has a non-string or empty "
+                        f"`version_file` ({version_file!r})."
+                    )
+                if not isinstance(publish_paths, str) or not publish_paths.strip():
+                    die(
+                        f"{TRAIN_REPO}/{TRAIN_FILE}: {name} declares `version_file` "
+                        f"but no usable `publish_paths` ({publish_paths!r}). The "
+                        "version-bump-gate needs both, so an absent one is a source "
+                        "error, not a repo to skip."
+                    )
+            members[name] = {
+                "version_file": version_file,
+                "publish_paths": publish_paths,
+            }
+        return members
     die(f"could not locate {TRAIN_FILE} in {org}/{TRAIN_REPO} on any branch.")
-    return set()  # unreachable; keeps the return type honest
+    return {}  # unreachable; keeps the return type honest
 
 
 def collect_uses(node, found: "list[tuple[str, dict]]") -> None:
@@ -1125,6 +1167,73 @@ def collect_uses(node, found: "list[tuple[str, dict]]") -> None:
     elif isinstance(node, list):
         for item in node:
             collect_uses(item, found)
+
+
+def version_bump_input_findings(
+    name: str, version_file: str, publish_paths: str,
+    hits: "list[tuple[str, str, dict]]",
+) -> "list[str]":
+    """Compare a repo's version-bump-gate caller inputs against repos.yml.
+
+    backend#2953. `version_file` and `publish_paths` come from release-train's
+    repos.yml (via load_release_train) -- this function HOLDS NEITHER, it only
+    compares, so it can never itself drift from the source. `hits` is the list of
+    (filename, ref, inputs) collect_uses parsed for the version-bump-gate reusable
+    in this repo; a repo with no such caller yields no hits and no findings here
+    (a MISSING required caller is the inventory's own check, not this one).
+
+    ANY disagreement is a finding, both directions, but they are DIFFERENT bugs and
+    say so:
+      * a NARROWER caller under-watches -- the published path it dropped ships
+        changed bytes under an already-released version and the gate stays green.
+        This is the unsafe direction and the one all five live drifts were in.
+      * a WIDER caller only over-watches (a nag), but it still disagrees with the
+        source, so it is reconciled rather than tolerated.
+
+    `exclude-paths` is deliberately NOT compared: it lives only in the caller
+    (backend#2758), names files INSIDE publish-paths that do not ship, and has no
+    counterpart in repos.yml. Comparing it would manufacture drift against a field
+    the source never had.
+    """
+    findings: "list[str]" = []
+    want_paths = set(publish_paths.split())
+    for filename, _ref, got in hits:
+        got_vf = got.get("version-file")
+        if got_vf != version_file:
+            findings.append(
+                f"{name}: {filename} passes `version-file: {got_vf!r}` to "
+                f"version-bump-gate, but release-train/repos.yml declares "
+                f"`version_file: {version_file}`. The gate would parse a different "
+                "file than the train tags from, so their verdicts can disagree."
+            )
+        got_pp = got.get("publish-paths")
+        if got_pp is None:
+            findings.append(
+                f"{name}: {filename} calls version-bump-gate with no `publish-paths`, "
+                f"but release-train/repos.yml declares `publish_paths: {publish_paths}`. "
+                "The gate cannot tell a published change from a docs change without it."
+            )
+            continue
+        got_paths = set(str(got_pp).split())
+        missing = sorted(want_paths - got_paths)
+        extra = sorted(got_paths - want_paths)
+        if missing:
+            findings.append(
+                f"{name}: {filename} declares `publish-paths` NARROWER than "
+                f"release-train/repos.yml -- it omits {missing}. Those paths are "
+                "published, so a PR touching only them ships changed bytes under an "
+                "already-released version and still gets a green check (backend#2953). "
+                f"repos.yml publish_paths: {publish_paths}."
+            )
+        if extra:
+            findings.append(
+                f"{name}: {filename} declares `publish-paths` WIDER than "
+                f"release-train/repos.yml -- it adds {extra}, which repos.yml does not "
+                "list as published. Harmless to the gate's verdict but still a "
+                "disagreement with the source; reconcile the two. repos.yml "
+                f"publish_paths: {publish_paths}."
+            )
+    return findings
 
 
 class RepoRead:
@@ -2320,6 +2429,23 @@ def main() -> int:
                     "and the inventory has not caught up, or the call is a typo "
                     "that has never run."
                 )
+
+        # backend#2953: the version-bump-gate caller's `version-file`/`publish-paths`
+        # are a hand-copy of release-train/repos.yml, and five of six had drifted
+        # narrower than the source -- published paths the gate no longer watched.
+        # DERIVED, not restated: the expected values are read live from repos.yml by
+        # load_release_train, so the caller can no longer disagree with the source
+        # unnoticed. Keyed off repos.yml carrying a `version_file`, not off the
+        # inventory's required/exempt flag, so a repo that gains a version_file is
+        # measured even if the inventory has not caught up. Counts in `callers`.
+        train_entry = train.get(name)
+        if train_entry and train_entry.get("version_file"):
+            findings.extend(version_bump_input_findings(
+                name,
+                train_entry["version_file"],
+                train_entry["publish_paths"],
+                read.callers.get(VERSION_BUMP_GATE, []),
+            ))
 
         _m["callers"] = len(findings) - _mark
         _mark = len(findings)
