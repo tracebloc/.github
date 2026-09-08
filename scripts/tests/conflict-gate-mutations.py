@@ -174,9 +174,9 @@ MUTATIONS = [
      '    state = check_run_state(latest)\n'
      '    return state if isinstance(state, str) else None'),
 
-    ("existing_state matches ANY check-run name, so another check's state is read as ours",
-     '        if run.get("name") == CONTEXT:',
-     '        if run.get("name") is not None:'),
+    ("_latest_own_run matches ANY check-run name, so another check's state is read as ours",
+     '            if isinstance(run, dict) and run.get("name") == CONTEXT]',
+     '            if isinstance(run, dict)]'),
 
     # THE PERMISSION CLASS THIS GATE TURNS ON (backend#3242). Reading the current
     # verdict from ANY commit-status source -- the rollup (which resolves
@@ -191,9 +191,13 @@ MUTATIONS = [
 
     # An unreadable current state must produce a WRITE. Turning it into a skip
     # would silently stop reporting whenever the check-runs read flakes.
+    # _latest_own_run returns a run dict or None, so the mutation returns a run
+    # dict (not a bare string, which would AttributeError in check_run_state and
+    # score UNCAUGHT). A completed-success run makes existing_state read "success"
+    # instead of None on an unreadable head, turning the mandatory write into a skip.
     ("an unreadable current state is treated as agreeing, so no check run is written",
      '    except CD.GhError:\n        return None\n    if not isinstance(listing, dict):',
-     '    except CD.GhError:\n        return "success"\n    if not isinstance(listing, dict):'),
+     '    except CD.GhError:\n        return {"status": "completed", "conclusion": "success"}\n    if not isinstance(listing, dict):'),
 
     # --- (G) the retry loop -------------------------------------------------
     ("every PR is re-read, not only the ones GitHub would not answer",
