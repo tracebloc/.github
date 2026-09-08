@@ -133,18 +133,40 @@ assert_out "empty API: the subject PR is used"          "Found PRs: 777"       "
 assert_out "empty API: it warns the API named none"     "the API names no merged PR" "$out"
 
 # ---------------------------------------------------------------------------
-# FAILED API read (403/5xx) -> distinct from empty: its own warning, NOT the
-# "API names none" wording (@saadqbal on .github#438).
+# FAILED API read (403/5xx) -> distinct from empty AND not survivable: the script
+# must NOT degrade to the subject grep (that re-introduces the wrong-card risk
+# this PR removes) and must NOT exit 0 -- a one-shot push job never revisits the
+# commit, so a silent skip leaves its card behind the shipped code. It fails the
+# step so the read is retried (Bugbot High on .github#438).
 # ---------------------------------------------------------------------------
 root="$(mktemp -d)"; STUB_DIR="$(mktemp -d)"; bin="$(mktemp -d)"
 make_gh_stub "$bin"
 base="$(make_repo "$root")"
 q="$(commit "$root" 'fix(x): a thing (#654)')"
 touch "$STUB_DIR/${q}.fail"                                # stub exits 1
-out="$(run_extract "$root" "$base" "$q" "$bin")"
-assert_out     "failed read: falls back to the subject as a last resort" "Found PRs: 654"           "$out"
-assert_out     "failed read: warns the read FAILED, distinctly"          "API read FAILED"          "$out"
-assert_not_out "failed read: does NOT claim the API named none"          "the API names no merged"  "$out"
+out="$(run_extract "$root" "$base" "$q" "$bin")"; rc=$?
+if [ "$rc" -ne 0 ]; then ok "failed read: the step exits non-zero (retried, not silently green)"
+else no "failed read: the step exits non-zero (retried, not silently green)" "rc=$rc -- got: $out"; fi
+assert_not_out "failed read: does NOT attribute #654 from the subject"   "Found PRs: 654"          "$out"
+assert_out     "failed read: warns the read FAILED, distinctly"          "API read FAILED"         "$out"
+assert_not_out "failed read: does NOT claim the API named none"          "the API names no merged" "$out"
+
+# ---------------------------------------------------------------------------
+# git log FAILURE (an invalid range -- e.g. a BEFORE the repo does not contain)
+# must ABORT non-zero, not swallow the failure into an empty `for` list and report
+# a clean empty run (Bugbot on .github#438).
+# ---------------------------------------------------------------------------
+root="$(mktemp -d)"; STUB_DIR="$(mktemp -d)"; bin="$(mktemp -d)"
+make_gh_stub "$bin"
+base="$(make_repo "$root")"
+e="$(commit "$root" 'fix(y): another thing (#321)')"
+# A well-formed but ABSENT sha (not the all-zero first-push hash): `git log
+# <absent>..SHA` fails "bad revision" rather than returning an empty list.
+out="$(run_extract "$root" "0000000000000000000000000000000000000001" "$e" "$bin")"; rc=$?
+if [ "$rc" -ne 0 ]; then ok "git log failure: the step exits non-zero"
+else no "git log failure: the step exits non-zero" "rc=$rc -- got: $out"; fi
+assert_out     "git log failure: it says git log failed"              "git log failed" "$out"
+assert_not_out "git log failure: it does NOT report a clean empty run" "Found PRs: "    "$out"
 
 # ---------------------------------------------------------------------------
 # UNATTRIBUTABLE: empty API AND subject names nothing -> no PR, warning only.

@@ -63,8 +63,22 @@ subject_prs() {
     | grep -oE '[0-9]+' || true
 }
 
+# Capture the commit list with an explicit status check. `for sha in $(git log
+# ...)` swallows a git-log failure (a missing BEFORE after a force-push, an
+# invalid range) into an EMPTY word list, and errexit does NOT fire on a command
+# substitution in a for-loop head -- so the script would write `prs=` and exit 0,
+# reporting a clean empty run for a range it never read (Bugbot on .github#438).
+# The earlier inline assignment aborted on the same failure; restore that.
+if ! commits=$(git log --format='%H' "${range[@]}"); then
+  echo "::error::git log failed for range '${range[*]}' (a missing BEFORE after a force-push, or an invalid range); cannot attribute commits." >&2
+  exit 1
+fi
+
 prs=""
-for sha in $(git log --format='%H' "${range[@]}"); do
+# A FAILED API read below fails the whole step (see the failure branch): track it
+# and exit non-zero at the end rather than degrading silently.
+api_read_failed=0
+for sha in $commits; do
   # Capture the API read's SUCCESS separately from its OUTPUT: a failed call (rate
   # limit, 5xx) must not read as "no PR" and silently degrade to the subject grep
   # while the log claims the API answered (Bugbot/@saadqbal on .github#438).
@@ -82,14 +96,14 @@ for sha in $(git log --format='%H' "${range[@]}"); do
       echo "::warning::commit ${sha}: no PR could be attributed (the API names none; the subject names none) - its card was not advanced."
     fi
   else
-    # The API READ itself failed -- honestly distinct from an empty answer.
-    sub=$(subject_prs "$sha")
-    if [ -n "$sub" ]; then
-      prs+=" ${sub}"
-      echo "::warning::commit ${sha}: the /pulls API read FAILED (not empty); attributed from its SUBJECT ($(echo "$sub" | tr '\n' ' ')) as a last resort - the card may be wrong."
-    else
-      echo "::warning::commit ${sha}: the /pulls API read FAILED and the subject names no PR - its card was not advanced."
-    fi
+    # The API READ itself FAILED (403 / 5xx / rate limit). Do NOT degrade to the
+    # subject grep this PR exists to replace -- that re-introduces the wrong-card
+    # risk -- and do NOT let the run go green: this is a one-shot `push` job, so a
+    # silently-skipped commit is never re-examined and its card stays behind the
+    # shipped code, the very outage this fixes. Record it and fail the step at the
+    # end so the read is retried (Bugbot High on .github#438).
+    api_read_failed=1
+    echo "::error::commit ${sha}: the /pulls API read FAILED (rate limit / 5xx); NOT attributing from the unreliable subject, and failing the step so it is retried rather than leaving the card behind."
   fi
 done
 
@@ -105,3 +119,11 @@ if [ -n "${GITHUB_OUTPUT:-}" ]; then
   echo "prs=${prs}" >> "$GITHUB_OUTPUT"
 fi
 echo "Found PRs: ${prs}"
+
+# A failed API read above is not a clean run: exit non-zero so the step is RED and
+# gets retried, rather than advancing a partial set and leaving the failed
+# commits' cards behind. The successful attributions are still printed/emitted
+# above for visibility (Bugbot High on .github#438).
+if [ "$api_read_failed" -ne 0 ]; then
+  exit 1
+fi
