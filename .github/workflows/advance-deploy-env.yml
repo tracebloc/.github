@@ -106,25 +106,21 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
           SHA: ${{ github.sha }}
-        run: |
-          # First push to a branch reports a zero hash - fall back to last 50 commits.
-          # Keep the range as an array, not a string: the zero-hash branch needs TWO
-          # argv entries (--max-count=50 and the SHA). A plain quoted "$RANGE" would
-          # hand git one bogus "--max-count=50 <sha>" argument and break the
-          # first-push path - the array is what makes quoting safe here.
-          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            RANGE=(--max-count=50 "$SHA")
-          else
-            RANGE=("$BEFORE..$SHA")
-          fi
-          # Extract PR refs from commit *subjects* only (not bodies), to avoid picking up
-          # issue references like "Closes #47" that aren't PR numbers.
-          # Squash merge subject: "Title (#NNN)"  Merge commit subject: "Merge pull request #NNN"
-          PRS=$(git log --format='%s' "${RANGE[@]}" \
-            | grep -oE '\(#[0-9]+\)|Merge pull request #[0-9]+' \
-            | grep -oE '#[0-9]+' | tr -d '#' | sort -u | tr '\n' ' ')
-          echo "Found PRs: $PRS"
-          echo "prs=$PRS" >> "$GITHUB_OUTPUT"
+          BRANCH: ${{ github.ref_name }}
+          # The caller's own workflow token: `/commits/{sha}/pulls` is a READ on the
+          # caller's repo, which the token already has. The App token minted below is
+          # only for the PROJECT (cross-repo) writes.
+          GH_TOKEN: ${{ github.token }}
+        # DERIVE each commit's PR from GitHub, not from its subject text
+        # (backend#3365). The org convention `type(scope): summary (backend#N)`
+        # puts a ticket in the `(#N)` slot, and an edited squash subject may carry
+        # no `(#N)` at all -- so the old subject-grep attributed the wrong card or
+        # none (2/48 on the 2026-09-07 staging hop). The script GETs each commit's
+        # merged PR and falls back to the subject only when the API is empty, with a
+        # `::warning::` so an unattributed commit is visible. It lives in .github
+        # (checked out at .kanban-map above), one definition; `git log` runs against
+        # the caller's checkout (cwd). Selftest: scripts/tests/extract-advanced-prs-selftest.sh.
+        run: bash .kanban-map/scripts/extract-advanced-prs.sh
 
       # THIS is the workflow backend#2036 was filed about. On 2026-08-14 at 06:22
       # UTC, run 31776053792 on client-runtime died with
