@@ -54,6 +54,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mutation_baseline  # noqa: E402
 
 
+# GITHUB_ACTOR the mutated selftest runs under. An UNDERSCORE makes this
+# structurally impossible as a GitHub login (logins are alphanumerics and single
+# hyphens only), so it can never collide with SYNC_REVIEWER -- or any other login
+# a catching assertion checks for -- no matter who triggers CI or how the reviewer
+# constant changes (backend#3422; @saadqbal on .github#440).
+SENTINEL_ACTOR = "mutation_harness_sentinel_actor"
+
+
+def selftest_env(base=None):
+    """The environment every mutated selftest subprocess runs under.
+
+    GITHUB_ACTOR is pinned to SENTINEL_ACTOR so the "reviewer reverts to
+    GITHUB_ACTOR" mutation is caught regardless of the CI run's actor: without the
+    pin the catching assertion (`SYNC_REVIEWER in reviewer_edit[0]`) accidentally
+    holds whenever the actor IS SYNC_REVIEWER, leaving the mutation uncaught and
+    reddening the shard for that one person only (backend#3422). Exposed as a
+    helper, not an inline dict, so the regression test can assert the pin takes
+    effect (standards-sync-actor-selftest.py).
+    """
+    return dict(
+        base if base is not None else os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        GITHUB_ACTOR=SENTINEL_ACTOR,
+    )
+
+
 # (label, old, new, the selftest case that must redden)
 MUTATIONS = [
     # --- (A) the author identity, which is the whole ticket -------------------
@@ -256,7 +282,10 @@ def main():
     pristine = GUARD.read_text(encoding="utf-8")
     stale, malformed, uncaught = [], [], []
 
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    # Pin GITHUB_ACTOR (see selftest_env / SENTINEL_ACTOR above) so the verdict is
+    # actor-independent: the "reviewer reverts to GITHUB_ACTOR" mutation is caught
+    # no matter who triggers CI (backend#3422).
+    env = selftest_env()
     try:
         for label, old, new, expect in MUTATIONS:
             try:
