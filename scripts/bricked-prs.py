@@ -263,6 +263,41 @@ def present_contexts(pr: dict) -> "set[str]":
     return out
 
 
+def full_context_names(org: str, name: str, oid: str) -> "set[str] | None":
+    """The COMPLETE set of status-check context names on ``oid``, paginated.
+
+    Called only when ``rollup_truncated`` is true -- the single-page
+    ``statusCheckRollup`` from ``gh pr list`` caps at ``ROLLUP_CONTEXT_CAP`` and
+    says nothing when it drops names, so a head over that cap must be read
+    directly and with pagination or it cannot be judged (backend#3243: this is
+    the read the audit lacked, which turned every big-rollup PR into a whole-run
+    refusal -- client#989 carried >=100 contexts and blocked every scheduled run
+    from 2026-09-03 on).
+
+    The rollup is the union of two GitHub surfaces, so this reads both and unions
+    them the same way ``present_contexts`` does: check runs carry ``name``,
+    legacy commit statuses carry ``context``. Only presence matters here (the
+    audit asks whether a required context is ABSENT, never whether it is failing),
+    so the ever-present set from the full history is exactly the rollup's presence
+    semantics with nothing paginated away. ``gh api --paginate`` with an
+    element-wise ``--jq`` streams one name per line across every page.
+
+    Returns None on a read failure (any ``GhError`` -- 502 / 403 / rate limit).
+    Fail-closed by contract: the caller keeps refusing an unreadable head rather
+    than assuming it healthy, the same rule ``head_age_minutes`` follows."""
+    names: "set[str]" = set()
+    for path, field in (
+        (f"repos/{org}/{name}/commits/{oid}/check-runs", ".check_runs[].name"),
+        (f"repos/{org}/{name}/commits/{oid}/statuses", ".[].context"),
+    ):
+        try:
+            raw = CD.gh(["api", "--paginate", path, "--jq", field])
+        except CD.GhError:
+            return None
+        names.update(line for line in raw.splitlines() if line.strip())
+    return names
+
+
 def audit_repo(org: str, name: str, roles: "dict[str, str]") -> "tuple[list, list]":
     """Returns (findings, errors) for one repo."""
     findings: "list[dict]" = []
@@ -345,14 +380,38 @@ def audit_repo(org: str, name: str, roles: "dict[str, str]") -> "tuple[list, lis
             # what is about to be reported -- and before the age lookup, so a PR it
             # refuses costs no API call either.
             if rollup_truncated(pr):
-                errors.append(
-                    f"{name}/{branch}#{pr.get('number')}: "
-                    f"{len(pr.get('statusCheckRollup') or [])} rollup contexts at or "
-                    f"over the {ROLLUP_CONTEXT_CAP} page size, so the "
-                    f"{'missing review' if unreviewed else 'missing context'} may be "
-                    "pagination rather than reality -- this PR was NOT audited"
-                )
-                continue
+                # PAGINATE, don't refuse (backend#3243). The old code appended an
+                # error and `continue`d here, which is fail-CLOSED done wrong: the
+                # error is not one row, it is the WHOLE run -- `main()` returns 2
+                # on any non-empty `errors` before `return 1 if findings`, so a
+                # single big-rollup PR (client#989, >=100 contexts) demoted every
+                # real finding in the fleet to "could not audit", every scheduled
+                # run, indefinitely. The truncated list cannot tell absence from
+                # pagination, so read the head's contexts directly and with
+                # pagination, then decide against the COMPLETE set.
+                full = full_context_names(org, name, pr.get("headRefOid") or "")
+                if full is None:
+                    # The paginated read itself failed -- now genuinely undecidable.
+                    # Refuse THIS PR (an error, out of the findings table), the same
+                    # fail-closed treatment an unreadable branch or head clock gets.
+                    errors.append(
+                        f"{name}/{branch}#{pr.get('number')}: "
+                        f"{len(pr.get('statusCheckRollup') or [])} rollup contexts at "
+                        f"or over the {ROLLUP_CONTEXT_CAP} page size and the paginated "
+                        "context read failed, so the "
+                        f"{'missing review' if unreviewed else 'missing context'} "
+                        "cannot be told from pagination -- this PR was NOT audited"
+                    )
+                    continue
+                # Recompute both conclusions against the full set. Truncation only
+                # ever removes names, so this can only ever CLEAR a false positive,
+                # never manufacture one: a PR healthy on the partial list stays
+                # healthy here.
+                unreviewed = (not (pr.get("author") or {}).get(BOT_AUTHOR_FIELD)
+                              and BUGBOT_CONTEXT not in full)
+                missing = sorted(required - full) if required else []
+                if not unreviewed and not missing:
+                    continue
 
             age = head_age_minutes(org, name, pr.get("headRefOid") or "")
 
