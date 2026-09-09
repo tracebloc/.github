@@ -545,6 +545,25 @@ def _():
     assert_finding(fx.findings(["declared-unused"]), "stale-allowlist", "tensorflow")
 
 
+@case("pyproject: a pragma on `requests-oauthlib`'s line is not inherited by the shorter `requests` pin")
+def _():
+    if DW.tomllib is None:
+        return
+    fx = Fixture({"pyproject.toml": '[project]\nname = "x"\ndependencies = [\n  "requests-oauthlib==2.0.0",  # dead-weight: reached through the oauth session factory\n  "requests==2.33.1",\n]\n',
+                  "a.py": "import os\n"})
+    f = fx.findings(["declared-unused"])
+    assert_finding(f, "declared-unused", "`requests`", count=1)
+    assert not [x for x in f if "requests-oauthlib" in x.message]
+
+
+@case("cuda-torch: exec-form RUN and a quoted -r path are installers too")
+def _():
+    exec_form = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": 'FROM python:3.11-slim\nRUN ["pip", "install", "--no-cache-dir", "-r", "requirements.txt"]\n'})
+    assert_finding(exec_form.findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", "Dockerfile:2", count=1)
+    quoted = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": 'FROM python:3.11-slim\nRUN pip install -r "requirements.txt"\n'})
+    assert_finding(quoted.findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
+
+
 # ── config + CLI ─────────────────────────────────────────────────────────────
 
 

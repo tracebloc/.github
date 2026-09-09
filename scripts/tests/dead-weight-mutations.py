@@ -211,6 +211,18 @@ MUTATIONS = [
      '            am = ARG_LINE.match(raw.split(" #", 1)[0])  # a trailing comment is not the default',
      "            am = ARG_LINE.match(raw)"),
 
+    ("a pyproject pragma attaches to any line that contains the name as a substring",
+     r'''        rx = re.compile(r"""["']%s(?=[^A-Za-z0-9._-])""" % re.escape(needle))''',
+     r'''        rx = re.compile(r"""%s""" % re.escape(needle))'''),
+
+    ("exec-form RUN arrays are no longer read as installers",
+     "    m = EXEC_FORM.match(line)\n    if not m:\n        return line",
+     "    m = None\n    if not m:\n        return line"),
+
+    ("a quoted -r path keeps its quotes and never matches the requirements basename",
+     r'''REQ_FLAG = re.compile(r"""(?:^|\s)(?:-r|--requirement)[\s=]+["']?([^\s"']+)["']?""")''',
+     r'''REQ_FLAG = re.compile(r"""(?:^|\s)(?:-r|--requirement)[\s=]+(\S+)""")'''),
+
     ("a stale indirect-use is skipped when nothing is declared",
      "        for n, (reason, line) in cfg.indirect.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,",
      "        for n, (reason, line) in {}.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,"),
