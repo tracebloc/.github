@@ -187,6 +187,19 @@ shellcheck: guard-shellcheck
 house-rules:
 	./scripts/house-rules.sh --all
 
+# dead-weight: code-quality.yml's second house-rules step (RFC-0087 D3,
+# backend#3523), run on this repo the way the job runs it on every caller.
+# NOT a `lint` prerequisite on purpose: this repo declares no dependencies, so
+# the live audit here can only ever print "0 finding(s)" -- the live half runs
+# on every caller through code-quality.yml, and the fixture half is
+# selftest-dead-weight + mutation-dead-weight in `selftests`. Kept as a target
+# so a maintainer can run the exact CI invocation against any checkout with
+# `make dead-weight ROOT=../some-repo`.
+ROOT ?= .
+.PHONY: dead-weight
+dead-weight:
+	$(PYTHON) scripts/dead-weight.py --root '$(ROOT)' --exclude 'scripts/tests/*'
+
 # action-pins: code-quality.yml's `action-pins` job, EXTRACTED from the workflow
 # rather than reimplemented. The job body is a python heredoc, and a
 # hand-copied second version of a supply-chain gate is a version that can
@@ -307,7 +320,8 @@ MUTATION_TARGETS := mutation-house-rules mutation-pipefail-early-close \
                    mutation-reusable-no-cancel \
                    mutation-lint-targets \
                    mutation-shard-shape \
-                   mutation-fr-gate-walk
+                   mutation-fr-gate-walk \
+                   mutation-dead-weight
 
 # THE WHOLE MUTATION TIER, BY NAME OF THE LIST. Every entry point -- CI,
 # `check-all`, `lint` -- depends on one of these two rather than on any
@@ -370,7 +384,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-reusable-no-cancel \
                     selftest-lint-targets \
                     selftest-fr-gate-walk \
-                    selftest-extract-advanced-prs
+                    selftest-extract-advanced-prs \
+                    selftest-dead-weight
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -695,6 +710,20 @@ mutation-lint-targets:
 .PHONY: selftest-shard-shape
 selftest-shard-shape: guard-pyyaml
 	$(PYTHON) scripts/tests/shard-shape-selftest.py
+
+# dead-weight (RFC-0087 D3, backend#3523): stdlib only, no pyyaml guard. The
+# selftest builds fixture repos in a tempdir and drives the real script; the
+# mutation runner breaks each rule in scripts/dead-weight.py and expects the
+# selftest to redden.
+.PHONY: selftest-dead-weight mutation-dead-weight mutation-dead-weight-dry
+selftest-dead-weight:
+	$(PYTHON) scripts/tests/dead-weight-selftest.py
+
+mutation-dead-weight:
+	$(PYTHON) scripts/tests/dead-weight-mutations.py
+
+mutation-dead-weight-dry:
+	$(PYTHON) scripts/tests/dead-weight-mutations.py --dry
 
 .PHONY: mutation-shard-shape mutation-shard-shape-dry
 mutation-shard-shape:

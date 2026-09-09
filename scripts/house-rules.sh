@@ -80,6 +80,12 @@
 #   A `rule:` line is `id | path-glob | POSIX ERE | message` and is how a repo
 #   adds its own house rules — including for languages this script knows
 #   nothing about — without touching the shared workflow.
+#   Three more directives live in this file but are read by the sibling
+#   checker scripts/dead-weight.py (RFC-0087 D3), which runs in the same job:
+#     indirect-use: <dist> | <how the package is reached>
+#     import-name:  <dist> | <module>
+#     dead-weight-disable: <check>
+#   This script ignores them; see dead-weight.py's header for their meaning.
 #
 # USAGE
 #   house-rules.sh [options] [file ...]
@@ -218,6 +224,10 @@ $val" ;;
             risky) CFG_RISKY="$CFG_RISKY $val" ;;
             disable) CFG_DISABLED="$CFG_DISABLED $val" ;;
             rule) printf '%s\n' "$val" >>"$CUSTOM" ;;
+            # Read by scripts/dead-weight.py (RFC-0087 D3), which shares this
+            # config file so a repo has ONE place for its house-rule exceptions.
+            # Nothing to do here; listed so they are not reported as unknown.
+            indirect-use | import-name | dead-weight-disable) ;;
             *) echo "$PROG: warning: $CONFIG: unknown directive '$key'" >&2 ;;
         esac
     done <"$CONFIG"
