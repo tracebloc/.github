@@ -317,7 +317,8 @@ CSS_IMPORT = re.compile(r"""@(?:import|use|forward)\s+(?:url\(\s*)?["']?([^"')\s
 FROM_LINE = re.compile(r"^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+(?:AS|as)\s+\S+)?\s*(#(.*))?$")
 ARG_LINE = re.compile(r"^\s*ARG\s+([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?\s*$")
 PIP_INSTALL = re.compile(r"\bpip3?\s+(?:[^\n]*?\s)?install\b|\bpython3?\s+-m\s+pip\s+(?:[^\n]*?\s)?install\b|\buv\s+pip\s+install\b")
-REQ_FLAG = re.compile(r"(?:^|\s)(?:-r|--requirement)[\s=]+(\S+)")
+REQ_FLAG = re.compile(r"""(?:^|\s)(?:-r|--requirement)[\s=]+["']?([^\s"']+)["']?""")
+EXEC_FORM = re.compile(r"^(\s*(?:RUN|CMD|ENTRYPOINT)\s+)(\[.*\])\s*$")
 RUNS_ON = re.compile(r"runs-on:\s*(.+)")
 
 
@@ -521,10 +522,14 @@ def _pyproject_deps(repo: Repo, rel: str, findings):
     lines = repo.text(rel).splitlines()
 
     def line_of(spec):
+        """The line holding THIS spec: the quoted name followed by a non-name
+        character, so `requests` never matches the `requests-oauthlib` line and
+        inherits its pragma (Bugbot, .github#454)."""
         name = REQ_NAME.match(spec)
         needle = name.group(1) if name else spec
+        rx = re.compile(r"""["']%s(?=[^A-Za-z0-9._-])""" % re.escape(needle))
         for i, ln in enumerate(lines, 1):
-            if needle in ln and ("=" in ln or '"' in ln):
+            if rx.search(ln):
                 return i
         return 1
 
@@ -985,8 +990,26 @@ def check_full_python_base(repo: Repo, cfg: Config, findings):
 
 # ── check 3: cuda-torch-on-cpu ─────────────────────────────────────────────────
 
+def _shell_form(line: str) -> str:
+    """A Dockerfile exec-form `RUN ["pip", "install", "-r", "requirements.txt"]`
+    read as the shell words it means, so the installer scan sees it the way it
+    sees shell form (Bugbot, .github#454). Anything that is not a JSON array of
+    strings is returned unchanged."""
+    m = EXEC_FORM.match(line)
+    if not m:
+        return line
+    try:
+        words = json.loads(m.group(2))
+    except json.JSONDecodeError:
+        return line
+    if not isinstance(words, list) or not all(isinstance(w, str) for w in words):
+        return line
+    return m.group(1) + " ".join(words)
+
+
 def _joined_commands(text: str):
-    """Yield (first_line_no, logical_line) with backslash continuations joined."""
+    """Yield (first_line_no, logical_line) with backslash continuations joined
+    and exec-form arrays rendered as shell words."""
     buf, start = [], None
     for no, raw in enumerate(text.splitlines(), 1):
         if start is None:
@@ -996,10 +1019,10 @@ def _joined_commands(text: str):
             buf.append(stripped[:-1])
             continue
         buf.append(stripped)
-        yield start, " ".join(buf)
+        yield start, _shell_form(" ".join(buf))
         buf, start = [], None
     if buf:
-        yield start, " ".join(buf)
+        yield start, _shell_form(" ".join(buf))
 
 
 def _strip_req_comment(raw: str) -> str:
