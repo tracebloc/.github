@@ -109,7 +109,11 @@ for sha in $commits; do
     # shipped code, the very outage this fixes. Record it and fail the step at the
     # end so the read is retried (Bugbot High on .github#438).
     api_read_failed=1
-    api_why=$(tr '\n' ' ' <"$api_err" | head -c 300)
+    # No pipe here: `tr | head -c` closes early and pipefail reads that as a
+    # failure of the message itself (quality/pipefail-early-close).
+    api_why=$(<"$api_err")
+    api_why=${api_why//$'\n'/ }
+    api_why=${api_why:0:300}
     echo "::error::commit ${sha}: the /pulls API read FAILED (gh said: ${api_why:-nothing on stderr}); NOT attributing from the unreliable subject, and failing the step so it is retried rather than leaving the card behind."
   fi
 done
