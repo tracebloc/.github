@@ -47,16 +47,29 @@ Here nothing is missing -- the required set is fully present and green -- so
 conflict is invisible to it by construction. Only asking about mergeability
 DIRECTLY, as this file does, sees it.
 
-WHAT THIS DOES. It sweeps every open PR in the inventory and writes a commit
-STATUS onto the PR's head sha:
+WHAT THIS DOES. It sweeps every open PR in the inventory and writes a CHECK RUN
+onto the PR's head sha:
 
   conflicted   -> failure   the PR now has something red to point at
-  clear        -> success   the context clears itself, so it can never brick a
+  clear        -> success   the check run clears itself, so it can never brick a
                             healthy PR (see "why success matters" below)
-  undetermined -> pending   "cannot tell" is neither, and says so
+  undetermined -> pending   "cannot tell" is neither, and says so (an
+                            in_progress check run with no conclusion)
 
-WHY A STATUS AND NOT A JOB. A job is the thing that cannot run. A status is
-written FROM OUTSIDE the PR against its head sha, so it needs no merge ref and
+WHY A CHECK RUN AND NOT A COMMIT STATUS (backend#3242). The signal must be
+written FROM OUTSIDE the PR against its head sha -- both a commit status and a
+check run are, and both need no merge ref and no checkout of the merge commit.
+The choice between them is a PERMISSION one. A commit status needs `statuses`,
+and the tracebloc-release-train App's installation does not grant it at all --
+so the token mint for `permission-statuses: write` was REFUSED before the sweep
+could run, and this gate never once executed from the day it landed. A check run
+needs `checks`, which the App does hold, so the same red-row-on-the-PR signal is
+written with a scope the mint can actually get. The Checks API is the same shape
+of "written from outside onto a head sha", so nothing else about this file
+changes -- only the API the two network seams speak.
+
+WHY A CHECK RUN AND NOT A JOB. A job is the thing that cannot run. A check run
+is written FROM OUTSIDE the PR against its head sha, so it needs no merge ref and
 no checkout of the merge commit. It is the only signal that can reach a
 conflicted PR at all.
 
@@ -89,7 +102,7 @@ WHY `success` MATTERS AS MUCH AS `failure`. A context that only ever appears
 when something is wrong cannot be required, and a required context that never
 reports leaves a PR at "Expected -- waiting for status" forever. That is
 precisely the brick `bricked-prs.py` exists to hunt, and shipping it here would
-plant the bug next door to its own watcher. So every PR swept gets a status,
+plant the bug next door to its own watcher. So every PR swept gets a check run,
 including the healthy ones.
 
 Exit codes, mirroring the other audits in this repo:
@@ -136,19 +149,21 @@ CONFLICTED = "conflicted"
 CLEAR = "clear"
 UNDETERMINED = "undetermined"
 
-# The status context. STABLE FOREVER once anything requires it: a renamed context
-# does not stop being required, it stops being REPORTED, which bricks every open
-# PR until someone edits protection.
+# The check-run NAME, which is the context branch protection would require.
+# STABLE FOREVER once anything requires it: a renamed check run does not stop
+# being required, it stops being REPORTED, which bricks every open PR until
+# someone edits protection.
 CONTEXT = "conflict-gate / mergeable"
 
 STATE_FOR = {
     CONFLICTED: "failure",
     CLEAR: "success",
-    # NOT `failure`. `pending` blocks a merge exactly as `failure` does if this
-    # context is ever required, so it is no less fail-closed -- but it does not
-    # assert a conflict that was never observed. The distinction is the whole
-    # point of having three verdicts instead of two: a reader must be able to
-    # tell "you have a conflict" from "GitHub would not tell me".
+    # NOT `failure`. `pending` -- an in_progress check run with no conclusion --
+    # blocks a merge exactly as `failure` does if this context is ever required,
+    # so it is no less fail-closed, but it does not assert a conflict that was
+    # never observed. The distinction is the whole point of having three verdicts
+    # instead of two: a reader must be able to tell "you have a conflict" from
+    # "GitHub would not tell me".
     UNDETERMINED: "pending",
 }
 
@@ -172,36 +187,42 @@ PR_LIST_LIMIT = 200
 DEFAULT_RETRIES = 3
 DEFAULT_RETRY_SLEEP = 2.0
 
-# GITHUB CAPS STATUSES AT 1000 PER SHA AND CONTEXT. A 30-minute sweep is 48
-# writes a day onto an unchanged head, so a PR left open three weeks would
-# exhaust the cap and every write after that would 422 -- the gate going silent
-# on precisely the stalest PRs, which are the ones most likely to have conflicted.
+# EACH POST CREATES A NEW CHECK RUN. Re-posting the same verdict every 30 minutes
+# onto an unchanged head would pile up hundreds of identical runs on a long-lived
+# PR -- clutter the head with, and make the rollup churn over, runs that say
+# nothing new. So a check run is written only when it would CHANGE something,
+# which means reading what the head already carries.
 #
-# So a status is written only when it would CHANGE something, which means reading
-# what the head already carries.
+# READ VIA THE REST CHECK-RUNS ENDPOINT, `GET /repos/{o}/{r}/commits/{sha}/check-runs`
+# (backend#3242). This is the same permission decision the whole file turns on: the
+# endpoint returns ONLY check runs and never resolves a commit-status context, so
+# it reads under the `checks` scope the App holds and never needs `statuses`, which
+# it does not. It also sidesteps the `statusCheckRollup` trap this gate's first
+# draft hit (Bugbot, .github#359): the rollup resolves `commit.status` in GraphQL,
+# refused on a PRIVATE repo without `actions: read`. The REST check-runs list
+# touches neither commit statuses nor `commit.status`, so it is refused on neither
+# scope. It costs one GET per open PR -- ~50 per sweep across the fleet -- read
+# once per PR and threaded into the write, never re-read (@saadqbal on #446).
 #
-# READ VIA THE REST COMBINED-STATUS ENDPOINT, NOT `statusCheckRollup` (Bugbot,
-# .github#359 -- a high finding on the first draft of this, which used the rollup).
-# `gh pr list --json statusCheckRollup` resolves `commit.status` underneath, and
-# GraphQL REFUSES that subfield on a PRIVATE repo unless the token also holds
-# `actions: read` -- measured under backend#2157 and documented in
-# bricked-prs.yml, which declares `permission-actions: read` for exactly this
-# reason. This gate's mint deliberately holds only `pull-requests: read` and
-# `statuses: write`, so the rollup would have failed on every private repo in the
-# org: `open_prs` raises, every private repo becomes COULD NOT EVALUATE, and the
-# sweep exits 2 having judged almost nothing. The trap was documented in a file
-# read while writing this one, which is the whole argument for narrow tokens
-# being measured rather than reasoned about.
-#
-# `GET /repos/{o}/{r}/commits/{sha}/status` reads commit statuses and nothing
-# else, so the `statuses` permission already held covers it, it cannot be refused
-# for a scope this job has no other use for, and it has no pagination cap to
-# straddle. It costs one GET per open PR -- ~50 per sweep across the fleet.
+# THE READ IS A GET WITH `filter=latest`. `gh api` POSTs the moment any `-f` is
+# passed, so the method is forced to GET; `filter=latest` returns the single
+# current run for our name, so the verdict does not depend on paging a 30-per-page
+# history. The greatest-`id` pick below is then only a defensive tie-break: `id`
+# is monotonic and always present, unlike a `started_at` a queued run leaves null.
 #
 # WHEN IN DOUBT, WRITE. An unreadable current state returns None, which equals no
-# state and so produces a write. Writing a status that was already correct wastes
-# one of the 1000; NOT writing one that was needed leaves the PR reading
+# state and so produces a write. Writing a check run that was already correct
+# costs one extra run; NOT writing one that was needed leaves the PR reading
 # empty-green, which is the failure this whole file exists to remove.
+
+# The verdict-state -> (check-run status, conclusion) mapping. A `completed` run
+# carries a conclusion; `pending` is an in_progress run with NONE, which blocks a
+# required merge without asserting a verdict this file never reached.
+STATUS_FOR_STATE = {
+    "success": ("completed", "success"),
+    "failure": ("completed", "failure"),
+    "pending": ("in_progress", None),
+}
 
 
 def _load_caller_drift():
@@ -274,41 +295,92 @@ def classify(pr: dict) -> "tuple[str, str]":
     )
 
 
+def check_run_state(run: dict) -> "str | None":
+    """Map one check run's (status, conclusion) back onto this file's states.
+
+    A run that is not `completed` (queued/in_progress, conclusion still None) is
+    our `pending`. A `completed` run reports its conclusion -- but only the two we
+    ever write; any other conclusion is a foreign verdict we return None for,
+    which forces a rewrite rather than trusting it. Case is NOT folded here: the
+    single fold lives in `existing_state`, so the dedup's case-insensitivity has
+    exactly one home to break.
+    """
+    if run.get("status") != "completed":
+        return "pending"
+    conclusion = run.get("conclusion")
+    if isinstance(conclusion, str) and conclusion.lower() in ("success", "failure"):
+        return conclusion
+    return None
+
+
+def _latest_own_run(org: str, name: str, sha: str) -> "dict | None":
+    """Our own check run with the greatest id on this head, or None.
+
+    None both when we have none AND when the read failed -- callers treat that as
+    "no known run", the safe direction (see the cap note above). Shared by
+    `existing_state` (reads the verdict) and `post_status` (needs the id to UPDATE
+    the one run in place rather than append another).
+    """
+    try:
+        # `--method GET` is LOAD-BEARING: `gh api` switches to POST the instant any
+        # `-f` is passed, and there is no POST route on `/commits/{sha}/check-runs`,
+        # so the read would 404 -> GhError -> None on EVERY call, killing the dedup
+        # and forcing post_status down the CREATE branch forever (backend#3242,
+        # @saadqbal on #446). `filter=latest` makes the endpoint return the single
+        # current run per name rather than a page of history: the list is paginated
+        # (30/page) and we read one page, so without it `max(id)` could pick a stale
+        # run off page 1 once more than 30 of ours land on a head. With it there is
+        # at most one run for CONTEXT and the ordering below is only a defensive
+        # tie-break.
+        listing = CD.gh_json(["api", "--method", "GET",
+                              f"repos/{org}/{name}/commits/{sha}/check-runs",
+                              "-f", f"check_name={CONTEXT}",
+                              "-f", "filter=latest"])
+    except CD.GhError:
+        return None
+    if not isinstance(listing, dict):
+        return None
+    ours = [run for run in (listing.get("check_runs") or [])
+            if isinstance(run, dict) and run.get("name") == CONTEXT]
+    if not ours:
+        return None
+    # The newest run by check-run id is the current verdict -- see the cap note.
+    return max(ours, key=lambda r: r.get("id") or 0)
+
+
 def existing_state(org: str, name: str, sha: str) -> "str | None":
-    """The state our own context already carries on this head, lowercased.
+    """The state our own check run already carries on this head, lowercased.
 
     None when there is none, AND when the read failed -- both produce a write,
     which is the safe direction (see the cap note above).
 
-    The case is folded because the two halves of GitHub disagree about it: REST
-    reports `success` while GraphQL reports `SUCCESS`. REST is what is called
-    here, so the fold is defensive rather than load-bearing today; it stays
-    because an unfolded comparison silently disables the whole dedup, and that
-    failure is invisible -- everything still works, it just writes every time.
+    The case is folded defensively: the REST check-runs endpoint answers lower
+    case (`success`), so the fold is not load-bearing today; it stays because an
+    unfolded comparison silently disables the whole dedup, and that failure is
+    invisible -- everything still works, it just writes every time.
     """
-    try:
-        combined = CD.gh_json(["api", f"repos/{org}/{name}/commits/{sha}/status"])
-    except CD.GhError:
+    return _run_state_folded(_latest_own_run(org, name, sha))
+
+
+def _run_state_folded(run: "dict | None") -> "str | None":
+    """The lowercased state of an already-read run (or None). The single case
+    fold, shared by `existing_state` (which reads the run) and `sweep_repo`
+    (which reads it once and threads it into `post_status`, so the verdict costs
+    one GET, not two -- @saadqbal on #446)."""
+    if run is None:
         return None
-    if not isinstance(combined, dict):
-        return None
-    for entry in combined.get("statuses") or []:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("context") == CONTEXT:
-            state = entry.get("state")
-            return state.lower() if isinstance(state, str) else None
-    return None
+    state = check_run_state(run)
+    return state.lower() if isinstance(state, str) else None
 
 
 def plan(prs: "list[dict]") -> "list[dict]":
-    """Turn PR payloads into the statuses to write. PURE.
+    """Turn PR payloads into the check runs to write. PURE.
 
     DRAFTS ARE SWEPT TOO, deliberately, where `bricked-prs.py` skips them. That
     watcher is asking "can this PR merge", and a draft cannot regardless. This is
     writing a context that may become required, and a draft marked ready for
     review does NOT get a fresh sweep of its own -- so skipping it would leave it
-    with no status at the moment it starts needing one.
+    with no check run at the moment it starts needing one.
     """
     out = []
     for pr in prs:
@@ -390,19 +462,63 @@ def resolve_undetermined(org: str, name: str, prs: "list[dict]", retries: int,
     return resolved
 
 
+_UNREAD = object()
+
+
 def post_status(org: str, name: str, sha: str, state: str, description: str,
-                target_url: "str | None") -> None:
-    """Write one commit status. Raises GhError."""
-    args = [
-        "api", "--method", "POST", f"repos/{org}/{name}/statuses/{sha}",
-        "-f", f"state={state}",
-        "-f", f"context={CONTEXT}",
-        # GitHub truncates a description over 140 chars; ours are well under, and
-        # the cap is stated here so a future edit does not discover it in prod.
-        "-f", f"description={description[:140]}",
+                target_url: "str | None", existing: "object" = _UNREAD) -> None:
+    """Write one check run onto the head sha. Raises GhError.
+
+    Named `post_status` still, and taking the same abstract `state`
+    (success/failure/pending) the rest of the file speaks: only the API under it
+    changed from Statuses to Checks (backend#3242). `state` is translated to a
+    check-run status/conclusion here, the one place that mapping lives.
+
+    `existing` is our current run on this head, when a caller already read it
+    (`sweep_repo` does, for the dedup) -- passed down so the verdict costs one GET
+    rather than two (@saadqbal on #446). Left `_UNREAD` -> read it here, which is
+    what direct callers/tests still want.
+    """
+    status, conclusion = STATUS_FOR_STATE[state]
+    # UPDATE our one run in place when it already exists; only CREATE when it does
+    # not. Check runs APPEND -- unlike a commit status, which was one slot per
+    # context that `success` overwrote -- and `statusCheckRollup` (what branch
+    # protection reads) is worst-of across EVERY same-name run on the sha. So a
+    # fresh POST cannot clear an earlier `failure`, and an `in_progress` (pending)
+    # POST never completed keeps the rollup pending forever; a later `success`
+    # would sit alongside them, not replace them. PATCHing the single run lets it
+    # transition success<->failure<->in_progress in one slot (backend#3242, Bugbot).
+    #
+    # PENDING PATCHES A COMPLETED RUN BACK TO in_progress WITHOUT a conclusion
+    # (STATUS_FOR_STATE["pending"] carries None), and we RELY on the check-run
+    # contract that a run is a `failure` in the rollup only while it is
+    # status=completed AND conclusion=failure: moving status to in_progress
+    # un-completes it, so its old conclusion no longer contributes and the rollup
+    # reads pending. Stated, not assumed, because it is undocumented and a future
+    # edit must re-confirm it against the live API before this gate is armed as
+    # required (@saadqbal on #446) -- an in_progress run left behind on a resolved
+    # conflict is the exact stuck-red shape this file exists to remove.
+    if existing is _UNREAD:
+        existing = _latest_own_run(org, name, sha)
+    if existing is not None and existing.get("id"):
+        args = ["api", "--method", "PATCH",
+                f"repos/{org}/{name}/check-runs/{existing['id']}",
+                "-f", f"status={status}"]
+    else:
+        args = ["api", "--method", "POST", f"repos/{org}/{name}/check-runs",
+                "-f", f"name={CONTEXT}",
+                "-f", f"head_sha={sha}",
+                "-f", f"status={status}"]
+    # A check run's output.title caps at 255; the summary carries the same text
+    # uncut. The cap is stated so a future edit does not find it in prod.
+    args += [
+        "-f", f"output[title]={description[:255]}",
+        "-f", f"output[summary]={description}",
     ]
+    if conclusion is not None:
+        args += ["-f", f"conclusion={conclusion}"]
     if target_url:
-        args += ["-f", f"target_url={target_url}"]
+        args += ["-f", f"details_url={target_url}"]
     CD.gh(args)
 
 
@@ -427,29 +543,33 @@ def sweep_repo(org: str, name: str, retries: int, sleep_for: float,
                 f"{name}#{st['number']}: {st['why']} -- this PR was NOT judged"
             )
         if not st["sha"]:
-            errors.append(f"{name}#{st['number']}: no head sha, so no status could be written")
+            errors.append(f"{name}#{st['number']}: no head sha, so no check run could be written")
             st["written"] = False
             continue
         if dry_run:
             st["written"] = False
             continue
-        # Already saying what we would say: writing again would burn one of the
-        # 1000 statuses this sha and context are allowed and change nothing.
-        st["existing"] = existing_state(org, name, st["sha"])
+        # Already saying what we would say: writing again would pile another
+        # identical check run onto this head and change nothing. Read our run ONCE
+        # here and thread it into post_status, so a changed verdict costs one GET,
+        # not two (@saadqbal on #446).
+        existing_run = _latest_own_run(org, name, st["sha"])
+        st["existing"] = _run_state_folded(existing_run)
         if st["existing"] == st["state"]:
             st["written"] = False
             st["unchanged"] = True
             continue
         try:
-            post_status(org, name, st["sha"], st["state"], st["description"], st["url"])
+            post_status(org, name, st["sha"], st["state"], st["description"],
+                        st["url"], existing_run)
             st["written"] = True
         except CD.GhError as exc:
             st["written"] = False
-            # A STATUS THAT DID NOT LAND IS THE WHOLE FAILURE, RE-ARMED. The PR
+            # A CHECK RUN THAT DID NOT LAND IS THE WHOLE FAILURE, RE-ARMED. The PR
             # still reads empty-green and nothing said so, which is why this is an
             # error and not a logged warning.
             errors.append(
-                f"{name}#{st['number']}: could not write the {st['state']} status "
+                f"{name}#{st['number']}: could not write the {st['state']} check run "
                 f"({exc.detail})"
             )
     return statuses, errors
