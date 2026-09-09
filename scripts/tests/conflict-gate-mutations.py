@@ -132,14 +132,14 @@ MUTATIONS = [
      '        return [], [f"{name}: PR list unreadable ({exc.detail})"]',
      '        return [], []'),
 
-    ("a status that failed to write is swallowed, so the PR stays empty-green",
+    ("a check run that failed to write is swallowed, so the PR stays empty-green",
      "            errors.append(\n"
-     "                f\"{name}#{st['number']}: could not write the {st['state']} status \"",
+     "                f\"{name}#{st['number']}: could not write the {st['state']} check run \"",
      "            _swallowed = (\n"
-     "                f\"{name}#{st['number']}: could not write the {st['state']} status \""),
+     "                f\"{name}#{st['number']}: could not write the {st['state']} check run \""),
 
     ("a PR with no head sha is skipped silently",
-     '            errors.append(f"{name}#{st[\'number\']}: no head sha, so no status could be written")',
+     '            errors.append(f"{name}#{st[\'number\']}: no head sha, so no check run could be written")',
      '            pass'),
 
     # --- (F) the exit-code ranking -----------------------------------------
@@ -165,30 +165,52 @@ MUTATIONS = [
      '        if st["existing"] == st["state"]:',
      '        if st["existing"] != st["state"]:'),
 
-    # REST answers lower case, GraphQL upper. Unfolded, an upper-case state never
-    # matches and the dedup silently does nothing -- invisible, because everything
-    # still works, it just writes every time until the cap.
+    # The check-runs REST endpoint answers lower case. Unfolded, an upper-case
+    # conclusion never matches and the dedup silently does nothing -- invisible,
+    # because everything still works, it just writes every time.
     ("the case fold goes, so an upper-case state never matches",
-     '            return state.lower() if isinstance(state, str) else None',
-     '            return state if isinstance(state, str) else None'),
+     '    state = check_run_state(run)\n'
+     '    return state.lower() if isinstance(state, str) else None',
+     '    state = check_run_state(run)\n'
+     '    return state if isinstance(state, str) else None'),
 
-    ("existing_state matches ANY context, so another check's state is read as ours",
-     '        if entry.get("context") == CONTEXT:',
-     '        if entry.get("context") is not None:'),
+    ("_latest_own_run matches ANY check-run name, so another check's state is read as ours",
+     '            if isinstance(run, dict) and run.get("name") == CONTEXT]',
+     '            if isinstance(run, dict)]'),
 
-    # THE BUGBOT FINDING ON THIS PR (#359, high). The rollup resolves
-    # `commit.status` in GraphQL, which a token without `actions: read` is REFUSED
-    # on a private repo -- so reading the current state that way would break every
-    # private repo in the org while passing every other case here.
-    ("the current state is read from the rollup again, not the REST endpoint",
-     '        combined = CD.gh_json(["api", f"repos/{org}/{name}/commits/{sha}/status"])',
-     '        combined = CD.gh_json(["pr", "view", sha, "--json", "statusCheckRollup"])'),
+    # THE PERMISSION CLASS THIS GATE TURNS ON (backend#3242). Reading the current
+    # verdict from ANY commit-status source -- the rollup (which resolves
+    # `commit.status` in GraphQL, .github#359) or the combined-status REST
+    # endpoint -- needs `statuses: read`, the scope the App does not hold and the
+    # whole reason the commit-status design never ran. The read must stay on
+    # check-runs, so a mutation back to a status source must redden.
+    ("the current state is read from the rollup again, not the check-runs endpoint",
+     '        listing = CD.gh_json(["api", "--method", "GET",\n'
+     '                              f"repos/{org}/{name}/commits/{sha}/check-runs",\n'
+     '                              "-f", f"check_name={CONTEXT}",\n'
+     '                              "-f", "filter=latest"])',
+     '        listing = CD.gh_json(["pr", "view", sha, "--json", "statusCheckRollup"])'),
+
+    # `gh api` POSTs the instant any `-f` is passed, and there is no POST route on
+    # check-runs, so dropping `--method GET` 404s the read on EVERY call:
+    # _latest_own_run returns None forever, the dedup dies, and post_status only
+    # ever CREATEs (the accumulation bug 97436c5 fixed, re-armed). The method is
+    # part of the contract, not decoration (@saadqbal on #446).
+    ("the read drops --method GET, so gh api POSTs it and the read 404s",
+     '        listing = CD.gh_json(["api", "--method", "GET",\n'
+     '                              f"repos/{org}/{name}/commits/{sha}/check-runs",',
+     '        listing = CD.gh_json(["api",\n'
+     '                              f"repos/{org}/{name}/commits/{sha}/check-runs",'),
 
     # An unreadable current state must produce a WRITE. Turning it into a skip
-    # would silently stop reporting whenever the status read flakes.
-    ("an unreadable current state is treated as agreeing, so no status is written",
-     '    except CD.GhError:\n        return None\n    if not isinstance(combined, dict):',
-     '    except CD.GhError:\n        return "success"\n    if not isinstance(combined, dict):'),
+    # would silently stop reporting whenever the check-runs read flakes.
+    # _latest_own_run returns a run dict or None, so the mutation returns a run
+    # dict (not a bare string, which would AttributeError in check_run_state and
+    # score UNCAUGHT). A completed-success run makes existing_state read "success"
+    # instead of None on an unreadable head, turning the mandatory write into a skip.
+    ("an unreadable current state is treated as agreeing, so no check run is written",
+     '    except CD.GhError:\n        return None\n    if not isinstance(listing, dict):',
+     '    except CD.GhError:\n        return {"status": "completed", "conclusion": "success"}\n    if not isinstance(listing, dict):'),
 
     # --- (G) the retry loop -------------------------------------------------
     ("every PR is re-read, not only the ones GitHub would not answer",
@@ -224,16 +246,19 @@ WORKFLOW_MUTATIONS = [
      '  cancel-in-progress: false',
      '  cancel-in-progress: true'),
 
-    # Without statuses:write every sweep finds conflicts it cannot report: a green
+    # Without checks:write every sweep finds conflicts it cannot report: a green
     # run, no red row, and the fail-open perfectly intact.
-    ("the mint loses statuses: write, so no finding can ever reach a PR",
-     '          permission-statuses: write',
-     '          permission-statuses: read'),
+    ("the mint loses checks: write, so no finding can ever reach a PR",
+     '          permission-checks: write',
+     '          permission-checks: read'),
 
-    ("the mint grows a permission this job has no use for",
-     '          permission-pull-requests: read\n          permission-statuses: write',
-     '          permission-pull-requests: read\n          permission-statuses: write\n'
-     '          permission-contents: write'),
+    # The class regression: someone re-adds `statuses`, the scope the App's
+    # installation does not grant -- reintroducing the mint refused fleet-wide
+    # (backend#3242).
+    ("the mint re-adds statuses: write, the scope the App cannot grant",
+     '          permission-pull-requests: read\n          permission-checks: write',
+     '          permission-pull-requests: read\n          permission-checks: write\n'
+     '          permission-statuses: write'),
 ]
 
 # One flat list of (target, label, old, new). Derived from the two lists rather
