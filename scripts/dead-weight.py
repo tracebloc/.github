@@ -949,6 +949,9 @@ def _image_name_tag(ref: str):
     return name, tag
 
 
+#: `-slim`, `-alpine`, and the versioned official spellings `-alpine3.20` /
+#: `-slim-bookworm` (Bugbot, .github#454: `3.12-alpine3.20` is Alpine, not Debian).
+SMALL_BASE_TAG = re.compile(r"(?:^|-)(?:slim|alpine)[0-9.]*(?:-|$)")
 ARG_REF = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))")
 
 
@@ -975,15 +978,20 @@ def _expand_args(ref: str, args: dict) -> tuple:
 
 def check_full_python_base(repo: Repo, cfg: Config, findings):
     for rel in repo.glob("Dockerfile*", "*.Dockerfile", "*.dockerfile"):
-        args = {}
+        # Only ARGs declared BEFORE the first FROM are global and visible to FROM
+        # lines; an ARG inside a stage is stage-local and a later FROM never sees
+        # it, however Docker expands the RUN lines beneath (Bugbot, .github#454).
+        args, seen_from = {}, False
         for no, raw in enumerate(repo.text(rel).splitlines(), 1):
             am = ARG_LINE.match(raw.split(" #", 1)[0])  # a trailing comment is not the default
             if am:
-                args[am.group(1)] = (am.group(2) or "").strip().strip('"').strip("'")
+                if not seen_from:
+                    args[am.group(1)] = (am.group(2) or "").strip().strip('"').strip("'")
                 continue
             fm = FROM_LINE.match(raw)
             if not fm:
                 continue
+            seen_from = True
             ref, unresolved = _expand_args(fm.group(1), args)
             name, tag = _image_name_tag(ref)
             if name != "python":
@@ -992,7 +1000,7 @@ def check_full_python_base(repo: Repo, cfg: Config, findings):
                 findings.append(Finding("full-python-base", rel, no,
                                         "FROM %s: the python tag comes from an ARG with no default in this file, so slim-or-full cannot be told; give the ARG a default" % fm.group(1)))
                 continue
-            if re.search(r"(?:^|-)(?:slim|alpine)(?:-|$)", tag):
+            if SMALL_BASE_TAG.search(tag):
                 continue
             comment = (fm.group(3) or "").strip()
             if len(comment.split()) >= 3:

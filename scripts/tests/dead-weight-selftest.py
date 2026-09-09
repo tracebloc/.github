@@ -436,6 +436,20 @@ def _():
     assert_finding(unknown.findings(["full-python-base"]), "full-python-base", "cannot be told")
 
 
+@case("full-python-base: versioned official small tags (-alpine3.20, -slim-bookworm) are small")
+def _():
+    fx = Fixture({"Dockerfile": "FROM python:3.12-alpine3.20\n", "Dockerfile.b": "FROM python:3.11-slim-bookworm\n"})
+    assert_clean(fx.findings(["full-python-base"]))
+    assert_finding(Fixture({"Dockerfile": "FROM python:3.12-bookworm\n"}).findings(["full-python-base"]), "full-python-base")
+
+
+@case("full-python-base: a stage-local ARG after a FROM does not change what a later FROM expands")
+def _():
+    # Docker: the global PY=3.11 is what the second FROM sees; the stage-local PY=3.11-slim is not.
+    fx = Fixture({"Dockerfile": "ARG PY=3.11\nFROM python:${PY} AS build\nARG PY=3.11-slim\nRUN echo $PY\nFROM python:${PY}\n"})
+    assert_finding(fx.findings(["full-python-base"]), "full-python-base", count=2)
+
+
 # ── cuda-torch-on-cpu ────────────────────────────────────────────────────────
 
 REQ_TORCH = "numpy==2.2.0\ntorch==2.13.0\n"

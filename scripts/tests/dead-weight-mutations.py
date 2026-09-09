@@ -243,6 +243,16 @@ MUTATIONS = [
      r'''JS_SOURCE_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".mdx", ".vue", ".svelte", ".astro"}''',
      r'''JS_SOURCE_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".mdx", ".md", ".vue", ".svelte", ".astro"}'''),
 
+    ("versioned alpine/slim tags read as full Debian again",
+     r'''SMALL_BASE_TAG = re.compile(r"(?:^|-)(?:slim|alpine)[0-9.]*(?:-|$)")''',
+     r'''SMALL_BASE_TAG = re.compile(r"(?:^|-)(?:slim|alpine)(?:-|$)")'''),
+
+    ("a stage-local ARG leaks into a later FROM",
+     r'''                if not seen_from:
+                    args[am.group(1)] = (am.group(2) or "").strip().strip('"').strip("'")''',
+     r'''                if True:
+                    args[am.group(1)] = (am.group(2) or "").strip().strip('"').strip("'")'''),
+
     ("a stale indirect-use is skipped when nothing is declared",
      "        for n, (reason, line) in cfg.indirect.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,",
      "        for n, (reason, line) in {}.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,"),
