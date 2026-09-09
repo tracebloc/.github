@@ -1036,9 +1036,15 @@ def _joined_commands(text: str):
     and exec-form arrays rendered as shell words."""
     buf, start = [], None
     for no, raw in enumerate(text.splitlines(), 1):
+        stripped = raw.rstrip()
+        if buf and not stripped.strip():
+            # A blank inside a continuation -- which is what a comment line
+            # becomes after DOCKER_COMMENT blanks it -- does not end the join:
+            # Docker drops comment lines inside a continued RUN and still sees
+            # one instruction (Bugbot, .github#454).
+            continue
         if start is None:
             start = no
-        stripped = raw.rstrip()
         if stripped.endswith("\\"):
             buf.append(stripped[:-1])
             continue
@@ -1233,13 +1239,19 @@ def check_cuda_torch_on_cpu(repo: Repo, cfg: Config, findings):
             continue
         # walk up include chains: the installer of an including file installs this one too
         basenames = {os.path.basename(rel)}
+        parents = []  # every file that -r-includes this one, transitively
         frontier = [rel]
         while frontier:
             cur = frontier.pop()
             for parent in includers.get(cur, []):
                 if os.path.basename(parent) not in basenames:
                     basenames.add(os.path.basename(parent))
+                    parents.append(parent)
                     frontier.append(parent)
+        # An index option on a PARENT file applies to everything pip resolves for
+        # that install, the included pins among them (Bugbot, .github#454).
+        if any(_file_names_index(repo.text(p)) in ("cpu", "gpu") for p in parents):
+            continue
         installers = []
         for b in basenames:
             installers.extend(_installers_of(repo, b, rel))

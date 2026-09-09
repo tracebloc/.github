@@ -669,6 +669,23 @@ def _():
     assert_finding(prose.findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
 
 
+@case("cuda-torch: a comment line inside a backslash-continued RUN does not split the install")
+def _():
+    df = "FROM python:3.11-slim\nRUN pip install \\\n    # the requirements the image runs with\n    -r requirements.txt\n"
+    f = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": df}).findings(["cuda-torch-on-cpu"])
+    assert_finding(f, "cuda-torch-on-cpu", "Dockerfile:2", count=1)
+
+
+@case("cuda-torch: a CPU index on the PARENT requirements file covers the torch pin in the file it includes")
+def _():
+    parent_idx = Fixture({"requirements.txt": REQ_TORCH, "requirements-dev.txt": "--extra-index-url https://download.pytorch.org/whl/cpu\n-r requirements.txt\npytest==8.0.0\n",
+                          ".github/workflows/t.yml": WF_CPU.replace("requirements.txt", "requirements-dev.txt")})
+    assert_clean(parent_idx.findings(["cuda-torch-on-cpu"]))
+    parent_plain = Fixture({"requirements.txt": REQ_TORCH, "requirements-dev.txt": "-r requirements.txt\npytest==8.0.0\n",
+                            ".github/workflows/t.yml": WF_CPU.replace("requirements.txt", "requirements-dev.txt")})
+    assert_finding(parent_plain.findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
+
+
 # ── config + CLI ─────────────────────────────────────────────────────────────
 
 

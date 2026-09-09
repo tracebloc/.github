@@ -279,6 +279,16 @@ MUTATIONS = [
      r'''DOCKER_COMMENT = re.compile(r"^\s*#.*$|\s#[^\"'\n]*$", re.M)''',
      r'''DOCKER_COMMENT = re.compile(r"^\s*#.*$", re.M)'''),
 
+    ("a blank (blanked comment) inside a continued RUN ends the join",
+     r'''        if buf and not stripped.strip():''',
+     r'''        if False:'''),
+
+    ("a parent requirements file's index no longer covers the pins it includes",
+     r'''        if any(_file_names_index(repo.text(p)) in ("cpu", "gpu") for p in parents):
+            continue''',
+     r'''        if False:
+            continue'''),
+
     ("a stale indirect-use is skipped when nothing is declared",
      "        for n, (reason, line) in cfg.indirect.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,",
      "        for n, (reason, line) in {}.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,"),
