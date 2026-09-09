@@ -82,7 +82,12 @@ for sha in $commits; do
   # Capture the API read's SUCCESS separately from its OUTPUT: a failed call (rate
   # limit, 5xx) must not read as "no PR" and silently degrade to the subject grep
   # while the log claims the API answered (Bugbot/@saadqbal on .github#438).
-  if api=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" --jq "$API_JQ" 2>/dev/null); then
+  # Keep the read's STDERR: for twelve hours on 2026-09-08/09 every private-repo
+  # run printed the "rate limit / 5xx" guess below while the real answer was a
+  # 403 from a token without `pull-requests: read` (backend#3447). The status
+  # belongs in the error line, not in a discarded stream.
+  api_err=$(mktemp)
+  if api=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" --jq "$API_JQ" 2>"$api_err"); then
     if [ -n "$api" ]; then
       prs+=" ${api}"
       continue
@@ -96,14 +101,20 @@ for sha in $commits; do
       echo "::warning::commit ${sha}: no PR could be attributed (the API names none; the subject names none) - its card was not advanced."
     fi
   else
-    # The API READ itself FAILED (403 / 5xx / rate limit). Do NOT degrade to the
+    # The API READ itself FAILED (403 from a token without pull-requests:read, 5xx,
+    # rate limit). Do NOT degrade to the
     # subject grep this PR exists to replace -- that re-introduces the wrong-card
     # risk -- and do NOT let the run go green: this is a one-shot `push` job, so a
     # silently-skipped commit is never re-examined and its card stays behind the
     # shipped code, the very outage this fixes. Record it and fail the step at the
     # end so the read is retried (Bugbot High on .github#438).
     api_read_failed=1
-    echo "::error::commit ${sha}: the /pulls API read FAILED (rate limit / 5xx); NOT attributing from the unreliable subject, and failing the step so it is retried rather than leaving the card behind."
+    # No pipe here: `tr | head -c` closes early and pipefail reads that as a
+    # failure of the message itself (quality/pipefail-early-close).
+    api_why=$(<"$api_err")
+    api_why=${api_why//$'\n'/ }
+    api_why=${api_why:0:300}
+    echo "::error::commit ${sha}: the /pulls API read FAILED (gh said: ${api_why:-nothing on stderr}); NOT attributing from the unreliable subject, and failing the step so it is retried rather than leaving the card behind."
   fi
 done
 
