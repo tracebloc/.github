@@ -31,6 +31,7 @@ import importlib.util
 import io
 import contextlib
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -588,9 +589,10 @@ finally:
 _WF = ROOT / ".github" / "workflows" / "conflict-gate.yml"
 try:
     import yaml  # noqa: E402
-    _wf = yaml.safe_load(_WF.read_text(encoding="utf-8"))
+    _raw = _WF.read_text(encoding="utf-8")
+    _wf = yaml.safe_load(_raw)
 except Exception as _exc:  # noqa: BLE001 - unreadable is a finding, not a skip
-    _wf = None
+    _raw, _wf = "", None
     check("conflict-gate.yml is readable YAML", False, "got %r" % (_exc,))
 
 if _wf is not None:
@@ -611,8 +613,26 @@ if _wf is not None:
     # quietly reintroducing the bug.
     check("the workflow is NOT triggered by pull_request",
           "pull_request" not in _on, "on: %r" % (sorted(_on),))
-    check("the workflow has a trigger that fires without a merge ref",
-          "schedule" in _on, "on: %r" % (sorted(_on),))
+
+    # THE SCHEDULE IS PAUSED, and the pause is pinned. Every scheduled run from
+    # 2026-08-27 to 2026-09-09 (534 of them, 0 successes) died at the token mint:
+    # the App's installation does not grant `statuses`, so the `statuses: write`
+    # request below is refused with HTTP 422 and the Sweep never runs. A cron that
+    # cannot start is ~48 red runs a day marking nothing, so the trigger is off
+    # until an org admin grants the permission. Two assertions, because they fail
+    # in different directions: the first catches someone re-arming the cron before
+    # the App can honour it (the suite reddens, which is the point -- re-arming is
+    # a deliberate edit here, in the same PR); the second catches the commented
+    # block being deleted outright, which would turn "paused" into "gone" and lose
+    # the cadence and its rationale with it.
+    check("the schedule is PAUSED: no `schedule` trigger is live while the App "
+          "lacks statuses",
+          "schedule" not in _on, "on: %r" % (sorted(_on),))
+    check("the paused schedule is kept as a commented block, so re-arming is an "
+          "uncomment",
+          re.search(r"^\s*#\s*schedule:\s*$", _raw, re.M) is not None
+          and re.search(r"^\s*#\s*-\s*cron:\s*\S", _raw, re.M) is not None,
+          "no commented `# schedule:` / `#   - cron:` pair in the workflow")
     check("the workflow can be run on demand",
           "workflow_dispatch" in _on, "on: %r" % (sorted(_on),))
 

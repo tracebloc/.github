@@ -58,12 +58,32 @@ name: Conflict gate
 # Runs in tracebloc/.github only, like the other org-wide crons.
 
 on:
-  schedule:
-    # Every 30 minutes. The window this closes is measured in hours -- client#847
-    # sat conflicted for ~3 of them with a hard failure invisible the whole time
-    # -- and a conflict is worth knowing about inside the review cycle, not after
-    # it. The sweep is one `gh pr list` per repo, so this is cheap.
-    - cron: "*/30 * * * *"
+  # THE SCHEDULE IS PAUSED, NOT REMOVED (2026-09-09). Every scheduled run since
+  # the first one on 2026-08-27 -- 534 runs, 0 successes, measured on the runs API
+  # the day this was written -- failed at "Mint an installation token" and never
+  # reached the Sweep step. The mint below asks `permission-statuses: write`, and
+  # the release-train App's installation does not grant `statuses`, so GitHub
+  # answers HTTP 422 ("The level of access for permissions requested are not
+  # granted to this installation") on every run. ~48 red runs a day that mark
+  # nothing is a gate nobody reads, and a cron that cannot start is not
+  # visibility -- so the trigger is off until the permission exists.
+  #
+  # TO RE-ARM: an org admin grants the App the `statuses: write` repository
+  # permission (GitHub App settings -> Permissions; the org installation then has
+  # to accept the new permission), confirms ONE `workflow_dispatch` run reaches the
+  # Sweep step, and uncomments the two `schedule:` lines below. Nothing else
+  # changes: the mint and its permission request are deliberately left as they
+  # are, because they state what the job needs, and the fix is on the App, not
+  # here. The selftest pins this state -- `schedule` absent from the parsed
+  # triggers, the commented block still present -- so re-arming means updating
+  # `scripts/tests/conflict-gate-selftest.py` in the same PR.
+  #
+  # Every 30 minutes, once armed. The window this closes is measured in hours --
+  # client#847 sat conflicted for ~3 of them with a hard failure invisible the
+  # whole time -- and a conflict is worth knowing about inside the review cycle,
+  # not after it. The sweep is one `gh pr list` per repo, so this is cheap.
+  # schedule:
+  #   - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
 permissions:
