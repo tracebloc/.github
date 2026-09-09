@@ -587,8 +587,9 @@ def _setup_py_deps(repo: Repo, rel: str, findings):
                     specs = literal_specs(kw.value)
                     if specs is None:
                         src = ast.get_source_segment(repo.text(rel), kw.value) or ""
-                        if "requirements" in src:
-                            continue  # delegates to a requirements file this script reads directly
+                        if READS_REQUIREMENTS_FILE.search(src):
+                            continue  # reads a requirements*.txt this script parses directly
+
                         findings.append(Finding("cannot-parse", rel, kw.value.lineno,
                                                 "%s is not a literal list; declare it literally or via a requirements file" % kw.arg))
                         continue
@@ -642,6 +643,12 @@ def _dotted_prefixes(name: str):
     return {".".join(parts[: i + 1]) for i in range(len(parts))}
 
 
+#: `install_requires=open("requirements.txt").read().splitlines()` and its
+#: Path()/read_text() spellings: the ONE non-literal shape that is not a
+#: cannot-parse, because the file it names is parsed by this script anyway. A
+#: helper call such as `get_requirements()` is not that, whatever its name
+#: (Bugbot, .github#454).
+READS_REQUIREMENTS_FILE = re.compile(r"""(?:open|Path|read_text)\s*\(\s*["'][^"']*requirements[^"']*\.txt["']""")
 #: An ALL-CAPS list that is itself a dependency declaration (`INSTALL_REQUIRES`,
 #: `EXTRAS_REQUIRE`, `DEPENDENCIES`, `PINNED_PACKAGES`) vouches for nothing: its
 #: strings are the pins under test, not modules the code reaches.
@@ -744,7 +751,10 @@ def _package_of_specifier(spec: str):
     return spec.split("/")[0]
 
 
-INSTALL_LINE = re.compile(r"^.*\b(?:pip3?\s+(?:[^\n]*?\s)?install|python3?\s+-m\s+pip\s+(?:[^\n]*?\s)?install|uv\s+pip\s+install|npm\s+(?:i|install|add)|yarn\s+add|pnpm\s+(?:add|install))\b.*$", re.M)
+#: [tool.*] tables that DECLARE dependencies rather than run tools -- poetry,
+#: pdm, uv, hatch environments -- vouch for nothing (Bugbot, .github#454).
+DEP_TABLE = re.compile(r"depend|^tool\.(?:poetry|pdm|uv|hatch\.envs|pixi|rye)(?:\.|$)")
+INSTALL_LINE = re.compile(r"\b(?:pip3?\s+(?:[^\n&;|]*?\s)?install|python3?\s+-m\s+pip\s+(?:[^\n&;|]*?\s)?install|uv\s+pip\s+install|npm\s+(?:i|install|add)|yarn\s+add|pnpm\s+(?:add|install))\b[^\n&;|]*")
 
 
 def _tool_tables_only(toml_text: str) -> str:
@@ -756,7 +766,8 @@ def _tool_tables_only(toml_text: str) -> str:
     for line in toml_text.splitlines():
         m = re.match(r"^\s*\[+\s*([A-Za-z0-9_.\"-]+)", line)
         if m:
-            keep = m.group(1).startswith("tool")
+            table = m.group(1)
+            keep = table.startswith("tool") and not DEP_TABLE.search(table)
         if keep:
             out.append(line)
     return "\n".join(out)
@@ -1112,14 +1123,14 @@ def _installers_of(repo: Repo, req_basename: str, want_file_rel: str):
                 if os.path.basename(target) == req_basename:
                     hits.append((rel, no, cmd, file_gpu or stage_gpu(no), text))
     for rel in repo.glob(".github/workflows/*.yml", ".github/workflows/*.yaml"):
-        for job_start, job_text in _workflow_jobs(repo.text(rel)):
+        for job_start, job_text, context in _workflow_jobs(repo.text(rel)):
             gpu = any(GPU_HINT.search(m.group(1)) for m in RUNS_ON.finditer(job_text))
             for offset, cmd in _joined_commands(job_text):
                 if not PIP_INSTALL.search(cmd):
                     continue
                 for target in REQ_FLAG.findall(cmd):
                     if os.path.basename(target) == req_basename:
-                        hits.append((rel, job_start + offset - 1, cmd, gpu, job_text))
+                        hits.append((rel, job_start + offset - 1, cmd, gpu, context))
     return hits
 
 
@@ -1132,7 +1143,10 @@ JOBS_LINE = re.compile(r"^jobs:\s*$")
 
 
 def _workflow_jobs(text: str):
-    """Yield (first_line_no, job_text) per job of a workflow, comments blanked.
+    """Yield (first_line_no, job_text, context_text) per job of a workflow,
+    comments blanked. `job_text` is the block itself (commands are located in
+    it, so line numbers stay absolute); `context_text` is the workflow header
+    plus the block, because a workflow-level `env:` is inherited by every job.
 
     Context that clears a CUDA-torch finding -- a GPU `runs-on`, a CPU index in
     `PIP_EXTRA_INDEX_URL` -- must come from the JOB that runs the install, not
@@ -1150,11 +1164,17 @@ def _workflow_jobs(text: str):
         if in_jobs and JOB_HEADER.match(line):
             starts.append(i)
     if not starts:
-        yield 1, "\n".join(lines)
+        whole = "\n".join(lines)
+        yield 1, whole, whole
         return
+    # Everything before the first job -- the workflow-level `env:` among it --
+    # is inherited by every job (Bugbot, .github#454); it is prepended to each
+    # block for the context searches, and line numbers stay absolute.
+    header = "\n".join(lines[: starts[0]])
     bounds = starts + [len(lines)]
     for a, b in zip(bounds, bounds[1:]):
-        yield a + 1, "\n".join(lines[a:b])
+        job_text = "\n".join(lines[a:b])
+        yield a + 1, job_text, header + "\n" + job_text
 
 
 def check_cuda_torch_on_cpu(repo: Repo, cfg: Config, findings):

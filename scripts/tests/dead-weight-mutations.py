@@ -223,6 +223,22 @@ MUTATIONS = [
      r'''REQ_FLAG = re.compile(r"""(?:^|\s)(?:-r|--requirement)[\s=]+["']?([^\s"']+)["']?""")''',
      r'''REQ_FLAG = re.compile(r"""(?:^|\s)(?:-r|--requirement)[\s=]+(\S+)""")'''),
 
+    ("a setup.py helper call named like a requirements read is silently skipped",
+     r'''                        if READS_REQUIREMENTS_FILE.search(src):''',
+     r'''                        if "requirements" in src:'''),
+
+    ("poetry/pdm/uv dependency tables count as invocations",
+     r'''            keep = table.startswith("tool") and not DEP_TABLE.search(table)''',
+     r'''            keep = table.startswith("tool")'''),
+
+    ("an install command erases the whole line, chained tools included",
+     r'''INSTALL_LINE = re.compile(r"\b(?:pip3?\s+(?:[^\n&;|]*?\s)?install|python3?\s+-m\s+pip\s+(?:[^\n&;|]*?\s)?install|uv\s+pip\s+install|npm\s+(?:i|install|add)|yarn\s+add|pnpm\s+(?:add|install))\b[^\n&;|]*")''',
+     r'''INSTALL_LINE = re.compile(r"^.*\b(?:pip3?\s+(?:[^\n]*?\s)?install|python3?\s+-m\s+pip\s+(?:[^\n]*?\s)?install|uv\s+pip\s+install|npm\s+(?:i|install|add)|yarn\s+add|pnpm\s+(?:add|install))\b.*$", re.M)'''),
+
+    ("workflow-level env is no longer inherited by the jobs",
+     r'''        yield a + 1, job_text, header + "\n" + job_text''',
+     r'''        yield a + 1, job_text, job_text'''),
+
     ("a stale indirect-use is skipped when nothing is declared",
      "        for n, (reason, line) in cfg.indirect.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,",
      "        for n, (reason, line) in {}.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,"),

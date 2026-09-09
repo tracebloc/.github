@@ -564,6 +564,43 @@ def _():
     assert_finding(quoted.findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
 
 
+@case("setup.py: only a literal requirements*.txt read is a delegation; a helper call is cannot-parse")
+def _():
+    helper = Fixture({"setup.py": 'from setuptools import setup\ndef get_requirements():\n    return ["humanize"]\nsetup(name="x", install_requires=get_requirements())\n', "a.py": ""})
+    assert_finding(helper.findings(["declared-unused"]), "cannot-parse", "install_requires")
+    pathread = Fixture({"setup.py": 'from pathlib import Path\nfrom setuptools import setup\nsetup(name="x", install_requires=Path("requirements.txt").read_text().splitlines())\n',
+                        "requirements.txt": "requests==2.33.1\n", "a.py": PY_MAIN})
+    assert_clean(pathread.findings(["declared-unused"]))
+
+
+@case("pyproject tool tables that DECLARE dependencies (poetry, pdm, uv, hatch envs) vouch for nothing")
+def _():
+    if DW.tomllib is None:
+        return
+    poetry = Fixture({"requirements.txt": "humanize==4.9.0\n", "pyproject.toml": '[tool.poetry.dependencies]\nhumanize = "^4.9"\n\n[tool.ruff]\nline-length = 100\n', "a.py": "import os\n"})
+    assert_finding(poetry.findings(["declared-unused"]), "declared-unused", "humanize")
+    # a tool RUN from a kept [tool.*] table still counts (a task runner's commands live in pyproject)
+    task_runs = Fixture({"requirements-dev.txt": "pytest==8.0.0\n", "pyproject.toml": '[tool.taskipy.tasks]\ntest = "pytest -q"\n', "a.py": "import os\n"})
+    assert_clean(task_runs.findings(["declared-unused"]))
+
+
+@case("a tool chained after an install command on the same line is still invoked")
+def _():
+    fx = Fixture({"requirements-dev.txt": "pytest==8.0.0\n", "Makefile": "test:\n\tpip install -r requirements-dev.txt && pytest -q\n", "a.py": ""})
+    assert_clean(fx.findings(["declared-unused"]))
+    only_install = Fixture({"requirements-dev.txt": "pytest==8.0.0\n", "Makefile": "setup:\n\tpip install pytest\n", "a.py": ""})
+    assert_finding(only_install.findings(["declared-unused"]), "declared-unused", "pytest")
+
+
+@case("cuda-torch: a workflow-level env with the CPU index is inherited by every job")
+def _():
+    wf = ("name: t\non: [push]\nenv:\n  PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu\njobs:\n"
+          "  cpu:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          pip install -r requirements.txt\n")
+    assert_clean(Fixture({"requirements.txt": REQ_TORCH, ".github/workflows/t.yml": wf}).findings(["cuda-torch-on-cpu"]))
+    no_env = wf.replace("env:\n  PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu\n", "")
+    assert_finding(Fixture({"requirements.txt": REQ_TORCH, ".github/workflows/t.yml": no_env}).findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
+
+
 # ── config + CLI ─────────────────────────────────────────────────────────────
 
 
