@@ -437,6 +437,18 @@ try:
               _real_existing("tracebloc", "x", "abc") == "success",
               "got %r" % (_real_existing("tracebloc", "x", "abc"),))
 
+        # NEWEST-WINS HOLDS FOR A PENDING RUN TOO: a fresh in_progress run
+        # (rid=2) posted over an older completed one (rid=1) reads back as
+        # `pending`, so a re-opened conflict is not masked by the stale verdict.
+        # (`filter=latest` already returns the in_progress run per name -- the
+        # newest-by-id pick is what selects it here, measured on the live API by
+        # @LukasWodka on #453; there was no orphaned-sibling bug to fix.)
+        gate.CD.gh_json = _runs([_run(conclusion="success", rid=1),
+                                 _run(status="in_progress", conclusion=None, rid=2)])
+        check("existing_state takes a newer in_progress run over an older completed one",
+              _real_existing("tracebloc", "x", "abc") == "pending",
+              "got %r" % (_real_existing("tracebloc", "x", "abc"),))
+
         # The fold: REST answers lower case. Defensive today, but an unfolded
         # compare silently disables the dedup and everything still works.
         gate.CD.gh_json = _runs([_run(conclusion="SUCCESS")])
