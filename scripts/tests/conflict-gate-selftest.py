@@ -31,6 +31,7 @@ import importlib.util
 import io
 import contextlib
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -436,6 +437,18 @@ try:
               _real_existing("tracebloc", "x", "abc") == "success",
               "got %r" % (_real_existing("tracebloc", "x", "abc"),))
 
+        # NEWEST-WINS HOLDS FOR A PENDING RUN TOO: a fresh in_progress run
+        # (rid=2) posted over an older completed one (rid=1) reads back as
+        # `pending`, so a re-opened conflict is not masked by the stale verdict.
+        # (`filter=latest` already returns the in_progress run per name -- the
+        # newest-by-id pick is what selects it here, measured on the live API by
+        # @LukasWodka on #453; there was no orphaned-sibling bug to fix.)
+        gate.CD.gh_json = _runs([_run(conclusion="success", rid=1),
+                                 _run(status="in_progress", conclusion=None, rid=2)])
+        check("existing_state takes a newer in_progress run over an older completed one",
+              _real_existing("tracebloc", "x", "abc") == "pending",
+              "got %r" % (_real_existing("tracebloc", "x", "abc"),))
+
         # The fold: REST answers lower case. Defensive today, but an unfolded
         # compare silently disables the dedup and everything still works.
         gate.CD.gh_json = _runs([_run(conclusion="SUCCESS")])
@@ -684,9 +697,10 @@ finally:
 _WF = ROOT / ".github" / "workflows" / "conflict-gate.yml"
 try:
     import yaml  # noqa: E402
-    _wf = yaml.safe_load(_WF.read_text(encoding="utf-8"))
+    _raw = _WF.read_text(encoding="utf-8")
+    _wf = yaml.safe_load(_raw)
 except Exception as _exc:  # noqa: BLE001 - unreadable is a finding, not a skip
-    _wf = None
+    _raw, _wf = "", None
     check("conflict-gate.yml is readable YAML", False, "got %r" % (_exc,))
 
 if _wf is not None:
@@ -707,8 +721,29 @@ if _wf is not None:
     # quietly reintroducing the bug.
     check("the workflow is NOT triggered by pull_request",
           "pull_request" not in _on, "on: %r" % (sorted(_on),))
-    check("the workflow has a trigger that fires without a merge ref",
-          "schedule" in _on, "on: %r" % (sorted(_on),))
+
+    # THE SCHEDULE IS PAUSED, and the pause is pinned (backend#3468). Every
+    # scheduled run from 2026-08-27 to 2026-09-09 (534 of them, 0 successes) died
+    # at the token mint with HTTP 422: the App's installation grants neither
+    # `statuses` (what the mint asked for until backend#3242) nor `checks` (what
+    # it asks for now -- scheduled run 34333719757, with the `permission-checks:
+    # write` mint in, 422'd the same way and the Sweep never ran). A cron that
+    # cannot start is ~48 red runs a day marking nothing, so the trigger is off
+    # until an org admin grants the App Checks: Read and write and one dispatched
+    # run reaches Sweep. Two assertions, because they fail
+    # in different directions: the first catches someone re-arming the cron before
+    # the App can honour it (the suite reddens, which is the point -- re-arming is
+    # a deliberate edit here, in the same PR); the second catches the commented
+    # block being deleted outright, which would turn "paused" into "gone" and lose
+    # the cadence and its rationale with it.
+    check("the schedule is PAUSED: no `schedule` trigger is live while the App "
+          "lacks checks: write",
+          "schedule" not in _on, "on: %r" % (sorted(_on),))
+    check("the paused schedule is kept as a commented block, so re-arming is an "
+          "uncomment",
+          re.search(r"^\s*#\s*schedule:\s*$", _raw, re.M) is not None
+          and re.search(r"^\s*#\s*-\s*cron:\s*\S", _raw, re.M) is not None,
+          "no commented `# schedule:` / `#   - cron:` pair in the workflow")
     check("the workflow can be run on demand",
           "workflow_dispatch" in _on, "on: %r" % (sorted(_on),))
 

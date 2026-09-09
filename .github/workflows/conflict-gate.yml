@@ -58,12 +58,41 @@ name: Conflict gate
 # Runs in tracebloc/.github only, like the other org-wide crons.
 
 on:
-  schedule:
-    # Every 30 minutes. The window this closes is measured in hours -- client#847
-    # sat conflicted for ~3 of them with a hard failure invisible the whole time
-    # -- and a conflict is worth knowing about inside the review cycle, not after
-    # it. The sweep is one `gh pr list` per repo, so this is cheap.
-    - cron: "*/30 * * * *"
+  # THE SCHEDULE IS PAUSED, NOT REMOVED (2026-09-09, backend#3468). Every
+  # scheduled run since the first one on 2026-08-27 -- 534 runs, 0 successes,
+  # measured on the runs API the day this was written -- failed at "Mint an
+  # installation token" and never reached the Sweep step. Until backend#3242 the
+  # mint asked `permission-statuses: write`, a scope the release-train App's
+  # installation does not grant, so GitHub answered HTTP 422 ("The level of
+  # access for permissions requested are not granted to this installation") on
+  # every run. #446 moved the mint to `permission-checks: write`, and THE 422 DID
+  # NOT MOVE: scheduled run 34333719757 (09:16Z the same day, head 7ccaf30, so
+  # with #446 in) requested exactly `permission-pull-requests: read` +
+  # `permission-checks: write`; steps 1-4 succeeded, the mint failed with the
+  # same 422, Sweep was skipped. So the installation grants NEITHER `statuses`
+  # NOR `checks`. ~48 red runs a day that mark nothing is a gate nobody reads,
+  # and a cron that cannot start is not visibility -- so the trigger is off
+  # until the permission exists.
+  #
+  # TO RE-ARM: an org admin grants the tracebloc-release-train App the
+  # **Checks: Read and write** repository permission (GitHub App settings ->
+  # Permissions & events; the org installation then has to ACCEPT the new
+  # permission, or the mint keeps answering 422), dispatches ONE
+  # `workflow_dispatch` run and confirms it reaches the Sweep step -- not merely
+  # past the mint -- and only then uncomments the two `schedule:` lines below.
+  # Granting Commit statuses does nothing: the mint no longer asks for it.
+  # Nothing else changes: the mint and its permission request are deliberately
+  # left as they are, because they state what the job needs, and the fix is on
+  # the App, not here. The selftest pins this state -- `schedule` absent from the
+  # parsed triggers, the commented block still present -- so re-arming means
+  # updating `scripts/tests/conflict-gate-selftest.py` in the same PR.
+  #
+  # Every 30 minutes, once armed. The window this closes is measured in hours --
+  # client#847 sat conflicted for ~3 of them with a hard failure invisible the
+  # whole time -- and a conflict is worth knowing about inside the review cycle,
+  # not after it. The sweep is one `gh pr list` per repo, so this is cheap.
+  # schedule:
+  #   - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -109,8 +138,11 @@ jobs:
       # check run, not a commit status. The tracebloc-release-train App's
       # installation does not grant `statuses` at all, so the mint for
       # `permission-statuses: write` was REFUSED before the sweep could run and
-      # this gate never executed. `checks` the App does hold, so the same
-      # red-row-on-the-PR signal is written with a scope the mint can get.
+      # this gate never executed. `checks` is the scope this signal actually
+      # needs, so the same red-row-on-the-PR signal is written with it -- but as
+      # of 2026-09-09 the installation does not grant `checks` either (scheduled
+      # run 34333719757 422'd on exactly this mint; see the `on:` block and
+      # backend#3468). The request stays as written: it names the grant to make.
       #
       #   pull-requests: read   the open-PR list and its two mergeability fields
       #   checks: write         the whole point: writing the check run onto the head

@@ -157,7 +157,7 @@ scan_raw realplus.sh '#!/usr/bin/env bash\nset -euo pipefail\nset +e\n  x="$(ls 
 if spares; then record 0 "but a REAL 'set +e' still disarms it" ""; else record 1 "but a REAL 'set +e' still disarms it" "$OUT"; fi
 
 echo
-echo "== a `set` line carries code too =============================================="
+echo '== a `set` line carries code too =============================================='
 # The dispatch `next`ed after apply_set, so the rest of the PHYSICAL line was
 # never judged (Asad, .github#300). Third `next`-shaped miss on this file.
 scan_raw setsame.sh '#!/usr/bin/env bash\nset -euo pipefail; producer | head -1\n'

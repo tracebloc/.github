@@ -235,12 +235,23 @@ WORKFLOW_MUTATIONS = [
     # doesn't this run on PRs?", adds the trigger, and the gate is now inert on
     # exactly the conflicted PRs it exists for -- while looking more thorough.
     ("the workflow acquires a pull_request trigger it cannot be dispatched by",
-     'on:\n  schedule:',
-     'on:\n  pull_request:\n  schedule:'),
+     '  workflow_dispatch: {}',
+     '  pull_request:\n  workflow_dispatch: {}'),
 
-    ("the schedule goes, so nothing fires without a merge ref",
-     '  schedule:\n    # Every 30 minutes.',
-     '  disabled_schedule:\n    # Every 30 minutes.'),
+    # THE SCHEDULE IS PAUSED (2026-09-09, backend#3468) because the App's
+    # installation grants neither `statuses` nor `checks`, and every scheduled run
+    # 422'd at the mint -- run 34333719757 included, made after the mint moved to
+    # `permission-checks: write`. The suite pins the pause from both sides, so
+    # both regressions are mutated here: re-arming the cron before the permission
+    # exists, and deleting the commented block so the pause quietly becomes a
+    # removal.
+    ("the schedule is re-armed while the App still cannot write check runs",
+     '  # schedule:\n  #   - cron: "*/30 * * * *"',
+     '  schedule:\n    - cron: "*/30 * * * *"'),
+
+    ("the paused schedule is deleted outright instead of kept for re-arming",
+     '  # schedule:\n  #   - cron: "*/30 * * * *"\n',
+     ''),
 
     ("the sweep becomes cancellable, leaving half its statuses stale",
      '  cancel-in-progress: false',
