@@ -518,6 +518,24 @@ def _():
     assert "humanize" not in out, "an unreadable file must not also be judged as if it were read"
 
 
+@case("cuda-torch: a CUDA builder stage does not exempt the CPU runtime stage that installs the file")
+def _():
+    multi = ("FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder\nRUN echo build\n"
+             "FROM python:3.11-slim\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\n")
+    f = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": multi}).findings(["cuda-torch-on-cpu"])
+    assert_finding(f, "cuda-torch-on-cpu", "Dockerfile:5", count=1)
+    inherit = ("FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS gpubase\nFROM gpubase\nRUN pip install -r requirements.txt\n")
+    assert_clean(Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": inherit}).findings(["cuda-torch-on-cpu"]))
+    gpu_then_gpu_install = ("FROM python:3.11-slim AS tools\nRUN echo x\nFROM nvidia/cuda:12.4.1-runtime-ubuntu22.04\nRUN pip install -r requirements.txt\n")
+    assert_clean(Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": gpu_then_gpu_install}).findings(["cuda-torch-on-cpu"]))
+
+
+@case("a stale `indirect-use` is reported even when no dependency file declares anything at all")
+def _():
+    fx = Fixture({"a.py": "import os\n"}, "indirect-use: tensorflow | user model files import it\n")
+    assert_finding(fx.findings(["declared-unused"]), "stale-allowlist", "tensorflow")
+
+
 # ── config + CLI ─────────────────────────────────────────────────────────────
 
 
@@ -536,6 +554,13 @@ def _():
     assert rc == 1 and "declared-unused" in out and "full-python-base" in out, (rc, out)
     rc, out = fx.main("--soft-fail")
     assert rc == 0 and "humanize" in out, (rc, out)
+    # scan integrity is never soft: an unparsable file or a broken config exits 1 in every mode
+    broken = Fixture({"requirements.txt": "requests==2.33.1\n", "a.py": PY_MAIN, "legacy/old.py": "print 'py2'\n"})
+    rc, out = broken.main("--soft-fail", "--github")
+    assert rc == 1 and "cannot-parse" in out and "::error file=legacy/old.py" in out and "scan-integrity" in out, (rc, out)
+    badcfg = Fixture({"requirements.txt": "requests==2.33.1\n", "a.py": PY_MAIN}, "indirect-use: gunicorn |\n")
+    rc, out = badcfg.main("--soft-fail")
+    assert rc == 1 and "config-error" in out, (rc, out)
     rc, out = fx.main("--check", "full-python-base")
     assert rc == 1 and "humanize" not in out and "full-python-base" in out, (rc, out)
     clean = Fixture({"requirements.txt": "requests==2.33.1\n", "a.py": PY_MAIN})

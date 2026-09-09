@@ -88,6 +88,12 @@ except ModuleNotFoundError:  # pragma: no cover -- the gate runs 3.12
 
 CHECKS = ("declared-unused", "full-python-base", "cuda-torch-on-cpu")
 
+#: Findings about the SCAN, not the tree: a file that could not be read or
+#: parsed, a config line that could not be understood. `--soft-fail` governs
+#: how loudly a real pin finding is reported; it never turns "we could not
+#: look" into green (Bugbot, .github#454). These exit 1 in every mode.
+INTEGRITY = frozenset({"cannot-read", "cannot-parse", "config-error"})
+
 # ── distribution name -> module(s) it provides ─────────────────────────────────
 # Only for names Python cannot derive by normalisation (lower-case, `-`/`.` -> `_`).
 # Dotted values are matched against every dotted prefix an import produces, so
@@ -839,6 +845,11 @@ def implicit_by_files(repo: Repo, dist: str) -> bool:
 def check_declared_unused(repo: Repo, cfg: Config, findings):
     py_decls, node_decls, = collect_declarations(repo, findings)
     if not py_decls and not node_decls:
+        # Nothing declared -- but an `indirect-use` left behind after the last
+        # pin went is still a stale entry, not silent agreement (Bugbot, .github#454).
+        for n, (reason, line) in cfg.indirect.items():
+            findings.append(Finding("stale-allowlist", cfg_rel(cfg), line,
+                                    "`indirect-use: %s` names a package no dependency file declares any more; delete the entry" % n))
         return
     reached, commands = python_usage(repo, findings) if py_decls else (set(), [])
     node_pkgs = node_usage(repo) if node_decls else set()
@@ -998,21 +1009,56 @@ def _file_names_index(text: str):
     return None
 
 
+def _stage_gpu_map(text: str):
+    """A function line_no -> is this line inside a GPU build stage?
+
+    A Dockerfile is judged per STAGE, not per file: a multi-stage image whose
+    builder is `FROM nvidia/cuda` and whose runtime is `FROM python:3.11-slim`
+    installs into the CPU runtime, and that install is exactly the finding
+    (Bugbot, .github#454). A stage inherits GPU-ness from an earlier stage it
+    is `FROM <name>` of; anything before the first FROM (ARGs) is no stage."""
+    stages = []  # (start_line, gpu)
+    named = {}
+    for no, raw in enumerate(text.splitlines(), 1):
+        m = FROM_LINE.match(raw)
+        if not m:
+            continue
+        ref = m.group(1)
+        alias = re.search(r"\s(?:AS|as)\s+(\S+)\s*(?:#.*)?$", raw)
+        if ref in named:
+            gpu = named[ref]
+        else:
+            gpu = bool(GPU_HINT.search(_image_name_tag(ref)[0] + " " + ref))
+        if alias:
+            named[alias.group(1)] = gpu
+        stages.append((no, gpu))
+
+    def lookup(line_no: int) -> bool:
+        current = False
+        for start, gpu in stages:
+            if start <= line_no:
+                current = gpu
+            else:
+                break
+        return current
+
+    return lookup
+
+
 def _installers_of(repo: Repo, req_basename: str, want_file_rel: str):
     """(rel, line, command, gpu_context) for every Dockerfile RUN / workflow step
     that pip-installs a requirements file with this basename."""
     hits = []
     for rel in repo.glob("Dockerfile*", "*.Dockerfile", "*.dockerfile"):
         text = repo.text(rel)
-        gpu = bool(GPU_HINT.search(os.path.basename(rel))) or any(
-            GPU_HINT.search(_image_name_tag(m.group(1))[0] + " " + m.group(1)) for m in
-            (FROM_LINE.match(ln) for ln in text.splitlines()) if m)
+        file_gpu = bool(GPU_HINT.search(os.path.basename(rel)))
+        stage_gpu = _stage_gpu_map(text)
         for no, cmd in _joined_commands(text):
             if not PIP_INSTALL.search(cmd):
                 continue
             for target in REQ_FLAG.findall(cmd):
                 if os.path.basename(target) == req_basename:
-                    hits.append((rel, no, cmd, gpu, text))
+                    hits.append((rel, no, cmd, file_gpu or stage_gpu(no), text))
     for rel in repo.glob(".github/workflows/*.yml", ".github/workflows/*.yaml"):
         for job_start, job_text in _workflow_jobs(repo.text(rel)):
             gpu = any(GPU_HINT.search(m.group(1)) for m in RUNS_ON.finditer(job_text))
@@ -1104,8 +1150,8 @@ def check_cuda_torch_on_cpu(repo: Repo, cfg: Config, findings):
 
 def report(findings, args):
     findings = sorted(findings, key=lambda f: (f.check, f.path, f.line or 0))
-    level = "warning" if args.soft_fail else "error"
     for f in findings:
+        level = "error" if (not args.soft_fail or f.check in INTEGRITY) else "warning"
         if args.github:
             print("::%s file=%s,line=%d,title=dead-weight %s::%s" % (level, f.path, f.line or 1, f.check, f.message))
         print(repr(f))
@@ -1156,6 +1202,10 @@ def main(argv=None):
         findings.append(Finding("cannot-read", rel, 1,
                                 "could not be read (%s), so whatever it declares is unknown; fix the permissions or `exclude:` it" % why))
     findings = report(findings, args)
+    integrity = [f for f in findings if f.check in INTEGRITY]
+    if integrity:
+        print("dead-weight: %d scan-integrity finding(s) -- these fail the run even under --soft-fail" % len(integrity))
+        return 1
     if findings and not args.soft_fail:
         return 1
     return 0

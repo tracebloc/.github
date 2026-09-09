@@ -137,8 +137,8 @@ MUTATIONS = [
      "    if False:\n        return 1"),
 
     ("--soft-fail annotations are emitted as errors",
-     '    level = "warning" if args.soft_fail else "error"',
-     '    level = "error"'),
+     '        level = "error" if (not args.soft_fail or f.check in INTEGRITY) else "warning"',
+     '        level = "error"'),
 
     # --- the .github#454 review round: each finding became a token ----------
     ("a pragma on the previous PIN line leaks onto the next pin",
@@ -189,6 +189,19 @@ MUTATIONS = [
     ("an unreadable file reads as empty",
      '                self.unreadable[rel] = "%s: %s" % (type(exc).__name__, exc.strerror or exc)',
      '                pass'),
+
+    # --- third review round on .github#454 -----------------------------------
+    ("--soft-fail swallows scan-integrity findings",
+     "    integrity = [f for f in findings if f.check in INTEGRITY]\n    if integrity:",
+     "    integrity = []\n    if integrity:"),
+
+    ("a GPU stage anywhere in a Dockerfile exempts every stage",
+     "                    hits.append((rel, no, cmd, file_gpu or stage_gpu(no), text))",
+     "                    hits.append((rel, no, cmd, file_gpu or any(g for _, g in [(0, stage_gpu(n)) for n in range(1, no + 1)]), text))"),
+
+    ("a stale indirect-use is skipped when nothing is declared",
+     "        for n, (reason, line) in cfg.indirect.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,",
+     "        for n, (reason, line) in {}.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,"),
 ]
 
 
