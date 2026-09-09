@@ -239,6 +239,10 @@ MUTATIONS = [
      r'''        yield a + 1, job_text, header + "\n" + job_text''',
      r'''        yield a + 1, job_text, job_text'''),
 
+    ("README fences count as JS imports again",
+     r'''JS_SOURCE_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".mdx", ".vue", ".svelte", ".astro"}''',
+     r'''JS_SOURCE_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".mdx", ".md", ".vue", ".svelte", ".astro"}'''),
+
     ("a stale indirect-use is skipped when nothing is declared",
      "        for n, (reason, line) in cfg.indirect.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,",
      "        for n, (reason, line) in {}.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,"),

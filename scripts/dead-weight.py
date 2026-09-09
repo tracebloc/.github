@@ -294,7 +294,10 @@ INVOCATION_GLOBS = (
     "tsup.config.*", "components.json", ".releaserc*", "release.config.*",
 )
 
-JS_SOURCE_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".mdx", ".md", ".vue", ".svelte", ".astro"}
+#: Source the bundler compiles. `.mdx` is source (its imports run); `.md` is
+#: prose -- a fenced `import x from "pkg"` in a README is documentation, and
+#: must not vouch for a pin (Bugbot, .github#454).
+JS_SOURCE_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".mdx", ".vue", ".svelte", ".astro"}
 CSS_SUFFIXES = {".css", ".scss", ".sass", ".less", ".pcss"}
 
 DEFAULT_EXCLUDES = (

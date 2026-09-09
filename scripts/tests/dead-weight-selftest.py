@@ -385,6 +385,18 @@ def _():
     assert_finding(no.findings(["declared-unused"]), "declared-unused", "@types/node")
 
 
+@case("node: an import shown in a README fence is documentation, not usage; the same import in .mdx is source")
+def _():
+    readme = Fixture({"package.json": PKG % ('"react": "^18", "katex": "^0.16"', ''),
+                      "src/a.jsx": "import React from 'react';\n",
+                      "README.md": "```js\nimport katex from 'katex';\n```\n"})
+    assert_finding(readme.findings(["declared-unused"]), "declared-unused", "katex")
+    mdx = Fixture({"package.json": PKG % ('"react": "^18", "katex": "^0.16"', ''),
+                   "src/a.jsx": "import React from 'react';\n",
+                   "content/post.mdx": "import katex from 'katex';\n\n# Hi\n"})
+    assert_clean(mdx.findings(["declared-unused"]))
+
+
 # ── full-python-base ─────────────────────────────────────────────────────────
 
 
