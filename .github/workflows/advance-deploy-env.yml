@@ -146,10 +146,13 @@ jobs:
           #   updateProjectV2ItemFieldValue                        projects  WRITE
           #   repository.pullRequest(n).projectItems               PRs       read
           #   GET /repos/{r}/commits/{sha}/pulls  (extract step)   PRs       read
+          #                                                        contents  read
           #
-          # Nothing here reads or writes repository CONTENT: both checkouts above
-          # use `github.token` / `persist-credentials: false`, not this token. So
-          # contents drops entirely, along with administration/actions/checks read.
+          # The ONE repository-CONTENT read is the extract step's
+          # `/commits/{sha}/pulls`, so contents stays at `read` -- see the call-site
+          # block below before dropping it. Neither checkout above is on this token
+          # (both use `github.token` / `persist-credentials: false`), so contents
+          # stops at read -- and administration/actions/checks read still drop.
           #
           # `repositories:` STAYS UNNARROWED, but the reason it used to give is gone.
           # It cited the closing-issue advancement, which was deliberately cross-repo;
@@ -166,19 +169,38 @@ jobs:
           # card left behind its own shipped code. The first push to a tracked
           # branch carrying a PR is the real test; if it reddens, read the failing
           # call rather than widening the list back to a full grant.
-          # NO `contents` HERE, AND THE ROUTER'S NEED DOES NOT GENERALISE (saadqbal,
-          # .github#324). A previous revision of this PR added `contents: read` by
-          # analogy with kanban-closure-router and it bought nothing: this
-          # workflow's ONE mapper call is `:94`, in the `env` step, which runs
-          # BEFORE this mint and under `GH_TOKEN: ${{ github.token }}` -- as the
-          # comment at `:169` already says. It also maps `$GITHUB_REPOSITORY`, its
-          # own repo, where the router maps `$REPO_FULL`, the caller's. Same
-          # script, different token and different repo, so the same scope is
-          # required there and inert here.
+          # `contents: read` IS FOR THE EXTRACT STEP'S CALL SITE, NOT THE MAPPER'S
+          # (backend#3447). Read this before dropping it again.
+          #
+          # saadqbal's finding on .github#324 was narrow and is STILL CORRECT, by its
+          # own test -- check the call site, not the prose. `contents: read` reached
+          # this file by analogy with kanban-closure-router, whose mapper calls run
+          # AFTER its mint under the App token; this workflow's ONE mapper call is
+          # `:94`, in the `env` step, which runs BEFORE this mint and under
+          # `GH_TOKEN: ${{ github.token }}`. It also maps `$GITHUB_REPOSITORY`, its
+          # own repo, where the router maps `$REPO_FULL`, the caller's. Same script,
+          # opposite side of the mint: the scope was required there and inert here.
+          # That reasoning is untouched, and the mapper is still not a reason to
+          # grant contents. Do not re-cite it as one.
+          #
+          # WHAT CHANGED IS A NEW CALL SITE ON THIS TOKEN. .github#438 put
+          # `GET /repos/{r}/commits/{sha}/pulls` in the extract step, and this PR
+          # moves that step to AFTER the mint -- so by the same call-site test its
+          # scope is now this token's business, which it was not when #324 was
+          # written. `fr-gate.yml`'s mint comment ("NOT DERIVED FROM A TEMPLATE")
+          # records that endpoint as `contents: read + pull-requests: read`, derived
+          # from its own calls under backend#2157 and running as a required check on
+          # every promotion since; no workflow in this repo reads that endpoint under
+          # `pull-requests: read` alone. Granting only PRs read
+          # would reproduce backend#3447 one scope over, in the same silent shape:
+          # the read 403s, the fail-closed branch refuses the subject fallback, and
+          # no card moves on any private repo.
+          #
           # `permission-issues` DROPPED (backend#2722). The only issue reads were
           # `repository.issue(n) {state, projectItems}` in the removed closing-issue
           # block; with it gone, nothing in this workflow touches an issue. Re-add it
           # only alongside a call that needs it.
+          permission-contents: read
           permission-pull-requests: read
           permission-organization-projects: write
 
@@ -189,9 +211,9 @@ jobs:
           BEFORE: ${{ github.event.before }}
           SHA: ${{ github.sha }}
           # The App token minted ABOVE, not `github.token`: `/commits/{sha}/pulls`
-          # needs `pull-requests: read`, which the org-default restricted workflow
-          # token does not carry on a private repo (backend#3447; the mint step's
-          # comment has the measurement).
+          # needs `pull-requests: read` + `contents: read`, and the org-default
+          # restricted workflow token holds only the latter on a private repo
+          # (backend#3447; the mint step's comment has the derivation).
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         # DERIVE each commit's PR from GitHub, not from its subject text
         # (backend#3365). The org convention `type(scope): summary (backend#N)`
