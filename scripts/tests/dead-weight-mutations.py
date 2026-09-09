@@ -253,6 +253,24 @@ MUTATIONS = [
      r'''                if True:
                     args[am.group(1)] = (am.group(2) or "").strip().strip('"').strip("'")'''),
 
+    ("an unresolved FROM ARG is advisory again",
+     r'''                findings.append(Finding("cannot-parse", rel, no,
+                                        "FROM %s: the python tag comes from an ARG with no default in this file''',
+     r'''                findings.append(Finding("full-python-base", rel, no,
+                                        "FROM %s: the python tag comes from an ARG with no default in this file'''),
+
+    ("autoprefixer vouches for itself through package.json",
+     r'''    "autoprefixer": (r"autoprefixer", ("postcss.config.*",)),''',
+     r'''    "autoprefixer": (r"autoprefixer", ("postcss.config.*", "package.json")),'''),
+
+    ("a commented-out RUN counts as an installer",
+     r'''        text = DOCKER_COMMENT.sub("", repo.text(rel))  # a commented-out RUN installs nothing (Bugbot, .github#454)''',
+     r'''        text = repo.text(rel)'''),
+
+    ("a GPU base behind a FROM ARG reads as CPU",
+     r'''        ref, _ = _expand_args(m.group(1), args)  # `FROM ${CUDA_IMAGE}` is judged by what it expands to (Bugbot, .github#454)''',
+     r'''        ref = m.group(1)'''),
+
     ("a stale indirect-use is skipped when nothing is declared",
      "        for n, (reason, line) in cfg.indirect.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,",
      "        for n, (reason, line) in {}.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,"),

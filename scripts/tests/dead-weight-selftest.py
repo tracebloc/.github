@@ -433,7 +433,7 @@ def _():
     full = Fixture({"Dockerfile": "ARG PY=3.11\nFROM python:$PY\n"})
     assert_finding(full.findings(["full-python-base"]), "full-python-base", "full Debian")
     unknown = Fixture({"Dockerfile": "ARG PY\nFROM python:${PY}\n"})
-    assert_finding(unknown.findings(["full-python-base"]), "full-python-base", "cannot be told")
+    assert_finding(unknown.findings(["full-python-base"]), "cannot-parse", "cannot be told")  # scan integrity: hard in every mode
 
 
 @case("full-python-base: versioned official small tags (-alpine3.20, -slim-bookworm) are small")
@@ -625,6 +625,29 @@ def _():
     assert_clean(Fixture({"requirements.txt": REQ_TORCH, ".github/workflows/t.yml": wf}).findings(["cuda-torch-on-cpu"]))
     no_env = wf.replace("env:\n  PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu\n", "")
     assert_finding(Fixture({"requirements.txt": REQ_TORCH, ".github/workflows/t.yml": no_env}).findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
+
+
+@case("cuda-torch: a commented-out RUN installs nothing; the live install with the CPU index clears the pin")
+def _():
+    fx = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "FROM python:3.11-slim\n# RUN pip install -r requirements.txt\nRUN pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt\n"})
+    assert_clean(fx.findings(["cuda-torch-on-cpu"]))
+
+
+@case("cuda-torch: a GPU base behind a pre-FROM ARG (`FROM ${CUDA_IMAGE}`) is a GPU stage")
+def _():
+    fx = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG CUDA_IMAGE=nvidia/cuda:12.4.1-runtime-ubuntu22.04\nFROM ${CUDA_IMAGE}\nRUN pip install -r requirements.txt\n"})
+    assert_clean(fx.findings(["cuda-torch-on-cpu"]))
+    cpu_arg = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG BASE=python:3.11-slim\nFROM ${BASE}\nRUN pip install -r requirements.txt\n"})
+    assert_finding(cpu_arg.findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
+
+
+@case("node: autoprefixer is reached by a postcss config, never by its own package.json key")
+def _():
+    alone = Fixture({"package.json": PKG % ('"react": "^18"', '"autoprefixer": "^10"'), "src/a.jsx": "import React from 'react';\n"})
+    assert_finding(alone.findings(["declared-unused"]), "declared-unused", "autoprefixer")
+    cfg = Fixture({"package.json": PKG % ('"react": "^18"', '"autoprefixer": "^10"'), "src/a.jsx": "import React from 'react';\n",
+                   "postcss.config.js": "module.exports = { plugins: { autoprefixer: {} } };\n"})
+    assert_clean(cfg.findings(["declared-unused"]))
 
 
 # ── config + CLI ─────────────────────────────────────────────────────────────

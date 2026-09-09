@@ -209,7 +209,7 @@ PLUGIN_EVIDENCE = {
     "pytest-randomly": (r"-p\s+no:randomly|--randomly-seed", ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "Makefile", ".github/workflows/*.yml")),
     "@vitest/coverage-v8": (r"--coverage\b|coverage\s*:\s*\{|provider\s*:\s*['\"]v8['\"]", ("package.json", "vitest.config.*", "vite.config.*")),
     "@vitest/coverage-istanbul": (r"provider\s*:\s*['\"]istanbul['\"]", ("vitest.config.*", "vite.config.*")),
-    "autoprefixer": (r"autoprefixer", ("postcss.config.*", "package.json")),
+    "autoprefixer": (r"autoprefixer", ("postcss.config.*",)),  # never package.json: a pin would vouch for itself
     "@tailwindcss/postcss": (r"@tailwindcss/postcss", ("postcss.config.*",)),
 }
 
@@ -997,7 +997,9 @@ def check_full_python_base(repo: Repo, cfg: Config, findings):
             if name != "python":
                 continue
             if unresolved:
-                findings.append(Finding("full-python-base", rel, no,
+                # Cannot tell slim from full: scan integrity, hard in every mode
+                # (Bugbot, .github#454), not an advisory full-base finding.
+                findings.append(Finding("cannot-parse", rel, no,
                                         "FROM %s: the python tag comes from an ARG with no default in this file, so slim-or-full cannot be told; give the ARG a default" % fm.group(1)))
                 continue
             if SMALL_BASE_TAG.search(tag):
@@ -1083,6 +1085,9 @@ def _file_names_index(text: str):
     return None
 
 
+DOCKER_COMMENT = re.compile(r"^\s*#.*$", re.M)
+
+
 def _stage_gpu_map(text: str):
     """A function line_no -> is this line inside a GPU build stage?
 
@@ -1093,11 +1098,17 @@ def _stage_gpu_map(text: str):
     is `FROM <name>` of; anything before the first FROM (ARGs) is no stage."""
     stages = []  # (start_line, gpu)
     named = {}
+    args, seen_from = {}, False
     for no, raw in enumerate(text.splitlines(), 1):
+        am = ARG_LINE.match(raw.split(" #", 1)[0])
+        if am and not seen_from:  # only pre-FROM ARGs reach FROM lines (Docker's rule)
+            args[am.group(1)] = (am.group(2) or "").strip().strip('"').strip("'")
+            continue
         m = FROM_LINE.match(raw)
         if not m:
             continue
-        ref = m.group(1)
+        seen_from = True
+        ref, _ = _expand_args(m.group(1), args)  # `FROM ${CUDA_IMAGE}` is judged by what it expands to (Bugbot, .github#454)
         alias = re.search(r"\s(?:AS|as)\s+(\S+)\s*(?:#.*)?$", raw)
         if ref in named:
             gpu = named[ref]
@@ -1124,7 +1135,7 @@ def _installers_of(repo: Repo, req_basename: str, want_file_rel: str):
     that pip-installs a requirements file with this basename."""
     hits = []
     for rel in repo.glob("Dockerfile*", "*.Dockerfile", "*.dockerfile"):
-        text = repo.text(rel)
+        text = DOCKER_COMMENT.sub("", repo.text(rel))  # a commented-out RUN installs nothing (Bugbot, .github#454)
         file_gpu = bool(GPU_HINT.search(os.path.basename(rel)))
         stage_gpu = _stage_gpu_map(text)
         for no, cmd in _joined_commands(text):
