@@ -399,14 +399,6 @@ try:
               any("repos/tracebloc/x/commits/abc/check-runs" in " ".join(a)
                   for a in _asked),
               "asked %r" % (_asked,))
-        # THE READ MUST INCLUDE in_progress RUNS. `filter=latest` filters by
-        # completed_at and hides a pending run, orphaning it into a stuck-pending
-        # rollup (Bugbot High, backend#3503); the read must use `filter=all` and
-        # never `latest`, so the sweep sees the pending run it posted and PATCHes it.
-        check("the check-runs read uses filter=all, never filter=latest",
-              any("filter=all" in a for a in _asked)
-              and not any("filter=latest" in a for a in _asked),
-              "asked %r" % (_asked,))
         # The METHOD is part of the contract, not just the endpoint string: `gh
         # api` POSTs the instant any `-f` is passed, and there is no POST route on
         # check-runs, so a read carrying `-f` MUST also carry `--method GET` or it
@@ -443,6 +435,18 @@ try:
                                  _run(conclusion="success", rid=2)])
         check("existing_state takes the newest run by check-run id",
               _real_existing("tracebloc", "x", "abc") == "success",
+              "got %r" % (_real_existing("tracebloc", "x", "abc"),))
+
+        # NEWEST-WINS HOLDS FOR A PENDING RUN TOO: a fresh in_progress run
+        # (rid=2) posted over an older completed one (rid=1) reads back as
+        # `pending`, so a re-opened conflict is not masked by the stale verdict.
+        # (`filter=latest` already returns the in_progress run per name -- the
+        # newest-by-id pick is what selects it here, measured on the live API by
+        # @LukasWodka on #453; there was no orphaned-sibling bug to fix.)
+        gate.CD.gh_json = _runs([_run(conclusion="success", rid=1),
+                                 _run(status="in_progress", conclusion=None, rid=2)])
+        check("existing_state takes a newer in_progress run over an older completed one",
+              _real_existing("tracebloc", "x", "abc") == "pending",
               "got %r" % (_real_existing("tracebloc", "x", "abc"),))
 
         # The fold: REST answers lower case. Defensive today, but an unfolded
