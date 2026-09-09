@@ -100,27 +100,6 @@ jobs:
         run: |
           echo "Branch '$BRANCH' is not develop/staging/master/main (and no .kanban.yml override) - nothing to do."
 
-      - name: Extract PR numbers from new commits
-        id: prs
-        if: steps.env.outputs.env != ''
-        env:
-          BEFORE: ${{ github.event.before }}
-          SHA: ${{ github.sha }}
-          # The caller's own workflow token: `/commits/{sha}/pulls` is a READ on the
-          # caller's repo, which the token already has. The App token minted below is
-          # only for the PROJECT (cross-repo) writes.
-          GH_TOKEN: ${{ github.token }}
-        # DERIVE each commit's PR from GitHub, not from its subject text
-        # (backend#3365). The org convention `type(scope): summary (backend#N)`
-        # puts a ticket in the `(#N)` slot, and an edited squash subject may carry
-        # no `(#N)` at all -- so the old subject-grep attributed the wrong card or
-        # none (2/48 on the 2026-09-07 staging hop). The script GETs each commit's
-        # merged PR and falls back to the subject only when the API is empty, with a
-        # `::warning::` so an unattributed commit is visible. It lives in .github
-        # (checked out at .kanban-map above), one definition; `git log` runs against
-        # the caller's checkout (cwd). Selftest: scripts/tests/extract-advanced-prs-selftest.sh.
-        run: bash .kanban-map/scripts/extract-advanced-prs.sh
-
       # THIS is the workflow backend#2036 was filed about. On 2026-08-14 at 06:22
       # UTC, run 31776053792 on client-runtime died with
       #     gh: API rate limit already exceeded for user ID 54042461
@@ -134,15 +113,24 @@ jobs:
       # leaves. `owner:` makes it ORG-scoped; a repo-scoped token cannot write an
       # org ProjectV2.
       #
-      # Gated behind the same `if:` as the step that uses it, so a push with no
-      # tracked branch or no PRs mints nothing.
+      # Minted BEFORE the extract step, because the extract step is its first
+      # consumer (backend#3447): `/commits/{sha}/pulls` needs `pull-requests: read`,
+      # and the caller's `github.token` runs under the org default of restricted
+      # `read` -- contents and packages only -- so under that token the read 403s
+      # on every PRIVATE repo and succeeds on every public one. From .github#438
+      # reaching `main` (2026-09-08 19:10 UTC) until this change, that was 100 % of
+      # private-repo pushes: the fail-closed branch below did its job and no card
+      # moved. A called workflow can only DOWNGRADE the caller's token, so the fix
+      # is not a `permissions:` block here -- it is this token, which already
+      # carries the grant. Gated on a tracked branch only: a push to an untracked
+      # branch still mints nothing.
       #
       # NO FALLBACK TO THE PAT: a fallback would let a broken App path keep
       # working silently, so the migration would look complete while nothing had
       # migrated (backend#1680's whole subject).
       - name: Mint an installation token
         id: app-token
-        if: steps.env.outputs.env != '' && steps.prs.outputs.prs != ''
+        if: steps.env.outputs.env != ''
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
@@ -157,6 +145,7 @@ jobs:
           #   organization(login:).projectV2 field/option lookup   projects  read
           #   updateProjectV2ItemFieldValue                        projects  WRITE
           #   repository.pullRequest(n).projectItems               PRs       read
+          #   GET /repos/{r}/commits/{sha}/pulls  (extract step)   PRs       read
           #
           # Nothing here reads or writes repository CONTENT: both checkouts above
           # use `github.token` / `persist-credentials: false`, not this token. So
@@ -192,6 +181,28 @@ jobs:
           # only alongside a call that needs it.
           permission-pull-requests: read
           permission-organization-projects: write
+
+      - name: Extract PR numbers from new commits
+        id: prs
+        if: steps.env.outputs.env != ''
+        env:
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          # The App token minted ABOVE, not `github.token`: `/commits/{sha}/pulls`
+          # needs `pull-requests: read`, which the org-default restricted workflow
+          # token does not carry on a private repo (backend#3447; the mint step's
+          # comment has the measurement).
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        # DERIVE each commit's PR from GitHub, not from its subject text
+        # (backend#3365). The org convention `type(scope): summary (backend#N)`
+        # puts a ticket in the `(#N)` slot, and an edited squash subject may carry
+        # no `(#N)` at all -- so the old subject-grep attributed the wrong card or
+        # none (2/48 on the 2026-09-07 staging hop). The script GETs each commit's
+        # merged PR and falls back to the subject only when the API is empty, with a
+        # `::warning::` so an unattributed commit is visible. It lives in .github
+        # (checked out at .kanban-map above), one definition; `git log` runs against
+        # the caller's checkout (cwd). Selftest: scripts/tests/extract-advanced-prs-selftest.sh.
+        run: bash .kanban-map/scripts/extract-advanced-prs.sh
 
       - name: Update project fields for each PR
         if: steps.env.outputs.env != '' && steps.prs.outputs.prs != ''
