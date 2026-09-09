@@ -152,6 +152,13 @@ a mapping of its own -- exactly what rule 1 forbids. So a bare number is
 satisfied by a closing ref with that NUMBER in any repo, and nothing stronger
 is claimed. When the title spells the repo out, the repo is checked.
 
+A ZERO-PADDED BARE SCOPE IS A DOCUMENT NUMBER, NOT A TICKET (backend#3357).
+`chore(0071)` names RFC-0071, not issue #71; a GitHub issue number never carries
+a leading zero. `SCOPE_BARE_RE` therefore requires a non-zero leading digit, so
+an unpadded `fix(71)` still parses and the rfcs repo's zero-padded RFC scope no
+longer reddens a PR that references its epic truthfully. See the pattern for the
+measurement.
+
 THE CROSS-REPO TRAP, which is the failure mode even for authors who DO add the
 keyword. A bare `Closes #2302` inside `release-train` resolves against
 `release-train`, not `backend`. Two outcomes, and this guard names both:
@@ -223,7 +230,24 @@ from collections import namedtuple
 SCOPE_RE = re.compile(r"^\s*[A-Za-z]+\s*\(([^()]*)\)\s*!?:")
 
 # A scope that is a bare ticket number: `fix(2218):`, `fix(#349):`.
-SCOPE_BARE_RE = re.compile(r"^#?(\d+)$")
+#
+# A ZERO-PADDED BARE SCOPE IS NOT A TICKET, and that is a measurement rather than
+# a taste (tracebloc/backend#3357). A GitHub issue number is never written with a
+# leading zero -- `#71`, never `#0071` -- so `[1-9]\d*` costs no real ticket any
+# recall. What it DOES stop reading as a ticket is the rfcs repo's RFC-document
+# scope, which zero-pads to four digits by convention: sampled 2026-09-08, the
+# open rfcs PRs carry `chore(0071)`, `docs(0077)`, `chore(0081)`, `docs(0075)`,
+# `docs(0067)` -- each naming an RFC DOCUMENT, none a GitHub issue #71/#77/... .
+# rfcs#78 (`chore(0071): Adopted -- epic tracebloc/backend#3289`) is the measured
+# casualty: `0071` was read as ticket #71, so the gate demanded a link to #71 and
+# rejected the PR's truthful `Part of tracebloc/backend#3289` -- which names the
+# epic, not #71. Forcing a `Closes #71` there is a FALSE close of the wrong issue
+# and dropping `(0071)` deletes the RFC traceability, which is rule 4's failure
+# mode (a gate whose only remedy is a lie or a deletion). The `rfc-0068`/`rfc-664`
+# scopes the same repo also writes never reached here -- a dash is no `#?\d+` --
+# so this closes the one shape that did. A repo that genuinely means issue #71
+# writes `fix(71)`, unpadded, and is unaffected.
+SCOPE_BARE_RE = re.compile(r"^#?([1-9]\d*)$")
 # A scope that names the repo: `fix(backend#2218):`, `fix(tracebloc/.github#300):`.
 #
 # THE REPO CLASS ADMITS A LEADING DOT, same as PAREN_REPO_RE below and for the same

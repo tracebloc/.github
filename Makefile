@@ -349,6 +349,7 @@ print-mutation-targets:
 # selftest target means adding it here, which is the single edit that both wires
 # it into `make check` and brings it under the coverage guard.
 SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-standards-sync \
+	selftest-standards-sync-actor \
 	selftest-stale-backlog \
                     selftest-version-bump-gate selftest-version-file \
                     selftest-bricked-prs selftest-kanban-columns \
@@ -368,7 +369,8 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-archive-baseline \
                     selftest-reusable-no-cancel \
                     selftest-lint-targets \
-                    selftest-fr-gate-walk
+                    selftest-fr-gate-walk \
+                    selftest-extract-advanced-prs
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
 
@@ -462,6 +464,14 @@ selftest-blocked-marker:
 .PHONY: selftest-standards-sync
 selftest-standards-sync: guard-pyyaml
 	$(PYTHON) scripts/tests/standards-sync-selftest.py
+
+# Runs the standards-sync mutation harness under the exact actor whose collision
+# with SYNC_REVIEWER used to leave a mutation uncaught (backend#3422), asserting
+# the harness's GITHUB_ACTOR pin holds. guard-pyyaml because the harness re-runs
+# the full standards-sync selftest, which imports yaml.
+.PHONY: selftest-standards-sync-actor
+selftest-standards-sync-actor: guard-pyyaml
+	$(PYTHON) scripts/tests/standards-sync-actor-selftest.py
 
 # The slowest of them all (~15 s): it builds a throwaway git repo per case.
 .PHONY: selftest-version-bump-gate
@@ -768,6 +778,10 @@ mutation-triage-labels-dry: guard-pyyaml
 .PHONY: selftest-git-reap
 selftest-git-reap:
 	bash scripts/tests/git-reap-selftest.sh
+
+.PHONY: selftest-extract-advanced-prs
+selftest-extract-advanced-prs:
+	bash scripts/tests/extract-advanced-prs-selftest.sh
 
 # Branch OWNERSHIP, which git-reap above deliberately does not need: it reaps the
 # caller's OWN local branches, so "whose is it" never arises. Anything that

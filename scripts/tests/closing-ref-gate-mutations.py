@@ -80,8 +80,14 @@ MUTATIONS = [
      r'PAREN_REPO_RE = re.compile(r"\(\s*(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([A-Za-z0-9.][A-Za-z0-9._-]*)#(\d+)\s*\)")',
      r'PAREN_REPO_RE = re.compile(r"\(\s*(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([A-Za-z0-9][A-Za-z0-9._-]*)#(\d+)\s*\)")'),
     ("a `#N` scope stops being a ticket",
-     r'SCOPE_BARE_RE = re.compile(r"^#?(\d+)$")',
-     r'SCOPE_BARE_RE = re.compile(r"^(\d+)$")'),
+     r'SCOPE_BARE_RE = re.compile(r"^#?([1-9]\d*)$")',
+     r'SCOPE_BARE_RE = re.compile(r"^([1-9]\d*)$")'),
+    # backend#3357: a zero-padded bare scope is an RFC document number, not a
+    # ticket. Reverting the non-zero leading digit re-reads `chore(0071)` as #71,
+    # which the rfcs#78 end-to-end case reddens.
+    ("a zero-padded scope is read as a ticket again (rfcs#78)",
+     r'SCOPE_BARE_RE = re.compile(r"^#?([1-9]\d*)$")',
+     r'SCOPE_BARE_RE = re.compile(r"^#?(\d+)$")'),
     # Anchor updated when the repo class gained a leading dot (.github#314). Left as a
     # separate entry from the leading-dot mutation below: this one makes the `#` optional
     # (a bare word scope becomes a repo+number), that one removes the dot. Different

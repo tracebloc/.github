@@ -171,11 +171,9 @@ MUTATIONS = [
      'TERMINAL_STATUSES = {"COMPLETED", "IN_PROGRESS", "QUEUED"}'),
     # The app-slug match is what makes a Bugbot RENAME harmless. Swapping it for
     # a display-name match is the exact drift the header argues against.
-    ("the check is matched on its DISPLAY NAME instead of the producing app",
-     '        slug = (((node.get("checkSuite") or {}).get("app") or {}) or {}).get("slug")\n'
-     '        if slug == BUGBOT_APP_SLUG:',
-     '        slug = node.get("name")\n'
-     '        if slug == "Cursor Bugbot":'),
+    ("the suite is matched on a check DISPLAY NAME instead of the producing app",
+     '        if (suite.get("app") or {}).get("slug") != BUGBOT_APP_SLUG:',
+     '        if BUGBOT_REVIEW_CHECK_NAME not in [r.get("name") for r in ((suite.get("checkRuns") or {}).get("nodes") or [])]:'),
 
     # --- (A4) THE AUTHOR DISCRIMINATOR (backend#2586) ----------------------
     #
@@ -283,9 +281,33 @@ MUTATIONS = [
     ("the totalCount self-check never reports a blind connection",
      '        if match is None or "totalCount" not in match.group(1):',
      '        if False and (match is None or "totalCount" not in match.group(1)):'),
-    ("the self-check only looks at one connection, leaving the other unguarded",
-     'PAGED_CONNECTIONS = ("contexts", "reviewThreads")',
-     'PAGED_CONNECTIONS = ("contexts",)'),
+    ("the self-check only looks at one connection, leaving the others unguarded",
+     'PAGED_CONNECTIONS = ("checkSuites", "checkRuns", "reviewThreads")',
+     'PAGED_CONNECTIONS = ("checkSuites",)'),
+
+    # --- the rollup union, and the scope it needs (backend#3360) ------------
+    # The union's StatusContext arm needs `statuses: read`, which this gate's
+    # token does not hold -- so a query that goes back to it is refused on any
+    # head carrying a commit status and green on every other, which is exactly
+    # the shape that read as flaky infra for three duplicate tickets.
+    ("the query goes back to the rollup union, which needs statuses: read",
+     '            checkSuites(first: 100) {',
+     '            statusCheckRollup(first: 100) {'),
+    ("the self-check stops noticing a query that reads commit statuses",
+     '    return "statusCheckRollup" in query',
+     '    return False'),
+    ("the query stops asking for the LATEST run, so a re-run reads as a tie",
+     'checkRuns(first: 100, filterBy: {checkType: LATEST}) {',
+     'checkRuns(first: 100) {'),
+    ("the self-check stops noticing a dropped LATEST filter",
+     '    return "checkType: LATEST" not in query',
+     '    return False'),
+    ("check runs are read from every app's suite, not just the producer's",
+     '        if (suite.get("app") or {}).get("slug") != BUGBOT_APP_SLUG:',
+     '        if False and (suite.get("app") or {}).get("slug") != BUGBOT_APP_SLUG:'),
+    ("a truncated check-run page inside the producer's suite is accepted",
+     '        candidates.extend(require_complete(RUNS_KIND, suite.get("checkRuns")))',
+     '        candidates.extend((suite.get("checkRuns") or {}).get("nodes") or [])'),
     ("a PR with no commits is read as having nothing to check",
      '        raise Unreadable("PR reported no commits, so there is no head to check")',
      '        return None'),

@@ -42,7 +42,7 @@
 
 ### Releases & publishing
 
-- The release train is the only path to `staging`, `main`, and every package registry. Never hand-cut a `v*` tag, hand-bump a version file, or publish an artifact — every legal publish path is inventoried in release-train's `PUBLISH-PATHS.md`.
+- The release train is the only path to `staging`, `main`, and every package registry. Never hand-cut a `v*` tag or publish an artifact — every legal publish path is inventoried in release-train's `PUBLISH-PATHS.md`. _(The `hand-bump a version file` clause was removed on 2026-09-08: it contradicted a REQUIRED check, and the meta-rule above says an enforced rule leaves this file. `version-bump-gate / version-check` fails a PR that touches a published path while the version file still reads an already-released version — "Bump package.json in this PR. The release train reads that file and cuts the tag from it — it never bumps for you." So the bump a feature PR ships is the train's INPUT, not a bypass of it. Read literally, the old clause forbade what the gate demands: it blocked two component PRs on design-system-v2 until someone put the two side by side, and a reviewer there opened and then retracted a change-request over the same collision.)_
 - Findings on a promotion PR are fixed on the source branch (`develop`/`staging`), then the train re-prepares. Never push fixes onto a promotion PR — every push re-rolls its review.
 
 ### Filing issues
