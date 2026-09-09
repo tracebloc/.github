@@ -93,7 +93,7 @@ MUTATIONS = [
      "        if False:"),
 
     ("the full-base rule accepts every tag",
-     '            if re.search(r"(?:^|-)(?:slim|alpine)(?:-|$)", tag):',
+     "            if SMALL_BASE_TAG.search(tag):",
      "            if True:"),
 
     ("a two-word comment justifies a full base",

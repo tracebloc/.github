@@ -239,7 +239,13 @@ on:
           false. Defaults TRUE, unlike the other soft-fail inputs: the checker
           arrives on `main` for all 16 callers at once, and a repo flips this
           to false in the same PR that writes its `indirect-use` entries and
-          shows zero findings (arm while green -- backend#3527).
+          shows zero findings (arm while green -- backend#3527). NOT covered by
+          this flag: scan-integrity findings (`cannot-read`, `cannot-parse`,
+          `config-error`) exit 1 in every mode -- an unparseable tracked .py, a
+          computed setup.py install_requires or a defaultless FROM ARG reddens
+          the required house-rules job even while advisory. The dry run of
+          2026-09-09 showed every caller clean of those; confirm it on the
+          repo's develop before flipping this to false.
         type: boolean
         default: true
       gitleaks-baseline:
