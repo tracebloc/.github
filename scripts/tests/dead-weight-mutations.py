@@ -85,8 +85,8 @@ MUTATIONS = [
      "    return bool(globs)"),
 
     ("an eslint config passes without being extended",
-     "    text = \"\\n\".join(repo.text(rel) for rel in repo.glob(*ESLINT_CONFIG_GLOBS))",
-     "    return True\n    text = \"\""),
+     '    text = "\\n".join(chunks)',
+     '    return True\n    text = "\\n".join(chunks)'),
 
     ("@types/* stop being checked at all",
      '        if d.dist.startswith("@types/"):',
