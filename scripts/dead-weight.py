@@ -329,10 +329,15 @@ def normalise(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name.strip().lower())
 
 
+#: IMPORT_NAME_OF keyed the way `normalise` spells names, so `ruamel.yaml` (dot
+#: -> hyphen) and `PyYAML` (case) both resolve (Bugbot, .github#454).
+_IMPORT_NAME_OF_NORMALISED = {normalise(k): v for k, v in IMPORT_NAME_OF.items()}
+
+
 def module_of(dist: str) -> str:
     n = normalise(dist)
-    if n in IMPORT_NAME_OF:
-        return IMPORT_NAME_OF[n]
+    if n in _IMPORT_NAME_OF_NORMALISED:
+        return _IMPORT_NAME_OF_NORMALISED[n]
     return n.replace("-", "_")
 
 
@@ -453,10 +458,15 @@ PRAGMA = re.compile(r"#\s*dead-weight:\s*(.+?)\s*$")
 
 def pragma_for(lines, index):
     """The `# dead-weight: <reason>` justification for line `index` (0-based):
-    on the line itself (after the pin) or on the line directly above. A reason
-    under three words is not one, and is reported as such by the caller."""
-    for candidate in (lines[index], lines[index - 1] if index > 0 else ""):
-        m = PRAGMA.search(candidate)
+    on the line itself (after the pin), or on the line directly above WHEN that
+    line is a comment and nothing else. A justified pin's own trailing pragma
+    must not leak onto the pin below it (Bugbot, .github#454). A reason under
+    three words is not one, and is reported as such by the caller."""
+    m = PRAGMA.search(lines[index])
+    if m:
+        return m.group(1)
+    if index > 0 and lines[index - 1].lstrip().startswith("#"):
+        m = PRAGMA.search(lines[index - 1])
         if m:
             return m.group(1)
     return None
@@ -616,6 +626,10 @@ def _dotted_prefixes(name: str):
     return {".".join(parts[: i + 1]) for i in range(len(parts))}
 
 
+#: An ALL-CAPS list that is itself a dependency declaration (`INSTALL_REQUIRES`,
+#: `EXTRAS_REQUIRE`, `DEPENDENCIES`, `PINNED_PACKAGES`) vouches for nothing: its
+#: strings are the pins under test, not modules the code reaches.
+DECLARATION_NAME = re.compile(r"REQUIRE|DEPEND|EXTRAS|PACKAGES|PINS?\b|WHEELS?\b")
 IMPORTISH_CALL = re.compile(r"(?:^|\.)(?:import_module|__import__|import_string|import_by_path|load_backend|get_module|load_plugin|entry_point|load_entry_point|resolve_name)$")
 
 
@@ -654,10 +668,14 @@ def python_usage(repo: Repo, findings):
                                     "does not parse as Python 3, so its imports are unknown (%s); fix it or `exclude:` it" % exc.msg))
             continue
         registry_strings = set()
+        is_declaration_file = os.path.basename(rel) in ("setup.py", "setup_py.py") or os.path.basename(rel).startswith("setup_")
         for node in ast.walk(tree):
             if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                if is_declaration_file:
+                    continue  # setup.py's INSTALL_REQUIRES is a declaration, not a registry (Bugbot, .github#454)
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                if any(isinstance(t, ast.Name) and t.id.isupper() for t in targets) and isinstance(node.value, (ast.List, ast.Tuple, ast.Set)):
+                names = [t.id for t in targets if isinstance(t, ast.Name)]
+                if any(n.isupper() and not DECLARATION_NAME.search(n) for n in names) and isinstance(node.value, (ast.List, ast.Tuple, ast.Set)):
                     for elt in node.value.elts:
                         if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
                             registry_strings.add(elt.value)
@@ -854,8 +872,8 @@ def check_declared_unused(repo: Repo, cfg: Config, findings):
         if d.dist.startswith("@types/"):
             typed = d.dist[len("@types/"):]
             base = ("@" + typed.replace("__", "/", 1)) if "__" in typed else typed  # @types/scope__name -> @scope/name
-            if base == "node" or node_used(base) or any(node_used(p) for p in PEER_OF.get(base, ())):
-                continue
+            if node_used(base) or any(node_used(p) for p in PEER_OF.get(base, ())):
+                continue  # `@types/node` is NOT special-cased: NODE_IMPLICIT ties it to a tsconfig (Bugbot, .github#454)
         if any(node_used(p) and p in declared_node for p in PEER_OF.get(d.dist, ())):
             continue
         if justified(d) or implicit_by_files(repo, d.dist) or plugin_evidence(repo, d.dist) or eslint_extends(repo, d.dist) or invoked(d.dist, invocations):
@@ -980,15 +998,45 @@ def _installers_of(repo: Repo, req_basename: str, want_file_rel: str):
                 if os.path.basename(target) == req_basename:
                     hits.append((rel, no, cmd, gpu, text))
     for rel in repo.glob(".github/workflows/*.yml", ".github/workflows/*.yaml"):
-        text = repo.text(rel)
-        gpu = any(GPU_HINT.search(m.group(1)) for m in RUNS_ON.finditer(text))
-        for no, cmd in _joined_commands(text):
-            if not PIP_INSTALL.search(cmd):
-                continue
-            for target in REQ_FLAG.findall(cmd):
-                if os.path.basename(target) == req_basename:
-                    hits.append((rel, no, cmd, gpu, text))
+        for job_start, job_text in _workflow_jobs(repo.text(rel)):
+            gpu = any(GPU_HINT.search(m.group(1)) for m in RUNS_ON.finditer(job_text))
+            for offset, cmd in _joined_commands(job_text):
+                if not PIP_INSTALL.search(cmd):
+                    continue
+                for target in REQ_FLAG.findall(cmd):
+                    if os.path.basename(target) == req_basename:
+                        hits.append((rel, job_start + offset - 1, cmd, gpu, job_text))
     return hits
+
+
+YAML_COMMENT = re.compile(r"^\s*#.*$", re.M)
+JOB_HEADER = re.compile(r"^  ([A-Za-z_][\w-]*):\s*$")
+
+
+def _workflow_jobs(text: str):
+    """Yield (first_line_no, job_text) per job of a workflow, comments blanked.
+
+    Context that clears a CUDA-torch finding -- a GPU `runs-on`, a CPU index in
+    `PIP_EXTRA_INDEX_URL` -- must come from the JOB that runs the install, not
+    from anywhere in the file: one GPU job (or a comment mentioning one) must not
+    exempt every CPU job beside it (Bugbot, .github#454). A workflow with no
+    `jobs:` block is one block, so nothing is skipped."""
+    lines = YAML_COMMENT.sub("", text).splitlines()
+    in_jobs, starts = False, []
+    for i, line in enumerate(lines):
+        if re.match(r"^jobs:\s*$", line):
+            in_jobs = True
+            continue
+        if in_jobs and line and not line.startswith(" "):
+            in_jobs = False  # a later top-level key ends the jobs map
+        if in_jobs and JOB_HEADER.match(line):
+            starts.append(i)
+    if not starts:
+        yield 1, "\n".join(lines)
+        return
+    bounds = starts + [len(lines)]
+    for a, b in zip(bounds, bounds[1:]):
+        yield a + 1, "\n".join(lines[a:b])
 
 
 def check_cuda_torch_on_cpu(repo: Repo, cfg: Config, findings):

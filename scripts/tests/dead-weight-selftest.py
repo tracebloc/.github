@@ -280,6 +280,36 @@ def _():
     assert_clean(Fixture({"a.py": PY_MAIN, "README.md": "hi\n"}).findings(["declared-unused"]))
 
 
+@case("a pragma on a justified pin does not leak onto the unjustified pin below it")
+def _():
+    fx = Fixture({"requirements.txt": "safetensors==0.8.0  # dead-weight: transitive of peft, pinned per OQ2\nhumanize==4.9.0\n", "a.py": "import os\n"})
+    f = fx.findings(["declared-unused"])
+    assert_finding(f, "declared-unused", "humanize", count=1)
+    assert not [x for x in f if "safetensors" in x.message]
+
+
+@case("setup.py's own INSTALL_REQUIRES list, and any *REQUIRE*/*PACKAGES* constant, vouch for nothing")
+def _():
+    via_const = Fixture({"setup.py": 'from setuptools import setup\nINSTALL_REQUIRES = ["humanize"]\nsetup(name="x", install_requires=INSTALL_REQUIRES)\n', "a.py": "import os\n"})
+    assert_finding(via_const.findings(["declared-unused"]), "declared-unused", "humanize")
+    # A constant whose NAME says nothing (`DEPS`) is still a declaration when it
+    # lives in setup.py: the file, not the spelling, is what disqualifies it.
+    via_deps = Fixture({"setup.py": 'from setuptools import setup\nDEPS = ["humanize"]\nsetup(name="x", install_requires=DEPS)\n', "a.py": "import os\n"})
+    assert_finding(via_deps.findings(["declared-unused"]), "declared-unused", "humanize")
+    elsewhere = Fixture({"requirements.txt": "humanize==4.9.0\n", "deps.py": 'REQUIRED_PACKAGES = ["humanize"]\n'})
+    assert_finding(elsewhere.findings(["declared-unused"]), "declared-unused", "humanize")
+    registry = Fixture({"requirements.txt": "humanize==4.9.0\n", "conf.py": 'PLUGINS = ["humanize"]\n'})
+    assert_clean(registry.findings(["declared-unused"]))
+
+
+@case("the distribution table matches after normalisation: ruamel.yaml is cleared by `import ruamel.yaml`")
+def _():
+    ok = Fixture({"requirements.txt": "ruamel.yaml==0.18.6\n", "a.py": "import ruamel.yaml\n"})
+    assert_clean(ok.findings(["declared-unused"]))
+    no = Fixture({"requirements.txt": "ruamel.yaml==0.18.6\n", "a.py": "import os\n"})
+    assert_finding(no.findings(["declared-unused"]), "declared-unused", "ruamel.yaml")
+
+
 # ── declared-unused · Node ───────────────────────────────────────────────────
 
 PKG = '{\n  "name": "x",\n  "scripts": {"lint": "eslint ."},\n  "dependencies": {%s},\n  "devDependencies": {%s}\n}\n'
@@ -342,6 +372,14 @@ def _():
                   "src/a.ts": "export const a = 1;\n", "tsconfig.json": "{}\n"})
     f = fx.findings(["declared-unused"])
     assert_finding(f, "declared-unused", "rimraf", count=1)
+
+
+@case("node: @types/node is tied to a tsconfig like every implied tool, never accepted on its name alone")
+def _():
+    yes = Fixture({"package.json": PKG % ('"react": "^18"', '"@types/node": "^22"'), "src/a.tsx": "import React from 'react';\n", "tsconfig.json": "{}\n"})
+    assert_clean(yes.findings(["declared-unused"]))
+    no = Fixture({"package.json": PKG % ('"react": "^18"', '"@types/node": "^22"'), "src/a.jsx": "import React from 'react';\n"})
+    assert_finding(no.findings(["declared-unused"]), "declared-unused", "@types/node")
 
 
 # ── full-python-base ─────────────────────────────────────────────────────────
@@ -433,6 +471,18 @@ def _():
     assert f[0].path == "requirements.txt"
     orphan = Fixture({"requirements.txt": REQ_TORCH, "README.md": "pip install -r requirements.txt\n"})
     assert_clean(orphan.findings(["cuda-torch-on-cpu"]))
+
+
+@case("cuda-torch: GPU context and CPU-index env are read per JOB -- a GPU job or a comment beside a CPU job exempts nothing")
+def _():
+    two_jobs = ("name: t\non: [push]\njobs:\n"
+                "  gpu:\n    runs-on: [self-hosted, gpu]\n    env:\n      PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu\n    steps:\n      - run: echo hi\n"
+                "  cpu:\n    # runs-on: gpu -- a comment, not a runner\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          pip install -r requirements.txt\n")
+    fx = Fixture({"requirements.txt": REQ_TORCH, ".github/workflows/t.yml": two_jobs})
+    f = fx.findings(["cuda-torch-on-cpu"])
+    assert_finding(f, "cuda-torch-on-cpu", ".github/workflows/t.yml:15", count=1)
+    same_job = two_jobs.replace("    runs-on: ubuntu-latest\n", "    runs-on: ubuntu-latest\n    env:\n      PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu\n")
+    assert_clean(Fixture({"requirements.txt": REQ_TORCH, ".github/workflows/t.yml": same_job}).findings(["cuda-torch-on-cpu"]))
 
 
 # ── config + CLI ─────────────────────────────────────────────────────────────

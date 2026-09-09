@@ -139,6 +139,35 @@ MUTATIONS = [
     ("--soft-fail annotations are emitted as errors",
      '    level = "warning" if args.soft_fail else "error"',
      '    level = "error"'),
+
+    # --- the .github#454 review round: each finding became a token ----------
+    ("a pragma on the previous PIN line leaks onto the next pin",
+     '    if index > 0 and lines[index - 1].lstrip().startswith("#"):',
+     "    if index > 0:"),
+
+    ("setup.py's INSTALL_REQUIRES vouches for its own pins",
+     "                if is_declaration_file:\n                    continue",
+     "                if False:\n                    continue"),
+
+    ("a *REQUIRE*/*PACKAGES* constant vouches for its pins",
+     "                if any(n.isupper() and not DECLARATION_NAME.search(n) for n in names) and isinstance(node.value, (ast.List, ast.Tuple, ast.Set)):",
+     "                if any(n.isupper() for n in names) and isinstance(node.value, (ast.List, ast.Tuple, ast.Set)):"),
+
+    ("the distribution table is looked up un-normalised (ruamel.yaml never matches)",
+     "_IMPORT_NAME_OF_NORMALISED = {normalise(k): v for k, v in IMPORT_NAME_OF.items()}",
+     "_IMPORT_NAME_OF_NORMALISED = dict(IMPORT_NAME_OF)"),
+
+    ("@types/node is accepted on its name alone",
+     "            if node_used(base) or any(node_used(p) for p in PEER_OF.get(base, ())):",
+     '            if base == "node" or node_used(base) or any(node_used(p) for p in PEER_OF.get(base, ())):'),
+
+    ("GPU / index context is read from the whole workflow, not the job",
+     "        for job_start, job_text in _workflow_jobs(repo.text(rel)):",
+     "        for job_start, job_text in [(1, repo.text(rel))]:"),
+
+    ("YAML comments count as workflow context",
+     '    lines = YAML_COMMENT.sub("", text).splitlines()',
+     "    lines = text.splitlines()"),
 ]
 
 
