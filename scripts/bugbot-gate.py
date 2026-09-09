@@ -81,9 +81,10 @@ FAIL CLOSED, AND "CANNOT TELL" IS A FINDING (CLAUDE.md rule 3). Every one of
 these EXITS NONZERO rather than reporting clean:
 
   * the GraphQL read failing, or returning no pull request
-  * a truncated rollup -- `contexts(first: 100)` says nothing when a head has
-    more, the same silent-truncation shape `bricked-prs.py` names, and it fails
-    in the direction that matters here: a lost context makes Bugbot look ABSENT
+  * a truncated read of the head's checks -- `checkSuites(first: 100)`, and the
+    producing app's own `checkRuns(first: 100)`, say nothing when a head has
+    more: the same silent-truncation shape `bricked-prs.py` names, and it fails
+    in the direction that matters here: a lost check makes Bugbot look ABSENT
     on a head it reviewed. The test is `totalCount > len(nodes)`, the only
     honest one when `totalCount` is in hand -- see the long note at PAGE_CAP for
     why an exactly-full page is complete and refusing it was a real bug
@@ -278,6 +279,40 @@ FAIL = "fail"        # Bugbot reviewed the head and something is open
 # deadline. See `main`.
 WAITABLE = frozenset({PENDING, UNCLAIMED})
 
+# THE HEAD'S CHECKS ARE READ THROUGH `checkSuites`, NEVER `statusCheckRollup`,
+# AND THAT IS A PERMISSION DECISION RATHER THAN A STYLE ONE (backend#3360).
+#
+# `statusCheckRollup.contexts` is a UNION -- `CheckRun | StatusContext` -- and a
+# `StatusContext` is a legacy COMMIT STATUS, which needs `statuses: read`. This
+# gate's token has `contents`/`checks`/`pull-requests` and nothing else, so the
+# moment a repo's head carried a commit status the whole read was refused with
+# `Resource not accessible by integration` and the gate failed closed on a
+# permission gap rather than on anything about Bugbot.
+#
+# MEASURED, because "only one repo is affected" is exactly the shape that reads
+# as flaky infra and gets dismissed: design-system-v2 was the only repo of the
+# 20 whose PR heads carry commit statuses (Chromatic posts `Storybook Publish`
+# and `UI Tests`); `client`'s heads carry none. The refusal tracked Chromatic to
+# the second -- across 5 sampled failures the GraphQL error landed 2s to 6min
+# AFTER the first status appeared and never once before it, and the green runs
+# were the ones that finished before Chromatic posted. Same repo, same caller,
+# same token, minutes apart.
+#
+# THE GATE NEVER WANTED THE STATUSES. It reads exactly one thing off the head --
+# a check run produced by app `cursor` -- so asking for a union that also drags
+# in commit statuses was requesting data it discards at the cost of a scope it
+# does not hold. Reading `checkSuites` asks for the check runs and only those:
+# no new scope, and immune by construction to any repo that later adds a
+# Chromatic-like status reporter. Verified on the failing head 38ee4e84
+# (design-system-v2#306): 11 suites, and `Cursor Bugbot` COMPLETED/SUCCESS comes
+# back clean where the rollup read was refused.
+#
+# `filterBy: {checkType: LATEST}` IS LOAD-BEARING. The rollup returned the
+# latest run per check name; a bare `checkRuns` returns EVERY run, so a Bugbot
+# re-run would put two `Cursor Bugbot` nodes on one head and `bugbot_check`
+# refuses an unresolvable tie. Dropping this filter turns every re-run into a
+# hard failure. `query_reads_commit_statuses` below refuses a query that goes
+# back to the rollup, for the same reason the other query self-checks exist.
 QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
@@ -290,17 +325,17 @@ query($owner: String!, $name: String!, $number: Int!) {
         nodes {
           commit {
             oid
-            statusCheckRollup {
-              contexts(first: 100) {
-                totalCount
-                nodes {
-                  __typename
-                  ... on CheckRun {
+            checkSuites(first: 100) {
+              totalCount
+              nodes {
+                app { slug }
+                checkRuns(first: 100, filterBy: {checkType: LATEST}) {
+                  totalCount
+                  nodes {
                     name
                     status
                     conclusion
                     detailsUrl
-                    checkSuite { app { slug } }
                   }
                 }
               }
@@ -333,7 +368,14 @@ query($owner: String!, $name: String!, $number: Int!) {
 PAGE_CAP = max([int(n) for n in re.findall(r"first:\s*(\d+)", QUERY)] or [0])
 
 # The two connections whose completeness this gate depends on.
-PAGED_CONNECTIONS = ("contexts", "reviewThreads")
+PAGED_CONNECTIONS = ("checkSuites", "checkRuns", "reviewThreads")
+
+
+# The label `require_complete` reports the producer's run page under. Hoisted to
+# a constant only so the call below stays ONE line: the mutation harness anchors
+# on exact source, and a call split across four lines cannot be neutralised by a
+# single-line anchor.
+RUNS_KIND = "app %r's check-run list" % BUGBOT_APP_SLUG
 
 
 class Unreadable(Exception):
@@ -351,7 +393,7 @@ def connections_missing_totalcount(query=QUERY):
     """
     missing = []
     for name in PAGED_CONNECTIONS:
-        match = re.search(name + r"\(first:\s*\d+\)\s*\{([^{]*)", query)
+        match = re.search(name + r"\(first:\s*\d+[^)]*\)\s*\{([^{]*)", query)
         if match is None or "totalCount" not in match.group(1):
             missing.append(name)
     return missing
@@ -368,6 +410,31 @@ HUMAN_AUTHOR = "User"
 # with its own report, per CLAUDE.md rule 3, and a bool cannot hold it.
 AUTHOR_BOT = "bot"
 AUTHOR_HUMAN = "human"
+
+
+def query_reads_commit_statuses(query=QUERY):
+    """True when `query` reads the head's checks back through the rollup union.
+
+    The union drags `StatusContext` -- a legacy commit status -- into a read
+    whose token holds no `statuses: read`, which is backend#3360: the gate fails
+    closed on a permission gap the instant a repo grows a commit-status
+    reporter, and looks like flaky infra while doing it. Derived by reading the
+    query, so it cannot drift from it, and it fails the run rather than
+    weakening quietly -- the same shape as the three self-checks around it.
+    """
+    return "statusCheckRollup" in query
+
+
+def query_lacks_latest_filter(query=QUERY):
+    """True when `query` stopped asking for the LATEST run of each check.
+
+    Without the filter `checkRuns` returns every run on the suite, so a Bugbot
+    RE-RUN puts two `Cursor Bugbot` nodes on one head -- and `bugbot_check`
+    refuses a tie it cannot resolve. That turns an ordinary re-run into a hard
+    failure, which is a regression the fixtures cannot catch: the multiplicity
+    is produced by the server, not by this file. Derived by reading the query.
+    """
+    return "checkType: LATEST" not in query
 
 
 def query_lacks_author_kind(query=QUERY):
@@ -508,9 +575,9 @@ def fetch(owner, name, number, env=None, runner=_run_gh):
 def bugbot_check(pr):
     """The Bugbot check run on the PR's CURRENT head, or None.
 
-    Raises on a truncated rollup: a context lost to pagination is
-    indistinguishable from Bugbot never having run, and that is the direction
-    this gate must not guess in.
+    Raises on a truncated read: a check lost to pagination -- the producing
+    app's whole SUITE, or one of its RUNS -- is indistinguishable from Bugbot
+    never having run, and that is the direction this gate must not guess in.
     """
     commits = (pr.get("commits") or {}).get("nodes") or []
     if not commits:
@@ -524,20 +591,21 @@ def bugbot_check(pr):
             "last commit %s is not headRefOid %s -- inconsistent read"
             % (head, pr.get("headRefOid"))
         )
-    rollup = commit.get("statusCheckRollup")
-    if rollup is None:
+    suites = commit.get("checkSuites")
+    if suites is None:
         # No checks at all on the head. Not truncation, and not Bugbot either.
         return None
-    # A context lost to pagination is indistinguishable from Bugbot never having
+    # A suite lost to pagination is indistinguishable from Bugbot never having
     # run, which is the direction this gate must not guess in.
-    nodes = require_complete("the head's check-context list", rollup.get("contexts"))
     candidates = []
-    for node in nodes:
-        if node.get("__typename") != "CheckRun":
+    for suite in require_complete("the head's check-suite list", suites):
+        if (suite.get("app") or {}).get("slug") != BUGBOT_APP_SLUG:
+            # Only the producing app's OWN suite is read, and only it is checked
+            # for truncation. A cut page of some other app's runs cannot hide a
+            # Bugbot check, so refusing on one would be a false "cannot tell" --
+            # and on a busy head the other suites are most of the volume.
             continue
-        slug = (((node.get("checkSuite") or {}).get("app") or {}) or {}).get("slug")
-        if slug == BUGBOT_APP_SLUG:
-            candidates.append(node)
+        candidates.extend(require_complete(RUNS_KIND, suite.get("checkRuns")))
     if not candidates:
         return None
     if len(candidates) == 1:
@@ -883,6 +951,30 @@ def main(argv=None):
     if blind:
         _emit(FAIL, [], "the GraphQL query no longer requests totalCount for: %s. "
                         "Without it a truncated page cannot be detected." % ", ".join(blind))
+        return 2
+
+    # Same shape, the scope this gate does not hold (backend#3360): a query that
+    # goes back to `statusCheckRollup` reads a union whose `StatusContext` arm
+    # needs `statuses: read`, so it is refused outright on any head carrying a
+    # commit status. Green everywhere else, which is what made it read as flaky
+    # infra for three duplicate tickets. A defect in this file, so it fails the
+    # run rather than the author's day.
+    if query_reads_commit_statuses():
+        _emit(FAIL, [], "the GraphQL query reads the head's checks through "
+                        "statusCheckRollup again, whose StatusContext arm needs "
+                        "statuses: read -- a scope this gate's token does not "
+                        "hold. See query_reads_commit_statuses.")
+        return 2
+
+    # And the filter that keeps a re-run from reading as a tie: without it
+    # `checkRuns` returns every run rather than the latest per name, so a second
+    # Bugbot run on one head makes `bugbot_check` refuse a tie it cannot
+    # resolve. The server produces that multiplicity, so no fixture catches it.
+    if query_lacks_latest_filter():
+        _emit(FAIL, [], "the GraphQL query no longer asks for checkType: LATEST, "
+                        "so a re-run puts two checks of one name on the head and "
+                        "the review cannot be told from its predecessor. See "
+                        "query_lacks_latest_filter.")
         return 2
 
     # Same shape, one field over (backend#2586): if the query stopped asking for

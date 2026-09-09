@@ -26,6 +26,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -139,13 +140,17 @@ def thread(body, login="cursor", resolved=False, outdated=False, raised_against=
 
 
 def check_run(slug="cursor", name="Cursor Bugbot", status="COMPLETED", conclusion="NEUTRAL"):
+    # `_app_slug` is FIXTURE PLUMBING, NOT PAYLOAD: `pr()` pops it to decide
+    # which check SUITE this run hangs off, and the node the gate actually sees
+    # carries only the four fields the query asks for. Keeping the slug on the
+    # run here is what lets ~90 call sites go on passing a flat list of runs
+    # while the payload underneath them is grouped the way GitHub groups it.
     return {
-        "__typename": "CheckRun",
+        "_app_slug": slug,
         "name": name,
         "status": status,
         "conclusion": conclusion,
         "detailsUrl": "d",
-        "checkSuite": {"app": {"slug": slug}},
     }
 
 
@@ -161,19 +166,39 @@ AUTHOR_ODD_FIXTURE = {"__typename": "Organization", "login": "tracebloc"}
 
 
 def pr(contexts=None, threads=None, head=HEAD, ctx_total=None, thread_total=None,
-       rollup=True, author=None):
+       suites=True, author=None, run_total=None):
     contexts = [] if contexts is None else contexts
     threads = [] if threads is None else threads
     author = AUTHOR_HUMAN_FIXTURE if author is None else author
     commit = {"oid": head}
-    commit["statusCheckRollup"] = (
+    # ONE SUITE PER PRODUCING APP, which is how GitHub returns them: `checkSuites`
+    # is per app and its `checkRuns` are that app's runs on the head. Call sites
+    # still hand in a flat list of runs; the grouping happens here so the shape
+    # under the assertions is the shape the gate reads in production.
+    #
+    # `ctx_total` is the SUITE page's totalCount and `run_total` the run page's
+    # -- two connections now, so truncation is assertable on each independently.
+    grouped = []
+    for node in contexts:
+        node = dict(node)
+        slug = node.pop("_app_slug")
+        for suite in grouped:
+            if suite["app"]["slug"] == slug:
+                suite["checkRuns"]["nodes"].append(node)
+                break
+        else:
+            grouped.append(
+                {"app": {"slug": slug}, "checkRuns": {"nodes": [node]}}
+            )
+    for suite in grouped:
+        runs = suite["checkRuns"]
+        runs["totalCount"] = len(runs["nodes"]) if run_total is None else run_total
+    commit["checkSuites"] = (
         {
-            "contexts": {
-                "totalCount": len(contexts) if ctx_total is None else ctx_total,
-                "nodes": contexts,
-            }
+            "totalCount": len(grouped) if ctx_total is None else ctx_total,
+            "nodes": grouped,
         }
-        if rollup
+        if suites
         else None
     )
     return {
@@ -204,7 +229,7 @@ v = ev(pr(contexts=[]), "high")
 check("no checks at all on the head is UNCLAIMED, not PASS",
       v == gate.UNCLAIMED and v != gate.PASS, "got %r" % v)
 
-v = ev(pr(contexts=[], rollup=False), "high")
+v = ev(pr(contexts=[], suites=False), "high")
 check("a null rollup is UNCLAIMED, not PASS",
       v == gate.UNCLAIMED and v != gate.PASS, "got %r" % v)
 
@@ -545,7 +570,7 @@ expect_unreadable(
     lambda: gate.evaluate(
         {
             "headRefOid": HEAD,
-            "commits": {"nodes": [{"commit": {"oid": HEAD, "statusCheckRollup": {"contexts": {"nodes": []}}}}]},
+            "commits": {"nodes": [{"commit": {"oid": HEAD, "checkSuites": {"nodes": []}}}]},
             "reviewThreads": {"totalCount": 0, "nodes": []},
         },
         "high",
@@ -657,21 +682,136 @@ check(
 # being REMOVED, because the domain it walks is the very thing under test. So the
 # two connections this gate depends on are also written down here as literals,
 # independently of the module. Dropping either from PAGED_CONNECTIONS now fails.
-for name in ("contexts", "reviewThreads"):
+for name in ("checkSuites", "checkRuns", "reviewThreads"):
     check(
         "%r is declared a guarded paged connection" % name,
         name in gate.PAGED_CONNECTIONS,
         "PAGED_CONNECTIONS = %r" % (gate.PAGED_CONNECTIONS,),
     )
 
+# THE STRIPPER MUST BE SHOWN TO HAVE STRIPPED. The previous version pasted the
+# connection's indentation into a fixed string replace, so reshaping the query
+# (backend#3360 moved these two connections a level in and gave `checkRuns` a
+# `filterBy:` argument) made every replace a no-op -- and a stripper that strips
+# nothing hands `connections_missing_totalcount` the UNMODIFIED query, which
+# correctly reports nothing missing. The case would have gone green while
+# testing that the detector can read a healthy query. So the substitution count
+# is asserted first, and the regex is indentation- and argument-agnostic.
 for name in gate.PAGED_CONNECTIONS:
-    stripped = gate.QUERY.replace(name + "(first: 100) {\n                totalCount", name + "(first: 100) {")
-    stripped = stripped.replace(name + "(first: 100) {\n        totalCount", name + "(first: 100) {")
+    stripped, applied = re.subn(
+        r"(" + name + r"\(first:\s*\d+[^)]*\)\s*\{\s*)totalCount\s*", r"\1", gate.QUERY
+    )
+    check(
+        "the totalCount stripper actually applied to %r" % name,
+        applied == 1,
+        "%d substitution(s) -- the anchor no longer matches the query" % applied,
+    )
     check(
         "dropping totalCount from %r is detected" % name,
         name in gate.connections_missing_totalcount(stripped),
         "detector said %r" % (gate.connections_missing_totalcount(stripped),),
     )
+
+# --------------------------------------------------------------------------
+# The rollup union, and why the query may never go back to it (backend#3360).
+# --------------------------------------------------------------------------
+# `statusCheckRollup.contexts` is `CheckRun | StatusContext`, and a StatusContext
+# is a legacy commit status -- readable only with `statuses: read`, which this
+# gate's token does not hold. So the union made the WHOLE read fail with
+# `Resource not accessible by integration` on any head carrying a commit status,
+# and on no other head: design-system-v2 (Chromatic posts `Storybook Publish`
+# and `UI Tests`) went red on 14 of 15 consecutive runs while all 19 other repos
+# stayed green on the identical caller. Three duplicate tickets read that as
+# flaky infra before the mechanism was pinned.
+#
+# These two assert the SCOPE PROPERTY, not the query text for its own sake: the
+# gate must reach the head's checks without ever naming a field that needs a
+# scope it was not granted.
+check(
+    "the query does not read the head's checks through the rollup union",
+    "statusCheckRollup" not in gate.QUERY,
+    "the query names statusCheckRollup, whose StatusContext arm needs statuses: read",
+)
+check(
+    "a query that goes back to the rollup is refused by the self-check",
+    gate.query_reads_commit_statuses(gate.QUERY.replace("checkSuites", "statusCheckRollup")),
+    "the self-check did not fire",
+)
+check(
+    "the real query passes its own rollup self-check",
+    not gate.query_reads_commit_statuses(),
+)
+
+# `filterBy: {checkType: LATEST}` restores what the rollup gave for free: the
+# latest run per check name. Without it a Bugbot RE-RUN puts two `Cursor Bugbot`
+# nodes on one head and the tie below is refused -- an ordinary re-run turned
+# into a hard failure. No fixture can catch that (the server produces the
+# multiplicity), so the query is asserted directly.
+check(
+    "the query asks for the LATEST run of each check",
+    "checkType: LATEST" in gate.QUERY,
+    "a re-run would read as an unresolvable tie",
+)
+check(
+    "a query that drops the LATEST filter is refused by the self-check",
+    gate.query_lacks_latest_filter(gate.QUERY.replace("checkType: LATEST", "checkType: ALL")),
+    "the self-check did not fire",
+)
+check(
+    "the real query passes its own LATEST self-check",
+    not gate.query_lacks_latest_filter(),
+)
+
+# Truncation is now assertable on BOTH connections independently -- the suite
+# page and the producing app's run page. The inner one is new with this shape
+# and would otherwise be a silent hole: a cut run page makes Bugbot look ABSENT
+# on a head it reviewed, which is the direction this gate must not guess in.
+expect_unreadable(
+    "a truncated check-SUITE page is refused",
+    lambda: gate.evaluate(pr(contexts=[check_run()], ctx_total=40), "high"),
+    because="the page is truncated",
+)
+expect_unreadable(
+    "a truncated check-RUN page inside the app's suite is refused",
+    lambda: gate.evaluate(pr(contexts=[check_run()], run_total=9), "high"),
+    because="the page is truncated",
+)
+
+# ... but ONLY the producing app's own suite is read, so a cut run page on some
+# OTHER app's suite must NOT refuse. On a busy head those suites are most of the
+# volume, and a cut page of them cannot hide a Bugbot check -- refusing would be
+# a false "cannot tell", which is as wrong as a false pass even though it fails
+# in the safe direction.
+# The cut page has to be on the FOREIGN suite ALONE, which is why this reaches
+# in per suite instead of passing `run_total`: that truncates every suite,
+# including the producer's, and the case would then refuse for the opposite
+# reason while still looking like it passed for this one. Caught by Bugbot on
+# this PR -- the first draft passed `run_total=None`, so nothing was truncated
+# at all and the assertion held whether or not foreign suites are read. A test
+# that cannot fail is the same defect as the stripper above, one file over.
+mixed = pr(contexts=[check_run(), check_run(slug="github-actions", name="Unit tests")])
+for suite in mixed["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"]:
+    if suite["app"]["slug"] != "cursor":
+        suite["checkRuns"]["totalCount"] = 40
+v = ev(mixed, "high")
+check(
+    "a cut run page on a FOREIGN app's suite is not refused",
+    v == gate.PASS,
+    "got %r -- a foreign suite's truncation must not become a false 'cannot tell'" % v,
+)
+
+# A check suite whose app GitHub does not name is skipped, not crashed on.
+v = ev(pr(contexts=[check_run()]), "high")
+noname = pr(contexts=[check_run()])
+noname["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"].append(
+    {"app": None, "checkRuns": {"totalCount": 0, "nodes": []}}
+)
+noname["commits"]["nodes"][0]["commit"]["checkSuites"]["totalCount"] = 2
+check(
+    "a suite with a null app is skipped rather than crashing the read",
+    ev(noname, "high") == v,
+    "got %r, expected %r" % (ev(noname, "high"), v),
+)
 
 check(
     "require_complete returns the nodes when the page is whole",
