@@ -651,6 +651,24 @@ def _():
     assert_clean(cfg.findings(["declared-unused"]))
 
 
+@case("cuda-torch: a CPU index set in ANOTHER Dockerfile stage does not clear this stage's install; one in the same stage does")
+def _():
+    other = ("FROM python:3.11-slim AS tools\nENV PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu\nRUN echo x\n"
+             "FROM python:3.11-slim\nRUN pip install -r requirements.txt\n"
+             "FROM python:3.11-slim AS later\nENV PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu\n")
+    assert_finding(Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": other}).findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", "Dockerfile:5", count=1)
+    same = "FROM python:3.11-slim\nENV PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu\nRUN pip install -r requirements.txt\n"
+    assert_clean(Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": same}).findings(["cuda-torch-on-cpu"]))
+
+
+@case("cuda-torch: a trailing Dockerfile comment neither hides an exec-form install nor names a CPU index")
+def _():
+    exec_c = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": 'FROM python:3.11-slim\nRUN ["pip", "install", "-r", "requirements.txt"] # nightly\n'})
+    assert_finding(exec_c.findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
+    prose = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "FROM python:3.11-slim\nRUN pip install -r requirements.txt # TODO --extra-index-url https://download.pytorch.org/whl/cpu\n"})
+    assert_finding(prose.findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
+
+
 # ── config + CLI ─────────────────────────────────────────────────────────────
 
 

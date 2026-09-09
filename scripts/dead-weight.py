@@ -1085,7 +1085,11 @@ def _file_names_index(text: str):
     return None
 
 
-DOCKER_COMMENT = re.compile(r"^\s*#.*$", re.M)
+#: Full-line comments, and trailing ` #...` comments with no quote inside (the
+#: shell sees them as comments; a JSON exec-form array followed by one would
+#: otherwise never parse, and the comment's text must not name a CPU index
+#: for the live install beside it -- Bugbot, .github#454).
+DOCKER_COMMENT = re.compile(r"^\s*#.*$|\s#[^\"'\n]*$", re.M)
 
 
 def _stage_gpu_map(text: str):
@@ -1127,7 +1131,20 @@ def _stage_gpu_map(text: str):
                 break
         return current
 
+    lookup.stages = stages
     return lookup
+
+
+def _stage_text(text: str, stages, line_no: int) -> str:
+    """The text of the stage containing `line_no` (FROM to the next FROM). ENV
+    does not survive a FROM, so a CPU index set in another stage -- before or
+    after -- says nothing about this stage's install (Bugbot, .github#454)."""
+    lines = text.splitlines()
+    starts = [start for start, _ in stages]
+    begin = max([st for st in starts if st <= line_no], default=1)
+    later = [st for st in starts if st > line_no]
+    end = min(later) - 1 if later else len(lines)
+    return "\n".join(lines[begin - 1 : end])
 
 
 def _installers_of(repo: Repo, req_basename: str, want_file_rel: str):
@@ -1143,7 +1160,7 @@ def _installers_of(repo: Repo, req_basename: str, want_file_rel: str):
                 continue
             for target in REQ_FLAG.findall(cmd):
                 if os.path.basename(target) == req_basename:
-                    hits.append((rel, no, cmd, file_gpu or stage_gpu(no), text))
+                    hits.append((rel, no, cmd, file_gpu or stage_gpu(no), _stage_text(text, stage_gpu.stages, no)))
     for rel in repo.glob(".github/workflows/*.yml", ".github/workflows/*.yaml"):
         for job_start, job_text, context in _workflow_jobs(repo.text(rel)):
             gpu = any(GPU_HINT.search(m.group(1)) for m in RUNS_ON.finditer(job_text))
