@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import ast
 import base64
+import contextlib
 import copy
 import importlib.util
+import io
 import inspect
 import inspect as _inspect
 import json
@@ -2048,12 +2050,18 @@ record(
 # A version_file with no publish_paths cannot be audited and breaks the gate too:
 # fail closed rather than derive an empty expectation that agrees with any caller.
 stub(_train_stub("repos:\n  - name: cli\n    version_file: VERSION\n"))
+_err = io.StringIO()
 try:
-    guard.load_release_train("acme")
+    with contextlib.redirect_stderr(_err):
+        guard.load_release_train("acme")
 except SystemExit as exc:
-    record(exc.code == 2,
+    # exit 2 alone is not enough: `die` ALWAYS exits 2, so the stub's misroute
+    # path (GhError -> die) passes this test for the wrong reason and a renamed
+    # TRAIN_FILE would too. Assert the SPECIFIC refusal so the test pins THIS
+    # branch (@LukasWodka on .github#447).
+    record(exc.code == 2 and "no usable `publish_paths`" in _err.getvalue(),
            "load_release_train: version_file without publish_paths fails closed",
-           f"SystemExit({exc.code})")
+           f"SystemExit({exc.code}) stderr={_err.getvalue()!r}")
 else:
     record(False,
            "load_release_train: version_file without publish_paths fails closed",
@@ -2062,12 +2070,14 @@ else:
 # An empty publish_paths string is the same malformation, not a repo with nothing
 # published.
 stub(_train_stub("repos:\n  - name: cli\n    version_file: VERSION\n    publish_paths: '   '\n"))
+_err = io.StringIO()
 try:
-    guard.load_release_train("acme")
+    with contextlib.redirect_stderr(_err):
+        guard.load_release_train("acme")
 except SystemExit as exc:
-    record(exc.code == 2,
+    record(exc.code == 2 and "no usable `publish_paths`" in _err.getvalue(),
            "load_release_train: empty publish_paths fails closed",
-           f"SystemExit({exc.code})")
+           f"SystemExit({exc.code}) stderr={_err.getvalue()!r}")
 else:
     record(False,
            "load_release_train: empty publish_paths fails closed",

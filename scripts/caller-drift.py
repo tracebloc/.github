@@ -1083,6 +1083,17 @@ def load_release_train(org: str) -> "dict[str, dict]":
     this: repos.yml is PRIVATE and a reusable runs with the caller repo's token
     (see version-bump-gate.yml's header), which is why the check lives in this
     privileged audit rather than in the gate.
+
+    RELATION TO release-train's OWN CHECK. `release-train/scripts/publish-inventory-check.sh`
+    (family 3, release-train#147 / backend#2953) compares the same caller
+    `publish-paths`/`version-file` against repos.yml, but on release-train's
+    weekly cron. That one is the periodic sweep FROM THE TRAIN'S SIDE; this one is
+    the PR-time gate FROM THE FLEET-AUDIT SIDE (it blocks a contract PR at open,
+    not a week later). They are deliberately redundant across vantage points, not
+    a second authority: repos.yml is the single source both read, so neither can
+    disagree with it without the other catching the same drift. Keep them in step
+    -- a change to what "agreement" means here belongs in both (@LukasWodka on
+    .github#447).
     """
     for ref in ("develop", None):
         path = f"repos/{org}/{TRAIN_REPO}/contents/{TRAIN_FILE}"

@@ -206,6 +206,14 @@ caller_inputs:
   code-quality.yml:
     soft-fail: false
     action-pins-soft-fail: false
+  # version-bump-gate.yml's `soft-fail` defaults TRUE (annotate-only): a caller
+  # that drops `soft-fail: false` reverts the gate to advisory, and the
+  # caller-drift check that derives version-file/publish-paths from repos.yml
+  # does NOT compare soft-fail -- so without this row nothing would catch that
+  # revert anywhere (@LukasWodka on .github#447). Measured green: all six
+  # version-bump-gate callers pass `soft-fail: false` on develop.
+  version-bump-gate.yml:
+    soft-fail: false
 
 protection_policy:
   develop:
