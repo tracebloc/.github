@@ -31,6 +31,7 @@ import importlib.util
 import io
 import contextlib
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -290,15 +291,17 @@ finally:
 # empty-green and nothing said so.
 _real_post = gate.post_status
 _real_existing_outer = gate.existing_state
+_real_latest = gate._latest_own_run
 try:
-    # HERMETIC: every case below writes, and the write decision now consults the
-    # REST combined-status endpoint. Stubbed to "no status yet" so these cases
-    # exercise the write path; the dedup itself is case (13b).
-    gate.existing_state = lambda org, name, sha: None
+    # HERMETIC: every case below writes, and the write decision now reads our run
+    # via `_latest_own_run` (the ONE read sweep_repo threads into post_status,
+    # @saadqbal on #446). Stubbed to "no check run yet" so these cases exercise
+    # the write path; the dedup itself is case (13d).
+    gate._latest_own_run = lambda org, name, sha: None
     gate.open_prs = lambda org, name: [pr(number=11, mergeable="CONFLICTING",
                                           state="DIRTY")]
 
-    def _post_fails(org, name, sha, state, description, target_url):
+    def _post_fails(org, name, sha, state, description, target_url, existing=None):
         raise gate.CD.GhError(403, "resource not accessible")
 
     gate.post_status = _post_fails
@@ -315,7 +318,7 @@ try:
     # And the happy path: the sha, state and context actually reach the API layer.
     seen = {}
 
-    def _post_ok(org, name, sha, state, description, target_url):
+    def _post_ok(org, name, sha, state, description, target_url, existing=None):
         seen.update(sha=sha, state=state, description=description)
 
     gate.post_status = _post_ok
@@ -354,67 +357,120 @@ try:
     check("an undetermined PR is ALSO a run-level error",
           any("NOT judged" in e for e in errors), "got %r" % (errors,))
 
-    # --- (13b) AN UNCHANGED STATUS IS NOT REWRITTEN --------------------------
+    # --- (13b) AN UNCHANGED CHECK RUN IS NOT REWRITTEN -----------------------
     #
-    # GitHub caps statuses at 1000 per sha AND context. A 30-minute sweep is 48
-    # writes a day onto an unchanged head, so a PR left open three weeks would
-    # exhaust the cap and every later write would 422 -- the gate going silent on
-    # exactly the stalest PRs. So a write happens only when it changes something.
+    # Each POST creates a NEW check run, so re-posting the same verdict every 30
+    # minutes onto an unchanged head would pile up hundreds of identical runs. So
+    # a write happens only when it changes something, which means reading the
+    # current verdict off the head first.
     ours = gate.CONTEXT
-    # THE REAL FUNCTION, not the None-returning stub installed above for the
-    # write-path cases -- calling the stub here would assert nothing at all.
+    # THE REAL FUNCTIONS, not the None-returning stub installed above for the
+    # write-path cases -- calling the stub here would assert nothing at all. The
+    # direct existing_state / post_status cases below drive the real read chain
+    # (existing_state -> _latest_own_run -> gh_json) with gh_json stubbed, so the
+    # real `_latest_own_run` is restored here; (13d) re-stubs it for the sweep.
     _real_existing = _real_existing_outer
+    gate._latest_own_run = _real_latest
     _real_ghjson = gate.CD.gh_json
 
-    # existing_state reads the REST combined-status endpoint, NOT
-    # `statusCheckRollup` -- the rollup resolves `commit.status` in GraphQL, which
-    # a token without `actions: read` is refused on a private repo (Bugbot, #359).
-    # The endpoint it must call is pinned here, because switching back to the
-    # rollup would break every private repo in the org while passing every other
-    # case in this file.
+    # existing_state reads the REST CHECK-RUNS endpoint (backend#3242), NEVER a
+    # commit-status source: not `/commits/{sha}/status` and not `statusCheckRollup`.
+    # Both of those resolve legacy commit statuses, which need `statuses: read` --
+    # the scope this gate's App does not hold and the whole reason the commit-status
+    # design never ran. The endpoint it must call is pinned here, because switching
+    # back to a status source would reintroduce the mint that was refused fleet-wide.
     _asked = []
 
-    def _combined(entries):
+    def _runs(entries):
         def _fake(args):
             _asked.append(args)
-            return {"statuses": entries}
+            return {"check_runs": entries}
         return _fake
 
+    def _run(name=ours, status="completed", conclusion="success", rid=1):
+        return {"name": name, "status": status, "conclusion": conclusion, "id": rid}
+
     try:
-        gate.CD.gh_json = _combined([{"context": ours, "state": "success"}])
-        check("existing_state reads our context's state",
+        gate.CD.gh_json = _runs([_run(conclusion="success")])
+        check("existing_state reads our check run's state",
               _real_existing("tracebloc", "x", "abc") == "success",
               "got %r" % (_real_existing("tracebloc", "x", "abc"),))
-        check("existing_state calls the REST combined-status endpoint on the sha",
-              any("repos/tracebloc/x/commits/abc/status" in " ".join(a)
+        check("existing_state calls the REST check-runs endpoint on the sha",
+              any("repos/tracebloc/x/commits/abc/check-runs" in " ".join(a)
                   for a in _asked),
               "asked %r" % (_asked,))
+        # The METHOD is part of the contract, not just the endpoint string: `gh
+        # api` POSTs the instant any `-f` is passed, and there is no POST route on
+        # check-runs, so a read carrying `-f` MUST also carry `--method GET` or it
+        # 404s and the whole dedup silently dies (@saadqbal on #446). Assert it on
+        # every `api` read that passes request params.
+        for a in _asked:
+            if "api" in a and any(t == "-f" for t in a):
+                check("an api read carrying -f is forced to GET (never POSTs)",
+                      "--method" in a and a[a.index("--method") + 1] == "GET",
+                      "read used a non-GET method: %r" % (a,))
         check("existing_state does NOT use statusCheckRollup",
               not any("statusCheckRollup" in " ".join(a) for a in _asked),
               "asked %r" % (_asked,))
+        check("existing_state does NOT read the commit-status endpoint",
+              not any("/commits/abc/status" in " ".join(a) for a in _asked),
+              "asked %r" % (_asked,))
 
-        # The fold: REST answers lower case, GraphQL upper. Defensive today, but an
-        # unfolded compare silently disables the dedup and everything still works.
-        gate.CD.gh_json = _combined([{"context": ours, "state": "SUCCESS"}])
-        check("existing_state folds case, so an upper-case state still matches",
+        # A `failure` conclusion reads back as failure.
+        gate.CD.gh_json = _runs([_run(conclusion="failure")])
+        check("existing_state reads a failure conclusion",
+              _real_existing("tracebloc", "x", "abc") == "failure",
+              "got %r" % (_real_existing("tracebloc", "x", "abc"),))
+
+        # An in_progress run (no conclusion yet) is our `pending`, so an
+        # undetermined PR that already carries one is not rewritten.
+        gate.CD.gh_json = _runs([_run(status="in_progress", conclusion=None)])
+        check("an in_progress check run reads back as pending",
+              _real_existing("tracebloc", "x", "abc") == "pending",
+              "got %r" % (_real_existing("tracebloc", "x", "abc"),))
+
+        # THE CURRENT VERDICT IS THE NEWEST RUN BY ID. A stale earlier run must not
+        # win, or a resolved conflict would read as still-failing forever.
+        gate.CD.gh_json = _runs([_run(conclusion="failure", rid=1),
+                                 _run(conclusion="success", rid=2)])
+        check("existing_state takes the newest run by check-run id",
               _real_existing("tracebloc", "x", "abc") == "success",
               "got %r" % (_real_existing("tracebloc", "x", "abc"),))
 
-        gate.CD.gh_json = _combined([{"context": "other", "state": "success"}])
-        check("existing_state is None when our context is absent",
+        # NEWEST-WINS HOLDS FOR A PENDING RUN TOO: a fresh in_progress run
+        # (rid=2) posted over an older completed one (rid=1) reads back as
+        # `pending`, so a re-opened conflict is not masked by the stale verdict.
+        # (`filter=latest` already returns the in_progress run per name -- the
+        # newest-by-id pick is what selects it here, measured on the live API by
+        # @LukasWodka on #453; there was no orphaned-sibling bug to fix.)
+        gate.CD.gh_json = _runs([_run(conclusion="success", rid=1),
+                                 _run(status="in_progress", conclusion=None, rid=2)])
+        check("existing_state takes a newer in_progress run over an older completed one",
+              _real_existing("tracebloc", "x", "abc") == "pending",
+              "got %r" % (_real_existing("tracebloc", "x", "abc"),))
+
+        # The fold: REST answers lower case. Defensive today, but an unfolded
+        # compare silently disables the dedup and everything still works.
+        gate.CD.gh_json = _runs([_run(conclusion="SUCCESS")])
+        check("existing_state folds case, so an upper-case conclusion still matches",
+              _real_existing("tracebloc", "x", "abc") == "success",
+              "got %r" % (_real_existing("tracebloc", "x", "abc"),))
+
+        gate.CD.gh_json = _runs([_run(name="other", conclusion="success")])
+        check("existing_state is None when our check run is absent",
               _real_existing("tracebloc", "x", "abc") is None,
               "got %r" % (_real_existing("tracebloc", "x", "abc"),))
 
-        gate.CD.gh_json = _combined([])
-        check("existing_state is None on a head with no statuses",
+        gate.CD.gh_json = _runs([])
+        check("existing_state is None on a head with no check runs",
               _real_existing("tracebloc", "x", "abc") is None,
               "got %r" % (_real_existing("tracebloc", "x", "abc"),))
 
         # AN UNREADABLE CURRENT STATE MUST PRODUCE A WRITE, not a skip. Writing a
-        # status that was already right wastes one of the 1000; skipping one that
+        # check run that was already right costs one extra run; skipping one that
         # was needed leaves the PR reading empty-green.
         def _read_fails(args):
-            raise gate.CD.GhError(502, "status read exploded")
+            raise gate.CD.GhError(502, "check-runs read exploded")
 
         gate.CD.gh_json = _read_fails
         check("an unreadable current state is None, so the write goes ahead",
@@ -423,10 +479,60 @@ try:
     finally:
         gate.CD.gh_json = _real_ghjson
 
-    # From here the lookup is stubbed at the function, so the sweep cases below
-    # exercise the SKIP/WRITE decision rather than the endpoint again.
+    # --- (13c) post_status UPDATES the one run in place, CREATEs only when absent -
+    #
+    # Check runs APPEND, and statusCheckRollup (what branch protection reads) is
+    # worst-of across EVERY same-name run on the sha (backend#3242, Bugbot). A
+    # fresh POST can never clear an earlier failure, and an in_progress POST left
+    # uncompleted keeps the rollup pending forever. So post_status must PATCH the
+    # run it already has and POST only when there is none. Exercises the REAL
+    # post_status via a stubbed gh/gh_json.
+    _cg_gh = gate.CD.gh
+    _cg_ghjson = gate.CD.gh_json
+    try:
+        cap = {}
+        gate.CD.gh = lambda args: cap.__setitem__("args", list(args))
+
+        # A run already exists -> PATCH repos/.../check-runs/<id>, never a new POST.
+        gate.CD.gh_json = lambda args: {"check_runs": [
+            {"name": gate.CONTEXT, "id": 4242, "status": "completed",
+             "conclusion": "failure"}]}
+        _real_post("tracebloc", "x", "abc", "success", "resolved", None)
+        a = cap.get("args") or []
+        check("post_status PATCHes when our run already exists",
+              "PATCH" in a and "repos/tracebloc/x/check-runs/4242" in a,
+              "got %r" % (a,))
+        check("the in-place update carries the new conclusion",
+              "conclusion=success" in a, "got %r" % (a,))
+        check("the update does NOT append a second run",
+              "POST" not in a and "head_sha=abc" not in a, "got %r" % (a,))
+
+        # No run yet -> POST a fresh one carrying name + head_sha.
+        cap.clear()
+        gate.CD.gh_json = lambda args: {"check_runs": []}
+        _real_post("tracebloc", "x", "abc", "failure", "conflict", None)
+        a = cap.get("args") or []
+        check("post_status POSTs a new run when none exists yet",
+              "POST" in a and "repos/tracebloc/x/check-runs" in a
+              and "head_sha=abc" in a, "got %r" % (a,))
+    finally:
+        gate.CD.gh = _cg_gh
+        gate.CD.gh_json = _cg_ghjson
+
+    # From here the lookup is stubbed at `_latest_own_run` -- the ONE read
+    # `sweep_repo` now makes and threads into `post_status` (@saadqbal on #446) --
+    # so the sweep cases below exercise the SKIP/WRITE decision rather than the
+    # endpoint again.
+    def _run_for_state(value):
+        # A synthetic run whose folded state == `value`; None -> no run.
+        if value is None:
+            return None
+        if value == "pending":
+            return {"name": ours, "status": "in_progress", "conclusion": None, "id": 1}
+        return {"name": ours, "status": "completed", "conclusion": value, "id": 1}
+
     def with_existing(value, **kw):
-        gate.existing_state = lambda org, name, sha: value
+        gate._latest_own_run = lambda org, name, sha: _run_for_state(value)
         return pr(**kw)
 
     # unchanged -> no write
@@ -468,7 +574,7 @@ try:
                                        sleep_for=0.0, dry_run=False)
     check("a head with no status of ours yet gets one written",
           seen.get("state") == "failure", "got %r" % (seen,))
-    gate.existing_state = _real_existing
+    gate._latest_own_run = _real_latest
 
     # --- (14) a PR with no head sha cannot be written, and says so ----------
     gate.open_prs = lambda org, name: [
@@ -483,6 +589,7 @@ finally:
     gate.post_status = _real_post
     gate.open_prs = _real_open
     gate.existing_state = _real_existing_outer
+    gate._latest_own_run = _real_latest
 
 # --- (15) exit codes ---------------------------------------------------------
 #
@@ -494,8 +601,9 @@ _real_inv = gate.CD.load_inventory
 try:
     gate.CD.load_inventory = lambda path: {"repos": {"x": {}}}
     gate.post_status = lambda *a, **k: None
-    # main() writes, so the dedup lookup would reach the network without this.
-    gate.existing_state = lambda org, name, sha: None
+    # main() writes, so the dedup lookup (`_latest_own_run`) would reach the
+    # network without this.
+    gate._latest_own_run = lambda org, name, sha: None
 
     def run(prs):
         gate.open_prs = lambda org, name: prs
@@ -544,6 +652,7 @@ finally:
     gate.post_status = _real_post
     gate.CD.load_inventory = _real_inv
     gate.existing_state = _real_existing_outer
+    gate._latest_own_run = _real_latest
 
 # --- (16) the PR-list cap is a refusal, not a partial sweep ------------------
 _real_gh = gate.CD.gh
@@ -588,9 +697,10 @@ finally:
 _WF = ROOT / ".github" / "workflows" / "conflict-gate.yml"
 try:
     import yaml  # noqa: E402
-    _wf = yaml.safe_load(_WF.read_text(encoding="utf-8"))
+    _raw = _WF.read_text(encoding="utf-8")
+    _wf = yaml.safe_load(_raw)
 except Exception as _exc:  # noqa: BLE001 - unreadable is a finding, not a skip
-    _wf = None
+    _raw, _wf = "", None
     check("conflict-gate.yml is readable YAML", False, "got %r" % (_exc,))
 
 if _wf is not None:
@@ -611,33 +721,62 @@ if _wf is not None:
     # quietly reintroducing the bug.
     check("the workflow is NOT triggered by pull_request",
           "pull_request" not in _on, "on: %r" % (sorted(_on),))
-    check("the workflow has a trigger that fires without a merge ref",
-          "schedule" in _on, "on: %r" % (sorted(_on),))
+
+    # THE SCHEDULE IS PAUSED, and the pause is pinned (backend#3468). Every
+    # scheduled run from 2026-08-27 to 2026-09-09 (534 of them, 0 successes) died
+    # at the token mint with HTTP 422: the App's installation grants neither
+    # `statuses` (what the mint asked for until backend#3242) nor `checks` (what
+    # it asks for now -- scheduled run 34333719757, with the `permission-checks:
+    # write` mint in, 422'd the same way and the Sweep never ran). A cron that
+    # cannot start is ~48 red runs a day marking nothing, so the trigger is off
+    # until an org admin grants the App Checks: Read and write and one dispatched
+    # run reaches Sweep. Two assertions, because they fail
+    # in different directions: the first catches someone re-arming the cron before
+    # the App can honour it (the suite reddens, which is the point -- re-arming is
+    # a deliberate edit here, in the same PR); the second catches the commented
+    # block being deleted outright, which would turn "paused" into "gone" and lose
+    # the cadence and its rationale with it.
+    check("the schedule is PAUSED: no `schedule` trigger is live while the App "
+          "lacks checks: write",
+          "schedule" not in _on, "on: %r" % (sorted(_on),))
+    check("the paused schedule is kept as a commented block, so re-arming is an "
+          "uncomment",
+          re.search(r"^\s*#\s*schedule:\s*$", _raw, re.M) is not None
+          and re.search(r"^\s*#\s*-\s*cron:\s*\S", _raw, re.M) is not None,
+          "no commented `# schedule:` / `#   - cron:` pair in the workflow")
     check("the workflow can be run on demand",
           "workflow_dispatch" in _on, "on: %r" % (sorted(_on),))
 
-    # A sweep cancelled mid-run leaves the statuses it had not reached stale,
+    # A sweep cancelled mid-run leaves the check runs it had not reached stale,
     # including `success` rows it was about to clear.
     check("the sweep is not cancelled in progress",
           (_wf.get("concurrency") or {}).get("cancel-in-progress") is False,
           "got %r" % (_wf.get("concurrency"),))
 
-    # The token must be able to WRITE statuses, or every sweep reports findings it
-    # cannot act on -- green run, no red row, the fail-open intact.
+    # The token must be able to WRITE check runs, or every sweep reports findings
+    # it cannot act on -- green run, no red row, the fail-open intact. It is
+    # `checks: write` and NOT `statuses: write` deliberately (backend#3242): the
+    # App's installation does not grant `statuses`, so a `permission-statuses`
+    # mint is refused before the sweep can run. Pinning `checks` here is what
+    # stops a well-meaning "shouldn't a conflict be a commit status?" edit from
+    # reintroducing the mint that never worked.
     _mint = [s for s in _steps
              if "create-github-app-token" in (s.get("uses") or "")]
     check("the workflow mints a token", len(_mint) == 1, "got %d" % (len(_mint),))
     _with = (_mint[0].get("with") if _mint else {}) or {}
-    check("the mint asks for statuses: write",
-          _with.get("permission-statuses") == "write",
+    check("the mint asks for checks: write",
+          _with.get("permission-checks") == "write",
+          "got %r" % (_with.get("permission-checks"),))
+    check("the mint does NOT ask for statuses (the scope the App cannot grant)",
+          "permission-statuses" not in _with,
           "got %r" % (_with.get("permission-statuses"),))
     check("the mint asks for pull-requests: read",
           _with.get("permission-pull-requests") == "read",
           "got %r" % (_with.get("permission-pull-requests"),))
-    # Scoped, not broad: this job reads PRs and writes statuses, nothing else.
+    # Scoped, not broad: this job reads PRs and writes check runs, nothing else.
     check("the mint asks for nothing beyond those two permissions",
           sorted(k for k in _with if k.startswith("permission-"))
-          == ["permission-pull-requests", "permission-statuses"],
+          == ["permission-checks", "permission-pull-requests"],
           "got %r" % (sorted(k for k in _with if k.startswith("permission-")),))
 
 if FAILURES:

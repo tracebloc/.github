@@ -272,6 +272,41 @@ check(
     refs_of("chore(v2): bump something") == [],
     "%r" % (refs_of("chore(v2): bump something"),),
 )
+# A ZERO-PADDED BARE SCOPE IS A DOCUMENT NUMBER, NOT A TICKET (backend#3357).
+# MEASURED on the open rfcs PRs, 2026-09-08: their scope is the RFC document
+# number, four-digit zero-padded by convention, and a GitHub issue number never
+# carries a leading zero. Reading `0071` as ticket #71 is what left rfcs#78 red
+# with a correct body -- see the end-to-end case below.
+check(
+    "a zero-padded scope is NOT a ticket (rfcs#78 `chore(0071)`, MEASURED)",
+    refs_of("chore(0071): Adopted — epic tracebloc/backend#3289") == [],
+    "%r" % (refs_of("chore(0071): Adopted — epic tracebloc/backend#3289"),),
+)
+check(
+    "another zero-padded RFC scope names no ticket (rfcs#85 `docs(0077)`, MEASURED); "
+    "its `Epic backend#3421` is loose prose, unparenthesised, so also not read",
+    refs_of("docs(0077): adopt — Status → Adopted, Epic backend#3421") == [],
+    "%r" % (refs_of("docs(0077): adopt — Status → Adopted, Epic backend#3421"),),
+)
+# THE RECALL COST IS ZERO ON A REAL TICKET, which is the whole bargain: an
+# unpadded scope, `#N` or not, still parses. A repo that genuinely meant #71
+# writes `fix(71)`, never `fix(0071)`.
+check(
+    "an unpadded bare scope still parses (the narrowing costs no real ticket)",
+    refs_of("fix(71): x") == [(None, None, 71)] and refs_of("fix(#71): x") == [(None, None, 71)],
+    "%r / %r" % (refs_of("fix(71): x"), refs_of("fix(#71): x")),
+)
+# The dedup key is the integer, so a leading zero must not sneak a ref back in by
+# some OTHER path either: `(0071)` is not a `(#N)` parenthetical (no `#`), and
+# `#0071` in a parenthetical is the one place a padded number could still be an
+# explicit citation -- left alone, because a parenthetical is a deliberate `#`
+# reference, not a conventional-commit scope. Pinned so a future widening of the
+# scope rule to the parentheticals is a conscious change, not a silent one.
+check(
+    "a padded bare parenthetical `(0071)` is not read as a ticket (no `#`)",
+    refs_of("chore(rfcs): reconcile (0071)") == [],
+    "%r" % (refs_of("chore(rfcs): reconcile (0071)"),),
+)
 check(
     "a title with no conventional-commit prefix at all names nothing",
     refs_of("just some prose about a change") == [],
@@ -1131,6 +1166,47 @@ check(
     "the report names the derived keyword it searched the body for",
     any("Part of" in line for line in lines),
     "%r" % (lines,),
+)
+
+# ---------------------------------------------------------------------------
+# 7c. END TO END on the rfcs#78 shape backend#3357 was filed about, verbatim.
+#     Title `chore(0071): ...`, base = the repo's default branch, no closing
+#     link, body `Part of tracebloc/backend#3289` -- the RFC-adoption chore is
+#     truthfully PART OF its epic and closes nothing. Before the fix, `0071` was
+#     read as ticket #71, so the gate demanded a link to #71 the PR neither has
+#     nor should have, and its only remedies were a FALSE `Closes #71` (the wrong
+#     issue) or deleting `(0071)` from the title (the RFC traceability). It must
+#     now PASS: the scope names no ticket, and nothing is claimed the graph lacks.
+# ---------------------------------------------------------------------------
+RFC_TITLE = "chore(0071): Adopted — epic tracebloc/backend#3289"
+RFC_BODY = (
+    "Flips RFC-0071 to **Adopted** (2026-09-07), and moves the index row.\n\n"
+    "Part of tracebloc/backend#3289 — the epic stays open; this PR only records "
+    "adoption.\n"
+)
+_rfc_pr = pr(RFC_TITLE, links=[], body=RFC_BODY)
+_rfc_pr["baseRefName"] = "main"  # rfcs' default branch, so the inert scan is armed
+verdict, lines = ev(_rfc_pr, default_branch="main")
+check(
+    "the RFC-adoption chore that is `Part of` its epic PASSES (rfcs#78, backend#3357)",
+    verdict == gate.NOTHING_NAMED,
+    "%s %r" % (verdict, lines),
+)
+# AND IT PASSES FOR THE RIGHT REASON: the padded scope named no ticket, so this is
+# not a case of a #71 that happened to be satisfied. A regression that re-read
+# `0071` as #71 would flip this to FAIL, naming #71 -- the exact defect.
+check(
+    "and it is the SCOPE that names nothing, so no phantom #71 is asserted",
+    gate.parse_title(RFC_TITLE) == [] and not any("#71" in line for line in lines),
+    "%r / %r" % (gate.parse_title(RFC_TITLE), lines),
+)
+# THE UNPADDED NEIGHBOUR STILL FIRES, so the fix is a narrowing and not a hole: a
+# real `fix(71)` that references nothing is still the defect this gate exists for.
+_v71, _l71 = ev(pr("fix(71): summary", links=[]))
+check(
+    "an UNPADDED `fix(71)` with no reference still FAILS (the narrowing is not a hole)",
+    _v71 == gate.FAIL,
+    "%s %r" % (_v71, _l71),
 )
 
 # ---------------------------------------------------------------------------
