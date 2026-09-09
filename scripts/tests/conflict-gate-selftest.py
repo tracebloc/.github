@@ -710,19 +710,22 @@ if _wf is not None:
     check("the workflow is NOT triggered by pull_request",
           "pull_request" not in _on, "on: %r" % (sorted(_on),))
 
-    # THE SCHEDULE IS PAUSED, and the pause is pinned. Every scheduled run from
-    # 2026-08-27 to 2026-09-09 (534 of them, 0 successes) died at the token mint:
-    # the App's installation does not grant `statuses`, so the `statuses: write`
-    # request below is refused with HTTP 422 and the Sweep never runs. A cron that
+    # THE SCHEDULE IS PAUSED, and the pause is pinned (backend#3468). Every
+    # scheduled run from 2026-08-27 to 2026-09-09 (534 of them, 0 successes) died
+    # at the token mint with HTTP 422: the App's installation grants neither
+    # `statuses` (what the mint asked for until backend#3242) nor `checks` (what
+    # it asks for now -- scheduled run 34333719757, with the `permission-checks:
+    # write` mint in, 422'd the same way and the Sweep never ran). A cron that
     # cannot start is ~48 red runs a day marking nothing, so the trigger is off
-    # until an org admin grants the permission. Two assertions, because they fail
+    # until an org admin grants the App Checks: Read and write and one dispatched
+    # run reaches Sweep. Two assertions, because they fail
     # in different directions: the first catches someone re-arming the cron before
     # the App can honour it (the suite reddens, which is the point -- re-arming is
     # a deliberate edit here, in the same PR); the second catches the commented
     # block being deleted outright, which would turn "paused" into "gone" and lose
     # the cadence and its rationale with it.
     check("the schedule is PAUSED: no `schedule` trigger is live while the App "
-          "lacks statuses",
+          "lacks checks: write",
           "schedule" not in _on, "on: %r" % (sorted(_on),))
     check("the paused schedule is kept as a commented block, so re-arming is an "
           "uncomment",

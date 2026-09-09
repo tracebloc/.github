@@ -238,12 +238,14 @@ WORKFLOW_MUTATIONS = [
      '  workflow_dispatch: {}',
      '  pull_request:\n  workflow_dispatch: {}'),
 
-    # THE SCHEDULE IS PAUSED (2026-09-09) because the App does not hold `statuses`
-    # and every scheduled run 422'd at the mint. The suite pins the pause from both
-    # sides, so both regressions are mutated here: re-arming the cron before the
-    # permission exists, and deleting the commented block so the pause quietly
-    # becomes a removal.
-    ("the schedule is re-armed while the App still cannot write statuses",
+    # THE SCHEDULE IS PAUSED (2026-09-09, backend#3468) because the App's
+    # installation grants neither `statuses` nor `checks`, and every scheduled run
+    # 422'd at the mint -- run 34333719757 included, made after the mint moved to
+    # `permission-checks: write`. The suite pins the pause from both sides, so
+    # both regressions are mutated here: re-arming the cron before the permission
+    # exists, and deleting the commented block so the pause quietly becomes a
+    # removal.
+    ("the schedule is re-armed while the App still cannot write check runs",
      '  # schedule:\n  #   - cron: "*/30 * * * *"',
      '  schedule:\n    - cron: "*/30 * * * *"'),
 
