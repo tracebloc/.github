@@ -349,6 +349,7 @@ class Repo:
         self.excludes = list(DEFAULT_EXCLUDES) + list(excludes)
         self.files = self._tracked()
         self._text = {}
+        self.unreadable = {}  # rel -> why; reported, never silently empty
 
     def _tracked(self):
         try:
@@ -386,11 +387,15 @@ class Repo:
         return out
 
     def text(self, rel: str) -> str:
+        """The file's text, or "" -- and the path recorded in `unreadable`, which
+        main() turns into a `cannot-read` finding. An unreadable requirements
+        file must not read as a file with no pins (Bugbot, .github#454)."""
         if rel not in self._text:
             try:
                 self._text[rel] = (self.root / rel).read_text(encoding="utf-8", errors="replace")
-            except OSError:
+            except OSError as exc:
                 self._text[rel] = ""
+                self.unreadable[rel] = "%s: %s" % (type(exc).__name__, exc.strerror or exc)
         return self._text[rel]
 
 
@@ -957,12 +962,20 @@ def _joined_commands(text: str):
         yield start, " ".join(buf)
 
 
+def _strip_req_comment(raw: str) -> str:
+    """A requirements line without its trailing comment. pip treats ` #` (and a
+    leading `#`) as a comment; a `+cpu` or an index URL inside one is prose."""
+    if raw.lstrip().startswith("#"):
+        return ""
+    return raw.split(" #", 1)[0].split("\t#", 1)[0]
+
+
 def _torch_pin_lines(repo: Repo, rel: str):
     out = []
     for d in parse_requirements(repo, rel):
         if normalise(d.dist) != "torch":
             continue
-        raw = d.raw
+        raw = _strip_req_comment(d.raw)
         if "+cpu" in raw:
             continue
         marker = raw.split(";", 1)[1] if ";" in raw else ""
@@ -975,9 +988,12 @@ def _torch_pin_lines(repo: Repo, rel: str):
 
 
 def _file_names_index(text: str):
-    if GPU_INDEX.search(text):
+    """The wheel index a requirements file names on an OPTION line (comments
+    stripped): "gpu", "cpu" or None. A URL in a comment names nothing."""
+    options = "\n".join(_strip_req_comment(ln) for ln in text.splitlines() if REQ_OPTION.match(_strip_req_comment(ln)))
+    if GPU_INDEX.search(options):
         return "gpu"
-    if CPU_INDEX.search(text):
+    if CPU_INDEX.search(options):
         return "cpu"
     return None
 
@@ -1009,8 +1025,12 @@ def _installers_of(repo: Repo, req_basename: str, want_file_rel: str):
     return hits
 
 
-YAML_COMMENT = re.compile(r"^\s*#.*$", re.M)
+#: Full-line comments, and trailing ` #...` comments that contain no quote
+#: (a `#` inside a quoted string or a `${{ }}` expression is not a comment; a
+#: trailing comment with a quote in it is left alone rather than guessed at).
+YAML_COMMENT = re.compile(r"^\s*#.*$|\s#[^\"'\n]*$", re.M)
 JOB_HEADER = re.compile(r"^  ([A-Za-z_][\w-]*):\s*$")
+JOBS_LINE = re.compile(r"^jobs:\s*$")
 
 
 def _workflow_jobs(text: str):
@@ -1024,7 +1044,7 @@ def _workflow_jobs(text: str):
     lines = YAML_COMMENT.sub("", text).splitlines()
     in_jobs, starts = False, []
     for i, line in enumerate(lines):
-        if re.match(r"^jobs:\s*$", line):
+        if JOBS_LINE.match(line):
             in_jobs = True
             continue
         if in_jobs and line and not line.startswith(" "):
@@ -1132,6 +1152,9 @@ def main(argv=None):
         {"declared-unused": check_declared_unused,
          "full-python-base": check_full_python_base,
          "cuda-torch-on-cpu": check_cuda_torch_on_cpu}[check](repo, cfg, findings)
+    for rel, why in sorted(repo.unreadable.items()):
+        findings.append(Finding("cannot-read", rel, 1,
+                                "could not be read (%s), so whatever it declares is unknown; fix the permissions or `exclude:` it" % why))
     findings = report(findings, args)
     if findings and not args.soft_fail:
         return 1

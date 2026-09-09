@@ -168,6 +168,27 @@ MUTATIONS = [
     ("YAML comments count as workflow context",
      '    lines = YAML_COMMENT.sub("", text).splitlines()',
      "    lines = text.splitlines()"),
+
+    # --- second review round on .github#454 ----------------------------------
+    ("a trailing YAML comment hides the `jobs:` line and every job with it",
+     'JOBS_LINE = re.compile(r"^jobs:\\s*$")',
+     'JOBS_LINE = re.compile(r"^jobs: # the jobs$")'),
+
+    ("trailing YAML comments stop being blanked (a `# gpu` remark makes a GPU job)",
+     'YAML_COMMENT = re.compile(r"^\\s*#.*$|\\s#[^\\"\'\\n]*$", re.M)',
+     'YAML_COMMENT = re.compile(r"^\\s*#.*$", re.M)'),
+
+    ("a `+cpu` in a requirements comment clears the pin",
+     '        raw = _strip_req_comment(d.raw)\n        if "+cpu" in raw:',
+     '        raw = d.raw\n        if "+cpu" in raw:'),
+
+    ("an index URL in a requirements comment names the file's index",
+     '    options = "\\n".join(_strip_req_comment(ln) for ln in text.splitlines() if REQ_OPTION.match(_strip_req_comment(ln)))',
+     '    options = text'),
+
+    ("an unreadable file reads as empty",
+     '                self.unreadable[rel] = "%s: %s" % (type(exc).__name__, exc.strerror or exc)',
+     '                pass'),
 ]
 
 

@@ -485,6 +485,39 @@ def _():
     assert_clean(Fixture({"requirements.txt": REQ_TORCH, ".github/workflows/t.yml": same_job}).findings(["cuda-torch-on-cpu"]))
 
 
+@case("cuda-torch: trailing YAML comments on `jobs:`, a job id or `runs-on:` neither hide the job nor make it GPU")
+def _():
+    wf = ("name: t\non: [push]\njobs: # the jobs\n"
+          "  cpu: # a cpu job\n    runs-on: ubuntu-latest # gpu runners come later\n    steps:\n      - run: |\n          pip install -r requirements.txt\n")
+    f = Fixture({"requirements.txt": REQ_TORCH, ".github/workflows/t.yml": wf}).findings(["cuda-torch-on-cpu"])
+    assert_finding(f, "cuda-torch-on-cpu", ".github/workflows/t.yml:8", count=1)
+
+
+@case("cuda-torch: a `+cpu` or a wheel-index URL inside a requirements COMMENT is prose, not a pin or an index")
+def _():
+    commented = ("# was: torch==2.13.0+cpu\n# --extra-index-url https://download.pytorch.org/whl/cpu (disabled while we test)\n"
+                 "numpy==2.2.0\ntorch==2.13.0  # not +cpu any more\n")
+    f = Fixture({"requirements.txt": commented, "Dockerfile": DOCKER_CPU}).findings(["cuda-torch-on-cpu"])
+    assert_finding(f, "cuda-torch-on-cpu", count=1)
+    assert f[0].line == 4
+
+
+@case("an unreadable dependency file is a cannot-read finding, never an empty one")
+def _():
+    fx = Fixture({"requirements.txt": "humanize==4.9.0\n", "a.py": "import os\n"})
+    path = os.path.join(fx.dir, "requirements.txt")
+    os.chmod(path, 0)
+    try:
+        still_readable = os.access(path, os.R_OK)  # root ignores mode bits
+        rc, out = fx.main()
+    finally:
+        os.chmod(path, 0o644)
+    if still_readable:
+        return  # running as root: the file was readable after all, nothing to assert
+    assert rc == 1 and "cannot-read" in out and "requirements.txt" in out, (rc, out)
+    assert "humanize" not in out, "an unreadable file must not also be judged as if it were read"
+
+
 # ── config + CLI ─────────────────────────────────────────────────────────────
 
 
