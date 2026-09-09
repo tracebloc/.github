@@ -1183,7 +1183,7 @@ def collect_uses(node, found: "list[tuple[str, dict]]") -> None:
 
 def version_bump_input_findings(
     name: str, version_file: str, publish_paths: "str | None",
-    hits: "list[tuple[str, str, dict]]",
+    hits: "list[tuple[str, str, dict]]", caller_state: "str | None" = None,
 ) -> "list[str]":
     """Compare a repo's version-bump-gate caller inputs against repos.yml.
 
@@ -1215,9 +1215,16 @@ def version_bump_input_findings(
     finding, not a comparison: the caller cannot be made conformant against an
     absent publish set, so this repo's run reddens and the audit continues for the
     rest (@LukasWodka on #447) -- see load_release_train for why it is not a die.
+    The finding names two remedies, "add `publish_paths` or exempt the caller", so
+    `caller_state == "exempt"` must actually clear it -- otherwise the advice is a
+    lie and an exempted repo stays red forever (Bugbot on #447).
     """
     findings: "list[str]" = []
     if not isinstance(publish_paths, str) or not publish_paths.strip():
+        if caller_state == "exempt":
+            # The operator took the second remedy the finding offers: the caller is
+            # exempt, so there is no gate run to be non-conformant. Silent.
+            return []
         return [
             f"{name}: release-train/repos.yml declares `version_file: {version_file}` "
             f"but no usable `publish_paths` ({publish_paths!r}) -- its sanctioned "
@@ -2536,19 +2543,20 @@ def main() -> int:
         # inventory's required/exempt flag, so a repo that gains a version_file is
         # measured even if the inventory has not caught up. Counts in `callers`.
         train_entry = train.get(name)
+        _vbg_state = entry["callers"].get(VERSION_BUMP_GATE, (None,))[0]
         if train_entry and train_entry.get("version_file"):
             findings.extend(version_bump_input_findings(
                 name,
                 train_entry["version_file"],
                 train_entry["publish_paths"],
                 read.callers.get(VERSION_BUMP_GATE, []),
+                _vbg_state,
             ))
         else:
             # backend#2953, zero pairs (per repo): caller required but no version_file
             # in repos.yml -> nothing to compare, so fail the repo (@LukasWodka #447).
             _missing_pair = version_bump_missing_pair_finding(
-                name, train_entry,
-                entry["callers"].get(VERSION_BUMP_GATE, (None,))[0],
+                name, train_entry, _vbg_state,
             )
             if _missing_pair:
                 findings.append(_missing_pair)

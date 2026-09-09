@@ -2098,6 +2098,15 @@ for _pp in (None, "   "):
         f"vbg: version_file with no publish_paths ({_pp!r}) -> per-repo finding",
         str(_f))
 
+# ...and the finding's own advice ("or exempt the caller") must actually work: an
+# EXEMPT caller clears the strict-mode finding, a required one keeps it. Otherwise
+# an exempted repo stays red forever (Bugbot on #447).
+record(guard.version_bump_input_findings("cli", VF, None, [], "exempt") == [],
+       "vbg: an exempt caller clears the strict-mode finding", "")
+_f = guard.version_bump_input_findings("cli", VF, None, [], "required")
+record(len(_f) == 1 and "strict mode" in _f[0],
+       "vbg: a required caller keeps the strict-mode finding", str(_f))
+
 # ask 4: an `exclude-paths` glob EQUAL to a repos.yml publish glob hollows that path
 # back out of the watched set -- a finding, even though exclude-paths is otherwise
 # not compared. LukasWodka's repro: publish `src/* tokens/*`, exclude `tokens/*`
