@@ -162,8 +162,8 @@ MUTATIONS = [
      '            if base == "node" or node_used(base) or any(node_used(p) for p in PEER_OF.get(base, ())):'),
 
     ("GPU / index context is read from the whole workflow, not the job",
-     "        for job_start, job_text in _workflow_jobs(repo.text(rel)):",
-     "        for job_start, job_text in [(1, repo.text(rel))]:"),
+     "        for job_start, job_text, context in _workflow_jobs(repo.text(rel)):",
+     "        for job_start, job_text, context in [(1, repo.text(rel), repo.text(rel))]:"),
 
     ("YAML comments count as workflow context",
      '    lines = YAML_COMMENT.sub("", text).splitlines()',
