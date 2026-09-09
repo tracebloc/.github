@@ -13,7 +13,7 @@ name: Conflict gate
 # THIS IS NOT FIXABLE BY ADDING A TRIGGER. It is platform behaviour, and there is
 # no merge commit for those jobs to check out. The only signal that can reach a
 # conflicted PR is one written onto its head sha FROM OUTSIDE, which is what this
-# does: a commit status, via the Statuses API.
+# does: a check run, via the Checks API.
 #
 # MEASURED, on `model-zoo#206`, 2026-08-27, while it was DIRTY against develop:
 #   * `actions/runs?head_sha=e7465ea` -> total_count 0. Nothing dispatched.
@@ -91,7 +91,7 @@ permissions:
 
 concurrency:
   group: conflict-gate
-  # NOT cancel-in-progress. A cancelled sweep leaves the statuses it had not yet
+  # NOT cancel-in-progress. A cancelled sweep leaves the check runs it had not yet
   # written stale -- including `success` rows it was about to clear -- so a half
   # sweep is worse than a late one.
   cancel-in-progress: false
@@ -122,11 +122,18 @@ jobs:
       #
       # TWO SCOPES, AND NOTHING ELSE. This job does not read branch protection --
       # unlike bricked-prs.py it does not care what a base REQUIRES, only whether
-      # the PR conflicts -- so it needs neither `administration` nor `checks`, and
-      # it lists PRs without `--base` so it needs no branch list either.
+      # the PR conflicts -- so it needs no `administration`, and it lists PRs
+      # without `--base` so it needs no branch list either.
+      #
+      # `checks: write` AND NOT `statuses: write` (backend#3242). The signal is a
+      # check run, not a commit status. The tracebloc-release-train App's
+      # installation does not grant `statuses` at all, so the mint for
+      # `permission-statuses: write` was REFUSED before the sweep could run and
+      # this gate never executed. `checks` the App does hold, so the same
+      # red-row-on-the-PR signal is written with a scope the mint can get.
       #
       #   pull-requests: read   the open-PR list and its two mergeability fields
-      #   statuses: write       the whole point: writing the context onto the head
+      #   checks: write         the whole point: writing the check run onto the head
       - name: Mint an installation token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -135,7 +142,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           permission-pull-requests: read
-          permission-statuses: write
+          permission-checks: write
       - name: Sweep
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
