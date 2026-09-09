@@ -290,15 +290,17 @@ finally:
 # empty-green and nothing said so.
 _real_post = gate.post_status
 _real_existing_outer = gate.existing_state
+_real_latest = gate._latest_own_run
 try:
-    # HERMETIC: every case below writes, and the write decision now consults the
-    # REST check-runs endpoint. Stubbed to "no check run yet" so these cases
-    # exercise the write path; the dedup itself is case (13b).
-    gate.existing_state = lambda org, name, sha: None
+    # HERMETIC: every case below writes, and the write decision now reads our run
+    # via `_latest_own_run` (the ONE read sweep_repo threads into post_status,
+    # @saadqbal on #446). Stubbed to "no check run yet" so these cases exercise
+    # the write path; the dedup itself is case (13d).
+    gate._latest_own_run = lambda org, name, sha: None
     gate.open_prs = lambda org, name: [pr(number=11, mergeable="CONFLICTING",
                                           state="DIRTY")]
 
-    def _post_fails(org, name, sha, state, description, target_url):
+    def _post_fails(org, name, sha, state, description, target_url, existing=None):
         raise gate.CD.GhError(403, "resource not accessible")
 
     gate.post_status = _post_fails
@@ -315,7 +317,7 @@ try:
     # And the happy path: the sha, state and context actually reach the API layer.
     seen = {}
 
-    def _post_ok(org, name, sha, state, description, target_url):
+    def _post_ok(org, name, sha, state, description, target_url, existing=None):
         seen.update(sha=sha, state=state, description=description)
 
     gate.post_status = _post_ok
@@ -361,9 +363,13 @@ try:
     # a write happens only when it changes something, which means reading the
     # current verdict off the head first.
     ours = gate.CONTEXT
-    # THE REAL FUNCTION, not the None-returning stub installed above for the
-    # write-path cases -- calling the stub here would assert nothing at all.
+    # THE REAL FUNCTIONS, not the None-returning stub installed above for the
+    # write-path cases -- calling the stub here would assert nothing at all. The
+    # direct existing_state / post_status cases below drive the real read chain
+    # (existing_state -> _latest_own_run -> gh_json) with gh_json stubbed, so the
+    # real `_latest_own_run` is restored here; (13d) re-stubs it for the sweep.
     _real_existing = _real_existing_outer
+    gate._latest_own_run = _real_latest
     _real_ghjson = gate.CD.gh_json
 
     # existing_state reads the REST CHECK-RUNS endpoint (backend#3242), NEVER a
@@ -392,6 +398,16 @@ try:
               any("repos/tracebloc/x/commits/abc/check-runs" in " ".join(a)
                   for a in _asked),
               "asked %r" % (_asked,))
+        # The METHOD is part of the contract, not just the endpoint string: `gh
+        # api` POSTs the instant any `-f` is passed, and there is no POST route on
+        # check-runs, so a read carrying `-f` MUST also carry `--method GET` or it
+        # 404s and the whole dedup silently dies (@saadqbal on #446). Assert it on
+        # every `api` read that passes request params.
+        for a in _asked:
+            if "api" in a and any(t == "-f" for t in a):
+                check("an api read carrying -f is forced to GET (never POSTs)",
+                      "--method" in a and a[a.index("--method") + 1] == "GET",
+                      "read used a non-GET method: %r" % (a,))
         check("existing_state does NOT use statusCheckRollup",
               not any("statusCheckRollup" in " ".join(a) for a in _asked),
               "asked %r" % (_asked,))
@@ -490,10 +506,20 @@ try:
         gate.CD.gh = _cg_gh
         gate.CD.gh_json = _cg_ghjson
 
-    # From here the lookup is stubbed at the function, so the sweep cases below
-    # exercise the SKIP/WRITE decision rather than the endpoint again.
+    # From here the lookup is stubbed at `_latest_own_run` -- the ONE read
+    # `sweep_repo` now makes and threads into `post_status` (@saadqbal on #446) --
+    # so the sweep cases below exercise the SKIP/WRITE decision rather than the
+    # endpoint again.
+    def _run_for_state(value):
+        # A synthetic run whose folded state == `value`; None -> no run.
+        if value is None:
+            return None
+        if value == "pending":
+            return {"name": ours, "status": "in_progress", "conclusion": None, "id": 1}
+        return {"name": ours, "status": "completed", "conclusion": value, "id": 1}
+
     def with_existing(value, **kw):
-        gate.existing_state = lambda org, name, sha: value
+        gate._latest_own_run = lambda org, name, sha: _run_for_state(value)
         return pr(**kw)
 
     # unchanged -> no write
@@ -535,7 +561,7 @@ try:
                                        sleep_for=0.0, dry_run=False)
     check("a head with no status of ours yet gets one written",
           seen.get("state") == "failure", "got %r" % (seen,))
-    gate.existing_state = _real_existing
+    gate._latest_own_run = _real_latest
 
     # --- (14) a PR with no head sha cannot be written, and says so ----------
     gate.open_prs = lambda org, name: [
@@ -550,6 +576,7 @@ finally:
     gate.post_status = _real_post
     gate.open_prs = _real_open
     gate.existing_state = _real_existing_outer
+    gate._latest_own_run = _real_latest
 
 # --- (15) exit codes ---------------------------------------------------------
 #
@@ -561,8 +588,9 @@ _real_inv = gate.CD.load_inventory
 try:
     gate.CD.load_inventory = lambda path: {"repos": {"x": {}}}
     gate.post_status = lambda *a, **k: None
-    # main() writes, so the dedup lookup would reach the network without this.
-    gate.existing_state = lambda org, name, sha: None
+    # main() writes, so the dedup lookup (`_latest_own_run`) would reach the
+    # network without this.
+    gate._latest_own_run = lambda org, name, sha: None
 
     def run(prs):
         gate.open_prs = lambda org, name: prs
@@ -611,6 +639,7 @@ finally:
     gate.post_status = _real_post
     gate.CD.load_inventory = _real_inv
     gate.existing_state = _real_existing_outer
+    gate._latest_own_run = _real_latest
 
 # --- (16) the PR-list cap is a refusal, not a partial sweep ------------------
 _real_gh = gate.CD.gh

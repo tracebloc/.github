@@ -201,12 +201,14 @@ DEFAULT_RETRY_SLEEP = 2.0
 # draft hit (Bugbot, .github#359): the rollup resolves `commit.status` in GraphQL,
 # refused on a PRIVATE repo without `actions: read`. The REST check-runs list
 # touches neither commit statuses nor `commit.status`, so it is refused on neither
-# scope. It costs one GET per open PR -- ~50 per sweep across the fleet.
+# scope. It costs one GET per open PR -- ~50 per sweep across the fleet -- read
+# once per PR and threaded into the write, never re-read (@saadqbal on #446).
 #
-# THE CURRENT VERDICT IS THE NEWEST RUN BY CHECK-RUN ID. Since a fresh run is
-# posted on every change, the head can carry several of ours over its life; the
-# one with the greatest `id` is the current one. `id` is monotonic and always
-# present, unlike a `started_at` a queued run leaves null.
+# THE READ IS A GET WITH `filter=latest`. `gh api` POSTs the moment any `-f` is
+# passed, so the method is forced to GET; `filter=latest` returns the single
+# current run for our name, so the verdict does not depend on paging a 30-per-page
+# history. The greatest-`id` pick below is then only a defensive tie-break: `id`
+# is monotonic and always present, unlike a `started_at` a queued run leaves null.
 #
 # WHEN IN DOUBT, WRITE. An unreadable current state returns None, which equals no
 # state and so produces a write. Writing a check run that was already correct
@@ -320,8 +322,20 @@ def _latest_own_run(org: str, name: str, sha: str) -> "dict | None":
     the one run in place rather than append another).
     """
     try:
-        listing = CD.gh_json(["api", f"repos/{org}/{name}/commits/{sha}/check-runs",
-                              "-f", f"check_name={CONTEXT}"])
+        # `--method GET` is LOAD-BEARING: `gh api` switches to POST the instant any
+        # `-f` is passed, and there is no POST route on `/commits/{sha}/check-runs`,
+        # so the read would 404 -> GhError -> None on EVERY call, killing the dedup
+        # and forcing post_status down the CREATE branch forever (backend#3242,
+        # @saadqbal on #446). `filter=latest` makes the endpoint return the single
+        # current run per name rather than a page of history: the list is paginated
+        # (30/page) and we read one page, so without it `max(id)` could pick a stale
+        # run off page 1 once more than 30 of ours land on a head. With it there is
+        # at most one run for CONTEXT and the ordering below is only a defensive
+        # tie-break.
+        listing = CD.gh_json(["api", "--method", "GET",
+                              f"repos/{org}/{name}/commits/{sha}/check-runs",
+                              "-f", f"check_name={CONTEXT}",
+                              "-f", "filter=latest"])
     except CD.GhError:
         return None
     if not isinstance(listing, dict):
@@ -345,10 +359,17 @@ def existing_state(org: str, name: str, sha: str) -> "str | None":
     unfolded comparison silently disables the whole dedup, and that failure is
     invisible -- everything still works, it just writes every time.
     """
-    latest = _latest_own_run(org, name, sha)
-    if latest is None:
+    return _run_state_folded(_latest_own_run(org, name, sha))
+
+
+def _run_state_folded(run: "dict | None") -> "str | None":
+    """The lowercased state of an already-read run (or None). The single case
+    fold, shared by `existing_state` (which reads the run) and `sweep_repo`
+    (which reads it once and threads it into `post_status`, so the verdict costs
+    one GET, not two -- @saadqbal on #446)."""
+    if run is None:
         return None
-    state = check_run_state(latest)
+    state = check_run_state(run)
     return state.lower() if isinstance(state, str) else None
 
 
@@ -441,14 +462,22 @@ def resolve_undetermined(org: str, name: str, prs: "list[dict]", retries: int,
     return resolved
 
 
+_UNREAD = object()
+
+
 def post_status(org: str, name: str, sha: str, state: str, description: str,
-                target_url: "str | None") -> None:
+                target_url: "str | None", existing: "object" = _UNREAD) -> None:
     """Write one check run onto the head sha. Raises GhError.
 
     Named `post_status` still, and taking the same abstract `state`
     (success/failure/pending) the rest of the file speaks: only the API under it
     changed from Statuses to Checks (backend#3242). `state` is translated to a
     check-run status/conclusion here, the one place that mapping lives.
+
+    `existing` is our current run on this head, when a caller already read it
+    (`sweep_repo` does, for the dedup) -- passed down so the verdict costs one GET
+    rather than two (@saadqbal on #446). Left `_UNREAD` -> read it here, which is
+    what direct callers/tests still want.
     """
     status, conclusion = STATUS_FOR_STATE[state]
     # UPDATE our one run in place when it already exists; only CREATE when it does
@@ -459,7 +488,18 @@ def post_status(org: str, name: str, sha: str, state: str, description: str,
     # POST never completed keeps the rollup pending forever; a later `success`
     # would sit alongside them, not replace them. PATCHing the single run lets it
     # transition success<->failure<->in_progress in one slot (backend#3242, Bugbot).
-    existing = _latest_own_run(org, name, sha)
+    #
+    # PENDING PATCHES A COMPLETED RUN BACK TO in_progress WITHOUT a conclusion
+    # (STATUS_FOR_STATE["pending"] carries None), and we RELY on the check-run
+    # contract that a run is a `failure` in the rollup only while it is
+    # status=completed AND conclusion=failure: moving status to in_progress
+    # un-completes it, so its old conclusion no longer contributes and the rollup
+    # reads pending. Stated, not assumed, because it is undocumented and a future
+    # edit must re-confirm it against the live API before this gate is armed as
+    # required (@saadqbal on #446) -- an in_progress run left behind on a resolved
+    # conflict is the exact stuck-red shape this file exists to remove.
+    if existing is _UNREAD:
+        existing = _latest_own_run(org, name, sha)
     if existing is not None and existing.get("id"):
         args = ["api", "--method", "PATCH",
                 f"repos/{org}/{name}/check-runs/{existing['id']}",
@@ -510,14 +550,18 @@ def sweep_repo(org: str, name: str, retries: int, sleep_for: float,
             st["written"] = False
             continue
         # Already saying what we would say: writing again would pile another
-        # identical check run onto this head and change nothing.
-        st["existing"] = existing_state(org, name, st["sha"])
+        # identical check run onto this head and change nothing. Read our run ONCE
+        # here and thread it into post_status, so a changed verdict costs one GET,
+        # not two (@saadqbal on #446).
+        existing_run = _latest_own_run(org, name, st["sha"])
+        st["existing"] = _run_state_folded(existing_run)
         if st["existing"] == st["state"]:
             st["written"] = False
             st["unchanged"] = True
             continue
         try:
-            post_status(org, name, st["sha"], st["state"], st["description"], st["url"])
+            post_status(org, name, st["sha"], st["state"], st["description"],
+                        st["url"], existing_run)
             st["written"] = True
         except CD.GhError as exc:
             st["written"] = False

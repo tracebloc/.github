@@ -169,9 +169,9 @@ MUTATIONS = [
     # conclusion never matches and the dedup silently does nothing -- invisible,
     # because everything still works, it just writes every time.
     ("the case fold goes, so an upper-case state never matches",
-     '    state = check_run_state(latest)\n'
+     '    state = check_run_state(run)\n'
      '    return state.lower() if isinstance(state, str) else None',
-     '    state = check_run_state(latest)\n'
+     '    state = check_run_state(run)\n'
      '    return state if isinstance(state, str) else None'),
 
     ("_latest_own_run matches ANY check-run name, so another check's state is read as ours",
@@ -185,9 +185,22 @@ MUTATIONS = [
     # whole reason the commit-status design never ran. The read must stay on
     # check-runs, so a mutation back to a status source must redden.
     ("the current state is read from the rollup again, not the check-runs endpoint",
-     '        listing = CD.gh_json(["api", f"repos/{org}/{name}/commits/{sha}/check-runs",\n'
-     '                              "-f", f"check_name={CONTEXT}"])',
+     '        listing = CD.gh_json(["api", "--method", "GET",\n'
+     '                              f"repos/{org}/{name}/commits/{sha}/check-runs",\n'
+     '                              "-f", f"check_name={CONTEXT}",\n'
+     '                              "-f", "filter=latest"])',
      '        listing = CD.gh_json(["pr", "view", sha, "--json", "statusCheckRollup"])'),
+
+    # `gh api` POSTs the instant any `-f` is passed, and there is no POST route on
+    # check-runs, so dropping `--method GET` 404s the read on EVERY call:
+    # _latest_own_run returns None forever, the dedup dies, and post_status only
+    # ever CREATEs (the accumulation bug 97436c5 fixed, re-armed). The method is
+    # part of the contract, not decoration (@saadqbal on #446).
+    ("the read drops --method GET, so gh api POSTs it and the read 404s",
+     '        listing = CD.gh_json(["api", "--method", "GET",\n'
+     '                              f"repos/{org}/{name}/commits/{sha}/check-runs",',
+     '        listing = CD.gh_json(["api",\n'
+     '                              f"repos/{org}/{name}/commits/{sha}/check-runs",'),
 
     # An unreadable current state must produce a WRITE. Turning it into a skip
     # would silently stop reporting whenever the check-runs read flakes.
