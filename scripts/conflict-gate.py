@@ -204,11 +204,14 @@ DEFAULT_RETRY_SLEEP = 2.0
 # scope. It costs one GET per open PR -- ~50 per sweep across the fleet -- read
 # once per PR and threaded into the write, never re-read (@saadqbal on #446).
 #
-# THE READ IS A GET WITH `filter=latest`. `gh api` POSTs the moment any `-f` is
-# passed, so the method is forced to GET; `filter=latest` returns the single
-# current run for our name, so the verdict does not depend on paging a 30-per-page
-# history. The greatest-`id` pick below is then only a defensive tie-break: `id`
-# is monotonic and always present, unlike a `started_at` a queued run leaves null.
+# THE READ IS A GET WITH `filter=all` (scoped to our name by `check_name`). `gh
+# api` POSTs the moment any `-f` is passed, so the method is forced to GET. It is
+# `all`, not `latest`: `latest` filters by `completed_at` and so hides an
+# `in_progress` (pending) run, which orphans it into a stuck-pending rollup
+# (backend#3503); `all` returns it. `check_name` scopes the list to our runs, so
+# it is one run in steady state and the greatest-`id` pick below is the current
+# verdict -- `id` is monotonic and always present, unlike a `started_at` a queued
+# run leaves null.
 #
 # WHEN IN DOUBT, WRITE. An unreadable current state returns None, which equals no
 # state and so produces a write. Writing a check run that was already correct
@@ -326,16 +329,24 @@ def _latest_own_run(org: str, name: str, sha: str) -> "dict | None":
         # `-f` is passed, and there is no POST route on `/commits/{sha}/check-runs`,
         # so the read would 404 -> GhError -> None on EVERY call, killing the dedup
         # and forcing post_status down the CREATE branch forever (backend#3242,
-        # @saadqbal on #446). `filter=latest` makes the endpoint return the single
-        # current run per name rather than a page of history: the list is paginated
-        # (30/page) and we read one page, so without it `max(id)` could pick a stale
-        # run off page 1 once more than 30 of ours land on a head. With it there is
-        # at most one run for CONTEXT and the ordering below is only a defensive
-        # tie-break.
+        # @saadqbal on #446).
+        #
+        # `filter=all`, NOT `filter=latest`. GitHub's `latest` filters by
+        # `completed_at`, so it OMITS an `in_progress` run (which has none) -- and a
+        # `pending` verdict is exactly an in_progress run with no conclusion. Under
+        # `latest`, the sweep that POSTed the pending run cannot see it next tick,
+        # reads the head as empty, and POSTs a sibling `success`/`failure`; the
+        # rollup is worst-of across same-name runs, so the orphaned pending sticks
+        # forever -- the stuck shape post_status's PATCH path exists to prevent
+        # (Bugbot High, backend#3503). `filter=all` returns every run, in_progress
+        # included, so the read finds the pending run and post_status PATCHes it in
+        # place. `check_name={CONTEXT}` scopes the response to OUR runs server-side,
+        # so the list is only ours (1 in steady state, since we PATCH one run), fits
+        # one page, and `max(id)` below picks the current one.
         listing = CD.gh_json(["api", "--method", "GET",
                               f"repos/{org}/{name}/commits/{sha}/check-runs",
                               "-f", f"check_name={CONTEXT}",
-                              "-f", "filter=latest"])
+                              "-f", "filter=all"])
     except CD.GhError:
         return None
     if not isinstance(listing, dict):

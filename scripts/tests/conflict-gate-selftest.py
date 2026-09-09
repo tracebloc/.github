@@ -399,6 +399,14 @@ try:
               any("repos/tracebloc/x/commits/abc/check-runs" in " ".join(a)
                   for a in _asked),
               "asked %r" % (_asked,))
+        # THE READ MUST INCLUDE in_progress RUNS. `filter=latest` filters by
+        # completed_at and hides a pending run, orphaning it into a stuck-pending
+        # rollup (Bugbot High, backend#3503); the read must use `filter=all` and
+        # never `latest`, so the sweep sees the pending run it posted and PATCHes it.
+        check("the check-runs read uses filter=all, never filter=latest",
+              any("filter=all" in a for a in _asked)
+              and not any("filter=latest" in a for a in _asked),
+              "asked %r" % (_asked,))
         # The METHOD is part of the contract, not just the endpoint string: `gh
         # api` POSTs the instant any `-f` is passed, and there is no POST route on
         # check-runs, so a read carrying `-f` MUST also carry `--method GET` or it

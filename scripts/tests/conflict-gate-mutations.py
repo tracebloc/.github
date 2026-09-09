@@ -188,8 +188,15 @@ MUTATIONS = [
      '        listing = CD.gh_json(["api", "--method", "GET",\n'
      '                              f"repos/{org}/{name}/commits/{sha}/check-runs",\n'
      '                              "-f", f"check_name={CONTEXT}",\n'
-     '                              "-f", "filter=latest"])',
+     '                              "-f", "filter=all"])',
      '        listing = CD.gh_json(["pr", "view", sha, "--json", "statusCheckRollup"])'),
+
+    # `filter=all`, NOT `filter=latest`: `latest` filters by completed_at and hides
+    # an in_progress (pending) run, orphaning it into a stuck-pending rollup
+    # (Bugbot High, backend#3503). Reverting to `latest` must redden.
+    ("the read filters by latest again, hiding the pending in_progress run",
+     '                              "-f", "filter=all"])',
+     '                              "-f", "filter=latest"])'),
 
     # `gh api` POSTs the instant any `-f` is passed, and there is no POST route on
     # check-runs, so dropping `--method GET` 404s the read on EVERY call:
