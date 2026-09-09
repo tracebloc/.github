@@ -225,6 +225,23 @@ on:
         description: "Extra path glob for house-rules to skip (one glob)."
         type: string
         default: ""
+      dead-weight:
+        description: >-
+          Run the dead-weight checker (RFC-0087 D3) in the house-rules job:
+          declared-vs-imported dependencies, full python base images, CUDA torch
+          installed on CPU targets. Same required context as house-rules, so it
+          is a gate wherever house-rules is one.
+        type: boolean
+        default: true
+      dead-weight-soft-fail:
+        description: >-
+          Report dead-weight findings but exit 0, even when `soft-fail` is
+          false. Defaults TRUE, unlike the other soft-fail inputs: the checker
+          arrives on `main` for all 16 callers at once, and a repo flips this
+          to false in the same PR that writes its `indirect-use` entries and
+          shows zero findings (arm while green -- backend#3527).
+        type: boolean
+        default: true
       gitleaks-baseline:
         description: "Path to a gitleaks baseline report; known findings in it are not re-reported."
         type: string
@@ -982,6 +999,48 @@ jobs:
           fi
 
           "$CHECKER" "$@"
+
+      # RFC-0087 D3 (backend#3523): what a repo declares, ships and installs must
+      # be reachable from what it runs. Rides THIS job on purpose -- `quality /
+      # house-rules` is a required status check on every train repo's develop
+      # (measured 2026-09-09), so the checker is a gate the day it lands without
+      # 16 branch-protection edits; a new job name would be advice (rule 2)
+      # until each protection was hand-updated.
+      #
+      # WHOLE-TREE, never diff-scoped: removing an import elsewhere is what makes
+      # a pin dead, and that hunk is never in the PR that added the pin.
+      #
+      # Advisory by default (`dead-weight-soft-fail: true`) and hard per caller,
+      # so the fleet does not go red on promotion day. Python >= 3.11 for
+      # tomllib; ubuntu-latest ships 3.12. The version guard is a real refusal,
+      # not a skip: a checker that silently ran nothing would report clean.
+      - name: Run the dead-weight checker
+        if: ${{ inputs.dead-weight }}
+        env:
+          CONFIG: ${{ inputs.house-rules-config }}
+          EXCLUDE: ${{ inputs.house-rules-exclude }}
+          SOFT_FAIL: ${{ inputs.dead-weight-soft-fail }}
+        run: |
+          set -uo pipefail
+          CHECKER=".quality-tools/scripts/dead-weight.py"
+          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' || {
+            echo "::error::dead-weight needs python3 >= 3.11 (tomllib); the runner has $(python3 --version)"
+            exit 1
+          }
+
+          set -- --root . --github --summary "$GITHUB_STEP_SUMMARY"
+          if [ -n "${CONFIG:-}" ]; then
+            set -- "$@" --config "$CONFIG"
+          fi
+          if [ -n "${EXCLUDE:-}" ]; then
+            set -- "$@" --exclude "$EXCLUDE"
+          fi
+          set -- "$@" --exclude '.quality-tools/*'
+          if [ "$SOFT_FAIL" = "true" ]; then
+            set -- "$@" --soft-fail
+          fi
+
+          python3 "$CHECKER" "$@"
 
   # Whole-tree action-pin gate (backend#1492, D10). Hand-pinning does not hold:
   # while one PR pinned jlumbroso/free-disk-space, a second PR added a NEW
