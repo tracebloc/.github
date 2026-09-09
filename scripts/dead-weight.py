@@ -235,7 +235,7 @@ NODE_IMPLICIT = {
     "@types/node": ("tsconfig.json", "tsconfig.*.json"),
     "postcss": ("postcss.config.*",),
 }
-ESLINT_CONFIG_GLOBS = ("eslint.config.*", ".eslintrc*", "package.json")
+ESLINT_CONFIG_GLOBS = ("eslint.config.*", ".eslintrc*")
 
 # Tools that are run, not imported: the console command(s) each distribution
 # installs. Anything not here is matched by its distribution name only.
@@ -825,7 +825,18 @@ def eslint_extends(repo: Repo, dist: str) -> bool:
         needles.append(("@%s/%s" % (scope, short)) if scope else short)
     elif scope:
         needles.append("@" + scope)
-    text = "\n".join(repo.text(rel) for rel in repo.glob(*ESLINT_CONFIG_GLOBS))
+    # Config files, plus ONLY the `eslintConfig` object of package.json: the raw
+    # file names every dependency as a key, so scanning it would make an unused
+    # eslint-config-next read as extended (Bugbot, .github#454).
+    chunks = [repo.text(rel) for rel in repo.glob(*ESLINT_CONFIG_GLOBS)]
+    for rel in repo.glob("package.json"):
+        try:
+            cfg = json.loads(repo.text(rel)).get("eslintConfig")
+        except json.JSONDecodeError:
+            cfg = None
+        if cfg:
+            chunks.append(json.dumps(cfg))
+    text = "\n".join(chunks)
     for n in needles:
         e = re.escape(n)
         if kind == "config" and re.search(r"""["']%s(?:/[\w./-]*)?["']""" % e, text):
@@ -919,24 +930,42 @@ def _image_name_tag(ref: str):
     return name, tag
 
 
+ARG_REF = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))")
+
+
+def _expand_args(ref: str, args: dict) -> tuple:
+    """Dockerfile `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR-default}` inside an
+    image reference: (expanded, unresolved). An ARG with a value wins; else the
+    inline default; else the reference stays and is reported as unresolved
+    (Bugbot, .github#454: `${PY:-3.11-slim}` used to keep its `:-3.11-slim}` tail)."""
+    unresolved = False
+
+    def sub(m):
+        nonlocal unresolved
+        var = m.group(1) or m.group(3)
+        default = m.group(2)
+        if var in args and args[var]:
+            return args[var]
+        if default is not None:
+            return default
+        unresolved = True
+        return m.group(0)
+
+    return ARG_REF.sub(sub, ref), unresolved
+
+
 def check_full_python_base(repo: Repo, cfg: Config, findings):
     for rel in repo.glob("Dockerfile*", "*.Dockerfile", "*.dockerfile"):
         args = {}
         for no, raw in enumerate(repo.text(rel).splitlines(), 1):
-            am = ARG_LINE.match(raw)
+            am = ARG_LINE.match(raw.split(" #", 1)[0])  # a trailing comment is not the default
             if am:
                 args[am.group(1)] = (am.group(2) or "").strip().strip('"').strip("'")
                 continue
             fm = FROM_LINE.match(raw)
             if not fm:
                 continue
-            ref = fm.group(1)
-            unresolved = False
-            for var in re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", ref):
-                if var in args and args[var]:
-                    ref = re.sub(r"\$\{?%s\}?" % var, args[var], ref)
-                else:
-                    unresolved = True
+            ref, unresolved = _expand_args(fm.group(1), args)
             name, tag = _image_name_tag(ref)
             if name != "python":
                 continue

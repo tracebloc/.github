@@ -361,9 +361,12 @@ def _():
                        "eslint.config.mjs": 'export default [...compat.extends("next/core-web-vitals"), ...compat.extends("plugin:react/recommended")];\n',
                        "src/a.jsx": "import React from 'react';\n"})
     assert_clean(cfg_yes.findings(["declared-unused"]))
-    cfg_no = Fixture({"package.json": PKG % ('"react": "^18"', '"eslint": "^9", "eslint-config-next": "^15"'),
-                      "eslint.config.mjs": "export default [];\n", "src/a.jsx": "import React from 'react';\n"})
+    cfg_no = Fixture({"package.json": PKG % ('"react": "^18", "next": "^15"', '"eslint": "^9", "eslint-config-next": "^15"'),
+                      "eslint.config.mjs": "export default [];\n", "src/a.jsx": "import React from 'react';\nimport Link from 'next/link';\n"})
     assert_finding(cfg_no.findings(["declared-unused"]), "declared-unused", "eslint-config-next")
+    in_pkg = Fixture({"package.json": '{"name":"x","scripts":{"lint":"eslint ."},"dependencies":{"react":"^18"},"devDependencies":{"eslint":"^9","eslint-config-next":"^15"},"eslintConfig":{"extends":["next/core-web-vitals"]}}\n',
+                      "src/a.jsx": "import React from 'react';\n"})
+    assert_clean(in_pkg.findings(["declared-unused"]))
 
 
 @case("node: a tool named in package.json scripts is invoked; a coverage provider is reached by --coverage")
@@ -409,6 +412,12 @@ def _():
 def _():
     ok = Fixture({"Dockerfile": "ARG PY=3.11-slim\nFROM python:${PY}\n"})
     assert_clean(ok.findings(["full-python-base"]))
+    inline = Fixture({"Dockerfile": "ARG PY\nFROM python:${PY:-3.11-slim}\n"})
+    assert_clean(inline.findings(["full-python-base"]))
+    inline_full = Fixture({"Dockerfile": "FROM python:${PY-3.11}\n"})
+    assert_finding(inline_full.findings(["full-python-base"]), "full-python-base", "full Debian")
+    commented_arg = Fixture({"Dockerfile": "ARG PY=3.11-slim # bump with the runtime\nFROM python:$PY\n"})
+    assert_clean(commented_arg.findings(["full-python-base"]))
     full = Fixture({"Dockerfile": "ARG PY=3.11\nFROM python:$PY\n"})
     assert_finding(full.findings(["full-python-base"]), "full-python-base", "full Debian")
     unknown = Fixture({"Dockerfile": "ARG PY\nFROM python:${PY}\n"})

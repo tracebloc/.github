@@ -199,6 +199,18 @@ MUTATIONS = [
      "                    hits.append((rel, no, cmd, file_gpu or stage_gpu(no), text))",
      "                    hits.append((rel, no, cmd, file_gpu or any(g for _, g in [(0, stage_gpu(n)) for n in range(1, no + 1)]), text))"),
 
+    ("eslint evidence reads the raw package.json again (dependency keys count as extends)",
+     '    chunks = [repo.text(rel) for rel in repo.glob(*ESLINT_CONFIG_GLOBS)]',
+     '    chunks = [repo.text(rel) for rel in repo.glob(*ESLINT_CONFIG_GLOBS, "package.json")]'),
+
+    ("an inline ${VAR:-default} in FROM is no longer honoured",
+     "        if default is not None:\n            return default",
+     "        if False:\n            return default"),
+
+    ("a trailing comment on an ARG line becomes part of the default",
+     '            am = ARG_LINE.match(raw.split(" #", 1)[0])  # a trailing comment is not the default',
+     "            am = ARG_LINE.match(raw)"),
+
     ("a stale indirect-use is skipped when nothing is declared",
      "        for n, (reason, line) in cfg.indirect.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,",
      "        for n, (reason, line) in {}.items():\n            findings.append(Finding(\"stale-allowlist\", cfg_rel(cfg), line,"),
