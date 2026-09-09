@@ -633,9 +633,10 @@ def _():
     assert_clean(fx.findings(["cuda-torch-on-cpu"]))
 
 
-@case("cuda-torch: a GPU base behind a pre-FROM ARG (`FROM ${CUDA_IMAGE}`) is a GPU stage")
+@case("cuda-torch: a GPU base behind a pre-FROM ARG (`FROM ${BASE_IMAGE}`) is a GPU stage")
 def _():
-    fx = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG CUDA_IMAGE=nvidia/cuda:12.4.1-runtime-ubuntu22.04\nFROM ${CUDA_IMAGE}\nRUN pip install -r requirements.txt\n"})
+    # the ARG name carries no gpu word on purpose: only the EXPANDED value can say GPU
+    fx = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG BASE_IMAGE=nvidia/cuda:12.4.1-runtime-ubuntu22.04\nFROM ${BASE_IMAGE}\nRUN pip install -r requirements.txt\n"})
     assert_clean(fx.findings(["cuda-torch-on-cpu"]))
     cpu_arg = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG BASE=python:3.11-slim\nFROM ${BASE}\nRUN pip install -r requirements.txt\n"})
     assert_finding(cpu_arg.findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
