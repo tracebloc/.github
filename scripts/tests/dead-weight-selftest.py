@@ -638,6 +638,29 @@ def _():
     # the ARG name carries no gpu word on purpose: only the EXPANDED value can say GPU
     fx = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG BASE_IMAGE=nvidia/cuda:12.4.1-runtime-ubuntu22.04\nFROM ${BASE_IMAGE}\nRUN pip install -r requirements.txt\n"})
     assert_clean(fx.findings(["cuda-torch-on-cpu"]))
+
+
+@case("cuda-torch: an unset base ARG is cannot-parse, never a clean pass -- its own name (`${CUDA_IMAGE}`) must not read as GPU")
+def _():
+    # The ARG name contains `cuda`; before the fix the unexpanded `${CUDA_IMAGE}`
+    # satisfied GPU_HINT and the CPU-torch install was silently cleared without
+    # knowing the image (Bugbot, backend#3562). It is now scan integrity, like
+    # check_full_python_base treats the same ambiguity.
+    cuda_named = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG CUDA_IMAGE\nFROM ${CUDA_IMAGE}\nRUN pip install -r requirements.txt\n"})
+    f = cuda_named.findings(["cuda-torch-on-cpu"])
+    assert_finding(f, "cannot-parse", "cannot be told")
+    assert_clean(f, "cuda-torch-on-cpu")  # not silently cleared, not falsely flagged
+    # an unset ARG whose name carries no gpu word is equally unknown -- cannot-parse, not a CPU finding
+    plain = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG BASE\nFROM ${BASE}\nRUN pip install -r requirements.txt\n"})
+    pf = plain.findings(["cuda-torch-on-cpu"])
+    assert_finding(pf, "cannot-parse", "cannot be told")
+    assert_clean(pf, "cuda-torch-on-cpu")
+
+
+@case("cuda-torch: an unresolved TAG over a real GPU name (`nvidia/cuda:${TAG}`) is still GPU, not cannot-parse")
+def _():
+    fx = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG TAG\nFROM nvidia/cuda:${TAG}\nRUN pip install -r requirements.txt\n"})
+    assert_clean(fx.findings(["cuda-torch-on-cpu"]))  # the resolved name settles GPU-ness; the tag is irrelevant to it
     cpu_arg = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG BASE=python:3.11-slim\nFROM ${BASE}\nRUN pip install -r requirements.txt\n"})
     assert_finding(cpu_arg.findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
 
