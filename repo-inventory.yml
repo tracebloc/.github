@@ -477,8 +477,6 @@ shared_reasons:
     not on the release train, so there is no develop -> staging -> prod lane and no `staging`
     branch to hold to a policy. Distinct from `no_staging_branch_no_hop_to_gate`, which is about
     the fr-gate caller rather than protection.
-  org_config_seed_pending: &org_config_seed_pending >-
-    SEED PENDING: this repo was created 2026-09-10 as the private home for the org's operational logic and is being seeded by a verbatim copy of `.github` (tracebloc/org-config#1). The repo is off the train, so the audit reads its DEFAULT branch, and that default branch is `develop` (set at creation, 2026-09-10) - the same branch the seed PR targets. Until the seed merges, that branch holds only a README, so the caller/file legitimately does not exist yet. Flip to `required` in the PR that follows the seed; leaving this `exempt` after the seed has merged is drift. If the default branch is ever moved off `develop` before then, this reason is false and the flip must wait for the seed to reach the new default.
   develop_unprotected_non_train: &develop_unprotected_non_train >-
     `develop` exists but carries no branch protection, and the repo is not on the train so nothing
     promotes out of it. UNREMEDIATED - recorded as an exemption with a name on it rather than
@@ -1393,10 +1391,11 @@ repos:
 
   org-config:
     # Private engine room seeded 2026-09-10 as a verbatim copy of `.github`'s
-    # operational logic (inventory, standards, scripts, reusable workflows). Until
-    # the fleet's callers switch, `.github` stays the source of truth and the live
-    # runner of the scheduled workflows; this entry exists so the audit sees a
-    # declared repo, not an undeclared one, and holds it to the same shape.
+    # operational logic (inventory, standards, scripts, reusable workflows); the
+    # seed merged 2026-09-10 (tracebloc/org-config#1), so its callers, copy and
+    # quality files are REQUIRED like every peer's. Until the fleet's callers
+    # switch, `.github` stays the source of truth and the live runner of the
+    # scheduled workflows (org-config's schedules are held, SEED-marked).
     visibility: private
     release_train: false
     protection:
@@ -1446,38 +1445,26 @@ repos:
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      advance-deploy-env.yml:
-        exempt: *org_config_seed_pending   # advance-deploy-env-caller.yml
-      code-quality.yml:
-        exempt: *org_config_seed_pending   # code-quality-caller.yml
-      customer-priority-bump.yml:
-        exempt: *org_config_seed_pending   # customer-priority-bump-caller.yml
-      fr-gate.yml:
-        exempt: *org_config_seed_pending   # fr-gate-caller.yml
-      stale-backlog.yml:
-        exempt: *org_config_seed_pending   # stale-backlog-caller.yml
-      fr-pass-comment.yml:
-        exempt: *org_config_seed_pending   # fr-pass-comment-caller.yml
-      kanban-closure-router.yml:
-        exempt: *org_config_seed_pending   # kanban-closure-caller.yml
-      set-pr-status.yml:
-        exempt: *org_config_seed_pending   # set-pr-status-caller.yml
+      advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump-caller.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      stale-backlog.yml: required   # stale-backlog-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-caller.yml
+      set-pr-status.yml: required   # set-pr-status-caller.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
       post-release-bump.yml:
         exempt: *post_release_bump_parked
-      bugbot-gate.yml:
-        exempt: *org_config_seed_pending   # bugbot-gate-caller.yml
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
     copies:
-      add-to-kanban.yml:
-        exempt: *org_config_seed_pending
+      add-to-kanban.yml: required
     quality_files:
-      CLAUDE.md:
-        exempt: *org_config_seed_pending
-      ".cursor/BUGBOT.md":
-        exempt: *org_config_seed_pending
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
 
   release-train:
     visibility: private
