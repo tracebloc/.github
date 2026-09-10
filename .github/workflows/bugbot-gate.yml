@@ -95,9 +95,16 @@ on:
       wait-seconds:
         description: >-
           How long to wait for Bugbot to deliver a terminal verdict on the head.
-          Default 900 is ~1.4x the slowest of 40 measured runs (635s).
+          Default 1500: the 900 that preceded it was ~1.4x the slowest of 40
+          measured runs (635s), and Bugbot then took 15m22s on
+          client-runtime#544 (backend#3530) -- the gate gave up at 15m08s and
+          the red verdict stood over a head Bugbot passed fourteen seconds
+          later. Re-measured 2026-09-10 over 57 completed Cursor Bugbot runs on
+          five repos: p50 3.6m, p90 7.2m, p99 9.9m, max 10.3m, plus that 15.4m
+          outlier; 1500 s is ~1.6x the slowest observed. Five of the 24 gate
+          failures in the same window were this timeout, not a finding.
         type: number
-        default: 900
+        default: 1500
       poll-seconds:
         description: "Gap between polls while waiting for Bugbot."
         type: number
@@ -124,10 +131,10 @@ jobs:
   review:
     name: review
     runs-on: ubuntu-latest
-    # Above the script's own 900s budget on purpose: the script must be the thing
+    # Above the script's own 1500s budget on purpose: the script must be the thing
     # that reports a timeout, with the measured latencies in the message. A
     # runner-level kill produces no explanation at all.
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       # Same shape as code-quality.yml and blocked-gate.yml: the checker lives
       # here, not in the calling repo, so the reusable fetches it. `.github` is

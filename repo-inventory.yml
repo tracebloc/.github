@@ -521,7 +521,7 @@ repos:
             evaluate_protection), so every baseline context has to be restated
             here or it stops being asserted on this branch. That is how
             `quality / action-pins` went missing when the staging baseline was
-            raised in backend#1976 (Bugbot, #277): the fleet gained a context and
+            raised in backend#1976 (Bugbot, .github#277): the fleet gained a context and
             this cell silently kept asserting the old set.
           required_checks:
             - gate / gate
@@ -1143,7 +1143,7 @@ repos:
       ".cursor/BUGBOT.md": required
 
   docs:
-    visibility: public
+    visibility: private   # flipped 2026-09-10; Mintlify keeps building from a private repo
     # Enrolled 2026-08-04 (backend#1420, D1 5-of-5). staging created from main
     # (256fa3e4); docs#80 backmerged main into develop and added the fr-gate
     # caller; release-train#30 added the repos.yml entry (that side lands first,
@@ -1298,7 +1298,7 @@ repos:
             develop -> staging hop (backend#1975). MORE, never fewer - an
             override REPLACES the baseline list, so every baseline context is
             restated here or it stops being asserted on this branch
-            (backend#1976, Bugbot on #277).
+            (backend#1976, Bugbot on .github#277).
           required_checks:
             - gate / gate
             - quality / gitleaks
@@ -1313,7 +1313,7 @@ repos:
             staging -> prod hop (backend#1975). MORE, never fewer - an override
             REPLACES the baseline list, so every baseline context is restated
             here or it stops being asserted on this branch (backend#1976,
-            Bugbot on #277).
+            Bugbot on .github#277).
           required_checks:
             - gate / gate
             - quality / gitleaks
@@ -1376,6 +1376,83 @@ repos:
       fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
       kanban-closure-router.yml: required   # kanban-closure-routing.yml
       set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
+    copies:
+      add-to-kanban.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
+
+  org-config:
+    # Private engine room seeded 2026-09-10 as a verbatim copy of `.github`'s
+    # operational logic (inventory, standards, scripts, reusable workflows); the
+    # seed merged 2026-09-10 (tracebloc/org-config#1), so its callers, copy and
+    # quality files are REQUIRED like every peer's. Until the fleet's callers
+    # switch, `.github` stays the source of truth and the live runner of the
+    # scheduled workflows (org-config's schedules are held, SEED-marked).
+    visibility: private
+    release_train: false
+    protection:
+      # WIDER than the fleet baseline on develop, the same shape as `.github`
+      # above and for the same reason: the fleet's guards are going to live here,
+      # so their selftests are armed as a required check on the branch they
+      # merge to. An override REPLACES the baseline list, so every baseline
+      # context is restated deliberately. Applied 2026-09-10, byte-for-byte the
+      # shape of `.github`'s develop.
+      develop:
+        divergent:
+          reason: >-
+            Requires MORE than the fleet baseline: the `selftests` job is armed
+            here on top of the develop baseline, so a red selftest blocks the
+            merge - the same shape as `.github`, whose operational logic this
+            repo is seeded from. MORE, never fewer; every baseline context is
+            restated because an override replaces the list.
+          required_checks:
+            - quality / gitleaks
+            - quality / house-rules
+            - quality / action-pins
+            - selftests
+      staging:
+        exempt: *no_staging_branch_not_on_train
+      prod:
+        divergent:
+          reason: >-
+            not on the release train (yet): `main` exists so reusable workflows can
+            be pinned `@main` once callers switch, and it is protected as a working
+            branch - one review, the quality checks, no admin lock - the same shape
+            as `rfcs` and `claude-skills`. Nothing promotes into it, so the train's
+            review bypass has no premise here and is not granted. When this repo
+            replaces `.github` on the train, this cell becomes the fleet `prod`
+            policy and this reason goes.
+          enforce_admins: false
+          require_conversation_resolution: false
+          bypass_reviews: []      # nothing promotes here; see the reason above
+          required_checks:
+            - quality / gitleaks
+            - quality / house-rules
+            - quality / action-pins
+    rulesets:
+      promotion_merge_commit_only:
+        exempt: "Not on the release train: no staging branch and no promotion PRs, so there are no promotion branches for a merge-method rule to protect."
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (repo created 2026-09-10)."
+    callers:
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
+      advance-deploy-env.yml: required   # advance-deploy-env-caller.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump-caller.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      stale-backlog.yml: required   # stale-backlog-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-caller.yml
+      set-pr-status.yml: required   # set-pr-status-caller.yml
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
