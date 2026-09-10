@@ -695,34 +695,111 @@ repos:
     visibility: private
     release_train: true
     protection:
-      # ALL THREE ROLES NOW EXIST AND NOT ONE OF THEM IS PROTECTED. Measured
-      # 2026-08-27: `develop`, `staging` and `main` each return "Branch not
-      # protected" from the classic endpoint AND the repo has ZERO rulesets, so
-      # neither protection system covers any of them. Joining the train created
-      # the branches; it did not arm them.
+      # ARMED 2026-09-09 -- THE WORK THE 2026-09-08 BLOCK BELOW NAMED IS DONE, and that
+      # block is kept as the record of why the two cells were `exempt` until today.
+      # Read back the same day via `gh api repos/tracebloc/design-system-v2/branches/
+      # {staging,main}/protection` (Lukas applied the fleet shape; caller-drift's
+      # own live run on the pre-flip inventory reported both rows as stale
+      # exemptions, which is exactly the signal the block below promised):
       #
-      # WHY THESE STAY `exempt` RATHER THAN FLIPPING TO `required` WITH THE FLAG
-      # ABOVE: `required` over an unarmed branch is a RED gate on merge, and
-      # nothing in this file may land red (CLAUDE.md rule 4 -- arm while green).
-      # The order is branch first, cell after, the same order the callers block
-      # below states for exemptions. Arming is the open half of backend#2547.
+      #   staging   classic object PRESENT: 1 approving review, dismiss-stale on,
+      #             review bypass App:tracebloc-release-train, strict=false,
+      #             required contexts gate / gate + quality / gitleaks +
+      #             quality / house-rules + quality / action-pins, conversation
+      #             resolution on, force pushes and deletion blocked,
+      #             enforce_admins false. Ruleset 22171656 still applies on top.
+      #   main      identical, plus enforce_admins TRUE -- the prod role's one
+      #             extra key (backend#1276 D1), so `required` holds on prod too.
       #
-      # STALENESS STILL BITES, which is what keeps these honest: the moment any
-      # of the three gains protection of either kind, caller-drift flags the
-      # exemption as stale (caller-drift.py evaluate_protection) and the cell
-      # must be promoted. An unprotected branch is the ONE state these rows can
-      # describe without the guard objecting -- see `no_develop_branch_single_branch_repo`.
+      # Every key the staging and prod policies assert matches the read-back, so
+      # both cells flip to `required` in this hop, as the block below said they
+      # must. `develop` is unchanged: its `divergent` cell still names the open
+      # half of backend#2547 (the three quality gates are not required there).
+      # THE "NOT ONE OF THEM IS PROTECTED" MEASUREMENT (2026-08-27) IS GONE. The
+      # 2026-08-27 block here said all three roles existed and neither protection
+      # system covered any of them, and that the guard would flag every row the
+      # moment that changed. It did, on 2026-09-08 (caller-drift run 34232408109):
+      # all three rows came back as stale exemptions. Re-measured 2026-09-08, the
+      # arming under backend#2547 is HALF done, and the half matters:
+      #
+      #   develop   classic protection PRESENT (1 review, dismiss-stale, no review
+      #             bypass, force-push + deletion blocked, conversation resolution
+      #             on, strict=false). `rules/branches/develop` is `[]`. Required:
+      #             the repo's own four suites + `set-status / closing-ref`; NOT
+      #             the three fleet `quality / *` gates.
+      #   staging   classic endpoint STILL 404s `Branch not protected`. Covered by
+      #             ruleset 22171656 `promotion-branches-merge-commit-only` alone
+      #             (created 2026-09-03T08:26:29+02:00).
+      #   main      identical to staging: classic 404, the same ruleset alone.
+      #
+      # WHAT EACH ROW CAN HONESTLY SAY. `develop` matches the develop baseline on
+      # every key except `required_checks`, so it is `divergent` naming the
+      # measured set. `staging` and `main` CANNOT be `required` or `divergent`:
+      # that ruleset is ONE `pull_request` rule with required_approving_review_count
+      # 0, no thread resolution, no deletion block, no required checks and no
+      # release-train bypass, so `required` fails on classic_protection,
+      # min_reviews, bypass_reviews, block_deletions, require_conversation_resolution
+      # and required_checks (plus enforce_admins on main) -- and `divergent` may
+      # not drop classic_protection or block_deletions BY DESIGN (see OVERRIDABLE
+      # in caller-drift.py). So those two stay `exempt`, and the guard WILL keep
+      # reporting them as stale exemptions, because evaluate_protection flags
+      # `exempt` + any ruleset. THAT FINDING IS CORRECT. It names exactly the work
+      # still owed: apply the fleet staging/prod classic shape to both branches,
+      # then flip both cells to `required` in the same hop. There is no cell shape
+      # that reads green over a ruleset-only promotion branch, and there must not
+      # be one -- a branch the train promotes through with zero required checks
+      # and zero required reviews is a gap, not a bookkeeping disagreement.
       develop:
-        exempt: "`develop` exists and carries NO protection of either kind (classic endpoint 404s `Branch not protected`; repo has zero rulesets - measured 2026-08-27). This repo is ON the train since 2026-08-26, so protection_policy.develop DOES apply here: this is a real, UNREMEDIATED gap rather than a structural one, and arming it is the open half of backend#2547. Deliberately not `required` yet - see the block comment above on arming before asserting."
-      staging:
-        exempt: "`staging` was created by the train onboarding and carries NO protection of either kind (measured 2026-08-27). Same case as `develop` above: on-train policy applies, nothing is armed, UNREMEDIATED under backend#2547. Recorded rather than aliased to `no_staging_branch_not_on_train`, whose premise - no train, no staging branch - is false here in both halves as of 2026-08-26."
-      prod:
-        exempt: "`main` exists (measured 2026-08-27) and carries NO protection of either kind, so the fleet's strictest role - enforce_admins closed, fr-gate required - is enforced by nothing. Same case as the two rows above: on-train policy applies, arming is UNREMEDIATED under backend#2547. This row previously read \"No prod branch exists ... structural, not a gap\"; the branch now exists, so that reading is retired."
+        divergent:
+          reason: >-
+            `develop` gained classic branch protection between 2026-08-27 and
+            2026-09-08 (measured 2026-09-08: classic object present, 1 approving
+            review, dismiss-stale on, no review bypass, force pushes and deletion
+            blocked, conversation resolution on, strict=false, no ruleset), so the
+            develop baseline holds on every key EXCEPT `required_checks`. The
+            branch requires its own four suites - Unit tests (Vitest), Lint
+            (ESLint), Type check, Format (Prettier) - plus `set-status /
+            closing-ref`, and NONE of the fleet's three `quality / *` content
+            gates. All three DO run and pass here (code-quality-caller.yml is on
+            develop with soft-fail false; gitleaks, house-rules and action-pins
+            each reported success on the last merged PR, design-system-v2#306,
+            head 38ee4e84), so arming them is a branch-setting change with no
+            caller work - the open half of backend#2547. Until then this cell
+            asserts the MEASURED set so a regression is a finding: an override
+            REPLACES the baseline list, so the repo's own contexts are stated in
+            full. UNREMEDIATED on the three baseline gates.
+          # `set-status / closing-ref` is also required on develop today and is
+          # deliberately NOT asserted: .github#434 made closing-ref advisory and
+          # required nowhere by design, so dropping it from this branch's required
+          # set is the intended direction, not drift. required_checks is a floor,
+          # so leaving it out asserts less, never more.
+          required_checks:
+            - Unit tests (Vitest)
+            - Lint (ESLint)
+            - Type check
+            - Format (Prettier)
+      # FLIPPED exempt -> required 2026-09-09 on the read-back above. The retired
+      # `exempt` reasons (2026-09-08, ruleset-only, classic 404) are in this file's
+      # history at 295e597 if the shape ever regresses.
+      staging: required
+      prod: required
     rulesets:
-      promotion_merge_commit_only:
-        exempt: "The repo has ZERO rulesets of any kind (measured 2026-08-27) while `staging` and `main` now exist and the train promotes through them - so nothing stops a promotion PR being squash-merged, which collapses the merge-commit ancestry promote-repo.sh reads and jams the next prepare. UNREMEDIATED, tracked with the protection arming in backend#2547. Not `required`, for the same arm-before-asserting reason as the protection rows above."
-      tag_trust_root:
-        exempt: "The repo has ZERO rulesets (measured 2026-08-27). The previous reason here - \"publishes nothing from a `v*` tag today - no tag-triggered workflow and no v* tags cut\" - is now false in BOTH halves: `publish.yml` triggers on `push: tags: ['v*']` and publishes to GitHub Packages, and `v0.1.0-rc.1` is cut. So the trust root is MISSING rather than inapplicable. UNREMEDIATED, tracked in backend#2547."
+      # FLIPPED exempt -> required 2026-09-08. Both rulesets appeared on
+      # 2026-09-03 (08:26:29 and 08:26:58 +02:00) and both were reported as
+      # stale exemptions in caller-drift run 34232408109. Measured against the
+      # policy before flipping, per `evaluate_rulesets`:
+      #   22171656 `promotion-branches-merge-commit-only`: target branch,
+      #            enforcement active, one `pull_request` rule with
+      #            allowed_merge_methods [merge], includes refs/heads/main +
+      #            refs/heads/staging (both roles resolve), bypass_actors [].
+      #   22171688 `Protect v* release tags (supply-chain trust root)`: target
+      #            tag, enforcement active, rules creation/update/deletion,
+      #            includes refs/tags/v*, bypass_actors exactly
+      #            [OrganizationAdmin, Team:18304481 (release-managers)].
+      # Every asserted property matches, so both land green. The 2026-08-27
+      # reasons ("ZERO rulesets of any kind") are retired by measurement.
+      promotion_merge_commit_only: required
+      tag_trust_root: required
     callers:
       # THE QUESTION THIS NOTE ANSWERED HAS EXPIRED, and the answer is kept
       # because the measurements in it are the record. It asked why an OFF-TRAIN
@@ -942,7 +1019,33 @@ repos:
     visibility: private
     release_train: true
     protection:
-      develop: required
+      # `strict: true` ON DEVELOP IS A DECISION OF RECORD, NOT DRIFT. Lukas set it
+      # on 2026-09-04 after two same-day green-onto-green breaks on this repo:
+      # client-runtime#503 merged onto #498 and #500 onto #497, each PR green on
+      # a base that had moved, develop red after the merge. backend#1276 D2 keeps
+      # the FLEET default at `strict: false` because the release train solves
+      # stale-base PROMOTIONS better (it polls for a fresh verdict and merges
+      # sha-pinned, so a push between evaluation and merge is a 409) -- but that
+      # never covered sibling PRs into develop, which is the very incident #1276
+      # named as its revisit trigger. Flipped on THIS repo only, on its own
+      # measured incident; another repo flips on its own, not by analogy. Every
+      # other develop key matches the baseline (measured 2026-09-08: 1 review,
+      # no bypass, force-push + deletion blocked, conversation resolution on,
+      # the three quality gates + pytest, ruff, shellcheck and Schema drift
+      # check required).
+      develop:
+        divergent:
+          reason: >-
+            Requires MORE than the fleet baseline: `required_status_checks.strict`
+            is true here by the 2026-09-04 decision, taken after two same-day
+            green-onto-green breaks on this repo (client-runtime#503 merged onto
+            client-runtime#498, client-runtime#500 onto client-runtime#497 - each
+            PR green on a stale base, develop red after the merge). The fleet
+            default stays false because the release train already solves
+            stale-base PROMOTIONS; it never covered sibling PRs into develop,
+            which is what broke here. Per-repo, on this repo's own incident;
+            every other develop key matches the baseline (measured 2026-09-08).
+          strict: true
       staging: required
       prod: required
     rulesets:
