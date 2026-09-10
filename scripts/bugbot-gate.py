@@ -313,6 +313,42 @@ WAITABLE = frozenset({PENDING, UNCLAIMED})
 # refuses an unresolvable tie. Dropping this filter turns every re-run into a
 # hard failure. `query_reads_commit_statuses` below refuses a query that goes
 # back to the rollup, for the same reason the other query self-checks exist.
+# THE FIELD LISTS ARE FRAGMENTS SHARED BY THE FIRST READ AND THE FOLLOW-UP
+# PAGES (backend#3530). One definition each, so a follow-up page cannot ask for
+# a different shape than the page it continues; the first draft of pagination
+# would have been a second copy of the query with `after:` bolted on.
+SUITES_FIELDS = """
+              totalCount
+              pageInfo { hasNextPage endCursor }
+              nodes {
+                app { slug }
+                checkRuns(first: 100, filterBy: {checkType: LATEST}) {
+                  totalCount
+                  nodes {
+                    name
+                    status
+                    conclusion
+                    detailsUrl
+                  }
+                }
+              }"""
+
+THREADS_FIELDS = """
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          isResolved
+          isOutdated
+          comments(first: 1) {
+            nodes {
+              author { login }
+              originalCommit { oid }
+              body
+              url
+            }
+          }
+        }"""
+
 QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
@@ -325,35 +361,37 @@ query($owner: String!, $name: String!, $number: Int!) {
         nodes {
           commit {
             oid
-            checkSuites(first: 100) {
-              totalCount
-              nodes {
-                app { slug }
-                checkRuns(first: 100, filterBy: {checkType: LATEST}) {
-                  totalCount
-                  nodes {
-                    name
-                    status
-                    conclusion
-                    detailsUrl
-                  }
-                }
-              }
+            checkSuites(first: 100) {""" + SUITES_FIELDS + """
             }
           }
         }
       }
-      reviewThreads(first: 100) {
-        totalCount
+      reviewThreads(first: 100) {""" + THREADS_FIELDS + """
+      }
+    }
+  }
+}
+"""
+
+# THE FOLLOW-UP PAGES (backend#3530). A head with more items on a connection
+# than one page holds used to be permanently un-gateable: `require_complete`
+# saw `totalCount > len(nodes)` and refused, correctly, on every re-run, and
+# nothing the author did could change it. client#1017 reached that on the
+# rollup with 103 contexts; `backend#3388` carries 70 review threads today. The
+# pages are followed until `hasNextPage` is false, and `require_complete` then
+# runs over the JOINED list -- the truncation test stays, it just measures the
+# whole set. Only the two top-level connections are paged: `checkRuns` sits
+# inside a suite and one suite is one workflow's jobs (28 on the busiest head
+# measured), and only the producing app's suite is read at all.
+FOLLOW_QUERIES = {
+    "checkSuites": """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      commits(last: 1) {
         nodes {
-          isResolved
-          isOutdated
-          comments(first: 1) {
-            nodes {
-              author { login }
-              originalCommit { oid }
-              body
-              url
+          commit {
+            checkSuites(first: 100, after: $cursor) {""" + SUITES_FIELDS + """
             }
           }
         }
@@ -361,7 +399,25 @@ query($owner: String!, $name: String!, $number: Int!) {
     }
   }
 }
-"""
+""",
+    "reviewThreads": """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {""" + THREADS_FIELDS + """
+      }
+    }
+  }
+}
+""",
+}
+
+#: Where each paged top-level connection sits in the first read's payload, and
+#: in its own follow-up page. Derived once here; `fetch` walks it.
+PAGED_TOPLEVEL = {
+    "checkSuites": ("commits", "nodes", 0, "commit", "checkSuites"),
+    "reviewThreads": ("reviewThreads",),
+}
 
 
 # Derived, not restated -- see the note above the QUERY's page sizes.
@@ -395,6 +451,22 @@ def connections_missing_totalcount(query=QUERY):
     for name in PAGED_CONNECTIONS:
         match = re.search(name + r"\(first:\s*\d+[^)]*\)\s*\{([^{]*)", query)
         if match is None or "totalCount" not in match.group(1):
+            missing.append(name)
+    return missing
+
+
+def connections_missing_pageinfo(query=QUERY):
+    """Which paged TOP-LEVEL connections in `query` fail to request `pageInfo`.
+
+    Without `pageInfo { hasNextPage endCursor }` the follow-up pages in `fetch`
+    are never asked for, and a head with more than one page of threads or
+    suites is back to being permanently refused (backend#3530). Same shape as
+    `connections_missing_totalcount`, read off the query so it cannot drift.
+    """
+    missing = []
+    for name in PAGED_TOPLEVEL:
+        match = re.search(name + r"\(first:\s*\d+[^)]*\)\s*\{(.*?)nodes\s*\{", query, re.S)
+        if match is None or "hasNextPage" not in match.group(1) or "endCursor" not in match.group(1):
             missing.append(name)
     return missing
 
@@ -539,19 +611,12 @@ def _run_gh(args, env):
     )
 
 
-def fetch(owner, name, number, env=None, runner=_run_gh):
-    """Read the PR. Any failure raises rather than returning a partial view."""
-    env = dict(os.environ if env is None else env)
-    proc = runner(
-        [
-            "gh", "api", "graphql",
-            "-f", "query=" + QUERY,
-            "-F", "owner=" + owner,
-            "-F", "name=" + name,
-            "-F", "number=%d" % number,
-        ],
-        env,
-    )
+def _graphql(query, variables, env, runner):
+    """One GraphQL read, or Unreadable. Never a partial view."""
+    args = ["gh", "api", "graphql", "-f", "query=" + query]
+    for key, value in variables.items():
+        args += ["-F", "%s=%s" % (key, value)]
+    proc = runner(args, env)
     if proc.returncode != 0:
         raise Unreadable(
             "GraphQL read failed (exit %d): %s"
@@ -568,8 +633,72 @@ def fetch(owner, name, number, env=None, runner=_run_gh):
     except (KeyError, TypeError):
         raise Unreadable("GraphQL response had no repository.pullRequest")
     if pr is None:
-        raise Unreadable("no such pull request: %s/%s#%d" % (owner, name, number))
+        raise Unreadable("no such pull request")
     return pr
+
+
+def _at(obj, path):
+    """The connection at `path` inside a payload, or None when the path is absent."""
+    cur = obj
+    for step in path:
+        if isinstance(step, int):
+            if not isinstance(cur, list) or len(cur) <= step:
+                return None
+            cur = cur[step]
+        else:
+            if not isinstance(cur, dict):
+                return None
+            cur = cur.get(step)
+    return cur
+
+
+def follow_pages(pr, variables, env, runner):
+    """Append every further page of each paged top-level connection onto `pr`.
+
+    Bounded: a connection cannot need more pages than `totalCount` divides
+    into, so a cursor that keeps saying `hasNextPage` past that is a broken
+    read and is refused rather than followed for ever. `require_complete`
+    stays the completeness test -- this only hands it the whole list.
+    """
+    for name, path in PAGED_TOPLEVEL.items():
+        conn = _at(pr, path)
+        nodes = conn.get("nodes") if isinstance(conn, dict) else None
+        if nodes is None:
+            continue
+        page_info = conn.get("pageInfo") or {}
+        total = conn.get("totalCount")
+        pages_left = (int(total) // 100) + 1 if isinstance(total, int) else 100
+        seen_cursors = set()
+        while page_info.get("hasNextPage"):
+            cursor = page_info.get("endCursor")
+            if not cursor or cursor in seen_cursors or pages_left <= 0:
+                raise Unreadable(
+                    "%s: the server kept reporting another page (cursor %r, %d "
+                    "node(s) read of %r) -- a follow-up page that never ends is a "
+                    "broken read, not a long list. Refusing to guess." % (name, cursor, len(nodes), total)
+                )
+            seen_cursors.add(cursor)
+            pages_left -= 1
+            page = _at(_graphql(FOLLOW_QUERIES[name], dict(variables, cursor=cursor), env, runner), path)
+            if not isinstance(page, dict) or page.get("nodes") is None:
+                raise Unreadable("%s: a follow-up page came back without nodes" % name)
+            nodes.extend(page["nodes"])
+            page_info = page.get("pageInfo") or {}
+        conn["pageInfo"] = {"hasNextPage": False, "endCursor": page_info.get("endCursor")}
+    return pr
+
+
+def fetch(owner, name, number, env=None, runner=_run_gh):
+    """Read the PR, every page of it. Any failure raises rather than returning a partial view."""
+    env = dict(os.environ if env is None else env)
+    variables = {"owner": owner, "name": name, "number": "%d" % number}
+    try:
+        pr = _graphql(QUERY, variables, env, runner)
+    except Unreadable as exc:
+        if str(exc) == "no such pull request":
+            raise Unreadable("no such pull request: %s/%s#%d" % (owner, name, number))
+        raise
+    return follow_pages(pr, variables, env, runner)
 
 
 def bugbot_check(pr):
@@ -959,6 +1088,12 @@ def main(argv=None):
     # commit status. Green everywhere else, which is what made it read as flaky
     # infra for three duplicate tickets. A defect in this file, so it fails the
     # run rather than the author's day.
+    unpaged = connections_missing_pageinfo()
+    if unpaged:
+        _emit(FAIL, [], "the GraphQL query no longer requests pageInfo for: %s. "
+                        "Without it a head with more than one page is refused for "
+                        "ever (backend#3530)." % ", ".join(unpaged))
+        return 2
     if query_reads_commit_statuses():
         _emit(FAIL, [], "the GraphQL query reads the head's checks through "
                         "statusCheckRollup again, whose StatusContext arm needs "

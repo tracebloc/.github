@@ -824,6 +824,103 @@ expect_unreadable(
 )
 
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# 6c. Pagination (backend#3530). A head with more than one page of threads or
+#     suites used to be PERMANENTLY refused: `require_complete` compared the
+#     first page against totalCount, correctly, on every re-run, and nothing the
+#     author did could change it. The pages are followed now, the truncation
+#     test runs over the joined list, and a follow-up that never ends is refused
+#     rather than followed for ever. Driven through `gate.fetch` with a runner
+#     that answers page by page, so the loop, the variables it sends and the
+#     join are all exercised -- not a helper the loop might not call.
+
+def _paged_runner(first, pages):
+    """A runner that answers the first read, then each follow-up page in turn,
+    and records every call's argv so the test can assert what was asked."""
+    calls = []
+    def run(args, env):
+        calls.append(args)
+        if "cursor=" not in " ".join(args):
+            return Proc(out=json.dumps({"data": {"repository": {"pullRequest": first}}}))
+        if not pages:
+            return Proc(rc=1, err="a follow-up page was asked for that the test did not script")
+        return Proc(out=json.dumps({"data": {"repository": {"pullRequest": pages.pop(0)}}}))
+    run.calls = calls
+    return run
+
+def _threads(n, start=0):
+    return [thread(finding_body("Medium", "finding %d" % i), resolved=True) for i in range(start, start + n)]
+
+# 150 threads: page one carries 100 and says there is more, page two the last 50.
+first = pr(contexts=[check_run()], threads=_threads(100), thread_total=150)
+first["reviewThreads"]["pageInfo"] = {"hasNextPage": True, "endCursor": "c1"}
+first["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"] = {"hasNextPage": False, "endCursor": None}
+page2 = {"reviewThreads": {"totalCount": 150, "pageInfo": {"hasNextPage": False, "endCursor": "c2"},
+                           "nodes": _threads(50, 100)}}
+runner = _paged_runner(first, [page2])
+got = gate.fetch("o", "n", 1, env={}, runner=runner)
+check("paging: 150 threads over two pages are joined into one list",
+      len(got["reviewThreads"]["nodes"]) == 150, "got %d" % len(got["reviewThreads"]["nodes"]))
+check("paging: the follow-up page was asked for with the first page's endCursor",
+      any("cursor=c1" in a for call in runner.calls for a in call), "calls=%r" % [c[-2:] for c in runner.calls])
+check("paging: exactly one follow-up page was fetched for one hasNextPage",
+      len(runner.calls) == 2, "calls=%d" % len(runner.calls))
+verdict = ev(got, "high")
+check("paging: the joined 150-thread head evaluates instead of being refused as truncated",
+      verdict == gate.PASS, "verdict=%r" % verdict)
+
+# The truncation test still bites AFTER the join: the server says 150, the pages
+# deliver 130 and stop. That is a cut list, and an absence in it is not evidence.
+first = pr(contexts=[check_run()], threads=_threads(100), thread_total=150)
+first["reviewThreads"]["pageInfo"] = {"hasNextPage": True, "endCursor": "c1"}
+short = {"reviewThreads": {"totalCount": 150, "pageInfo": {"hasNextPage": False, "endCursor": "c2"},
+                           "nodes": _threads(30, 100)}}
+got = gate.fetch("o", "n", 1, env={}, runner=_paged_runner(first, [short]))
+expect_unreadable("paging: a list still short of totalCount after every page is refused",
+                  lambda: gate.findings(got), because="the page is truncated")
+
+# A cursor that repeats, or more pages than totalCount can need, is a broken
+# read and is refused -- never followed until the job clock kills the run.
+first = pr(contexts=[check_run()], threads=_threads(100), thread_total=150)
+first["reviewThreads"]["pageInfo"] = {"hasNextPage": True, "endCursor": "c1"}
+looping = {"reviewThreads": {"totalCount": 150, "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+                             "nodes": _threads(10, 100)}}
+expect_unreadable("paging: a follow-up page that repeats its cursor is refused",
+                  lambda: gate.fetch("o", "n", 1, env={}, runner=_paged_runner(first, [looping, dict(looping)])),
+                  because="never ends")
+
+# The suites connection pages the same way, through its own path in the payload.
+first = pr(contexts=[check_run(slug="github-actions", name="unit")], threads=[])
+first["commits"]["nodes"][0]["commit"]["checkSuites"].update(
+    {"totalCount": 2, "pageInfo": {"hasNextPage": True, "endCursor": "s1"}})
+first["reviewThreads"]["pageInfo"] = {"hasNextPage": False, "endCursor": None}
+bugbot_suite = pr(contexts=[check_run()])["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"]
+page2 = {"commits": {"nodes": [{"commit": {"checkSuites": {
+    "totalCount": 2, "pageInfo": {"hasNextPage": False, "endCursor": "s2"}, "nodes": bugbot_suite}}}]}}
+got = gate.fetch("o", "n", 1, env={}, runner=_paged_runner(first, [page2]))
+try:
+    found = gate.bugbot_check(got)
+except gate.Unreadable as exc:
+    # A page never followed leaves the suite list short of totalCount, and
+    # `bugbot_check` then refuses it. That is a FAILED assertion here, not a
+    # crash: the harness cannot score a suite that never reported.
+    found = "refused: %s" % exc
+check("paging: a Bugbot suite on the SECOND page of suites is found",
+      isinstance(found, dict) and found.get("name") == gate.BUGBOT_REVIEW_CHECK_NAME, "found=%r" % (found,))
+
+# The query must keep asking for pageInfo, or none of the above ever runs live.
+check("the real QUERY asks both top-level connections for pageInfo",
+      gate.connections_missing_pageinfo() == [], "missing=%r" % gate.connections_missing_pageinfo())
+for name in gate.PAGED_TOPLEVEL:
+    stripped = re.sub(r"pageInfo \{ hasNextPage endCursor \}\n", "", gate.QUERY, count=1) \
+        if name == "checkSuites" else gate.QUERY.replace("      pageInfo { hasNextPage endCursor }\n", "", 1)
+    # Whichever occurrence the stripper removed, the guard must name AT LEAST one
+    # connection -- the assertion is that the stripper applied and was seen.
+    check("the pageInfo stripper actually applied", stripped != gate.QUERY)
+    check("dropping pageInfo from the query is detected",
+          gate.connections_missing_pageinfo(stripped) != [], "guard stayed silent for %r" % name)
+    break
+
 # 7. severity_of, directly.
 # --------------------------------------------------------------------------
 check("severity_of lowercases", gate.severity_of("**High Severity**") == "high")

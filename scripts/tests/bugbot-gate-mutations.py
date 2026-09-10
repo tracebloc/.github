@@ -69,6 +69,19 @@ import mutation_baseline  # noqa: E402
 
 # (label, old, new)
 MUTATIONS = [
+    # --- (P) PAGINATION (backend#3530): a head with more than one page of
+    # threads or suites was permanently refused. The pages must be followed, and
+    # the query must keep asking for the cursor that makes following possible.
+    ("the follow-up pages are never fetched, so a two-page head is refused again",
+     '        while page_info.get("hasNextPage"):',
+     '        while False and page_info.get("hasNextPage"):'),
+    ("the pageInfo self-check goes blind, so a query that stopped asking passes",
+     '        if match is None or "hasNextPage" not in match.group(1) or "endCursor" not in match.group(1):',
+     '        if False and (match is None or "hasNextPage" not in match.group(1) or "endCursor" not in match.group(1)):'),
+    ("a repeating cursor is followed for ever instead of refused",
+     '            if not cursor or cursor in seen_cursors or pages_left <= 0:',
+     '            if not cursor:'),
+
     # --- (A) the load-bearing claim: a TERMINAL verdict on THIS head --------
     ("a missing Bugbot verdict reports PASS instead of UNCLAIMED",
      '    if check is None:\n        return UNCLAIMED, [',
