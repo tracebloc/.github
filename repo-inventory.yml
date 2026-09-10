@@ -478,7 +478,7 @@ shared_reasons:
     branch to hold to a policy. Distinct from `no_staging_branch_no_hop_to_gate`, which is about
     the fr-gate caller rather than protection.
   org_config_seed_pending: &org_config_seed_pending >-
-    SEED PENDING: this repo was created 2026-09-10 as the private home for the org's operational logic and is being seeded by a verbatim copy of `.github` (tracebloc/org-config#1). Until that PR merges, `develop` holds only a README, so the caller/file legitimately does not exist yet. Flip to `required` in the PR that follows the seed; leaving this `exempt` after the seed has merged is drift.
+    SEED PENDING: this repo was created 2026-09-10 as the private home for the org's operational logic and is being seeded by a verbatim copy of `.github` (tracebloc/org-config#1). The repo is off the train, so the audit reads its DEFAULT branch, and that default branch is `develop` (set at creation, 2026-09-10) - the same branch the seed PR targets. Until the seed merges, that branch holds only a README, so the caller/file legitimately does not exist yet. Flip to `required` in the PR that follows the seed; leaving this `exempt` after the seed has merged is drift. If the default branch is ever moved off `develop` before then, this reason is false and the flip must wait for the seed to reach the new default.
   develop_unprotected_non_train: &develop_unprotected_non_train >-
     `develop` exists but carries no branch protection, and the repo is not on the train so nothing
     promotes out of it. UNREMEDIATED - recorded as an exemption with a name on it rather than
