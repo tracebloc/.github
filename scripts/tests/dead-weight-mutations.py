@@ -279,6 +279,10 @@ MUTATIONS = [
      "            if unresolved:\n                # The stage's base image comes from an ARG with no value in this",
      "            if False:\n                # The stage's base image comes from an ARG with no value in this"),
 
+    ("a placeholder surviving a nested default no longer keeps the stage unresolved",
+     "            unresolved = (unresolved or bool(ARG_REF.search(ref))) and not gpu",
+     "            unresolved = unresolved and not gpu"),
+
     ("a CPU index anywhere in the Dockerfile clears every stage's install",
      r'''                    hits.append((rel, no, cmd, gpu, _stage_text(text, stage_gpu.stages, no), unresolved))''',
      r'''                    hits.append((rel, no, cmd, gpu, text, unresolved))'''),

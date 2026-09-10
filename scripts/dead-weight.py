@@ -1133,7 +1133,13 @@ def _stage_gpu_map(text: str):
             # when the resolved text says nothing.
             resolved = ARG_REF.sub("", ref)
             gpu = bool(GPU_HINT.search(_image_name_tag(resolved)[0] + " " + resolved))
-            unresolved = unresolved and not gpu
+            # ANY placeholder still present after expansion means the image is
+            # not known -- including one left inside a nested default like
+            # `${IMAGE:-${GPU_BASE}}`, which `_expand_args` does not recurse into
+            # and whose inner ref the strip above would otherwise silently drop
+            # (Bugbot, .github#459). Keep it unresolved unless the resolved text
+            # already proves GPU.
+            unresolved = (unresolved or bool(ARG_REF.search(ref))) and not gpu
         if alias:
             named[alias.group(1)] = (gpu, unresolved)
         stages.append((no, gpu, unresolved))

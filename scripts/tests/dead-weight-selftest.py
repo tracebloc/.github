@@ -661,6 +661,17 @@ def _():
 def _():
     fx = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG TAG\nFROM nvidia/cuda:${TAG}\nRUN pip install -r requirements.txt\n"})
     assert_clean(fx.findings(["cuda-torch-on-cpu"]))  # the resolved name settles GPU-ness; the tag is irrelevant to it
+
+
+@case("cuda-torch: a placeholder left inside an unresolved NESTED default (`${IMAGE:-${GPU_BASE}}`) is cannot-parse, not a CPU finding")
+def _():
+    # _expand_args does not recurse into the nested default, so `${GPU_BASE}`
+    # survives expansion; stripping it must not make the stage read as a known
+    # CPU image (Bugbot, .github#459) -- the image is genuinely unknown.
+    fx = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG IMAGE\nFROM ${IMAGE:-${GPU_BASE}}\nRUN pip install -r requirements.txt\n"})
+    f = fx.findings(["cuda-torch-on-cpu"])
+    assert_finding(f, "cannot-parse", "cannot be told")
+    assert_clean(f, "cuda-torch-on-cpu")
     cpu_arg = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG BASE=python:3.11-slim\nFROM ${BASE}\nRUN pip install -r requirements.txt\n"})
     assert_finding(cpu_arg.findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
 
