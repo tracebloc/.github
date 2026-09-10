@@ -693,6 +693,26 @@ repos:
     visibility: private
     release_train: true
     protection:
+      # ARMED 2026-09-09 -- THE WORK THE 2026-09-08 BLOCK BELOW NAMED IS DONE, and that
+      # block is kept as the record of why the two cells were `exempt` until today.
+      # Read back the same day via `gh api repos/tracebloc/design-system-v2/branches/
+      # {staging,main}/protection` (Lukas applied the fleet shape; caller-drift's
+      # own live run on the pre-flip inventory reported both rows as stale
+      # exemptions, which is exactly the signal the block below promised):
+      #
+      #   staging   classic object PRESENT: 1 approving review, dismiss-stale on,
+      #             review bypass App:tracebloc-release-train, strict=false,
+      #             required contexts gate / gate + quality / gitleaks +
+      #             quality / house-rules + quality / action-pins, conversation
+      #             resolution on, force pushes and deletion blocked,
+      #             enforce_admins false. Ruleset 22171656 still applies on top.
+      #   main      identical, plus enforce_admins TRUE -- the prod role's one
+      #             extra key (backend#1276 D1), so `required` holds on prod too.
+      #
+      # Every key the staging and prod policies assert matches the read-back, so
+      # both cells flip to `required` in this hop, as the block below said they
+      # must. `develop` is unchanged: its `divergent` cell still names the open
+      # half of backend#2547 (the three quality gates are not required there).
       # THE "NOT ONE OF THEM IS PROTECTED" MEASUREMENT (2026-08-27) IS GONE. The
       # 2026-08-27 block here said all three roles existed and neither protection
       # system covered any of them, and that the guard would flag every row the
@@ -756,10 +776,11 @@ repos:
             - Lint (ESLint)
             - Type check
             - Format (Prettier)
-      staging:
-        exempt: "`staging` is covered by ruleset 22171656 `promotion-branches-merge-commit-only` and by NOTHING ELSE: `branches/staging/protection` still 404s `Branch not protected` (measured 2026-09-08; the ruleset was created 2026-09-03). That ruleset is one `pull_request` rule with required_approving_review_count 0, no thread resolution, no deletion block, no required checks and no release-train bypass, so `required` would fail on classic_protection, min_reviews, bypass_reviews, block_deletions, require_conversation_resolution and required_checks, and `divergent` cannot drop classic_protection or block_deletions by design. This row therefore stays `exempt` and the guard KEEPS reporting it as a stale exemption - that finding is correct: it is the classic-layer arming still owed under backend#2547 (fleet staging shape: 1 review, App:tracebloc-release-train bypass, gate / gate + the three quality gates, force-push/deletion blocked, conversation resolution). Apply it and flip this cell to `required` in the same hop. UNREMEDIATED."
-      prod:
-        exempt: "`main` is covered by ruleset 22171656 `promotion-branches-merge-commit-only` and by NOTHING ELSE: `branches/main/protection` still 404s `Branch not protected` (measured 2026-09-08). Same shape as `staging` above - the ruleset requires 0 reviews, no thread resolution, no deletion block, no checks - and on prod `required` would additionally fail enforce_admins (policy true, nothing closes the admin bypass here). Neither `required` nor `divergent` can state that honestly, so this row stays `exempt` and the guard KEEPS reporting it as a stale exemption; that finding is correct and names the work: the fleet's strictest role - enforce_admins closed, fr-gate + the three quality gates required, train bypass on review - is still enforced by a merge-method rule alone. Arm the classic layer under backend#2547 and flip this cell to `required` in the same hop. The 2026-08-27 reading (\"carries NO protection of either kind\") is retired by this one. UNREMEDIATED."
+      # FLIPPED exempt -> required 2026-09-09 on the read-back above. The retired
+      # `exempt` reasons (2026-09-08, ruleset-only, classic 404) are in this file's
+      # history at 295e597 if the shape ever regresses.
+      staging: required
+      prod: required
     rulesets:
       # FLIPPED exempt -> required 2026-09-08. Both rulesets appeared on
       # 2026-09-03 (08:26:29 and 08:26:58 +02:00) and both were reported as
