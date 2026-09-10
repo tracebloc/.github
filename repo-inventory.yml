@@ -157,7 +157,9 @@ quality_files:
 # whichever of main/master is IN THE BRANCH LIST -- never by probing
 # `branches/master`, which follows rename redirects and returns 200 for a branch
 # that does not exist (measured 2026-08-10: all 16 train repos reported a
-# `master`; only 3 have one).
+# `master`; only 3 had one, and since the 2026-09-08 renames of client-runtime,
+# tracebloc-engine and tracebloc-py-package none does -- every train repo's
+# prod branch is `main`; the redirect makes the probe lie on all 16 now).
 #
 # Values are the decisions of record from backend#1276, so that the two ways a
 # protection setting can be wrong -- someone changes it, or someone "fixes" a
