@@ -1118,7 +1118,7 @@ def _stage_gpu_map(text: str):
         if not m:
             continue
         seen_from = True
-        ref, unresolved = _expand_args(m.group(1), args)  # `FROM ${CUDA_IMAGE}` is judged by what it expands to (Bugbot, .github#454)
+        ref, _ = _expand_args(m.group(1), args)  # `FROM ${CUDA_IMAGE}` is judged by what it expands to (Bugbot, .github#454)
         alias = re.search(r"\s(?:AS|as)\s+(\S+)\s*(?:#.*)?$", raw)
         if ref in named:
             gpu, unresolved = named[ref]
@@ -1127,19 +1127,18 @@ def _stage_gpu_map(text: str):
             # placeholder must not satisfy GPU_HINT through its own name -- an
             # unset `FROM ${CUDA_IMAGE}` would otherwise read as a GPU stage and
             # silently clear a CPU-torch finding without knowing the image, the
-            # very case check_full_python_base reports as cannot-parse (Bugbot,
-            # backend#3562). A tag-only placeholder over a real GPU name
-            # (`nvidia/cuda:${TAG}`) is still GPU, so unresolved only survives
-            # when the resolved text says nothing.
+            # very case check_full_python_base reports as cannot-parse
+            # (Bugbot, .github#457).
             resolved = ARG_REF.sub("", ref)
-            gpu = bool(GPU_HINT.search(_image_name_tag(resolved)[0] + " " + resolved))
-            # ANY placeholder still present after expansion means the image is
-            # not known -- including one left inside a nested default like
-            # `${IMAGE:-${GPU_BASE}}`, which `_expand_args` does not recurse into
-            # and whose inner ref the strip above would otherwise silently drop
-            # (Bugbot, .github#459). Keep it unresolved unless the resolved text
-            # already proves GPU.
-            unresolved = (unresolved or bool(ARG_REF.search(ref))) and not gpu
+            name = _image_name_tag(resolved)[0]
+            gpu = bool(GPU_HINT.search(name + " " + resolved))
+            # The image is unknown only when expansion leaves no image NAME at
+            # all -- an unset `${CUDA_IMAGE}`/`${BASE}`, or a nested default like
+            # `${IMAGE:-${GPU_BASE}}` that `_expand_args` does not recurse into,
+            # whose inner ref the strip above drops (Bugbot, .github#459). A name
+            # templated only in its registry or tag (`${REGISTRY}/python:3.11-slim`,
+            # `nvidia/cuda:${TAG}`) is known -- judge it, never cannot-parse.
+            unresolved = not name and not gpu
         if alias:
             named[alias.group(1)] = (gpu, unresolved)
         stages.append((no, gpu, unresolved))
@@ -1178,7 +1177,7 @@ def _installers_of(repo: Repo, req_basename: str, want_file_rel: str):
     Dockerfile RUN / workflow step that pip-installs a requirements file with
     this basename. `unresolved` is true only when the install sits in a stage
     whose base image is an ARG with no value, so GPU-or-CPU cannot be told
-    (Bugbot, backend#3562)."""
+    (Bugbot, .github#457)."""
     hits = []
     for rel in repo.glob("Dockerfile*", "*.Dockerfile", "*.dockerfile"):
         text = DOCKER_COMMENT.sub("", repo.text(rel))  # a commented-out RUN installs nothing (Bugbot, .github#454)
@@ -1292,7 +1291,7 @@ def check_cuda_torch_on_cpu(repo: Repo, cfg: Config, findings):
                 # file, so GPU-or-CPU cannot be told and a CUDA-on-CPU torch
                 # install can be neither confirmed nor ruled out. Scan integrity,
                 # hard in every mode -- matching check_full_python_base, not a
-                # silent clean pass (Bugbot, backend#3562).
+                # silent clean pass (Bugbot, .github#457).
                 findings.append(Finding(
                     "cannot-parse", irel, ino,
                     "torch is installed here in a stage whose base image comes from an ARG with no value in this file, "

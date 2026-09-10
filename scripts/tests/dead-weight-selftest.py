@@ -633,18 +633,21 @@ def _():
     assert_clean(fx.findings(["cuda-torch-on-cpu"]))
 
 
-@case("cuda-torch: a GPU base behind a pre-FROM ARG (`FROM ${BASE_IMAGE}`) is a GPU stage")
+@case("cuda-torch: a GPU base behind a pre-FROM ARG (`FROM ${BASE_IMAGE}`) is a GPU stage; a CPU one is a finding")
 def _():
     # the ARG name carries no gpu word on purpose: only the EXPANDED value can say GPU
     fx = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG BASE_IMAGE=nvidia/cuda:12.4.1-runtime-ubuntu22.04\nFROM ${BASE_IMAGE}\nRUN pip install -r requirements.txt\n"})
     assert_clean(fx.findings(["cuda-torch-on-cpu"]))
+    # the CPU counterpart: a resolved slim image via ARG is a normal finding, not cannot-parse
+    cpu_arg = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG BASE=python:3.11-slim\nFROM ${BASE}\nRUN pip install -r requirements.txt\n"})
+    assert_finding(cpu_arg.findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
 
 
 @case("cuda-torch: an unset base ARG is cannot-parse, never a clean pass -- its own name (`${CUDA_IMAGE}`) must not read as GPU")
 def _():
     # The ARG name contains `cuda`; before the fix the unexpanded `${CUDA_IMAGE}`
     # satisfied GPU_HINT and the CPU-torch install was silently cleared without
-    # knowing the image (Bugbot, backend#3562). It is now scan integrity, like
+    # knowing the image (Bugbot, .github#457). It is now scan integrity, like
     # check_full_python_base treats the same ambiguity.
     cuda_named = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG CUDA_IMAGE\nFROM ${CUDA_IMAGE}\nRUN pip install -r requirements.txt\n"})
     f = cuda_named.findings(["cuda-torch-on-cpu"])
@@ -672,8 +675,17 @@ def _():
     f = fx.findings(["cuda-torch-on-cpu"])
     assert_finding(f, "cannot-parse", "cannot be told")
     assert_clean(f, "cuda-torch-on-cpu")
-    cpu_arg = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG BASE=python:3.11-slim\nFROM ${BASE}\nRUN pip install -r requirements.txt\n"})
-    assert_finding(cpu_arg.findings(["cuda-torch-on-cpu"]), "cuda-torch-on-cpu", count=1)
+
+
+@case("cuda-torch: a placeholder in only the REGISTRY (`${REGISTRY}/python:3.11-slim`) keeps the known image name -- a finding, not cannot-parse")
+def _():
+    # The image name (`python`) survives the strip, so GPU-or-CPU is known: this
+    # is a CPU install with the real "+cpu / index" remedy, not an unknown image
+    # (Bugbot, .github#459 nit -- unknown means no resolved NAME, not any placeholder).
+    fx = Fixture({"requirements.txt": REQ_TORCH, "Dockerfile": "ARG REGISTRY\nFROM ${REGISTRY}/python:3.11-slim\nRUN pip install -r requirements.txt\n"})
+    f = fx.findings(["cuda-torch-on-cpu"])
+    assert_finding(f, "cuda-torch-on-cpu", count=1)
+    assert_clean(f, "cannot-parse")
 
 
 @case("node: autoprefixer is reached by a postcss config, never by its own package.json key")
