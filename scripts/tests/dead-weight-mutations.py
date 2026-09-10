@@ -101,8 +101,8 @@ MUTATIONS = [
      "            if comment:"),
 
     ("an unresolved ARG tag is silently accepted",
-     "            if unresolved:",
-     "            if False:"),
+     "            if unresolved:\n                # Cannot tell slim from full",
+     "            if False:\n                # Cannot tell slim from full"),
 
     ("torch pins are never judged",
      '        if "+cpu" in raw:\n            continue',
@@ -196,8 +196,8 @@ MUTATIONS = [
      "    integrity = []\n    if integrity:"),
 
     ("a GPU stage anywhere in a Dockerfile exempts every stage",
-     "                    hits.append((rel, no, cmd, file_gpu or stage_gpu(no), _stage_text(text, stage_gpu.stages, no)))",
-     "                    hits.append((rel, no, cmd, file_gpu or any(stage_gpu(n) for n in range(1, no + 1)), _stage_text(text, stage_gpu.stages, no)))"),
+     "                    gpu = file_gpu or stage_gpu(no)",
+     "                    gpu = file_gpu or any(stage_gpu(n) for n in range(1, no + 1))"),
 
     ("eslint evidence reads the raw package.json again (dependency keys count as extends)",
      '    chunks = [repo.text(rel) for rel in repo.glob(*ESLINT_CONFIG_GLOBS)]',
@@ -269,11 +269,23 @@ MUTATIONS = [
 
     ("a GPU base behind a FROM ARG reads as CPU",
      r'''        ref, _ = _expand_args(m.group(1), args)  # `FROM ${CUDA_IMAGE}` is judged by what it expands to (Bugbot, .github#454)''',
-     r'''        ref = m.group(1)'''),
+     r'''        ref, _ = m.group(1), False'''),
+
+    ("an unresolved FROM ARG's own name marks the stage GPU (`${CUDA_IMAGE}` reads GPU)",
+     r'''            resolved = ARG_REF.sub("", ref)''',
+     r'''            resolved = ref'''),
+
+    ("an install in an unresolved-base stage is silently cleared, not cannot-parse",
+     "            if unresolved:\n                # The stage's base image comes from an ARG with no value in this",
+     "            if False:\n                # The stage's base image comes from an ARG with no value in this"),
+
+    ("the resolved NAME, not the raw ref, decides an unknown image (nested-default / empty-name)",
+     "            unresolved = not name and not gpu",
+     "            unresolved = not ref and not gpu"),
 
     ("a CPU index anywhere in the Dockerfile clears every stage's install",
-     r'''                    hits.append((rel, no, cmd, file_gpu or stage_gpu(no), _stage_text(text, stage_gpu.stages, no)))''',
-     r'''                    hits.append((rel, no, cmd, file_gpu or stage_gpu(no), text))'''),
+     r'''                    hits.append((rel, no, cmd, gpu, _stage_text(text, stage_gpu.stages, no), unresolved))''',
+     r'''                    hits.append((rel, no, cmd, gpu, text, unresolved))'''),
 
     ("trailing Dockerfile comments are kept (hide exec-form installs, name indexes)",
      r'''DOCKER_COMMENT = re.compile(r"^\s*#.*$|\s#[^\"'\n]*$", re.M)''',

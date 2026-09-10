@@ -1106,8 +1106,8 @@ def _stage_gpu_map(text: str):
     installs into the CPU runtime, and that install is exactly the finding
     (Bugbot, .github#454). A stage inherits GPU-ness from an earlier stage it
     is `FROM <name>` of; anything before the first FROM (ARGs) is no stage."""
-    stages = []  # (start_line, gpu)
-    named = {}
+    stages = []  # (start_line, gpu, unresolved)
+    named = {}   # alias -> (gpu, unresolved)
     args, seen_from = {}, False
     for no, raw in enumerate(text.splitlines(), 1):
         am = ARG_LINE.match(raw.split(" #", 1)[0])
@@ -1121,22 +1121,41 @@ def _stage_gpu_map(text: str):
         ref, _ = _expand_args(m.group(1), args)  # `FROM ${CUDA_IMAGE}` is judged by what it expands to (Bugbot, .github#454)
         alias = re.search(r"\s(?:AS|as)\s+(\S+)\s*(?:#.*)?$", raw)
         if ref in named:
-            gpu = named[ref]
+            gpu, unresolved = named[ref]
         else:
-            gpu = bool(GPU_HINT.search(_image_name_tag(ref)[0] + " " + ref))
+            # Judge GPU-ness on the RESOLVED text only: an unresolved `${ARG}`
+            # placeholder must not satisfy GPU_HINT through its own name -- an
+            # unset `FROM ${CUDA_IMAGE}` would otherwise read as a GPU stage and
+            # silently clear a CPU-torch finding without knowing the image, the
+            # very case check_full_python_base reports as cannot-parse
+            # (Bugbot, .github#457).
+            resolved = ARG_REF.sub("", ref)
+            name = _image_name_tag(resolved)[0]
+            gpu = bool(GPU_HINT.search(name + " " + resolved))
+            # The image is unknown only when expansion leaves no image NAME at
+            # all -- an unset `${CUDA_IMAGE}`/`${BASE}`, or a nested default like
+            # `${IMAGE:-${GPU_BASE}}` that `_expand_args` does not recurse into,
+            # whose inner ref the strip above drops (Bugbot, .github#459). A name
+            # templated only in its registry or tag (`${REGISTRY}/python:3.11-slim`,
+            # `nvidia/cuda:${TAG}`) is known -- judge it, never cannot-parse.
+            unresolved = not name and not gpu
         if alias:
-            named[alias.group(1)] = gpu
-        stages.append((no, gpu))
+            named[alias.group(1)] = (gpu, unresolved)
+        stages.append((no, gpu, unresolved))
 
-    def lookup(line_no: int) -> bool:
-        current = False
-        for start, gpu in stages:
+    def _at(line_no: int, idx: int) -> bool:
+        current = (False, False)
+        for start, gpu, unres in stages:
             if start <= line_no:
-                current = gpu
+                current = (gpu, unres)
             else:
                 break
-        return current
+        return current[idx]
 
+    def lookup(line_no: int) -> bool:
+        return _at(line_no, 0)
+
+    lookup.unresolved_at = lambda line_no: _at(line_no, 1)
     lookup.stages = stages
     return lookup
 
@@ -1146,7 +1165,7 @@ def _stage_text(text: str, stages, line_no: int) -> str:
     does not survive a FROM, so a CPU index set in another stage -- before or
     after -- says nothing about this stage's install (Bugbot, .github#454)."""
     lines = text.splitlines()
-    starts = [start for start, _ in stages]
+    starts = [start for start, *_ in stages]
     begin = max([st for st in starts if st <= line_no], default=1)
     later = [st for st in starts if st > line_no]
     end = min(later) - 1 if later else len(lines)
@@ -1154,8 +1173,11 @@ def _stage_text(text: str, stages, line_no: int) -> str:
 
 
 def _installers_of(repo: Repo, req_basename: str, want_file_rel: str):
-    """(rel, line, command, gpu_context) for every Dockerfile RUN / workflow step
-    that pip-installs a requirements file with this basename."""
+    """(rel, line, command, gpu_context, context_text, unresolved) for every
+    Dockerfile RUN / workflow step that pip-installs a requirements file with
+    this basename. `unresolved` is true only when the install sits in a stage
+    whose base image is an ARG with no value, so GPU-or-CPU cannot be told
+    (Bugbot, .github#457)."""
     hits = []
     for rel in repo.glob("Dockerfile*", "*.Dockerfile", "*.dockerfile"):
         text = DOCKER_COMMENT.sub("", repo.text(rel))  # a commented-out RUN installs nothing (Bugbot, .github#454)
@@ -1166,7 +1188,11 @@ def _installers_of(repo: Repo, req_basename: str, want_file_rel: str):
                 continue
             for target in REQ_FLAG.findall(cmd):
                 if os.path.basename(target) == req_basename:
-                    hits.append((rel, no, cmd, file_gpu or stage_gpu(no), _stage_text(text, stage_gpu.stages, no)))
+                    gpu = file_gpu or stage_gpu(no)
+                    # unresolved only matters when GPU-ness is otherwise unknown:
+                    # a GPU filename or a resolved GPU stage already settles it.
+                    unresolved = not gpu and stage_gpu.unresolved_at(no)
+                    hits.append((rel, no, cmd, gpu, _stage_text(text, stage_gpu.stages, no), unresolved))
     for rel in repo.glob(".github/workflows/*.yml", ".github/workflows/*.yaml"):
         for job_start, job_text, context in _workflow_jobs(repo.text(rel)):
             gpu = any(GPU_HINT.search(m.group(1)) for m in RUNS_ON.finditer(job_text))
@@ -1175,7 +1201,7 @@ def _installers_of(repo: Repo, req_basename: str, want_file_rel: str):
                     continue
                 for target in REQ_FLAG.findall(cmd):
                     if os.path.basename(target) == req_basename:
-                        hits.append((rel, job_start + offset - 1, cmd, gpu, context))
+                        hits.append((rel, job_start + offset - 1, cmd, gpu, context, False))
     return hits
 
 
@@ -1255,10 +1281,21 @@ def check_cuda_torch_on_cpu(repo: Repo, cfg: Config, findings):
         installers = []
         for b in basenames:
             installers.extend(_installers_of(repo, b, rel))
-        for irel, ino, cmd, gpu, itext in installers:
+        for irel, ino, cmd, gpu, itext, unresolved in installers:
             if gpu:
                 continue
             if CPU_INDEX.search(cmd) or re.search(r"PIP_(?:EXTRA_)?INDEX_URL[^\n]*whl/cpu", itext):
+                continue
+            if unresolved:
+                # The stage's base image comes from an ARG with no value in this
+                # file, so GPU-or-CPU cannot be told and a CUDA-on-CPU torch
+                # install can be neither confirmed nor ruled out. Scan integrity,
+                # hard in every mode -- matching check_full_python_base, not a
+                # silent clean pass (Bugbot, .github#457).
+                findings.append(Finding(
+                    "cannot-parse", irel, ino,
+                    "torch is installed here in a stage whose base image comes from an ARG with no value in this file, "
+                    "so GPU-or-CPU cannot be told; give the ARG a default (else a CUDA-on-CPU torch install cannot be caught)"))
                 continue
             for pin in pins:
                 findings.append(Finding(
