@@ -36,7 +36,7 @@ Your data stays on your infrastructure. Fine-tuned weights stay on your infrastr
 | | |
 |---|---|
 | **[model-zoo](https://github.com/tracebloc/model-zoo)** | Pre-built models for vision, NLP, tabular, time series — ready to train |
-| **[start-training](https://github.com/tracebloc/start-training)** | Jupyter notebook to launch training in minutes |
+| **[quickstart](https://github.com/tracebloc/quickstart)** | Jupyter notebook to launch training in minutes |
 | **[data-ingestors](https://github.com/tracebloc/data-ingestors)** | Pipelines to validate, prepare, and ingest your datasets |
 | **[client](https://github.com/tracebloc/client)** | Deploy the tracebloc workspace on your Kubernetes cluster |
 
