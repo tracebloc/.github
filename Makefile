@@ -385,6 +385,7 @@ SELFTEST_TARGETS := selftest-caller-drift selftest-blocked-marker selftest-stand
                     selftest-lint-targets \
                     selftest-fr-gate-walk \
                     selftest-extract-advanced-prs \
+                    selftest-post-release-bump \
                     selftest-dead-weight
 
 selftests: selftests-cover $(SELFTEST_TARGETS)
@@ -811,6 +812,16 @@ selftest-git-reap:
 .PHONY: selftest-extract-advanced-prs
 selftest-extract-advanced-prs:
 	bash scripts/tests/extract-advanced-prs-selftest.sh
+
+# The TAG DECISION in post-release-bump.yml (backend#3681). Its callers trigger on
+# `push: tags: ['v*']`, not on `release`, so "is this a prerelease?" is decided from
+# the tag text rather than an event field -- and the shape glob the workflow already
+# had accepts `1.2.3-rc.1`, so the rc test has to be explicit or every rc tag bumps
+# the version. The suite extracts both `case` blocks out of the YAML rather than
+# restating them, so the workflow cannot drift away from what this runs.
+.PHONY: selftest-post-release-bump
+selftest-post-release-bump:
+	bash scripts/tests/post-release-bump-selftest.sh
 
 # Branch OWNERSHIP, which git-reap above deliberately does not need: it reaps the
 # caller's OWN local branches, so "whose is it" never arises. Anything that
