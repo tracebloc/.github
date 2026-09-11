@@ -81,6 +81,15 @@ MUTATIONS = [
     ("a repeating cursor is followed for ever instead of refused",
      '            if not cursor or cursor in seen_cursors or pages_left <= 0:',
      '            if not cursor:'),
+    # The regression the staging-hop Bugbot named on #464: the pageInfo self-check
+    # going blind for ONE connection. The selftest's stripper loop used to `break`
+    # after `checkSuites`, and its `reviewThreads` branch pasted a fixed indentation
+    # that matched the checkSuites line first -- so this row was UNCAUGHT until
+    # the loop was made to visit every member (measured before the fix landed).
+    ("the pageInfo self-check walks only the first connection, so reviewThreads' "
+     "cursor can be dropped from the query unnoticed",
+     '    for name in PAGED_TOPLEVEL:\n        match = re.search(name + r"\\(first:',
+     '    for name in list(PAGED_TOPLEVEL)[:1]:\n        match = re.search(name + r"\\(first:'),
 
     # --- (A) the load-bearing claim: a TERMINAL verdict on THIS head --------
     ("a missing Bugbot verdict reports PASS instead of UNCLAIMED",
