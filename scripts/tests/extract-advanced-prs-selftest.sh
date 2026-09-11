@@ -26,6 +26,19 @@ no() { printf '  FAIL  %s\n     %s\n' "$1" "$2"; fail=$((fail + 1)); }
 assert_out()     { if grep -qF -- "$2" <<<"$3"; then ok "$1"; else no "$1" "expected: $2 -- got: $3"; fi; }
 assert_not_out() { if grep -qF -- "$2" <<<"$3"; then no "$1" "must NOT contain: $2 -- got: $3"; else ok "$1"; fi; }
 
+# result_line <out> -> ONLY the script's "Found PRs: ..." line, the attribution
+# itself. The "is NOT attributed" checks below must grep THIS, never the whole
+# output: the script also prints `::warning::commit <40-hex sha>: ...`, and the
+# fixture commits are minted at run time (random content + the wall clock), so
+# their shas are random hex. A negative grep for "901" over the whole output
+# therefore fails whenever the sha happens to contain "901" -- which is what
+# reddened `selftests` on main at eb89c1e5 (sha e57d5bafc191901afac...) with the
+# extractor itself correct. ~1% of runs per three-digit needle: a coin the
+# suite tossed on every push. An absent result line is returned as-is (empty),
+# so a negative assertion on it still passes only when the positive
+# "Found PRs" assertion next to it is what carries the check.
+result_line() { grep -- '^Found PRs:' <<<"$1" || true; }
+
 # A `gh` stub. `gh api repos/<repo>/commits/<sha>/pulls --jq <expr>`:
 #   * $STUB_DIR/<sha>.fail present -> exit 1 (a FAILED read, e.g. a 403)
 #   * else apply <expr> with real jq over $STUB_DIR/<sha>.json (empty array if none)
@@ -93,7 +106,7 @@ a="$(commit "$root" 'fix(tests): bound the k3d cleanup in all seven e2e EXIT tra
 printf '[{"number":985,"merged_at":"2026-09-07T08:22:52Z","base":{"ref":"develop"},"head":{"ref":"fix/979-k3d-cleanup"}}]\n' >"$STUB_DIR/${a}.json"
 out="$(run_extract "$root" "$base" "$a" "$bin")"
 assert_out     "client#985: the develop-based feature PR is attributed on a staging hop" "Found PRs: 985" "$out"
-assert_not_out "client#985: the subject issue is NOT used"                               "979"            "$out"
+assert_not_out "client#985: the subject issue is NOT used"                               "979"            "$(result_line "$out")"
 
 # ---------------------------------------------------------------------------
 # FIXTURE 2: tracebloc-engine#914 — subject names ticket backend#3013 in the
@@ -106,7 +119,7 @@ b="$(commit "$root" 'sec(deps): torch 2.13.0 + torchvision 0.28.0 on the cu129 i
 printf '[{"number":914,"merged_at":"2026-09-07T00:00:00Z","base":{"ref":"develop"},"head":{"ref":"sec/3013-torch"}}]\n' >"$STUB_DIR/${b}.json"
 out="$(run_extract "$root" "$base" "$b" "$bin")"
 assert_out     "engine#914: the develop-based feature PR is attributed on a staging hop" "Found PRs: 914" "$out"
-assert_not_out "engine#914: the subject ticket is NOT used"                              "3013"           "$out"
+assert_not_out "engine#914: the subject ticket is NOT used"                              "3013"           "$(result_line "$out")"
 
 # ---------------------------------------------------------------------------
 # PROMOTION PR EXCLUDED: a commit whose /pulls names a merged release-train/*
@@ -118,7 +131,7 @@ base="$(make_repo "$root")"
 p="$(commit "$root" 'chore(promote): develop -> staging (#900)')"
 printf '[{"number":901,"merged_at":"2026-09-07T00:00:00Z","base":{"ref":"staging"},"head":{"ref":"release-train/develop-to-staging"}}]\n' >"$STUB_DIR/${p}.json"
 out="$(run_extract "$root" "$base" "$p" "$bin")"
-assert_not_out "promotion: the release-train PR is not attributed"       "901"            "$out"
+assert_not_out "promotion: the release-train PR is not attributed"       "901"            "$(result_line "$out")"
 assert_out     "promotion: it falls through to the subject"              "Found PRs: 900" "$out"
 
 # ---------------------------------------------------------------------------
