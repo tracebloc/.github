@@ -911,15 +911,54 @@ check("paging: a Bugbot suite on the SECOND page of suites is found",
 # The query must keep asking for pageInfo, or none of the above ever runs live.
 check("the real QUERY asks both top-level connections for pageInfo",
       gate.connections_missing_pageinfo() == [], "missing=%r" % gate.connections_missing_pageinfo())
+
+# EVERY CONNECTION, AND THE RIGHT ONE. The first version of this loop ended in a
+# `break`, so only the first member of PAGED_TOPLEVEL (`checkSuites`) was ever
+# exercised, and its `reviewThreads` branch pasted a fixed 6-space indentation
+# into `str.replace` -- a needle that is a substring of the 14-space-indented
+# `checkSuites` line and so, had it ever run, would have stripped checkSuites'
+# pageInfo a second time and let the detector "pass" by naming the wrong
+# connection (measured: `connections_missing_pageinfo` answered
+# `['checkSuites']` for the reviewThreads branch). A self-check that went blind
+# for `reviewThreads` alone passed this suite. Same shape as the totalCount
+# stripper above, with three things pinned:
+#   1. the members are ALSO written down as literals, because a loop over the
+#      module's own dict cannot see a member being removed from it;
+#   2. the stripper is anchored on the connection's own name and is indentation-
+#      agnostic, and its substitution count is asserted, so it cannot hit the
+#      neighbour or silently strip nothing;
+#   3. the detector must name EXACTLY the connection stripped -- the other one,
+#      or both, is a wrong answer, not a pass;
+# and the loop's visit list is compared to the literals afterwards, so a `break`
+# (or a `continue` past the asserts) reddens the suite instead of shrinking it.
+PAGED_TOPLEVEL_LITERALS = ("checkSuites", "reviewThreads")
+for name in PAGED_TOPLEVEL_LITERALS:
+    check(
+        "%r is declared a paged top-level connection" % name,
+        name in gate.PAGED_TOPLEVEL,
+        "PAGED_TOPLEVEL = %r" % (list(gate.PAGED_TOPLEVEL),),
+    )
+pageinfo_visited = []
 for name in gate.PAGED_TOPLEVEL:
-    stripped = re.sub(r"pageInfo \{ hasNextPage endCursor \}\n", "", gate.QUERY, count=1) \
-        if name == "checkSuites" else gate.QUERY.replace("      pageInfo { hasNextPage endCursor }\n", "", 1)
-    # Whichever occurrence the stripper removed, the guard must name AT LEAST one
-    # connection -- the assertion is that the stripper applied and was seen.
-    check("the pageInfo stripper actually applied", stripped != gate.QUERY)
-    check("dropping pageInfo from the query is detected",
-          gate.connections_missing_pageinfo(stripped) != [], "guard stayed silent for %r" % name)
-    break
+    stripped, applied = re.subn(
+        r"(" + name + r"\(first:\s*\d+[^)]*\)\s*\{[^{]*?)pageInfo\s*\{[^}]*\}\s*", r"\1", gate.QUERY
+    )
+    check(
+        "the pageInfo stripper actually applied to %r" % name,
+        applied == 1,
+        "%d substitution(s) -- the anchor no longer matches the query" % applied,
+    )
+    check(
+        "dropping pageInfo from %r is detected, and %r alone is named" % (name, name),
+        gate.connections_missing_pageinfo(stripped) == [name],
+        "detector said %r" % (gate.connections_missing_pageinfo(stripped),),
+    )
+    pageinfo_visited.append(name)
+check(
+    "the pageInfo stripper loop visited every paged top-level connection",
+    sorted(pageinfo_visited) == sorted(PAGED_TOPLEVEL_LITERALS),
+    "visited %r, expected %r" % (pageinfo_visited, list(PAGED_TOPLEVEL_LITERALS)),
+)
 
 # 7. severity_of, directly.
 # --------------------------------------------------------------------------
