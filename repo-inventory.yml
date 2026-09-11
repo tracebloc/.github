@@ -208,6 +208,14 @@ caller_inputs:
   code-quality.yml:
     soft-fail: false
     action-pins-soft-fail: false
+  # version-bump-gate.yml's `soft-fail` defaults TRUE (annotate-only): a caller
+  # that drops `soft-fail: false` reverts the gate to advisory, and the
+  # caller-drift check that derives version-file/publish-paths from repos.yml
+  # does NOT compare soft-fail -- so without this row nothing would catch that
+  # revert anywhere (@LukasWodka on .github#447). Measured green: all six
+  # version-bump-gate callers pass `soft-fail: false` on develop.
+  version-bump-gate.yml:
+    soft-fail: false
 
 protection_policy:
   develop:
@@ -336,7 +344,10 @@ shared_reasons:
   version_gate_not_applicable: &version_gate_not_applicable >-
     This repo has no version_file in release-train/repos.yml, so it publishes
     no tag-versioned artifact through the train and the version-bump gate does
-    not apply. The five version-published repos declare it required.
+    not apply. The repos that DO declare a version_file mark it required, and
+    caller-drift derives their version-file/publish-paths from repos.yml
+    (backend#2953) - no count is restated here, so this reason cannot drift as
+    that set grows.
 
   wip_limit_check_has_no_callers: &wip_limit_check_has_no_callers >-
     wip-limit-check has ZERO callers anywhere in the org (measured 2026-08-03, all 20 active

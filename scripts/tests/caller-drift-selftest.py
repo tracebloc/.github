@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import ast
 import base64
+import contextlib
 import copy
 import importlib.util
+import io
 import inspect
 import inspect as _inspect
 import json
@@ -1924,6 +1926,240 @@ record(_c == 0, "exit: over-counting remediation is still green, not partial", f
 # non-zero. Without this, `remediated and ...` could decay into `if remediated`.
 _c, _r = _exit(findings=9, remediated=1)
 record(_c == 1, "exit: one PR does not make nine findings green", f"{_c} {_r!r}")
+
+
+# ---------------------------------------- version-bump-gate caller vs repos.yml
+#
+# backend#2953. The caller's `version-file`/`publish-paths` restate release-train's
+# repos.yml, and five of six had drifted NARROWER than the source, publishing paths
+# the gate no longer watched. `version_bump_input_findings` derives the expected
+# values from repos.yml (holding neither itself) and flags any disagreement. These
+# cases pin the direction wording, the set semantics, and the two fields it must
+# NOT compare on.
+
+VF = "package.json"
+PP = "src/* tokens/*"
+
+
+def _vbg_hit(inputs, filename="version-bump-gate-caller.yml"):
+    """One (filename, ref, inputs) tuple, the shape collect_uses yields."""
+    return [(filename, "main", inputs)]
+
+
+# Exact agreement: no finding.
+_f = guard.version_bump_input_findings(
+    "ds", VF, PP, _vbg_hit({"version-file": VF, "publish-paths": PP}))
+record(_f == [], "vbg: a caller that matches repos.yml is clean", str(_f))
+
+# Order-independent: publish-paths is a set of globs, and the gate loops over them,
+# so a reordered-but-equal list is NOT drift.
+_f = guard.version_bump_input_findings(
+    "ds", VF, PP, _vbg_hit({"version-file": VF, "publish-paths": "tokens/* src/*"}))
+record(_f == [], "vbg: publish-paths compared as a set, order does not matter", str(_f))
+
+# THE ISSUE'S CASE: design-system-v2 declared `src/*` while repos.yml publishes
+# `src/* tokens/*`. Narrower -> one finding, the unsafe direction, naming the gap.
+_f = guard.version_bump_input_findings(
+    "design-system-v2", VF, PP,
+    _vbg_hit({"version-file": VF, "publish-paths": "src/*"}))
+record(len(_f) == 1 and "NARROWER" in _f[0] and "tokens/*" in _f[0],
+       "vbg: a NARROWER caller is a finding that names the dropped path",
+       str(_f))
+
+# Wider -> a finding too (a nag), and it must read as the WIDER direction, not the
+# narrower one -- the two are different bugs.
+_f = guard.version_bump_input_findings(
+    "ds", VF, PP,
+    _vbg_hit({"version-file": VF, "publish-paths": "src/* tokens/* extra/*"}))
+record(len(_f) == 1 and "WIDER" in _f[0] and "extra/*" in _f[0],
+       "vbg: a WIDER caller is a distinct finding, not silently tolerated",
+       str(_f))
+
+# version-file drift is caught even when publish-paths agree (the issue's "also
+# worth checking" note -- keep them agreeing).
+_f = guard.version_bump_input_findings(
+    "ds", VF, PP, _vbg_hit({"version-file": "VERSION", "publish-paths": PP}))
+record(len(_f) == 1 and "version-file" in _f[0] and "VERSION" in _f[0],
+       "vbg: a drifted version-file is a finding on its own", str(_f))
+
+# publish-paths omitted entirely -> a finding (the reusable requires it; an absent
+# one is not permission to skip).
+_f = guard.version_bump_input_findings(
+    "ds", VF, PP, _vbg_hit({"version-file": VF}))
+record(len(_f) == 1 and "no `publish-paths`" in _f[0],
+       "vbg: a caller with no publish-paths is a finding", str(_f))
+
+# exclude-paths is caller-only (backend#2758) and has no repos.yml counterpart, so
+# a caller that passes it while otherwise matching is CLEAN -- comparing it would
+# manufacture drift.
+_f = guard.version_bump_input_findings(
+    "ds", VF, PP,
+    _vbg_hit({"version-file": VF, "publish-paths": PP, "exclude-paths": "src/*.test.ts"}))
+record(_f == [], "vbg: exclude-paths is not compared against repos.yml", str(_f))
+
+# soft-fail is likewise not this check's concern (the inventory's caller_inputs
+# floor owns it); an otherwise-matching caller with soft-fail is clean here.
+_f = guard.version_bump_input_findings(
+    "ds", VF, PP,
+    _vbg_hit({"version-file": VF, "publish-paths": PP, "soft-fail": False}))
+record(_f == [], "vbg: soft-fail is not compared here (caller_inputs owns it)", str(_f))
+
+# No caller at all -> nothing from this check. A MISSING required caller is the
+# inventory's own finding, and double-reporting it here would be noise.
+record(guard.version_bump_input_findings("ds", VF, PP, []) == [],
+       "vbg: no caller yields no finding here (missing-caller is the inventory's)", "")
+
+# Both fields wrong on the same caller -> both findings, so one masking the other
+# cannot happen.
+_f = guard.version_bump_input_findings(
+    "ds", VF, PP, _vbg_hit({"version-file": "VERSION", "publish-paths": "src/*"}))
+record(len(_f) == 2, "vbg: version-file AND publish-paths drift both reported", str(_f))
+
+
+# --- load_release_train now carries version_file/publish_paths ------------------
+# It is the ONE reader of those two fields; everything downstream derives from it.
+
+def _train_stub(reposyml_text):
+    """Stub gh so load_release_train reads this repos.yml body off develop."""
+    def h(args):
+        joined = " ".join(args)
+        if "release-train/contents/repos.yml" in joined:
+            return reposyml_text
+        raise guard.GhError(500, f"unexpected call {args!r}")
+    return h
+
+
+_GOOD_TRAIN = textwrap.dedent("""\
+    repos:
+      - name: hub
+      - name: cli
+        version_file: VERSION
+        publish_paths: cmd/* VERSION
+""")
+
+stub(_train_stub(_GOOD_TRAIN))
+_train = guard.load_release_train("acme")
+record(
+    set(_train) == {"hub", "cli"}
+    and _train["hub"]["version_file"] is None
+    and _train["cli"]["version_file"] == "VERSION"
+    and _train["cli"]["publish_paths"] == "cmd/* VERSION",
+    "load_release_train: membership as keys, version_file/publish_paths as values",
+    repr(_train))
+
+# A `version_file` with NO `publish_paths` is repos.yml's SANCTIONED strict mode
+# ("Omit the key to keep the strict behaviour"), not a malformed source:
+# load_release_train now CARRIES it (publish_paths None) rather than dying, so one
+# entry omitting the key no longer discards all 19 others' findings. The per-repo
+# consequence is version_bump_input_findings' business (below). @LukasWodka #447.
+stub(_train_stub("repos:\n  - name: cli\n    version_file: VERSION\n"))
+_train = guard.load_release_train("acme")
+record(
+    _train["cli"]["version_file"] == "VERSION"
+    and _train["cli"]["publish_paths"] is None,
+    "load_release_train: version_file with no publish_paths is carried, not a die",
+    repr(_train))
+
+# An empty/whitespace publish_paths is carried the same way -- the strip that turns
+# it into the per-repo finding happens downstream, not here.
+stub(_train_stub("repos:\n  - name: cli\n    version_file: VERSION\n    publish_paths: '   '\n"))
+_train = guard.load_release_train("acme")
+record(
+    _train["cli"]["version_file"] == "VERSION"
+    and (_train["cli"]["publish_paths"] or "").strip() == "",
+    "load_release_train: empty publish_paths is carried, not a die",
+    repr(_train))
+
+# A non-string/empty `version_file`, by contrast, IS malformed and still fails
+# closed -- exit 2 AND the specific refusal (not any `die`, which also exits 2).
+stub(_train_stub("repos:\n  - name: cli\n    version_file: '   '\n"))
+_err = io.StringIO()
+try:
+    with contextlib.redirect_stderr(_err):
+        guard.load_release_train("acme")
+except SystemExit as exc:
+    record(exc.code == 2 and "non-string or empty `version_file`" in _err.getvalue(),
+           "load_release_train: empty version_file still fails closed",
+           f"SystemExit({exc.code}) stderr={_err.getvalue()!r}")
+else:
+    record(False, "load_release_train: empty version_file still fails closed",
+           "accepted an empty version_file")
+
+# ask 3: the strict-mode case (version_file, no usable publish_paths) is now a
+# PER-REPO finding whose text the ask-2 assertions pin. None and empty both yield
+# it, and it fires WITHOUT a caller -- the source, not the caller, is the problem
+# (@LukasWodka on #447).
+for _pp in (None, "   "):
+    _f = guard.version_bump_input_findings("cli", VF, _pp, [])
+    record(
+        len(_f) == 1
+        and "strict mode" in _f[0]
+        and "no usable `publish_paths`" in _f[0],
+        f"vbg: version_file with no publish_paths ({_pp!r}) -> per-repo finding",
+        str(_f))
+
+# ...and the finding's own advice ("or exempt the caller") must actually work: an
+# EXEMPT caller clears the strict-mode finding, a required one keeps it. Otherwise
+# an exempted repo stays red forever (Bugbot on #447).
+record(guard.version_bump_input_findings("cli", VF, None, [], "exempt") == [],
+       "vbg: an exempt caller clears the strict-mode finding", "")
+_f = guard.version_bump_input_findings("cli", VF, None, [], "required")
+record(len(_f) == 1 and "strict mode" in _f[0],
+       "vbg: a required caller keeps the strict-mode finding", str(_f))
+
+# ask 4: an `exclude-paths` glob EQUAL to a repos.yml publish glob hollows that path
+# back out of the watched set -- a finding, even though exclude-paths is otherwise
+# not compared. LukasWodka's repro: publish `src/* tokens/*`, exclude `tokens/*`
+# (@LukasWodka on #447).
+_f = guard.version_bump_input_findings(
+    "ds", VF, PP,
+    _vbg_hit({"version-file": VF, "publish-paths": PP, "exclude-paths": "tokens/*"}))
+record(len(_f) == 1 and "hollows" in _f[0] and "tokens/*" in _f[0],
+       "vbg: an exclude glob equal to a publish glob is a hollowing finding", str(_f))
+
+# ask 1a: zero_pair_die_message fires only when NO entry carries version_file AND
+# the inventory requires the caller. An intentionally train-free fleet, or one that
+# still carries a version_file, is not an error (@LukasWodka on #447).
+_INV_REQ = {"cli": {"callers": {guard.VERSION_BUMP_GATE: ("required", "")}}}
+_msg = guard.zero_pair_die_message({"cli": {"version_file": None}}, _INV_REQ)
+record(bool(_msg) and "run on nobody" in _msg,
+       "zero_pair: no version_file anywhere + a required caller -> die message",
+       repr(_msg))
+record(
+    guard.zero_pair_die_message({"cli": {"version_file": "VERSION"}}, _INV_REQ) is None,
+    "zero_pair: some entry still carries version_file -> no die", "")
+_INV_EXEMPT = {"cli": {"callers": {guard.VERSION_BUMP_GATE: ("exempt", "x")}}}
+record(
+    guard.zero_pair_die_message({"cli": {"version_file": None}}, _INV_EXEMPT) is None,
+    "zero_pair: no required caller -> no die even with no version_file", "")
+
+# ask 1b: version_bump_missing_pair_finding fires when the caller is required but the
+# train entry has no version_file; silent when it has one, or the caller is not
+# required (@LukasWodka on #447).
+_mp = guard.version_bump_missing_pair_finding("cli", None, "required")
+record(bool(_mp) and "no `version_file`" in _mp,
+       "missing_pair: required caller + no train version_file -> finding", repr(_mp))
+record(
+    guard.version_bump_missing_pair_finding(
+        "cli", {"version_file": "VERSION"}, "required") is None,
+    "missing_pair: required caller WITH version_file -> no finding (compared instead)",
+    "")
+record(
+    guard.version_bump_missing_pair_finding("cli", None, "exempt") is None,
+    "missing_pair: exempt caller -> no finding", "")
+
+# Optional pin (@LukasWodka on #447): the REAL inventory carries the soft-fail floor
+# for the version-bump-gate caller, so a silent deletion of that caller_inputs row
+# cannot pass unnoticed (the selftest comment "caller_inputs owns it" is now true
+# AND held up).
+_REAL_INV = os.path.join(HERE, os.pardir, os.pardir, "repo-inventory.yml")
+_real_inv = guard.load_inventory(_REAL_INV)
+record(
+    (_real_inv.get("caller_inputs") or {})
+    .get(guard.VERSION_BUMP_GATE, {})
+    .get("soft-fail") is False,
+    "inventory: version-bump-gate caller_inputs pins soft-fail: false",
+    repr((_real_inv.get("caller_inputs") or {}).get(guard.VERSION_BUMP_GATE)))
 
 
 failed = [row for row in RESULTS if not row[0]]
