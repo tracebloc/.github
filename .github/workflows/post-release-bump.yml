@@ -20,6 +20,32 @@ name: Post-release version bump
 # This opens the bump PR at the one moment the version is known for certain --
 # immediately after the release that consumed it.
 #
+# THE CALLER TRIGGERS ON THE TAG, NOT ON `release` (backend#3681). The first
+# version of this reusable read `github.event.release.*` and assumed callers would
+# trigger on `release: published`. Measured 2026-09-11 across the six repos that
+# declare a version_file in release-train/repos.yml, that event reaches exactly ONE
+# of them:
+#
+#   client                 gh_release: true -> the train runs `gh release create`
+#                          under a PAT, so the event fires.                    FIRES
+#   cli, data-ingestors    their own publish workflows create the Release under
+#                          GITHUB_TOKEN, and GitHub does not start workflow runs
+#                          from events raised by GITHUB_TOKEN.             NEVER FIRES
+#   tracebloc-py-package   no GitHub Release is created at all -- promote-repo.sh
+#   design-system          POSTs a bare tag ref (`git/refs`) for every repo that
+#   design-system-v2       does not set gh_release.                        NEVER FIRES
+#
+# The three that raise no release event at all are precisely the repos this
+# reusable was written for -- `design-system` after v1.3.0 and v1.4.0, and
+# `design-system-v2` at v0.1.0, all cited above. So callers wire it to
+# `on: push: tags: ['v*']`: the TAG is the one signal all six actually produce,
+# because the train always creates it on the way to publishing.
+#
+# THE PRERELEASE TEST THEREFORE MOVED INTO THE SCRIPT. On the release event it was
+# a field (`prerelease`); on a tag push there is no such field, and `v*` matches
+# every rc tag the train cuts per hop. An rc is a GREEN NO-OP, not an error -- it
+# consumes no version and there is nothing to bump.
+#
 # WHY A PR AND NOT A PUSH. `develop` is protected and the bump is a judgement
 # call: patch is the safe default, but the person who just shipped may know the
 # next cycle is a minor. A PR is reviewable, and editing the number before merge
@@ -105,7 +131,10 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # PR CREATION ONLY, so the PR has an author Bugbot will review.
           PR_AUTHOR_TOKEN: ${{ secrets.SYNC_PR_AUTHOR_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
+          # BOTH EVENTS, because the release path stays supported for `client`,
+          # which is the one repo whose release event does fire. On a tag push
+          # `github.event.release` is absent and `github.ref_name` is the tag.
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
           VERSION_FILE: ${{ inputs.version-file }}
           BUMP: ${{ inputs.bump }}
           BASE: ${{ inputs.base-branch }}
@@ -147,6 +176,22 @@ jobs:
             echo "::error::SYNC_PR_AUTHOR_TOKEN is not set. An app-authored PR gets no Bugbot review and bugbot-gate can never pass it, so nothing was written. Set the secret and re-run."
             exit 1
           fi
+
+          # AN rc CONSUMES NOTHING (backend#3681). On the release event this was the
+          # job-level `if: github.event.release.prerelease != true`; a tag push has
+          # no such field and the caller's `v*` glob matches every rc the train cuts,
+          # which is once per hop per repo. Green no-op, never an error.
+          #
+          # CHECKED BEFORE THE SHAPE TEST BELOW, WHICH DOES NOT CATCH IT. That test
+          # is a GLOB -- `[0-9]*.[0-9]*.[0-9]*` -- and `1.2.3-rc.1` satisfies it,
+          # since `*` matches the suffix too. The prerelease field was doing this
+          # work, so removing the field without adding this check would have bumped
+          # the version on every rc tag.
+          case "$TAG" in
+            *-rc.*|*-rc[0-9]*)
+              echo "::notice::$TAG is a release candidate - it consumes no version, nothing to bump."
+              exit 0 ;;
+          esac
 
           RELEASED="${TAG#v}"
           case "$RELEASED" in

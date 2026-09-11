@@ -350,7 +350,16 @@ shared_reasons:
     reviewed on their own, which is the whole risk surface. The callers are added in the
     follow-up rollout PR, and THIS ROW MUST BE DELETED at that point -- an exemption that
     outlives the reason for it is how a parked artifact becomes a permanently unaudited
-    one. Deliberately cites NO ticket number: the ticket this reusable was filed under
+    one. UPDATED backend#3681: the rollout was attempted and found blocked, which is the
+    thing this row was quietly hiding. The reusable was driven by the `release` event,
+    and measured 2026-09-11 that event reaches ONE of the six repos declaring a
+    version_file -- client, whose release the train creates under a PAT. cli and
+    data-ingestors create theirs under GITHUB_TOKEN, which never starts a workflow run;
+    tracebloc-py-package, design-system and design-system-v2 get a bare tag ref and no
+    release at all. Five callers would have been dead workflows, and the three with no
+    release event are the repos the reusable was written for. The trigger now accepts a
+    tag push, which is the one signal all six produce; the callers are the next PR and
+    this row still goes when they land. Deliberately cites NO ticket number: the ticket this reusable was filed under
     closed while it was still unmerged, and a reason that defers work to a shut ticket is
     the exact shape reason-citations exists to catch (it caught an earlier draft of this
     very text on its first run). The condition is written out instead of delegated, which
