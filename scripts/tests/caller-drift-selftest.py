@@ -485,12 +485,27 @@ _main_src = _inspect.getsource(guard.main)
 _ok_idx = _main_src.find("if not read.ok:")
 _callers_idx = _main_src.find("for reusable in reusables:")
 _between = _main_src[_ok_idx:_callers_idx] if _ok_idx >= 0 and _callers_idx > _ok_idx else ""
+# Anchor on the IF that actually consumes caller_state_unknown's return value,
+# not just the call's presence anywhere in `_between` (Bugbot, .github#477).
+# The `if not read.ok:` branch immediately above already contains its own
+# `unreadable.append` and `continue`, so three independent `in` checks over
+# the whole slice pass even when caller_state_unknown's result is discarded,
+# or the call itself is deleted and left dangling elsewhere in `_between` --
+# the exact false-MISSING fallthrough this PR exists to close would then
+# return with this test still green. Requiring the literal
+# `if caller_state_unknown(read):` ties the branch to the function's return
+# value, and requiring append/continue to appear AFTER that anchor (never
+# merely somewhere in `_between`) stops the earlier read.ok block's own
+# append/continue from covering for a gutted or unused call.
+_gate_idx = _between.find("if caller_state_unknown(read):")
+_after_gate = _between[_gate_idx:] if _gate_idx >= 0 else ""
 record(
-    "caller_state_unknown(read)" in _between and "unreadable.append" in _between
-    and "continue" in _between,
+    _gate_idx >= 0 and "unreadable.append" in _after_gate
+    and "continue" in _after_gate,
     "main() calls caller_state_unknown(read) between the read.ok check and the "
-    "callers loop, and records + skips on a true result",
-    (_between[:200] if _between else "call not found between the two anchors"))
+    "callers loop, gated by an `if` on its return value, and records + skips "
+    "on a true result",
+    (_after_gate[:200] if _after_gate else "gated call not found between the two anchors"))
 
 
 # ------------------------------------------------------------ positive controls
