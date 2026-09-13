@@ -1,3 +1,10 @@
+# Code review is automated: the dedicated review account is requested on every
+# pull request the moment it opens, and a review from it satisfies the
+# required approving review. Path rules below add it beside any existing
+# owner rather than replacing them (the last matching rule wins in CODEOWNERS).
+
+* @tracebloc-review
+
 # Code owners for tracebloc/.github
 #
 # This repository is the org's enforcement root: 96 caller workflows across 14
@@ -26,7 +33,7 @@
 # template does not.
 
 # The reusable workflows that define every gate in the org.
-/.github/workflows/         @LukasWodka
+/.github/workflows/ @LukasWodka @tracebloc-review
 
 # Scripts invoked by those workflows.
-/scripts/                   @LukasWodka
+/scripts/ @LukasWodka @tracebloc-review
