@@ -1149,6 +1149,37 @@ class RepoRead:
         return not self.errors
 
 
+def caller_state_unknown(read: "RepoRead") -> bool:
+    """Whether this repo's caller/copy state cannot be trusted, despite `read.ok`.
+
+    `read.ok` only proves every API call this guard made came back without an
+    error. It says nothing about whether what came back was COMPLETE, and a
+    git tree that read in full, untruncated, and simply matched zero
+    `.github/workflows/*.yml` paths is exactly that shape (backend#3690):
+    every active, inventoried repo in this org ships at least one workflow --
+    every repo carries `add-to-kanban.yml` at minimum, several carry a dozen
+    -- so a fully-read tree with none at all is not evidence the callers were
+    removed. It is evidence that THIS read did not see what every other read
+    of the same branch does, which is the exact shape of surprise this file
+    already treats as UNKNOWN for an unreadable org listing or a failed
+    protection read (see `listing_unreadable`, `protection_unreadable`).
+
+    `read.has_workflow_dir` was computed in `read_repo()` for exactly this
+    purpose and then consulted NOWHERE -- an inert field, set once and read
+    never, which is how a tree in this shape silently reported every
+    REQUIRED caller and copy as MISSING instead of UNKNOWN. Measured
+    2026-09-11 on `.github#474`: `backend`, `client-runtime` and others each
+    demonstrably carried their required callers on `develop` while the audit
+    reported them all missing -- a positive claim manufactured from an
+    absence of evidence, not from evidence of absence.
+
+    A dedicated function, not an inline `if`, so the selftest's mutation
+    proof calls the SAME code `main()` calls (backend#1729 rule 9) rather
+    than a copy of the condition that could drift from it.
+    """
+    return not read.has_workflow_dir
+
+
 def read_repo(
     org: str, name: str, meta: dict, copies: "list[str]",
     quality_files: "list[str]", on_train: bool,
@@ -2244,6 +2275,21 @@ def main() -> int:
             for problem in read.errors:
                 unreadable.append(f"{name}: {problem}")
             print(f"  ?? {name} - NOT EVALUATED: {'; '.join(read.errors)}")
+            matrix[name] = {"unread": True}
+            continue
+
+        # backend#3690: a read that came back EMPTY is not a read that came back
+        # CLEAN. `read.ok` is true here -- every call succeeded -- but a tree with
+        # zero `.github/workflows/*.yml` matches is treated the same as any other
+        # read this file cannot trust: UNKNOWN, never a MISSING finding manufactured
+        # for every required caller and copy this repo declares.
+        if caller_state_unknown(read):
+            unreadable.append(
+                f"{name}: tree of {read.branch} read in full but matched zero "
+                ".github/workflows/*.yml paths - caller and copy state UNKNOWN, "
+                "not reported as missing."
+            )
+            print(f"  ?? {name} - NOT EVALUATED: zero workflow files matched on {read.branch}")
             matrix[name] = {"unread": True}
             continue
 

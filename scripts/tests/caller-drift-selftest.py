@@ -414,6 +414,85 @@ expect_unreadable(
     "content unreadable")
 
 
+# ------------------------------------------- empty workflow match (backend#3690)
+#
+# A read that came back EMPTY is not a read that came back CLEAN. `read.ok` only
+# asserts every API call succeeded; a tree that read in full, untruncated, and
+# simply matched zero `.github/workflows/*.yml` paths passed `read.ok` while
+# `main()` walked its (empty) `read.callers` and reported every REQUIRED caller
+# and copy as MISSING -- a positive claim manufactured from an absence of
+# evidence. Measured on `.github#474`: backend and client-runtime each carried
+# their required callers on develop while the audit reported them all missing.
+#
+# `has_workflow_dir` was computed in `read_repo()` for exactly this purpose and
+# consulted nowhere -- these cases pin `caller_state_unknown()`, the function
+# that now consults it, directly (behavioural, not a copy of the condition).
+
+def _tree_no_workflows(args):
+    if _branches(args):
+        return "main\n"
+    if _tree(args):
+        # A fully-read, non-truncated tree: real entries, none of them a
+        # workflow. Exactly the shape a partial/incomplete caller read would
+        # also produce with no error surfaced anywhere.
+        return json.dumps({"truncated": False, "tree": [
+            {"type": "blob", "path": "README.md", "sha": "abc123", "size": 12},
+        ]})
+    raise AssertionError("no workflow blob should ever be fetched")
+
+
+stub(_tree_no_workflows)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+record(
+    read.ok and not read.has_workflow_dir,
+    "a fully-read tree with zero workflow matches is NOT a read failure by itself "
+    "(read.ok stays true) - `has_workflow_dir` is what carries the signal",
+    f"ok={read.ok} has_workflow_dir={read.has_workflow_dir}")
+record(
+    guard.caller_state_unknown(read),
+    "caller_state_unknown() flags a zero-workflow-match read as UNKNOWN",
+    f"has_workflow_dir={read.has_workflow_dir}")
+
+def _tree_one_workflow(args):
+    if _branches(args):
+        return "main\n"
+    if _tree(args):
+        return TREE_ONE
+    return blob(
+        b"name: FR gate\n"
+        b"on:\n  pull_request:\n"
+        b"jobs:\n  gate:\n"
+        b"    uses: tracebloc/.github/.github/workflows/fr-gate.yml@main\n")
+
+
+stub(_tree_one_workflow)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+record(
+    read.ok and not guard.caller_state_unknown(read),
+    "caller_state_unknown() is false once at least one workflow file is found",
+    f"has_workflow_dir={read.has_workflow_dir} callers={read.callers}")
+
+# THE WIRING, because the behavioural cases above cannot see whether `main()`
+# actually calls it. Same pattern as the on_train wiring test above: a SOURCE
+# assertion, weaker than behavioural and said so plainly, because driving
+# `main()` needs the org listing, the inventory and the train file stubbed
+# together, which this suite has no harness for. What it asserts is that the
+# call exists between the `read.ok` check and the callers loop, and that its
+# result is used to skip evaluation and record the repo as unreadable rather
+# than falling through to "MISSING" -- so a call that is added but ignored, or
+# never added at all, reddens this.
+_main_src = _inspect.getsource(guard.main)
+_ok_idx = _main_src.find("if not read.ok:")
+_callers_idx = _main_src.find("for reusable in reusables:")
+_between = _main_src[_ok_idx:_callers_idx] if _ok_idx >= 0 and _callers_idx > _ok_idx else ""
+record(
+    "caller_state_unknown(read)" in _between and "unreadable.append" in _between
+    and "continue" in _between,
+    "main() calls caller_state_unknown(read) between the read.ok check and the "
+    "callers loop, and records + skips on a true result",
+    (_between[:200] if _between else "call not found between the two anchors"))
+
+
 # ------------------------------------------------------------ positive controls
 
 def _good(args):
