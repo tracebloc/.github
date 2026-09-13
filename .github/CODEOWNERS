@@ -24,10 +24,12 @@
 # CODEOWNERS file that misdescribes its own enforcement is worse than none: it
 # reads as a control while gating nothing.
 #
-# The `*` line is GONE, deliberately. It auto-requested the same person on every
-# PR in the repo they touch most, which reads in the UI as "waiting on Lukas"
-# long after someone else has approved -- and it made this the second `*` rule
-# in an org whose convention is narrow, security-only ownership with
+# The HUMAN `*` line is GONE, deliberately, and the `* @tracebloc-review` line
+# at the top does not bring it back: that account is automated review, not a
+# person. The old line auto-requested the same person on every PR in the repo
+# they touch most, which reads in the UI as "waiting on Lukas" long after
+# someone else has approved -- and it made this the second `*` rule in an org
+# whose convention is narrow, security-only human ownership with
 # author-picks-reviewer everywhere else. The two paths below are the ones that
 # actually carry the blast radius described at the top; a README or an issue
 # template does not.
