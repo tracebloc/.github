@@ -1765,6 +1765,87 @@ except SystemExit as exc:
 _expect_exit("source reusables: a missing workflows dir is refused, not passed",
              lambda: guard.check_source_reusables(tempfile.mkdtemp(), ["a.yml"]))
 
+# --- transition-hosts fallback (backend#3690 follow-up, .github#477) ----------
+#
+# `desk-dispatch.yml` lives ONLY in org-config, never in `.github` -- so the
+# local scan above can never find it, on any run, in any repo's checkout. The
+# two existing die() cases just above must still fire when `hosts` is left at
+# its default empty tuple (every pre-existing caller of this function, and the
+# whole point of the die() when a name really is a ghost everywhere); only a
+# caller that PASSES hosts gets the live fallback, and only for names still
+# phantom after the local scan.
+
+def _stub_remote_workflow(reusable_by_repo):
+    """`gh_json` stub: {repo: {name: is_workflow_call bool}}. Anything else 404s."""
+    def handler(args):
+        # args like ["api", "repos/tracebloc/org-config/contents/.github/workflows/desk-dispatch.yml?ref=main"]
+        path = args[1]
+        m = re.match(r"repos/[^/]+/([^/]+)/contents/\.github/workflows/([^?]+)\?ref=", path)
+        if not m:
+            raise guard.GhError(404, f"unexpected path {path!r}")
+        repo, name = m.group(1), m.group(2)
+        is_reusable = reusable_by_repo.get(repo, {}).get(name)
+        if is_reusable is None:
+            raise guard.GhError(404, "not found")
+        body = REUSABLE if is_reusable else NOT_REUSABLE
+        return {"content": base64.b64encode(body.encode()).decode()}
+    guard.gh_json = handler
+
+
+_saved_gh_json = guard.gh_json
+
+# Present as a workflow_call in the transition host: no local copy, no die().
+root = _src_tree({"a.yml": REUSABLE})
+_stub_remote_workflow({"org-config": {"desk-dispatch.yml": True}})
+try:
+    guard.check_source_reusables(
+        root, ["a.yml", "desk-dispatch.yml"], "tracebloc", ["org-config"], "main",
+    )
+    record(True, "source reusables: a transition-host-only reusable is resolved remotely",
+           "no exit")
+except SystemExit as exc:
+    record(False, "source reusables: a transition-host-only reusable is resolved remotely",
+           f"SystemExit({exc.code})")
+finally:
+    guard.gh_json = _saved_gh_json
+
+# Present in the transition host but NOT as `workflow_call` (e.g. a plain
+# workflow of the same name) -- still a phantom, still refused.
+root = _src_tree({"a.yml": REUSABLE})
+_stub_remote_workflow({"org-config": {"desk-dispatch.yml": False}})
+try:
+    _expect_exit(
+        "source reusables: present remotely but not `workflow_call` is still refused",
+        lambda: guard.check_source_reusables(
+            root, ["a.yml", "desk-dispatch.yml"], "tracebloc", ["org-config"], "main",
+        ),
+    )
+finally:
+    guard.gh_json = _saved_gh_json
+
+# Absent from every host, including the transition ones -- a real ghost, refused
+# exactly as it was before `hosts` existed.
+root = _src_tree({"a.yml": REUSABLE})
+_stub_remote_workflow({})
+try:
+    _expect_exit(
+        "source reusables: absent from every transition host is still a ghost",
+        lambda: guard.check_source_reusables(
+            root, ["a.yml", "desk-dispatch.yml"], "tracebloc", ["org-config"], "main",
+        ),
+    )
+finally:
+    guard.gh_json = _saved_gh_json
+
+# `hosts` defaulting to empty must not change behaviour for every pre-existing
+# caller (mutation anchor: if the default ever silently became non-empty, or if
+# the fallback fired without `hosts`, this call would stop dying and this test
+# would go vacuous along with it -- so it uses the exact 2-positional-arg call
+# shape every case above this section already uses).
+root = _src_tree({"a.yml": REUSABLE})
+_expect_exit("source reusables: no hosts given means no fallback, ghost dies as before",
+             lambda: guard.check_source_reusables(root, ["a.yml", "ghost.yml"]))
+
 
 # --- the conformance matrix (backend#1608 increment 3) ------------------------
 #

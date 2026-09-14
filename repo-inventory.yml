@@ -140,6 +140,19 @@ reusables:
   - stale-backlog.yml
   - bugbot-gate.yml
   - post-release-bump.yml
+  # ADDED (backend#3690 follow-up, .github#477): shipped on `org-config` main
+  # 2026-09-13 (blob 3c732272) and never added here, so it was compared against
+  # no repo and reported by nothing -- the exact blind spot check_source_reusables()
+  # exists to catch, except this one is hosted ONLY on a transition_sources repo,
+  # never on `.github` itself, so the local source-tree scan can never find it
+  # either; check_source_reusables() now falls back to a live read of each
+  # transition host before calling a locally-absent name a ghost (see its
+  # docstring). TWO live callers today (claude-skills#44/#45/#48,
+  # org-config#28/#32): org-config's own canonical caller and claude-skills'
+  # byte-identical pilot copy are the only rows below reading `required`; every
+  # other repo is `exempt` as `*desk_dispatch_pilot_only` because the reusable
+  # has not rolled out past the two pilots yet.
+  - desk-dispatch.yml
 
 # Copies, not callers: these are duplicated into each repo, so the guard compares
 # content (git blob sha against the checked-out source) instead of looking for a
@@ -509,6 +522,37 @@ shared_reasons:
     promotes out of it. UNREMEDIATED - recorded as an exemption with a name on it rather than
     quietly dropped, per this file's schema decision. Protecting it is cheap; the reason it has not
     happened is that nothing depends on it.
+  desk_dispatch_pilot_only: &desk_dispatch_pilot_only >-
+    desk-dispatch.yml has exactly TWO live callers org-wide, both deliberate PILOTS
+    for the reusable that reached org-config's `main` on 2026-09-13 (blob 3c732272,
+    claude-skills#44, claude-skills#45, org-config#28, org-config#32): org-config's own
+    canonical desk-dispatch-caller.yml (the first caller this reusable ever had) and
+    claude-skills' byte-identical copy (claude-skills#48), "one low-traffic private
+    repo, the same pilot the bugbot gate used" per org-config's own caller header. Both
+    repos' rows read `required` for exactly this reason - see each entry's own comment
+    rather than restating it here. Every OTHER repo is exempt because it is not one of
+    the two pilots: rolling out past them is unfiled follow-up work, not a decision this
+    row makes. DO NOT flip a further repo to `required` here without a caller that
+    actually exists on its develop branch - `required` with no caller is the
+    MISSING-required-caller finding this schema exists to catch.
+  quickstart_self_contained_copy: &quickstart_self_contained_copy >-
+    quickstart is PUBLIC and its reusables are drawn from org-config, which is PRIVATE
+    - GitHub does not let a public repo `uses:` a private repo's reusable workflow, so
+    there is no direct caller to find. Instead each file is a GENERATED, self-contained
+    copy (`scripts/render-self-contained.py` in org-config) that folds the reusable's
+    jobs and the canonical caller's inputs into one workflow with no `uses:` line at
+    all - verified by reading the file headers directly ("GENERATED FILE -- DO NOT EDIT
+    BY HAND ... Self-contained copy of the reusable workflow ... folded with the
+    private source repo's own caller of it") and confirming each `run:` step checks out
+    `tracebloc/org-config` for its scripts. caller-drift.py's caller detection matches
+    only a resolved `uses:` value (by design - MATCHING IS ON `uses:` CONTENT, this
+    file's own header), so it cannot see a reusable inlined this way: `exempt` is the
+    honest state for THIS GUARD, not a claim that the gate is unenforced - each job is
+    present and its `code-quality` inputs resolve to the same `soft-fail: false` /
+    `action-pins-soft-fail: false` literals the fleet's callers pass (verified in
+    quickstart/.github/workflows/code-quality.yml, measured 2026-09-14). Teaching this
+    guard to verify a self-contained copy's inlined jobs against the reusable's own
+    definition is unfiled follow-up work, not something this row can assert on its own.
 repos:
   .github:
     visibility: public
@@ -614,6 +658,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -649,6 +695,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -683,6 +731,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -889,6 +939,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -970,6 +1022,15 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      # ONE OF TWO PILOTS (backend#3690 follow-up, .github#477), not the only
+      # one: org-config gained its own canonical caller the same day (see that
+      # repo's entry). Verified directly here -- claude-skills'
+      # desk-dispatch-caller.yml `uses: tracebloc/org-config/.github/workflows/
+      # desk-dispatch.yml@main`, byte-identical to org-config's own copy per
+      # its header ("the same pilot the bugbot gate used"). Every other repo's
+      # row cites `*desk_dispatch_pilot_only` and stays `exempt` until the
+      # rollout follows past these two.
+      desk-dispatch.yml: required   # desk-dispatch-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1003,6 +1064,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1036,6 +1099,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1097,6 +1162,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1130,6 +1197,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1163,6 +1232,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1233,6 +1304,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1282,6 +1355,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1369,6 +1444,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1410,7 +1487,88 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
+      add-to-kanban.yml: required
+    quality_files:
+      CLAUDE.md: required
+      ".cursor/BUGBOT.md": required
+
+  # ADDED (backend#3690 follow-up, .github#477): active in the org, absent from
+  # this file. NOT a fresh repo - `gh api repos/tracebloc/model-zoo` redirects
+  # here (200, `name: "model-zoo-archive"`), the same rename-redirect trap this
+  # file's own header warns about for a renamed prod branch, so a single-repo
+  # read of the OLD name `model-zoo` would report a false "still here" instead
+  # of surfacing the rename. The org repo list (not a single-repo read) confirms
+  # only `model-zoo-archive` exists today; `model-zoo` is not archived
+  # (`isArchived: false`), so it stays counted as active and this entry is
+  # required, on the NEW name.
+  #
+  # NOT REMOVING THE `model-zoo:` ENTRY ABOVE: that is a judgement call about
+  # which name the fleet's `model-zoo` row should carry and whether it belongs
+  # on the train at all (release-train/repos.yml has no `model-zoo` OR
+  # `model-zoo-archive` entry today, despite the existing `model-zoo:` row
+  # above reading `release_train: true`) - out of scope here, flagged
+  # separately rather than decided in this PR.
+  model-zoo-archive:
+    visibility: private
+    # Measured 2026-09-14 against release-train/repos.yml: no `model-zoo` or
+    # `model-zoo-archive` entry exists there today, so this repo is off-train
+    # per the only source that check cross-references (caller-drift.py compares
+    # `release_train` against `name in train`, read live from repos.yml - never
+    # against what protection happens to look like). `false` here is what keeps
+    # that comparison honest; it is not a claim that the repo's protection is
+    # informal (it is not - see below).
+    release_train: false
+    protection:
+      # Measured live 2026-09-14 (classic protection API, all three branches).
+      # `develop` and `main` carry EXTRA required contexts (`ruff`,
+      # `test-pytorch`, `test-sklearn`, `test-survival` - this repo's own model
+      # test suite) on top of the fleet baseline; `staging` matches the baseline
+      # exactly. required_checks is a floor (evaluate_protection: "SUBSET, not
+      # equality"), so a superset needs no divergent override. All three roles
+      # otherwise match: 1 review, dismiss-stale, force-push/deletion blocked,
+      # conversation resolution on, strict=false, release-train bypass on
+      # staging/main, enforce_admins true on main only.
+      develop: required
+      staging: required
+      prod: required
+    rulesets:
+      # Measured 2026-09-14: ruleset 20364190 `promotion-branches-merge-commit-only`,
+      # target branch, enforcement active, one `pull_request` rule with
+      # `allowed_merge_methods: [merge]`, `include: [refs/heads/main,
+      # refs/heads/staging]`, `bypass_actors: []` - matches the policy exactly.
+      # Exactly one ruleset exists on this repo (no tag-trust-root ruleset).
+      promotion_merge_commit_only: required
+      tag_trust_root:
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-09-14)."
+    callers:
+      # Every `uses:` verified directly against the checked-out workflow files
+      # (measured 2026-09-14), all pinned `@main`, all resolving to `.github` -
+      # same shape as `model-zoo` above, byte-identical caller set.
+      version-bump-gate.yml:
+        exempt: *version_gate_not_applicable
+      advance-deploy-env.yml: required   # advance-deploy-env.yml
+      code-quality.yml: required   # code-quality-caller.yml
+      customer-priority-bump.yml: required   # customer-priority-bump.yml
+      fr-gate.yml: required   # fr-gate-caller.yml
+      stale-backlog.yml: required   # stale-backlog-caller.yml
+      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
+      kanban-closure-router.yml: required   # kanban-closure-routing.yml
+      set-pr-status.yml: required   # set-pr-status.yml
+      wip-limit-check.yml:
+        exempt: *wip_limit_check_has_no_callers
+      blocked-gate.yml:
+        exempt: *blocked_gate_rollout_pending
+      post-release-bump.yml:
+        exempt: *post_release_bump_parked
+      bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
+    copies:
+      # Blob sha verified byte-identical to the canonical file (measured
+      # 2026-09-14): 2a3a432b3d01516575d5c57b9d0a1b2379db299d on both sides.
       add-to-kanban.yml: required
     quality_files:
       CLAUDE.md: required
@@ -1487,6 +1645,16 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      # THE SECOND PILOT, not exempt (backend#3690 follow-up, .github#477):
+      # org-config carries the CANONICAL caller for the reusable it hosts,
+      # verified directly (`desk-dispatch-caller.yml`, header: "THE CANONICAL
+      # CALLER... the first caller that reusable has anywhere... this repo runs
+      # its own canonical and `claude-skills`... carries the identical file").
+      # Both are pilots by design; a caller that exists must read `required` or
+      # the exemption is the stale-exemption finding this schema exists to
+      # catch (evaluate the alternative: `exempt` here was tried first and the
+      # live audit called it out by name).
+      desk-dispatch.yml: required   # desk-dispatch-caller.yml
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1557,6 +1725,8 @@ repos:
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
       stale-backlog.yml:
         exempt: *stale_backlog_exemption_needs_redeciding
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml:
         divergent: >-
@@ -1711,47 +1881,96 @@ repos:
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
       stale-backlog.yml:
         exempt: *stale_backlog_not_a_backlog
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
       CLAUDE.md: required
       ".cursor/BUGBOT.md": required
-  start-training:
+  # `start-training` is GONE (backend#3690 follow-up, .github#477): renamed to
+  # `start-training-archive` and archived (measured 2026-09-14, `gh api
+  # repos/tracebloc/start-training --jq .archived` -> true, name redirects to
+  # `start-training-archive`; confirmed via the org repo list directly rather
+  # than the single-repo read, which follows a renamed repo's redirect and
+  # would otherwise report a false "still here" - the exact trap this file's
+  # own header warns about). `quickstart` (below) replaces it on the train
+  # (release-train/repos.yml: "Public content repo (created 2026-09-11) that
+  # replaces start-training on the train"). An archived repo is not an active
+  # one, so it carries no entry here at all - there is no
+  # `start-training-archive:` row to add, only this one to remove.
+  quickstart:
     visibility: public
     release_train: true
     protection:
+      # Measured live 2026-09-14 on all three branches (classic protection API):
+      # develop requires the fleet's three `quality / *` contexts exactly;
+      # staging and main require `gate / gate` + the same three, with
+      # `App:tracebloc-release-train` holding the review bypass on both and
+      # `enforce_admins` true on main only - byte-for-byte the fleet shape, so
+      # `required` needs no divergent override (required_checks is a floor, not
+      # an exact match - see evaluate_protection).
       develop: required
-      # Closed 2026-08-13 (backend#1681). Both promotion branches carried the
-      # fr-gate but NOT the content gates, on a PUBLIC repo whose notebooks
-      # carry executed output cells - exactly where a token gets committed
-      # unnoticed, which is why the credential scan mattered most here. Armed to
-      # the fleet baseline after measuring the caller green on both roles.
       staging: required
       prod: required
     rulesets:
+      # Measured 2026-09-14: ruleset 22898633 `promotion-branches-merge-commit-only`,
+      # target branch, enforcement active, one `pull_request` rule with
+      # `allowed_merge_methods: [merge]`, `include: [refs/heads/staging,
+      # refs/heads/main]`, `bypass_actors: []` - matches the policy exactly.
+      # Exactly one ruleset exists on this repo, so there is no tag-trust-root
+      # ruleset either.
       promotion_merge_commit_only: required
       tag_trust_root:
-        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-08-11)."
+        exempt: "Publishes nothing from a `v*` tag - no tag-triggered workflow and no v* tags cut (measured 2026-09-14)."
     callers:
       version-bump-gate.yml:
         exempt: *version_gate_not_applicable
-      advance-deploy-env.yml: required   # advance-deploy-env.yml
-      code-quality.yml: required   # code-quality-caller.yml
-      customer-priority-bump.yml: required   # customer-priority-bump.yml
-      fr-gate.yml: required   # fr-gate-caller.yml
-      stale-backlog.yml: required   # stale-backlog-caller.yml
-      fr-pass-comment.yml: required   # fr-pass-comment-caller.yml
-      kanban-closure-router.yml: required   # kanban-closure-routing.yml
-      set-pr-status.yml: required   # set-pr-status.yml
+      advance-deploy-env.yml:
+        exempt: *quickstart_self_contained_copy
+      code-quality.yml:
+        exempt: *quickstart_self_contained_copy
+      customer-priority-bump.yml:
+        exempt: *quickstart_self_contained_copy
+      fr-gate.yml:
+        exempt: *quickstart_self_contained_copy
+      stale-backlog.yml:
+        exempt: *quickstart_self_contained_copy
+      fr-pass-comment.yml:
+        exempt: *quickstart_self_contained_copy
+      kanban-closure-router.yml:
+        exempt: *quickstart_self_contained_copy
+      set-pr-status.yml:
+        exempt: *quickstart_self_contained_copy
       wip-limit-check.yml:
         exempt: *wip_limit_check_has_no_callers
       blocked-gate.yml:
         exempt: *blocked_gate_rollout_pending
       post-release-bump.yml:
         exempt: *post_release_bump_parked
-      bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      bugbot-gate.yml:
+        exempt: *quickstart_self_contained_copy
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
-      add-to-kanban.yml: required
+      add-to-kanban.yml:
+        divergent: >-
+          Same self-contained-copy mechanism as the `callers` family above, applied to
+          the one file this schema treats as a byte-compared COPY rather than a
+          `uses:` caller. quickstart's add-to-kanban.yml carries its own generated
+          header ("Public-safe copy of `.github/workflows/add-to-kanban.yml`
+          (blob 2a3a432b3d01516575d5c57b9d0a1b2379db299d) for a PUBLIC repo") and
+          differs from the canonical file ONLY in comment text scrubbed by
+          `render-self-contained.py` (private issue references replaced with
+          `(internal ref)`) plus its own generated-file header - diffed directly
+          against the canonical blob, measured 2026-09-14. The header claims "the
+          conformance audit compares a public repo's copy against THIS file", which
+          is not yet true of load_source_copies() (it holds one canonical sha, read
+          from the checkout, with no public-variant comparison) - `divergent` is the
+          honest state given the CURRENT checker, not confirmation of that claim.
+          Teaching load_source_copies() to compare a public repo's copy against a
+          scrubbed variant instead of the raw canonical bytes is unfiled follow-up
+          work, not something this row can assert on its own.
     quality_files:
       CLAUDE.md: required
       ".cursor/BUGBOT.md": required
@@ -1785,6 +2004,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1818,6 +2039,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:
@@ -1858,6 +2081,8 @@ repos:
       post-release-bump.yml:
         exempt: *post_release_bump_parked
       bugbot-gate.yml: required   # bugbot-gate-caller.yml
+      desk-dispatch.yml:
+        exempt: *desk_dispatch_pilot_only
     copies:
       add-to-kanban.yml: required
     quality_files:

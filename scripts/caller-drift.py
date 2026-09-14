@@ -1034,7 +1034,41 @@ def remediate_copies(
     return _ensure_copy_pr(full, head, base, issue, [n for n, _ in entries])
 
 
-def check_source_reusables(source_dir: str, listed: "list[str]") -> None:
+def _is_remote_workflow_call(org: str, repo: str, ref: str, name: str) -> bool:
+    """True if `<repo>/.github/workflows/<name>` on `ref` declares `workflow_call`.
+
+    A live, best-effort existence check -- used ONLY by check_source_reusables()
+    to resolve a reusable it did not find in the local checkout, for one it is
+    hosted solely in a `transition_sources` repo (backend#3690 follow-up,
+    .github#477): `desk-dispatch.yml` lives in `org-config`, never in `.github`,
+    so no local scan of `source_dir` (always the `.github` checkout -- see
+    caller-drift.yml's `--source-dir .`) can ever find it. A 404, an unreadable
+    response or an unparseable file all mean "not on THIS host" here, never
+    "unreadable" -- check_source_reusables() already dies with a clear message
+    once every host has been asked and none had it, so this only needs to answer
+    one host at a time.
+    """
+    try:
+        blob = gh_json(["api", f"repos/{org}/{repo}/contents/.github/workflows/{name}?ref={ref}"])
+    except GhError:
+        return False
+    if not isinstance(blob, dict):
+        return False
+    try:
+        body = base64.b64decode(blob.get("content", ""))
+        doc = yaml.safe_load(body)
+    except (ValueError, binascii.Error, yaml.YAMLError):
+        return False
+    triggers = doc.get("on") if isinstance(doc, dict) else None
+    if triggers is None and isinstance(doc, dict):
+        triggers = doc.get(True)
+    return isinstance(triggers, dict) and "workflow_call" in triggers
+
+
+def check_source_reusables(
+    source_dir: str, listed: "list[str]",
+    org: "str | None" = None, hosts: "tuple[str, ...] | list[str]" = (), ref: str = "main",
+) -> None:
     """Every `workflow_call` workflow in the source repo must be in the inventory.
 
     THE GUARD ENUMERATED THE INVENTORY, NEVER THE SOURCE. `reusables` is a
@@ -1055,6 +1089,15 @@ def check_source_reusables(source_dir: str, listed: "list[str]") -> None:
     contract that does not mention half the artifacts it governs cannot be
     audited against. Adding the row is the fix; `exempt` with a written reason is
     how a parked reusable stays parked (see wip-limit-check).
+
+    `org` AND `hosts` ARE OPTIONAL, AND DEFAULT TO NO FALLBACK (backend#3690
+    follow-up, .github#477). Every existing call in this file's own selftest
+    passes only `(source_dir, listed)`, and must keep behaving exactly as before
+    -- a phantom name dies immediately, no network touched. Only main()'s real
+    call site passes the inventory's `org` and `transition_sources`, because only
+    there can a name legitimately be hosted somewhere this checkout cannot see.
+    `hosts` is checked ONLY for names still phantom after the local scan, so a
+    fully self-hosted inventory (empty `transition_sources`) never makes a call.
     """
     workflows = os.path.join(source_dir, ".github", "workflows")
     if not os.path.isdir(workflows):
@@ -1088,10 +1131,18 @@ def check_source_reusables(source_dir: str, listed: "list[str]") -> None:
             "a written reason is how a parked reusable stays parked."
         )
     phantom = sorted(set(listed) - set(found))
+    if phantom and hosts:
+        still_phantom = [
+            name for name in phantom
+            if not any(_is_remote_workflow_call(org, host, ref, name) for host in hosts)
+        ]
+        phantom = still_phantom
     if phantom:
         die(
             f"inventory lists reusable(s) {phantom} that are not `workflow_call` "
-            f"workflows in {workflows}. A renamed or deleted reusable leaves every "
+            f"workflows in {workflows}"
+            + (f" or in any of {list(hosts)}" if hosts else "")
+            + ". A renamed or deleted reusable leaves every "
             "repo's row asserting something that cannot exist."
         )
 
@@ -2233,7 +2284,14 @@ def main() -> int:
     copies = list(inventory["copies"])
     caller_inputs = inventory.get("caller_inputs") or {}
     quality_files = list(inventory["quality_files"])
-    check_source_reusables(args.source_dir, reusables)
+    # `org` and `transition_sources` given here (backend#3690 follow-up,
+    # .github#477): a reusable hosted only in a transition_sources repo (e.g.
+    # `desk-dispatch.yml`, org-config-only) has no copy in this checkout for the
+    # local scan to find, so an absent-locally name is checked against every
+    # migration host before it is called a ghost.
+    check_source_reusables(
+        args.source_dir, reusables, org, inventory["transition_sources"], pinned_ref,
+    )
     source_shas = load_source_copies(args.source_dir, copies)
 
     active = list_active_repos(org)
