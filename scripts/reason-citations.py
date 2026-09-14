@@ -68,7 +68,7 @@ not assumed:
   PullRequest CLOSED  FINDING -- a plan that never landed
 
 A merged PR is the one closed thing whose terminal state is SUCCESS. Reasons cite
-PRs as provenance ("remediated under model-zoo#115", "Bugbot, .github#196"), and
+PRs as provenance ("remediated under model-zoo-archive#115", "Bugbot, .github#196"), and
 that sentence stays true forever. Flagging them would have made 9 of the 23 live
 citations findings on day one for describing history correctly -- noise that
 teaches people to stop reading the report, which is the failure mode a gate can
