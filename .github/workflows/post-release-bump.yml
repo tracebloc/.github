@@ -41,10 +41,30 @@ name: Post-release version bump
 # `on: push: tags: ['v*']`: the TAG is the one signal all six actually produce,
 # because the train always creates it on the way to publishing.
 #
-# THE PRERELEASE TEST THEREFORE MOVED INTO THE SCRIPT. On the release event it was
-# a field (`prerelease`); on a tag push there is no such field, and `v*` matches
-# every rc tag the train cuts per hop. An rc is a GREEN NO-OP, not an error -- it
-# consumes no version and there is nothing to bump.
+# THE PRERELEASE TEST THEREFORE MOVED INTO THE SCRIPT -- AND MERGED WITH THE SHAPE
+# TEST, SO THERE IS ONE RULE (review of PR .github#474). On the release event this
+# was a job-level `if:` reading a FIELD (`prerelease`); a tag push has no such
+# field, and the caller's `v*` glob matches every rc the train cuts, once per hop
+# per repo. The rule is not invented here: `cli`'s release.yml and the train's
+# promote-repo.sh both define a stable release as exactly `^v[0-9]+\.[0-9]+\.[0-9]+$`
+# and treat any suffixed tag as a prerelease. The same rule, in one `case`:
+#
+#   v1.2.3          plain vX.Y.Z       the version is consumed        ->  BUMP
+#   v1.2.3-rc.1     a `-` suffix       prerelease, consumes nothing   ->  GREEN NO-OP
+#   v1.2.3-beta.1   a `-` suffix       prerelease, consumes nothing   ->  GREEN NO-OP
+#   v1.2.3.4        neither            not a version this can derive  ->  REFUSED
+#   v1.2.3rc1       neither            not a version this can derive  ->  REFUSED
+#   vlatest         neither            not a version this can derive  ->  REFUSED
+#
+# The glob this replaced -- `[0-9]*.[0-9]*.[0-9]*` -- accepted every one of the last
+# four rows, because `*` matches the suffix too. The malformed ones then reached
+# `version_file.py cmp`, which refused them with a message blaming the version file
+# rather than the tag, so the refusal that names the tag was never the one shown.
+#
+# THE DECISION IS THE FIRST STEP, before the App token, both checkouts and the PAT
+# guard. An rc is the most frequent outcome and the cheapest to reach -- it needs
+# only $TAG -- so a caller that has not yet been given SYNC_PR_AUTHOR_TOKEN goes red
+# only on the release that actually needs a PR, not on every rc along the way.
 #
 # WHY A PR AND NOT A PUSH. `develop` is protected and the bump is a judgement
 # call: patch is the safe default, but the person who just shipped may know the
@@ -93,44 +113,15 @@ jobs:
     name: open the next-version PR
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # A PRERELEASE CONSUMES NOTHING. rc tags are cut per hop and would otherwise
-    # open a bump PR on every one of them.
-    if: github.event.release.prerelease != true
     steps:
-      - name: Mint an installation token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
-          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-pull-requests: read
-
-      - name: Check out the base branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.base-branch }}
-          token: ${{ steps.app-token.outputs.token }}
-          persist-credentials: true
-
-      # The format rules live in ONE place. Vendoring a copy of the parse into
-      # this workflow is the drift this whole change exists to remove, so the
-      # script is checked out rather than reimplemented.
-      - name: Check out the shared version-file writer
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: tracebloc/.github
-          ref: main
-          path: .version-tools
-          persist-credentials: false
-
-      - name: Bump, and open the PR
+      # EVERYTHING THAT CAN REFUSE OR NO-OP HAPPENS HERE, FIRST. This step mints
+      # nothing, checks out nothing and reads no secret: it needs only the tag and
+      # the caller's inputs. A prerelease -- the most frequent outcome, once per
+      # staging hop per repo -- therefore ends the job green before any of that
+      # work, and a malformed tag or an empty input is refused before it.
+      - name: Decide what the tag means
+        id: tag
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          # PR CREATION ONLY, so the PR has an author Bugbot will review.
-          PR_AUTHOR_TOKEN: ${{ secrets.SYNC_PR_AUTHOR_TOKEN }}
           # BOTH EVENTS, because the release path stays supported for `client`,
           # which is the one repo whose release event does fire. On a tag push
           # `github.event.release` is absent and `github.ref_name` is the tag.
@@ -138,19 +129,16 @@ jobs:
           VERSION_FILE: ${{ inputs.version-file }}
           BUMP: ${{ inputs.bump }}
           BASE: ${{ inputs.base-branch }}
-          REPO_FULL: ${{ github.repository }}
         run: |
           set -euo pipefail
-          VF=".version-tools/scripts/version_file.py"
-          [ -f "$VF" ] || { echo "::error::the shared writer is missing at $VF"; exit 1; }
           # INPUTS ARE REFUSED WHEN EMPTY, BEFORE ANYTHING READS THEM (Bugbot #372).
           # `required: true` on a workflow_call input does NOT reject "" -- a caller
           # passing an unset variable satisfies it -- and `default:` is overridden by
           # an explicit empty string. So each of these can arrive empty, and each
           # would then be diagnosed as something it is not: an empty version-file is
-          # reported by the check below as "does not exist on $BASE", naming a missing
-          # file rather than a missing input. version-bump-gate.yml already refuses
-          # its inputs this way; this matches it.
+          # reported further down as "does not exist on $BASE", naming a missing file
+          # rather than a missing input. version-bump-gate.yml already refuses its
+          # inputs this way; this matches it.
           #
           # All three are guarded, not only the one that was flagged: the defect is a
           # property of workflow_call input handling, so every input this job reads is
@@ -162,11 +150,93 @@ jobs:
             fi
           done
 
+          # THE TAG DECISION. One `case`, three outcomes, and the stable rule is the
+          # org's existing one: `cli`'s release.yml and the train's promote-repo.sh
+          # both say a stable release is exactly ^v[0-9]+\.[0-9]+\.[0-9]+$ and any
+          # suffixed tag is a prerelease.
+          #
+          #   *-*                 prerelease (rc, beta, anything suffixed). It
+          #                       consumes no version, so there is nothing to bump:
+          #                       GREEN NO-OP, never an error.
+          #   plain vX.Y.Z        the released version. Bump.
+          #   anything else       v1.2.3.4, v1.2.3rc1, vlatest: REFUSED here, naming
+          #                       the tag, rather than reaching version_file.py and
+          #                       being refused there in the version file's name.
+          #
+          # scripts/tests/post-release-bump-selftest.sh EXTRACTS THIS BLOCK and runs
+          # it, so it cannot drift from what is asserted. Keep it self-contained:
+          # every variable it interpolates is one the selftest binds, and the refusal
+          # it prints must keep saying "::error::release tag", which is what the
+          # selftest matches on to tell a refusal apart from a broken block.
+          case "$TAG" in
+            *-*)
+              echo "::notice::$TAG is a prerelease - it consumes no version, nothing to bump."
+              exit 0 ;;
+            *)
+              [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+                echo "::error::release tag '$TAG' is not a plain vX.Y.Z, so the next version cannot be derived. Bump $VERSION_FILE by hand."
+                exit 1
+              } ;;
+          esac
+
+          # The released version comes from the TAG, not from parsing anything: the
+          # tag is what was actually published and is the only unambiguous record of
+          # it. Its absence is what every later step keys off -- a prerelease exited
+          # above without writing it, so those steps skip and the job stays green.
+          echo "released=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint an installation token
+        id: app-token
+        if: steps.tag.outputs.released != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: read
+
+      - name: Check out the base branch
+        if: steps.tag.outputs.released != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.base-branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: true
+
+      # The format rules live in ONE place. Vendoring a copy of the parse into
+      # this workflow is the drift this whole change exists to remove, so the
+      # script is checked out rather than reimplemented.
+      - name: Check out the shared version-file writer
+        if: steps.tag.outputs.released != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tracebloc/.github
+          ref: main
+          path: .version-tools
+          persist-credentials: false
+
+      - name: Bump, and open the PR
+        if: steps.tag.outputs.released != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # PR CREATION ONLY, so the PR has an author Bugbot will review.
+          PR_AUTHOR_TOKEN: ${{ secrets.SYNC_PR_AUTHOR_TOKEN }}
+          # DECIDED, NOT RE-DERIVED. The tag was read, validated and stripped in the
+          # first step; re-parsing it here would be a second copy of the rule.
+          RELEASED: ${{ steps.tag.outputs.released }}
+          VERSION_FILE: ${{ inputs.version-file }}
+          BUMP: ${{ inputs.bump }}
+          BASE: ${{ inputs.base-branch }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VF=".version-tools/scripts/version_file.py"
+          [ -f "$VF" ] || { echo "::error::the shared writer is missing at $VF"; exit 1; }
+
           [ -f "$VERSION_FILE" ] || { echo "::error::version-file '$VERSION_FILE' does not exist on $BASE"; exit 1; }
 
-          # The released version comes from the TAG, not from parsing anything:
-          # the tag is what was actually published and is the only unambiguous
-          # record of it.
           # THE PAT IS CHECKED BEFORE ANYTHING IS WRITTEN (Bugbot High, #372).
           # It used to be tested after commit+push, so an absent secret pushed
           # `chore/bump-$NEXT` and then exited 1 with no PR -- the half-rollout
@@ -176,28 +246,6 @@ jobs:
             echo "::error::SYNC_PR_AUTHOR_TOKEN is not set. An app-authored PR gets no Bugbot review and bugbot-gate can never pass it, so nothing was written. Set the secret and re-run."
             exit 1
           fi
-
-          # AN rc CONSUMES NOTHING (backend#3681). On the release event this was the
-          # job-level `if: github.event.release.prerelease != true`; a tag push has
-          # no such field and the caller's `v*` glob matches every rc the train cuts,
-          # which is once per hop per repo. Green no-op, never an error.
-          #
-          # CHECKED BEFORE THE SHAPE TEST BELOW, WHICH DOES NOT CATCH IT. That test
-          # is a GLOB -- `[0-9]*.[0-9]*.[0-9]*` -- and `1.2.3-rc.1` satisfies it,
-          # since `*` matches the suffix too. The prerelease field was doing this
-          # work, so removing the field without adding this check would have bumped
-          # the version on every rc tag.
-          case "$TAG" in
-            *-rc.*|*-rc[0-9]*)
-              echo "::notice::$TAG is a release candidate - it consumes no version, nothing to bump."
-              exit 0 ;;
-          esac
-
-          RELEASED="${TAG#v}"
-          case "$RELEASED" in
-            [0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "::error::release tag '$TAG' is not a plain vX.Y.Z, so the next version cannot be derived. Bump $VERSION_FILE by hand."; exit 1 ;;
-          esac
 
           CURRENT="$(python3 "$VF" read --file "$VERSION_FILE" --in-place)"
           echo "released=$RELEASED  current on $BASE=$CURRENT"

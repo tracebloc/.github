@@ -815,10 +815,13 @@ selftest-extract-advanced-prs:
 
 # The TAG DECISION in post-release-bump.yml (backend#3681). Its callers trigger on
 # `push: tags: ['v*']`, not on `release`, so "is this a prerelease?" is decided from
-# the tag text rather than an event field -- and the shape glob the workflow already
-# had accepts `1.2.3-rc.1`, so the rc test has to be explicit or every rc tag bumps
-# the version. The suite extracts both `case` blocks out of the YAML rather than
-# restating them, so the workflow cannot drift away from what this runs.
+# the tag text rather than an event field -- and the shape glob the workflow used to
+# have accepts `1.2.3-rc.1`, so the prerelease test has to be explicit or every rc
+# tag bumps the version. The suite extracts the `case` block out of the YAML rather
+# than restating it, so the workflow cannot drift away from what this runs, and it
+# scores a refusal on the SPECIFIC error text -- any other non-zero exit is reported
+# as `broken`, because "non-zero" is what let an unbound-variable abort pass as a
+# refusal in this file's own first draft.
 .PHONY: selftest-post-release-bump
 selftest-post-release-bump:
 	bash scripts/tests/post-release-bump-selftest.sh
