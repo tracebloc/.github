@@ -69,6 +69,7 @@ MINIMAL = {
     "pinned_ref": "main",
     "audit_branch": "develop-first-on-train",
     "source_repo": "hub",
+    "transition_sources": [],
     "reusables": ["a.yml"],
     "copies": ["c.yml"],
     "quality_files": ["GUIDE.md"],
@@ -148,6 +149,48 @@ expect_schema_failure("empty reusables rejected",
 expect_schema_failure("blank org rejected", lambda d: d.update({"org": "  "}))
 expect_schema_failure("source_repo with no repos entry rejected",
                       lambda d: d.update({"source_repo": "absent"}))
+
+# transition_sources (backend#3690 follow-up, .github#477): same schema shape
+# as source_repo, and the same reasons apply -- see build_org_uses_pattern()'s
+# docstring in caller-drift.py and the field's own comment in
+# repo-inventory.yml. Unlike `reusables`/`quality_files`, EMPTY is a legitimate
+# value (no migration in flight), so there is no "empty rejected" case here.
+expect_schema_failure("missing transition_sources rejected",
+                      _drop("transition_sources"))
+expect_schema_failure("non-list transition_sources rejected",
+                      lambda d: d.update({"transition_sources": "org-config"}))
+expect_schema_failure("blank transition_sources entry rejected",
+                      lambda d: d.update({"transition_sources": ["  "]}))
+expect_schema_failure("transition_sources entry with no repos entry rejected",
+                      lambda d: d.update({"transition_sources": ["absent"]}))
+expect_schema_failure("transition_sources repeating source_repo rejected",
+                      lambda d: d.update({"transition_sources": ["hub"]}))
+expect_schema_failure("duplicate transition_sources entry rejected",
+                      lambda d: d.update({"transition_sources": ["dup", "dup"]}))
+
+# Positive control: a WELL-FORMED transition_sources (a second real repo,
+# distinct from source_repo) must load -- otherwise every failure case above
+# would prove nothing about the valid shape.
+def _with_second_repo(d):
+    d["repos"]["spoke"] = copy.deepcopy(d["repos"]["hub"])
+    d["transition_sources"] = ["spoke"]
+
+
+_spoke_data = copy.deepcopy(MINIMAL)
+_with_second_repo(_spoke_data)
+with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as _h:
+    yaml.safe_dump(_spoke_data, _h)
+    _spoke_path = _h.name
+try:
+    _loaded = guard.load_inventory(_spoke_path)
+    record(_loaded["transition_sources"] == ["spoke"],
+           "positive control: a real transition_sources host loads",
+           str(_loaded["transition_sources"]))
+except SystemExit as exc:
+    record(False, "positive control: a real transition_sources host loads",
+           f"rejected with {exc.code}")
+finally:
+    os.unlink(_spoke_path)
 expect_schema_failure("reusable listed as a copy too rejected",
                       lambda d: d.update({"copies": ["a.yml"]}))
 expect_schema_failure("duplicate reusable rejected",
@@ -295,6 +338,14 @@ else:
 
 COPIES = ["add-to-kanban.yml", "stale-backlog.yml"]
 QFILES = ["CLAUDE.md", ".cursor/BUGBOT.md"]
+# The org_uses matcher every pre-existing case below needs: all of their fixture
+# workflows hardcode `tracebloc/.github/.github/workflows/...`, exactly what
+# `build_org_uses_pattern([".github"])` recognizes. This is production's real
+# `source_repo` alone, with no transition host -- these cases are about branch
+# selection, decoys, inputs capture etc., not about the org-config migration,
+# so they get the matcher `main()` would build for an inventory with an empty
+# `transition_sources` (backend#3690 follow-up, .github#477).
+ORG_USES_GITHUB_ONLY = guard.build_org_uses_pattern([".github"])
 # THE FIXTURE META IS THE SHAPE `list_active_repos` RETURNS, and nothing more
 # (Bugbot, #289). It deliberately does NOT carry `release_train`: an earlier version
 # of this fixture did, `read_repo` read the flag from `meta`, and every case passed
@@ -328,7 +379,7 @@ def blob(body: bytes) -> str:
 def expect_unreadable(name: str, handler, needle: str) -> None:
     """A failed read must produce an UNREADABLE record, never 'no caller found'."""
     stub(handler)
-    read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+    read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, ORG_USES_GITHUB_ONLY)
     ok = (not read.ok) and any(needle in err for err in read.errors)
     record(ok, name, str(read.errors))
 
@@ -442,7 +493,7 @@ def _tree_no_workflows(args):
 
 
 stub(_tree_no_workflows)
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, ORG_USES_GITHUB_ONLY)
 record(
     read.ok and not read.has_workflow_dir,
     "a fully-read tree with zero workflow matches is NOT a read failure by itself "
@@ -466,7 +517,7 @@ def _tree_one_workflow(args):
 
 
 stub(_tree_one_workflow)
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, ORG_USES_GITHUB_ONLY)
 record(
     read.ok and not guard.caller_state_unknown(read),
     "caller_state_unknown() is false once at least one workflow file is found",
@@ -572,6 +623,42 @@ record(bool(_call) and "entry" in _call and "release_train" in _call,
        (_call[:150] if _call else "no read_repo call found")
        + " — a constant here is the #289 bug with better manners")
 
+# --- the org_uses WIRING, same shape and same reason (backend#3690 follow-up,
+# .github#477). The behavioural cases later in this file pin
+# build_org_uses_pattern() and read_repo() directly; neither can see whether
+# main() actually builds the pattern from the INVENTORY (`source_repo` +
+# `transition_sources`) rather than from a hardcoded host or a module constant
+# that could silently go back to matching `.github` alone -- the exact shape
+# of the bug this whole change closes. A source assertion, for the same reason
+# the on_train wiring test above is one: driving main() needs a stubbed org
+# listing, inventory and train file this suite has no harness for.
+#
+# ANCHORED TO THE ONE ASSIGNMENT LINE, comments stripped, not to
+# `_inspect.getsource(guard.main)` as a whole (backend#1729 rule 9). The first
+# draft of this case checked the whole function source, and the comment
+# directly above the real line already says "source_repo" and
+# "transition_sources" in prose -- so mutating the CODE to drop
+# `transition_sources` back to a hardcoded `[source_repo]` left the comment's
+# prose intact and this check green, proving nothing. Restricting to the
+# actual code tokens on the assignment line, with any trailing `#` comment cut
+# off first, is what makes the mutation below actually redden it.
+_ou_def_idx = next(
+    (i for i, line in enumerate(_main_lines)
+     if "build_org_uses_pattern(" in line and "=" in line),
+    None)
+_ou_def_line = _main_lines[_ou_def_idx].split("#", 1)[0] if _ou_def_idx is not None else ""
+record(
+    bool(_ou_def_line) and "source_repo" in _ou_def_line
+    and "transition_sources" in _ou_def_line,
+    "main() builds org_uses via build_org_uses_pattern() from the inventory's "
+    "source_repo + transition_sources, not a hardcoded host list",
+    _ou_def_line.strip() or "no build_org_uses_pattern(...) assignment found")
+_org_uses_call = " ".join(x.strip() for x in _main_lines[_i:_i + 3]) if _i is not None else ""
+record(
+    "org_uses" in _org_uses_call,
+    "main() passes the derived org_uses pattern into read_repo()",
+    (_org_uses_call[:150] if _org_uses_call else "no read_repo call found"))
+
 # ---------------------------------------- which branch gets audited (backend#2214)
 #
 # Plain develop-first read `develop` wherever that branch existed. For a repo the
@@ -597,20 +684,20 @@ def _branch_probe(box):
 
 box = []
 stub(_branch_probe(box))
-guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+guard.read_repo("acme", "repo", META, COPIES, QFILES, True, ORG_USES_GITHUB_ONLY)
 record(any("trees/develop" in u for u in box),
        "a TRAIN repo is audited on develop even when it defaults to main",
        f"requested {box!r}")
 
 box = []
 stub(_branch_probe(box))
-guard.read_repo("acme", "repo", META_OFF_TRAIN, COPIES, QFILES, False)
+guard.read_repo("acme", "repo", META_OFF_TRAIN, COPIES, QFILES, False, ORG_USES_GITHUB_ONLY)
 record(any("trees/main" in u for u in box) and not any("trees/develop" in u for u in box),
        "a NON-TRAIN repo is audited on its default branch, not a stray develop",
        f"requested {box!r} — this is the rfcs case; develop here lags and nobody merges to it")
 
 stub(_good)
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, ORG_USES_GITHUB_ONLY)
 record(
     read.ok
     and read.branch == "develop"
@@ -634,7 +721,7 @@ def _decoys(args):
 
 
 stub(_decoys)
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, ORG_USES_GITHUB_ONLY)
 record(read.ok and read.callers == {},
        "a commented-out `uses:` and one inside a run script are NOT callers",
        f"callers={read.callers}")
@@ -651,7 +738,7 @@ def _unpinned(args):
 
 
 stub(_unpinned)
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, ORG_USES_GITHUB_ONLY)
 record(read.ok and read.callers.get("fr-gate.yml") == [("fr-gate-caller.yml", "v1.2.3", {})],
        "a caller on an unexpected ref is captured with its ref, for the pin check",
        f"callers={read.callers}")
@@ -674,7 +761,7 @@ def _soft_fail_true(args):
 
 
 stub(_soft_fail_true)
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, ORG_USES_GITHUB_ONLY)
 record(
     read.ok
     and read.callers.get("fr-gate.yml") == [("fr-gate-caller.yml", "main", {"soft-fail": True})],
@@ -692,7 +779,7 @@ def _copy_sha(args):
 
 
 stub(_copy_sha)
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, ORG_USES_GITHUB_ONLY)
 record(read.ok and read.copies.get("add-to-kanban.yml") == "deadbeef",
        "a copy is recorded by blob sha so content can be compared",
        f"copies={read.copies}")
@@ -700,6 +787,76 @@ record(read.ok and read.copies.get("add-to-kanban.yml") == "deadbeef",
 record(guard.blob_sha(b"hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a",
        "blob_sha matches git's own object id",
        guard.blob_sha(b"hello\n"))
+
+
+# -------------------- org-config migration: caller host recognition (backend#3690
+# follow-up, .github#477)
+#
+# `.github#477`'s OWN audit run (34760430511/34760430541, both FAILURE) reported
+# ~139 MISSING findings for callers that were actually present on `develop`: the
+# fleet's `uses:` lines are mid-migration from `tracebloc/.github/...` to
+# `tracebloc/org-config/...` (org-config seeded 2026-09-10, callers switching one
+# repo per PR), and the matcher recognized only the former. Confirmed live via
+# `gh api repos/tracebloc/{backend,client-runtime}/contents/.github/workflows/
+# advance-deploy-env.yml?ref=develop`: both already resolve to
+# `tracebloc/org-config/.github/workflows/advance-deploy-env.yml@main`.
+#
+# Three cases, matching this org's fail-closed rule (backend#1729 rule 5/6): the
+# NEW host is recognized, the OLD host is STILL recognized (both must hold at
+# once during the transition, not one OR the other), and a THIRD, unlisted host
+# is correctly refused rather than silently treated as anything-goes.
+
+TRANSITION_HOSTS = guard.build_org_uses_pattern([".github", "org-config"])
+
+
+def _caller_at(host: str):
+    def handler(args):
+        if _branches(args):
+            return "main\n"
+        if _tree(args):
+            return TREE_ONE
+        return blob(
+            f"name: FR gate\non:\n  pull_request:\njobs:\n  gate:\n"
+            f"    uses: tracebloc/{host}/.github/workflows/fr-gate.yml@main\n"
+            .encode())
+    return handler
+
+
+stub(_caller_at("org-config"))
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, TRANSITION_HOSTS)
+record(
+    read.ok and read.callers.get("fr-gate.yml") == [("fr-gate-caller.yml", "main", {})],
+    "a caller pointed at the migration destination (org-config) is recognized",
+    f"callers={read.callers}")
+
+stub(_caller_at(".github"))
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, TRANSITION_HOSTS)
+record(
+    read.ok and read.callers.get("fr-gate.yml") == [("fr-gate-caller.yml", "main", {})],
+    "a caller still pointed at the canonical host (.github) is ALSO recognized "
+    "during the transition, not superseded by org-config",
+    f"callers={read.callers}")
+
+stub(_caller_at("some-other-repo"))
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, TRANSITION_HOSTS)
+record(
+    read.ok and read.callers == {},
+    "a caller pointed at neither listed host is NOT recognized - fail-closed, "
+    "not silently accepted as anything-goes",
+    f"callers={read.callers}")
+
+# Decoy hosts that merely CONTAIN a valid host name as a substring must not
+# satisfy the alternation - each host is matched as a whole `/`-bounded path
+# segment, so `org-config` cannot be spoofed by `org-config-fork` or
+# `not-org-config`, and `.github`'s literal dot is not an unescaped wildcard.
+for decoy in ("org-config-fork", "not-org-config", "xgithubx"):
+    stub(_caller_at(decoy))
+    read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, TRANSITION_HOSTS)
+    record(
+        read.ok and read.callers == {},
+        f"decoy host {decoy!r} (contains a valid host as a substring) is NOT "
+        "recognized",
+        f"callers={read.callers}")
 
 
 # --------------------------------------------- quality files (#1608 increment 5)
@@ -727,7 +884,7 @@ def _stub_qf_tree(payload):
 
 _stub_qf_tree(_qf_tree(_qf_entry("CLAUDE.md", size=5901),
                        _qf_entry(".cursor/BUGBOT.md", size=4193)))
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, ORG_USES_GITHUB_ONLY)
 record(read.ok
        and read.quality_files.get("CLAUDE.md", {}).get("size") == 5901
        and read.quality_files.get(".cursor/BUGBOT.md", {}).get("mode") == "100644",
@@ -736,7 +893,7 @@ record(read.ok
 
 # Absence from a SUCCESSFUL read is the only legitimate way to conclude "absent".
 _stub_qf_tree(_qf_tree(_qf_entry("README.md")))
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, ORG_USES_GITHUB_ONLY)
 record(read.ok and read.quality_files == {},
        "quality files: absent from a fully-read tree is recorded as absent",
        f"quality_files={read.quality_files}")
@@ -745,7 +902,7 @@ record(read.ok and read.quality_files == {},
 # knowledge. read_repo must fail the whole row rather than let the family conclude
 # the file is missing -- exit 2, never a finding and never an all-clear.
 _stub_qf_tree(_qf_tree(_qf_entry("README.md"), truncated=True))
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, ORG_USES_GITHUB_ONLY)
 record(not read.ok and any("truncated" in e for e in read.errors),
        "quality files: a TRUNCATED tree is unreadable, never 'the file is absent'",
        f"ok={read.ok} errors={read.errors}")
@@ -753,7 +910,7 @@ record(not read.ok and any("truncated" in e for e in read.errors),
 # A blob whose size the API did not report cannot be told from an empty file.
 # Guessing either way is the guard deciding a fact it does not have.
 _stub_qf_tree(_qf_tree(_qf_entry("CLAUDE.md", with_size=False)))
-read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True)
+read = guard.read_repo("acme", "repo", META, COPIES, QFILES, True, ORG_USES_GITHUB_ONLY)
 record(not read.ok and any("no size" in e for e in read.errors),
        "quality files: a blob with no reported size is unreadable, not 'empty'",
        f"ok={read.ok} errors={read.errors}")

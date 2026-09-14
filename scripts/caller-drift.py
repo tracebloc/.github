@@ -75,6 +75,7 @@ except ImportError:  # pragma: no cover - the workflow installs it explicitly
 
 TOP_LEVEL_KEYS = {
     "schema_version", "org", "pinned_ref", "audit_branch", "source_repo",
+    "transition_sources",
     "reusables", "copies", "shared_reasons", "repos", "protection_policy",
     "ruleset_policy", "quality_files", "caller_inputs",
 }
@@ -192,9 +193,49 @@ OVERRIDABLE = {
 }
 
 WORKFLOW_PATH = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
-ORG_USES = re.compile(
-    r"^tracebloc/\.github/\.github/workflows/(?P<name>[^/@]+\.ya?ml)@(?P<ref>.+)$"
-)
+
+
+def build_org_uses_pattern(hosts: "list[str]") -> "re.Pattern[str]":
+    """Compile the `uses:` matcher for every repo host currently valid as the
+    source of the org's reusable workflows.
+
+    ORG-CONFIG MIGRATION (backend#3690 follow-up, .github#477). This used to be
+    a module-level constant hardcoded to `tracebloc/\\.github/\\.github/...` --
+    the one host repo-inventory.yml's `source_repo` names. But `org-config` was
+    seeded 2026-09-10 as a verbatim copy of `.github`'s operational logic, and
+    the fleet's callers are being switched to it ONE REPO PER PR rather than in
+    one atomic flip, so at any moment during that migration a caller's `uses:`
+    may legitimately point at EITHER host. A pattern hardcoded to `.github`
+    alone treated every already-migrated repo's real caller as a non-match:
+    `collect_uses()` found the `uses:` line fine, this pattern refused it, and
+    the per-reusable loop in `main()` reported a caller that was actually
+    present as MISSING -- measured live on .github#477's own audit run
+    34760430511/34760430541 (`gate` and `audit` both FAILURE): ~139 MISSING
+    findings across backend, client-runtime, design-system, design-system-v2,
+    docs, e2e-test-agent, frontend-app, tracebloc-engine,
+    tracebloc-py-package and others, for callers the "-- <repo> @ <branch>"
+    print line one step earlier had already proven were readable.
+
+    DERIVED, NEVER RESTATED (backend#1729 rule 1). The caller passes
+    `[source_repo, *transition_sources]` straight from the loaded inventory, so
+    this file holds no second list of valid hosts that could drift from
+    repo-inventory.yml's own -- the exact shape of defect this whole guard
+    exists to catch elsewhere.
+
+    Each host is regex-escaped and matched as a whole path segment (bounded by
+    `/` on both sides), so `org-config` cannot be satisfied by a decoy repo
+    like `org-config-fork` or `not-org-config`, and a hyphen in a host name is
+    never read as a regex metacharacter.
+    """
+    if not hosts:
+        raise ValueError("build_org_uses_pattern() needs at least one host")
+    alternation = "|".join(re.escape(host) for host in hosts)
+    return re.compile(
+        rf"^tracebloc/(?:{alternation})/\.github/workflows/"
+        r"(?P<name>[^/@]+\.ya?ml)@(?P<ref>.+)$"
+    )
+
+
 HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 
 # The repo that holds the authoritative release-train membership list.
@@ -587,6 +628,29 @@ def load_inventory(path: str) -> dict:
     for key in ("org", "pinned_ref", "source_repo"):
         if not isinstance(data[key], str) or not data[key].strip():
             die(f"{path}: `{key}` must be a non-empty string.")
+
+    # HOSTS TRANSITIONALLY VALID ALONGSIDE `source_repo` (backend#3690 follow-up,
+    # .github#477): see the comment on this key in repo-inventory.yml itself for
+    # why it exists. A missing key is the same guard failure as a missing
+    # `source_repo` would be -- there is no silent default that would leave the
+    # migration unrecognized -- but an EMPTY list is a legitimate value (no
+    # migration in flight, or one already completed), unlike `reusables` and
+    # `quality_files` above, which reject empty because they would pass every
+    # repo vacuously.
+    transition_sources = data["transition_sources"]
+    if not isinstance(transition_sources, list):
+        die(f"{path}: `transition_sources` must be a list.")
+    if any(not isinstance(item, str) or not item.strip() for item in transition_sources):
+        die(f"{path}: `transition_sources` must contain only non-empty strings.")
+    if len(set(transition_sources)) != len(transition_sources):
+        die(f"{path}: `transition_sources` contains duplicates.")
+    if data["source_repo"] in transition_sources:
+        die(
+            f"{path}: `transition_sources` repeats source_repo "
+            f"{data['source_repo']!r} - it is always recognized and does not "
+            "need restating."
+        )
+
     if data["audit_branch"] != SUPPORTED_AUDIT_BRANCH:
         die(
             f"{path}: audit_branch is {data['audit_branch']!r}; only "
@@ -668,6 +732,9 @@ def load_inventory(path: str) -> dict:
         die(f"{path}: `repos` must be a non-empty mapping.")
     if data["source_repo"] not in repos:
         die(f"{path}: source_repo {data['source_repo']!r} has no entry under `repos`.")
+    missing_hosts = sorted(set(transition_sources) - set(repos))
+    if missing_hosts:
+        die(f"{path}: transition_sources {missing_hosts!r} has no entry under `repos`.")
 
     for name, entry in repos.items():
         where = f"{path}: repos.{name}"
@@ -1182,7 +1249,7 @@ def caller_state_unknown(read: "RepoRead") -> bool:
 
 def read_repo(
     org: str, name: str, meta: dict, copies: "list[str]",
-    quality_files: "list[str]", on_train: bool,
+    quality_files: "list[str]", on_train: bool, org_uses: "re.Pattern[str]",
 ) -> RepoRead:
     """Read one repo's state on the branch it ships from.
 
@@ -1196,6 +1263,14 @@ def read_repo(
 
     Required and positional so a caller that forgets it raises TypeError. Defaulting
     it to False would reproduce the same bug with better manners.
+
+    `org_uses` IS ALSO A PARAMETER, NOT A MODULE CONSTANT, for the same reason
+    (backend#3690 follow-up, .github#477): it is built once in `main()` from
+    `[source_repo, *transition_sources]`, which is data that lives only in the
+    loaded inventory. A module-level constant here would have to hardcode the
+    host list a second time -- which is exactly the "org-config isn't
+    recognized" bug this parameter exists to close, reproduced with better
+    manners if it defaulted to anything.
     """
     out = RepoRead(name)
 
@@ -1336,7 +1411,7 @@ def read_repo(
         refs: "list[tuple[str, dict]]" = []
         collect_uses(parsed, refs)
         for ref, inputs in refs:
-            match = ORG_USES.match(ref)
+            match = org_uses.match(ref)
             if match:
                 out.callers.setdefault(match.group("name"), []).append(
                     (filename, match.group("ref"), inputs)
@@ -2140,6 +2215,12 @@ def main() -> int:
     org = inventory["org"]
     pinned_ref = inventory["pinned_ref"]
     source_repo = inventory["source_repo"]
+    # DERIVED FROM THE INVENTORY, NOT A MODULE CONSTANT (backend#3690 follow-up,
+    # .github#477): a caller's `uses:` may legitimately point at `source_repo`
+    # OR any host still mid-migration in `transition_sources` -- see
+    # build_org_uses_pattern()'s docstring and the `transition_sources` comment
+    # in repo-inventory.yml for the measured evidence.
+    org_uses = build_org_uses_pattern([source_repo, *inventory["transition_sources"]])
     # {(repo, branch): [copy_name, ...]} - REQUIRED copies that are missing or
     # drifted. Populated during the audit so remediation never re-derives what
     # counts as broken from a second, drifting copy of the rules.
@@ -2270,7 +2351,7 @@ def main() -> int:
         # is the org listing and carries no such field -- reading it from there is the
         # bug Bugbot found on #289.
         read = read_repo(org, name, meta, copies, quality_files,
-                         bool(entry.get("release_train")))
+                         bool(entry.get("release_train")), org_uses)
         if not read.ok:
             for problem in read.errors:
                 unreadable.append(f"{name}: {problem}")

@@ -96,6 +96,33 @@ audit_branch: develop-first-on-train
 # first, flip the entry after.
 source_repo: .github
 
+# HOSTS TRANSITIONALLY VALID ALONGSIDE `source_repo` (backend#3690 follow-up,
+# .github#477). `org-config` was seeded 2026-09-10 as a verbatim copy of this
+# repo's operational logic (see the `org-config` entry under `repos:` below),
+# and callers are being switched to it ONE REPO PER PR rather than in one
+# atomic flip -- so at any moment during the migration a caller's `uses:` may
+# legitimately point at EITHER host. Measured live 2026-09-14 via the
+# checked-out `uses:` line on `develop` in each repo's own
+# advance-deploy-env.yml: `backend`, `client-runtime`, `docs` and
+# `design-system` already resolve to `tracebloc/org-config/...`; `model-zoo`,
+# `start-training`, `data-ingestors` and `rfcs` still resolve to
+# `tracebloc/.github/...`. Both must be recognized as the same caller for
+# exactly as long as this list says so.
+#
+# `caller-drift.py` reads `[source_repo, *transition_sources]` from THIS file
+# to build the `uses:` matcher at runtime -- it holds no second, hardcoded host
+# list that could drift from the one written here (backend#1729 rule 1: derive,
+# never restate). Before this was added, the matcher recognized `.github`
+# alone, so every already-migrated repo's real caller silently failed to match
+# and was reported MISSING (measured on .github#477's own audit run
+# 34760430541: ~139 MISSING findings for callers that were actually present).
+#
+# Drop an entry once every caller has switched off it -- an empty list is the
+# END STATE once the migration completes and `source_repo` itself flips to
+# `org-config`, not an error today.
+transition_sources:
+  - org-config
+
 # Reusables: workflows in .github/workflows declaring `on: workflow_call`. A repo
 # calls one when any workflow of any filename resolves to
 #   uses: tracebloc/.github/.github/workflows/<name>@<pinned_ref>
