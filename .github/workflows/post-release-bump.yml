@@ -126,6 +126,9 @@ jobs:
           # which is the one repo whose release event does fire. On a tag push
           # `github.event.release` is absent and `github.ref_name` is the tag.
           TAG: ${{ github.event.release.tag_name || github.ref_name }}
+          # A TAG DELETION IS A `push` EVENT TOO (Bugbot, #474). Absent on the
+          # release event, where it arrives as the empty string.
+          DELETED: ${{ github.event.deleted }}
           VERSION_FILE: ${{ inputs.version-file }}
           BUMP: ${{ inputs.bump }}
           BASE: ${{ inputs.base-branch }}
@@ -150,7 +153,13 @@ jobs:
             fi
           done
 
-          # THE TAG DECISION. One `case`, three outcomes, and the stable rule is the
+          # THE TAG DECISION. A `push: tags:` caller fires on tag CREATION AND TAG
+          # DELETION alike -- same event, `github.ref_name` still the tag, only
+          # `deleted` telling them apart -- so a `git push --delete origin v1.2.3`
+          # would otherwise be read as a release that consumed v1.2.3 and open a bump
+          # PR for a version that never shipped. Deleting is the no-op it looks like.
+          #
+          # Then one `case`, three outcomes, and the stable rule is the
           # org's existing one: `cli`'s release.yml and the train's promote-repo.sh
           # both say a stable release is exactly ^v[0-9]+\.[0-9]+\.[0-9]+$ and any
           # suffixed tag is a prerelease.
@@ -168,6 +177,10 @@ jobs:
           # every variable it interpolates is one the selftest binds, and the refusal
           # it prints must keep saying "::error::release tag", which is what the
           # selftest matches on to tell a refusal apart from a broken block.
+          if [ "$DELETED" = "true" ]; then
+            echo "::notice::$TAG was DELETED, not published - it consumed no version, nothing to bump."
+            exit 0
+          fi
           case "$TAG" in
             *-*)
               echo "::notice::$TAG is a prerelease - it consumes no version, nothing to bump."

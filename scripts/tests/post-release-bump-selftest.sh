@@ -51,14 +51,14 @@ no() { printf '  FAIL  %s\n     %s\n' "$1" "$2"; fail=$((fail + 1)); }
 # Anchored on the literal `case` subject rather than on a line number, which moves.
 # The extraction is REQUIRED to find something: a silent empty extraction would make
 # every assertion below pass against an empty function.
-tag_case="$(awk '/^ *case "\$TAG" in/{f=1} f{print} f&&/^ *esac/{exit}' "$WF")"
-[ -n "$tag_case" ] || { echo "FATAL: could not extract the \`case \"\$TAG\"\` block from $WF"; exit 1; }
+tag_case="$(awk '/^ *if \[ "\$DELETED" = "true" \]; then/{f=1} f{print} f&&/^ *esac/{exit}' "$WF")"
+[ -n "$tag_case" ] || { echo "FATAL: could not extract the tag decision (the \$DELETED guard through the \`case \"\$TAG\"\` esac) from $WF"; exit 1; }
 
 # AND IT IS REQUIRED TO STILL CONTAIN ALL THREE OUTCOMES. Extraction succeeding is
 # not the same as extracting the right thing: a rewrite that kept the `case` subject
 # but lost an arm would extract cleanly and then be scored against whatever was
 # left. Each arm is asserted by the text the assertions below actually depend on.
-for _needle in '*-*)' '::notice::' '::error::release tag' 'exit 0' 'exit 1'; do
+for _needle in '$DELETED' '*-*)' '::notice::' '::error::release tag' 'exit 0' 'exit 1'; do
   grep -qF -- "$_needle" <<<"$tag_case" || {
     echo "FATAL: the extracted block no longer contains '$_needle'. Either an arm was"
     echo "       removed or the refusal text changed; verdict() below keys on it."
@@ -75,7 +75,7 @@ done
 # -- and they would have kept passing with the shape test deleted. Binding one more
 # variable by hand closed one instance; this closes the CLASS, by reading the
 # references out of the extracted block and refusing any that nothing here binds.
-BOUND="TAG VERSION_FILE BASE BUMP REPO_FULL"
+BOUND="TAG DELETED VERSION_FILE BASE BUMP REPO_FULL"
 _unbound=""
 for _v in $(grep -oE '\$\{?[A-Za-z_][A-Za-z_0-9]*' <<<"$tag_case" | tr -d '${' | sort -u); do
   case " $BOUND " in
@@ -94,13 +94,14 @@ done
 # The workflow's own arms call `echo ::notice`/`::error` and `exit`. Run them in a
 # subshell and read BOTH the exit code and the output: the code alone cannot tell a
 # refusal from a broken block, which is the whole point of the paragraph above.
-verdict() { # tag -> "skip" | "accept" | "refuse" | "broken"
-  local TAG="$1" out rc
+verdict() { # tag [deleted] -> "skip" | "accept" | "refuse" | "broken"
+  local TAG="$1" DELETED="${2:-false}" out rc
   out=$(
     # THE SAME FLAGS THE WORKFLOW'S `run:` SETS. `-e` matters: without it a failing
     # command inside an arm would abort in production and sail past here.
     set -euo pipefail
     TAG="$TAG"
+    DELETED="$DELETED"
     # Read by `eval "$tag_case"` below, which shellcheck cannot follow. The BOUND
     # list above is what keeps this set honest -- it is derived from the block, so
     # a binding that stops being needed is dead weight, not a silent hazard.
@@ -119,8 +120,8 @@ verdict() { # tag -> "skip" | "accept" | "refuse" | "broken"
   fi
 }
 
-is() { # desc, expected, tag
-  local got; got="$(verdict "$3")"
+is() { # desc, expected, tag, [deleted]
+  local got; got="$(verdict "$3" "${4:-false}")"
   if [ "$got" = "$2" ]; then ok "$1"; else no "$1" "expected $2, got $got (tag: $3)"; fi
 }
 
@@ -153,6 +154,16 @@ is "an empty tag is refused"           refuse ""
 is "an unprefixed 1.2.3 is refused"    refuse 1.2.3
 is "a four-part v1.2.3.4 is refused"   refuse v1.2.3.4
 is "v1.2.3rc1 is refused, not skipped (no separator to read)" refuse v1.2.3rc1
+
+# --- a DELETED tag published nothing, whatever its shape ----------------------
+#
+# `on: push: tags:` fires on `git push --delete origin v1.2.3` exactly as it does on
+# the create, with the same `github.ref_name`; only `github.event.deleted` separates
+# them. Without the guard a deletion reads as a release that consumed the version and
+# opens a bump PR for something that never shipped (Bugbot, #474).
+is "a DELETED v1.2.3 is skipped, not bumped"      skip v1.2.3      true
+is "a DELETED rc is skipped too"                  skip v1.2.3-rc.1 true
+is "a DELETED malformed tag is skipped, not refused - nothing shipped" skip vlatest true
 
 printf '\npost-release-bump: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
