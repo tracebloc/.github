@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import ast
 import base64
+import contextlib
 import copy
 import importlib.util
 import inspect
 import inspect as _inspect
+import io
 import json
 import re
 import pathlib
@@ -1765,32 +1767,85 @@ except SystemExit as exc:
 _expect_exit("source reusables: a missing workflows dir is refused, not passed",
              lambda: guard.check_source_reusables(tempfile.mkdtemp(), ["a.yml"]))
 
-# --- transition-hosts fallback (backend#3690 follow-up, .github#477) ----------
+# --- transition-hosts scan (backend#3690 follow-up, .github#477) --------------
 #
 # `desk-dispatch.yml` lives ONLY in org-config, never in `.github` -- so the
 # local scan above can never find it, on any run, in any repo's checkout. The
 # two existing die() cases just above must still fire when `hosts` is left at
 # its default empty tuple (every pre-existing caller of this function, and the
 # whole point of the die() when a name really is a ghost everywhere); only a
-# caller that PASSES hosts gets the live fallback, and only for names still
-# phantom after the local scan.
+# caller that PASSES hosts gets the remote scan.
+#
+# The scan is TWO-directional and FAILS CLOSED (Bugbot on 25ed5eb2): each host's
+# workflows directory is listed and every file classified, so a reusable shipped
+# only on a host is caught as untracked; a file or listing that cannot be read is
+# a "cannot tell" die(), never an absence verdict. The stub therefore serves the
+# directory listing as well as the file reads, and can make either fail.
 
-def _stub_remote_workflow(reusable_by_repo):
-    """`gh_json` stub: {repo: {name: is_workflow_call bool}}. Anything else 404s."""
+def _stub_remote_workflow(files_by_repo, listing_status=None):
+    """`gh_json` stub for the transition-host scan.
+
+    files_by_repo: {repo: {name: spec}} -- the host's `.github/workflows/`
+    listing, and what reading each file answers: True = a `workflow_call`
+    workflow, False = a push-triggered workflow of that name, an int = that
+    HTTP status when the file is read, "garbage" = a body that is not YAML.
+    listing_status: {repo: int} -- the listing itself fails with that status.
+    A repo in neither mapping has no workflows directory (404). Anything else
+    404s.
+    """
+    listing_status = listing_status or {}
+
     def handler(args):
         # args like ["api", "repos/tracebloc/org-config/contents/.github/workflows/desk-dispatch.yml?ref=main"]
         path = args[1]
-        m = re.match(r"repos/[^/]+/([^/]+)/contents/\.github/workflows/([^?]+)\?ref=", path)
+        m = re.match(
+            r"repos/[^/]+/([^/]+)/contents/\.github/workflows(?:/([^?]+))?\?ref=", path,
+        )
         if not m:
             raise guard.GhError(404, f"unexpected path {path!r}")
         repo, name = m.group(1), m.group(2)
-        is_reusable = reusable_by_repo.get(repo, {}).get(name)
-        if is_reusable is None:
+        if name is None:
+            if repo in listing_status:
+                raise guard.GhError(listing_status[repo], f"HTTP {listing_status[repo]}")
+            if repo not in files_by_repo:
+                raise guard.GhError(404, "not found")
+            return [{"name": n, "type": "file"} for n in files_by_repo[repo]]
+        spec = files_by_repo.get(repo, {}).get(name)
+        if spec is None:
             raise guard.GhError(404, "not found")
-        body = REUSABLE if is_reusable else NOT_REUSABLE
+        if isinstance(spec, bool):
+            body = REUSABLE if spec else NOT_REUSABLE
+        elif isinstance(spec, int):
+            raise guard.GhError(spec, f"HTTP {spec}")
+        else:
+            body = "on: [unclosed\n  - :\n"
         return {"content": base64.b64encode(body.encode()).decode()}
     guard.gh_json = handler
 
+
+def _expect_die(name, fn, needle, forbidden=None):
+    """die() with exit 2 whose message contains `needle` and not `forbidden`.
+
+    _expect_exit() above only checks the code, and every die() in this function
+    is exit 2 -- so "refused for the RIGHT reason" needs the message. The cases
+    below hinge on exactly that: an UNREADABLE refusal and an absence refusal
+    share an exit code and must not be mistaken for one another.
+    """
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            fn()
+    except SystemExit as exc:
+        err = buf.getvalue()
+        ok = exc.code == 2 and needle in err and (forbidden is None or forbidden not in err)
+        record(ok, name, f"SystemExit({exc.code}) {err.strip()[:200]!r}")
+    else:
+        record(False, name, "ACCEPTED what should have been refused")
+
+
+ABSENT_PHRASE = "that are not `workflow_call` workflows"
+UNTRACKED_PHRASE = "absent from the inventory's `reusables` list"
+UNKNOWN_PHRASE = "This is a failed read, not a missing workflow."
 
 _saved_gh_json = guard.gh_json
 
@@ -1810,29 +1865,35 @@ finally:
     guard.gh_json = _saved_gh_json
 
 # Present in the transition host but NOT as `workflow_call` (e.g. a plain
-# workflow of the same name) -- still a phantom, still refused.
+# workflow of the same name) -- a DEFINITIVE read, so still a phantom, refused
+# with the absence message and not the unknown one.
 root = _src_tree({"a.yml": REUSABLE})
 _stub_remote_workflow({"org-config": {"desk-dispatch.yml": False}})
 try:
-    _expect_exit(
+    _expect_die(
         "source reusables: present remotely but not `workflow_call` is still refused",
         lambda: guard.check_source_reusables(
             root, ["a.yml", "desk-dispatch.yml"], "tracebloc", ["org-config"], "main",
         ),
+        ABSENT_PHRASE, forbidden=UNKNOWN_PHRASE,
     )
 finally:
     guard.gh_json = _saved_gh_json
 
 # Absent from every host, including the transition ones -- a real ghost, refused
-# exactly as it was before `hosts` existed.
+# exactly as it was before `hosts` existed. The host's listing is READABLE and
+# simply does not carry the name: that is what makes the absence definitive. (A
+# host with no listing at all is the unreadable case further down, and this
+# case would go vacuous if it leaned on it -- exit 2 either way.)
 root = _src_tree({"a.yml": REUSABLE})
-_stub_remote_workflow({})
+_stub_remote_workflow({"org-config": {}})
 try:
-    _expect_exit(
+    _expect_die(
         "source reusables: absent from every transition host is still a ghost",
         lambda: guard.check_source_reusables(
             root, ["a.yml", "desk-dispatch.yml"], "tracebloc", ["org-config"], "main",
         ),
+        ABSENT_PHRASE, forbidden=UNKNOWN_PHRASE,
     )
 finally:
     guard.gh_json = _saved_gh_json
@@ -1845,6 +1906,145 @@ finally:
 root = _src_tree({"a.yml": REUSABLE})
 _expect_exit("source reusables: no hosts given means no fallback, ghost dies as before",
              lambda: guard.check_source_reusables(root, ["a.yml", "ghost.yml"]))
+
+# THE OTHER DIRECTION (Bugbot on 25ed5eb2): a reusable shipped only on the
+# transition host and never listed. The one-directional fallback only asked
+# about listed names, so this was compared against no repo and reported by
+# nothing -- the blind spot that hid desk-dispatch.yml. It must now die as
+# UNTRACKED, naming the file and the host it was found on.
+root = _src_tree({"a.yml": REUSABLE})
+_stub_remote_workflow({"org-config": {"desk-dispatch.yml": True, "sneaky.yml": True}})
+try:
+    _expect_die(
+        "source reusables: an UNLISTED reusable hosted only on a transition host is refused",
+        lambda: guard.check_source_reusables(
+            root, ["a.yml", "desk-dispatch.yml"], "tracebloc", ["org-config"], "main",
+        ),
+        "sneaky.yml (in tracebloc/org-config@main)", forbidden=UNKNOWN_PHRASE,
+    )
+finally:
+    guard.gh_json = _saved_gh_json
+
+# A plain (push-triggered) workflow on the host is NOT demanded in the list --
+# the remote classifier must not be looser than the local one.
+root = _src_tree({"a.yml": REUSABLE})
+_stub_remote_workflow({"org-config": {"plain.yml": False}})
+try:
+    guard.check_source_reusables(root, ["a.yml"], "tracebloc", ["org-config"], "main")
+    record(True, "source reusables: a push-triggered workflow on a transition host is not demanded",
+           "no exit")
+except SystemExit as exc:
+    record(False, "source reusables: a push-triggered workflow on a transition host is not demanded",
+           f"SystemExit({exc.code})")
+finally:
+    guard.gh_json = _saved_gh_json
+
+# FAILED READ IS NOT ABSENCE (Bugbot on 25ed5eb2). A 403 on the file read used
+# to become False -> "not on this host" -> die("does not exist"). It must be an
+# UNKNOWN refusal that says so, and must NOT carry the absence phrase.
+root = _src_tree({"a.yml": REUSABLE})
+_stub_remote_workflow({"org-config": {"desk-dispatch.yml": 403}})
+try:
+    _expect_die(
+        "source reusables: a 403 on the remote read is UNKNOWN, not absent",
+        lambda: guard.check_source_reusables(
+            root, ["a.yml", "desk-dispatch.yml"], "tracebloc", ["org-config"], "main",
+        ),
+        UNKNOWN_PHRASE, forbidden=ABSENT_PHRASE,
+    )
+finally:
+    guard.gh_json = _saved_gh_json
+
+# ...and the same when nothing is phantom. The one-directional fallback never
+# touched the network unless a listed name was missing locally, so an unreadable
+# host silently let "every reusable is tracked" pass. With the host's surface
+# unknown that claim cannot be made either.
+root = _src_tree({"a.yml": REUSABLE})
+_stub_remote_workflow({"org-config": {"other.yml": 500}})
+try:
+    _expect_die(
+        "source reusables: an unreadable host file refuses even with nothing phantom",
+        lambda: guard.check_source_reusables(root, ["a.yml"], "tracebloc", ["org-config"], "main"),
+        UNKNOWN_PHRASE, forbidden=ABSENT_PHRASE,
+    )
+finally:
+    guard.gh_json = _saved_gh_json
+
+# A body that is not YAML is a failed read too, not "not a reusable".
+root = _src_tree({"a.yml": REUSABLE})
+_stub_remote_workflow({"org-config": {"desk-dispatch.yml": "garbage"}})
+try:
+    _expect_die(
+        "source reusables: unparseable remote YAML is UNKNOWN, not absent",
+        lambda: guard.check_source_reusables(
+            root, ["a.yml", "desk-dispatch.yml"], "tracebloc", ["org-config"], "main",
+        ),
+        UNKNOWN_PHRASE, forbidden=ABSENT_PHRASE,
+    )
+finally:
+    guard.gh_json = _saved_gh_json
+
+# UNREADABLE LISTING FAILS CLOSED. A directory listing that errors must be one
+# UNKNOWN record, never an empty host that lets the untracked check pass.
+root = _src_tree({"a.yml": REUSABLE})
+_stub_remote_workflow({}, listing_status={"org-config": 500})
+try:
+    _expect_die(
+        "source reusables: an unreadable transition-host listing is UNKNOWN",
+        lambda: guard.check_source_reusables(root, ["a.yml"], "tracebloc", ["org-config"], "main"),
+        "listing failed", forbidden=ABSENT_PHRASE,
+    )
+finally:
+    guard.gh_json = _saved_gh_json
+
+# A host with NO workflows directory is a surprise, not "hosts nothing": a
+# transition host is declared as hosting reusables, so its 404 is unreadable too.
+root = _src_tree({"a.yml": REUSABLE})
+_stub_remote_workflow({})
+try:
+    _expect_die(
+        "source reusables: a transition host with no workflows dir is UNKNOWN, not empty",
+        lambda: guard.check_source_reusables(root, ["a.yml"], "tracebloc", ["org-config"], "main"),
+        "listing failed", forbidden=ABSENT_PHRASE,
+    )
+finally:
+    guard.gh_json = _saved_gh_json
+
+# THE TRI-STATE ITSELF, so the classifier is pinned independently of how
+# check_source_reusables() consumes it. Only a 404 or a parsed non-reusable is
+# ABSENT; every failure shape is UNREADABLE.
+_stub_remote_workflow({"h": {
+    "reusable.yml": True, "plain.yml": False, "forbidden.yml": 403,
+    "broken.yml": 500, "garbage.yml": "garbage",
+}})
+try:
+    _expected = {
+        "reusable.yml": guard.REMOTE_PRESENT,
+        "plain.yml": guard.REMOTE_ABSENT,
+        "missing.yml": guard.REMOTE_ABSENT,
+        "forbidden.yml": guard.REMOTE_UNREADABLE,
+        "broken.yml": guard.REMOTE_UNREADABLE,
+        "garbage.yml": guard.REMOTE_UNREADABLE,
+    }
+    _got = {n: guard._remote_reusable_state("tracebloc", "h", "main", n)[0] for n in _expected}
+    record(_got == _expected, "remote state: only 404 or a parsed non-reusable is ABSENT",
+           f"got={_got}")
+    # A status gh could not report (None) is not a 404 either.
+    guard.gh_json = _raise(None, "could not execute gh")
+    _state, _detail = guard._remote_reusable_state("tracebloc", "h", "main", "x.yml")
+    record(_state == guard.REMOTE_UNREADABLE and "could not execute gh" in _detail,
+           "remote state: an unknown status is UNREADABLE and keeps the detail", f"{_state} {_detail!r}")
+finally:
+    guard.gh_json = _saved_gh_json
+
+# ONE CLASSIFIER, NOT TWO (backend#1729 rule 9): the local scan and the remote
+# read must both go through _declares_workflow_call(), or the two can drift.
+_csr_src = inspect.getsource(guard.check_source_reusables)
+_rrs_src = inspect.getsource(guard._remote_reusable_state)
+record("_declares_workflow_call(" in _csr_src and "_declares_workflow_call(" in _rrs_src
+       and '"workflow_call" in' not in _csr_src and '"workflow_call" in' not in _rrs_src,
+       "wiring: local and remote reusable scans share _declares_workflow_call()",
+       "both call sites route through the one classifier")
 
 
 # --- the conformance matrix (backend#1608 increment 3) ------------------------

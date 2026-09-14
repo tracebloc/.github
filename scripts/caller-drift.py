@@ -1034,42 +1034,130 @@ def remediate_copies(
     return _ensure_copy_pr(full, head, base, issue, [n for n, _ in entries])
 
 
-def _is_remote_workflow_call(org: str, repo: str, ref: str, name: str) -> bool:
-    """True if `<repo>/.github/workflows/<name>` on `ref` declares `workflow_call`.
+# The three answers a live read of one remote workflow file can give. Strings,
+# not a bool, because the middle answer is the one this file exists to keep
+# apart from the other two: a read that FAILED is not a read that found nothing.
+REMOTE_PRESENT = "present"
+REMOTE_ABSENT = "absent"
+REMOTE_UNREADABLE = "unreadable"
 
-    A live, best-effort existence check -- used ONLY by check_source_reusables()
-    to resolve a reusable it did not find in the local checkout, for one it is
-    hosted solely in a `transition_sources` repo (backend#3690 follow-up,
-    .github#477): `desk-dispatch.yml` lives in `org-config`, never in `.github`,
-    so no local scan of `source_dir` (always the `.github` checkout -- see
-    caller-drift.yml's `--source-dir .`) can ever find it. A 404, an unreadable
-    response or an unparseable file all mean "not on THIS host" here, never
-    "unreadable" -- check_source_reusables() already dies with a clear message
-    once every host has been asked and none had it, so this only needs to answer
-    one host at a time.
+
+def _declares_workflow_call(doc) -> bool:
+    """Whether a parsed workflow document carries a `workflow_call` trigger.
+
+    `on:` parses as the boolean True in YAML 1.1, which is why this reads both
+    keys rather than the obvious one. ONE function for the local scan and the
+    remote reads in check_source_reusables(), so the two classifiers cannot
+    drift apart (backend#1729 rule 9).
     """
-    try:
-        blob = gh_json(["api", f"repos/{org}/{repo}/contents/.github/workflows/{name}?ref={ref}"])
-    except GhError:
+    if not isinstance(doc, dict):
         return False
-    if not isinstance(blob, dict):
-        return False
-    try:
-        body = base64.b64decode(blob.get("content", ""))
-        doc = yaml.safe_load(body)
-    except (ValueError, binascii.Error, yaml.YAMLError):
-        return False
-    triggers = doc.get("on") if isinstance(doc, dict) else None
-    if triggers is None and isinstance(doc, dict):
+    triggers = doc.get("on")
+    if triggers is None:
         triggers = doc.get(True)
     return isinstance(triggers, dict) and "workflow_call" in triggers
+
+
+def _remote_reusable_state(org: str, repo: str, ref: str, name: str) -> "tuple[str, str]":
+    """Classify `<repo>/.github/workflows/<name>` on `ref`. Returns (state, detail).
+
+    REMOTE_PRESENT: the file read, parsed, and declares `workflow_call`.
+    REMOTE_ABSENT: the API said so DEFINITIVELY -- a 404, or a file that read
+    and parsed cleanly and is not a reusable (a push-triggered workflow of the
+    same name).
+    REMOTE_UNREADABLE: everything else -- a 403, a 5xx, a rate limit, a status
+    `gh` could not report, a payload that is not a file object, content that
+    does not decode, YAML that does not parse. `detail` says which, for the
+    record check_source_reusables() writes.
+
+    THE MIDDLE STATE IS THE POINT (Bugbot, .github#477). The first version of
+    this helper returned a bool and folded every failure into False -- "not on
+    this host" -- and check_source_reusables() then die()d that the listed
+    reusable does not exist: a positive absence claim manufactured from a
+    failed read, the same class caller_state_unknown() closes for a
+    zero-workflow tree. Only a 404 is evidence of absence; a 403 is evidence of
+    nothing. The local scan already holds itself to this rule (an unparseable
+    local file dies with "cannot tell if it is a reusable" instead of being
+    skipped); this is that rule for the remote hosts.
+    """
+    path = f"repos/{org}/{repo}/contents/.github/workflows/{name}?ref={ref}"
+    try:
+        blob = gh_json(["api", path])
+    except GhError as exc:
+        if exc.status == 404:
+            return REMOTE_ABSENT, "404"
+        return REMOTE_UNREADABLE, f"read failed ({exc.detail})"
+    if not isinstance(blob, dict):
+        return REMOTE_UNREADABLE, "payload is not a file object"
+    try:
+        body = base64.b64decode(blob.get("content", ""))
+    except (TypeError, ValueError, binascii.Error) as exc:
+        return REMOTE_UNREADABLE, f"content does not decode ({exc})"
+    try:
+        doc = yaml.safe_load(body)
+    except yaml.YAMLError as exc:
+        return REMOTE_UNREADABLE, f"content does not parse as YAML ({exc})"
+    if _declares_workflow_call(doc):
+        return REMOTE_PRESENT, "workflow_call"
+    return REMOTE_ABSENT, "exists but does not declare workflow_call"
+
+
+def _list_remote_reusables(org: str, repo: str, ref: str) -> "tuple[set[str], list[str]]":
+    """Every `workflow_call` workflow `<repo>` hosts at `ref`: (found, unreadable).
+
+    Lists the host's `.github/workflows/` through the contents API (a directory
+    listing there is complete up to 1,000 entries, unpaginated -- two orders of
+    magnitude above any workflows directory in this org), then classifies every
+    `.yml`/`.yaml` file with _remote_reusable_state(). `found` is the names that
+    declared `workflow_call`; `unreadable` is one record per file -- or for the
+    listing itself -- that could NOT be classified. A name in neither set is a
+    definitive non-reusable: a 404 between list and read, or a plain workflow.
+
+    DERIVED FROM THE HOST, NOT FROM THE INVENTORY (Bugbot, .github#477). The
+    first version of the transition-host fallback only asked whether each
+    LISTED name missing locally existed remotely -- one direction. A reusable
+    shipped only on a transition host and never listed was compared against no
+    repo and reported by nothing, the very blind spot check_source_reusables()
+    exists to close and the one that hid `desk-dispatch.yml`. Enumerating the
+    host's directory is what lets the untracked check see it.
+
+    FAIL CLOSED ON THE LISTING. A listing that cannot be read is one UNREADABLE
+    record and zero names -- never an empty set, which would let the untracked
+    check pass vacuously. That includes a 404: a transition host is by
+    definition a repo the inventory declares as hosting reusables, so a missing
+    workflows directory there is a surprise this guard cannot interpret, not a
+    clean "hosts nothing". Same for a payload that is not a directory, or an
+    entry with no name.
+    """
+    where = f"{repo}/.github/workflows"
+    try:
+        entries = gh_json(["api", f"repos/{org}/{repo}/contents/.github/workflows?ref={ref}"])
+    except GhError as exc:
+        return set(), [f"{where}: listing failed ({exc.detail})"]
+    if not isinstance(entries, list):
+        return set(), [f"{where}: listing is not a directory"]
+    found: "set[str]" = set()
+    unreadable: "list[str]" = []
+    for entry in entries:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if not isinstance(name, str) or not name:
+            unreadable.append(f"{where}: listing entry has no name ({entry!r})")
+            continue
+        if not name.endswith((".yml", ".yaml")) or entry.get("type", "file") != "file":
+            continue
+        state, detail = _remote_reusable_state(org, repo, ref, name)
+        if state == REMOTE_PRESENT:
+            found.add(name)
+        elif state == REMOTE_UNREADABLE:
+            unreadable.append(f"{where}/{name}: {detail}")
+    return found, unreadable
 
 
 def check_source_reusables(
     source_dir: str, listed: "list[str]",
     org: "str | None" = None, hosts: "tuple[str, ...] | list[str]" = (), ref: str = "main",
 ) -> None:
-    """Every `workflow_call` workflow in the source repo must be in the inventory.
+    """Every `workflow_call` workflow on any source host must be in the inventory.
 
     THE GUARD ENUMERATED THE INVENTORY, NEVER THE SOURCE. `reusables` is a
     hand-written list and the audit iterates it, so a reusable added to
@@ -1090,14 +1178,30 @@ def check_source_reusables(
     audited against. Adding the row is the fix; `exempt` with a written reason is
     how a parked reusable stays parked (see wip-limit-check).
 
-    `org` AND `hosts` ARE OPTIONAL, AND DEFAULT TO NO FALLBACK (backend#3690
+    `org` AND `hosts` ARE OPTIONAL, AND DEFAULT TO NO REMOTE SCAN (backend#3690
     follow-up, .github#477). Every existing call in this file's own selftest
     passes only `(source_dir, listed)`, and must keep behaving exactly as before
     -- a phantom name dies immediately, no network touched. Only main()'s real
     call site passes the inventory's `org` and `transition_sources`, because only
-    there can a name legitimately be hosted somewhere this checkout cannot see.
-    `hosts` is checked ONLY for names still phantom after the local scan, so a
-    fully self-hosted inventory (empty `transition_sources`) never makes a call.
+    there can a reusable legitimately live somewhere this checkout cannot see:
+    `desk-dispatch.yml` is hosted ONLY on `org-config`, never on `.github`, so
+    no scan of `source_dir` (always the `.github` checkout -- caller-drift.yml's
+    `--source-dir .`) can find it.
+
+    THE REMOTE SCAN RUNS IN BOTH DIRECTIONS, AND FAILS CLOSED (Bugbot,
+    .github#477). Each host's workflows directory is enumerated with
+    _list_remote_reusables() and unioned into `found`, so a reusable that ships
+    only on a transition host is caught by the untracked check exactly like a
+    local one, and a listed name hosted there resolves instead of dying as a
+    ghost. Any file or listing that could not be read is a die() of its own
+    -- BEFORE either the untracked or the phantom verdict -- worded as "cannot
+    tell", never as "does not exist": with a host's reusable surface unknown,
+    neither "every reusable is tracked" nor "this listed reusable is a ghost"
+    can be claimed. Exit 2 is this file's own "could not evaluate" code, and
+    die() is documented as "used only where a value could not be established";
+    a record in main()'s `unreadable` bucket would say the same thing, but
+    this runs before any repo is read and the source surface is what every
+    repo is then measured against, so there is nothing sound to continue with.
     """
     workflows = os.path.join(source_dir, ".github", "workflows")
     if not os.path.isdir(workflows):
@@ -1105,7 +1209,8 @@ def check_source_reusables(
             f"source workflow directory {workflows} is missing. Refusing to "
             "report that every reusable is tracked without having looked."
         )
-    found = []
+    # name -> where it was found, for the untracked message.
+    found: "dict[str, list[str]]" = {}
     for name in sorted(os.listdir(workflows)):
         if not name.endswith((".yml", ".yaml")):
             continue
@@ -1115,28 +1220,35 @@ def check_source_reusables(
                 doc = yaml.safe_load(handle)
         except (OSError, yaml.YAMLError) as exc:
             die(f"{path} is not readable/parseable ({exc}); cannot tell if it is a reusable.")
-        # `on:` parses as the boolean True in YAML 1.1, which is why this reads
-        # both keys rather than the obvious one.
-        triggers = doc.get("on") if isinstance(doc, dict) else None
-        if triggers is None and isinstance(doc, dict):
-            triggers = doc.get(True)
-        if isinstance(triggers, dict) and "workflow_call" in triggers:
-            found.append(name)
+        if _declares_workflow_call(doc):
+            found.setdefault(name, []).append(workflows)
+
+    if hosts and not org:
+        die("check_source_reusables: transition hosts given without an org; cannot read them.")
+    unreadable_remote: "list[str]" = []
+    for host in hosts:
+        remote_found, bad = _list_remote_reusables(org, host, ref)
+        for name in remote_found:
+            found.setdefault(name, []).append(f"{org}/{host}@{ref}")
+        unreadable_remote.extend(bad)
+    if unreadable_remote:
+        die(
+            f"could not establish which reusables the transition host(s) {list(hosts)} "
+            "carry: " + "; ".join(unreadable_remote) + ". Their reusable surface is "
+            "UNKNOWN, so neither 'every reusable is tracked' nor 'this listed reusable "
+            "does not exist' can be claimed. This is a failed read, not a missing workflow."
+        )
+
     untracked = sorted(set(found) - set(listed))
     if untracked:
         die(
-            f"reusable workflow(s) {untracked} exist in {workflows} but are absent "
-            "from the inventory's `reusables` list, so they are checked against no "
-            "repo and reported by nothing. Add a row for every repo - `exempt` with "
-            "a written reason is how a parked reusable stays parked."
+            "reusable workflow(s) "
+            + ", ".join(f"{name} (in {', '.join(found[name])})" for name in untracked)
+            + " exist but are absent from the inventory's `reusables` list, so they "
+            "are checked against no repo and reported by nothing. Add a row for every "
+            "repo - `exempt` with a written reason is how a parked reusable stays parked."
         )
     phantom = sorted(set(listed) - set(found))
-    if phantom and hosts:
-        still_phantom = [
-            name for name in phantom
-            if not any(_is_remote_workflow_call(org, host, ref, name) for host in hosts)
-        ]
-        phantom = still_phantom
     if phantom:
         die(
             f"inventory lists reusable(s) {phantom} that are not `workflow_call` "
@@ -2287,8 +2399,11 @@ def main() -> int:
     # `org` and `transition_sources` given here (backend#3690 follow-up,
     # .github#477): a reusable hosted only in a transition_sources repo (e.g.
     # `desk-dispatch.yml`, org-config-only) has no copy in this checkout for the
-    # local scan to find, so an absent-locally name is checked against every
-    # migration host before it is called a ghost.
+    # local scan to find. Every migration host's workflows directory is
+    # enumerated and unioned into the source set, so a listed name hosted there
+    # resolves AND an unlisted one shipped there is caught -- both directions --
+    # and a host whose files cannot be read is a die() saying so, never an
+    # absence verdict (Bugbot, .github#477).
     check_source_reusables(
         args.source_dir, reusables, org, inventory["transition_sources"], pinned_ref,
     )
