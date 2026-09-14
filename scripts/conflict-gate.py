@@ -9,7 +9,7 @@ installer tests, not `Source-of-truth drift`, not `make drift`, not
 `gen-manifest.sh --check`. Every one of them is silently inactive, and no
 trigger tweak can change that: there is nothing for them to run against.
 
-The result reads as HEALTH. Measured on `model-zoo#206`, 2026-08-27, while it
+The result reads as HEALTH. Measured on `model-zoo-archive#206`, 2026-08-27, while it
 was `DIRTY` against `develop`:
 
   * `actions/runs?head_sha=e7465ea` -> `total_count: 0`. Nothing dispatched.

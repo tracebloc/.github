@@ -412,7 +412,7 @@ shared_reasons:
     The anchor stays because that one citation is genuine: `release-train` has no
     code-quality caller (verified 2026-08-25).
     Remediation history, which is measurement rather than a tally: model-zoo and
-    start-training were remediated 2026-08-04 under backend#1420 (model-zoo#115,
+    start-training were remediated 2026-08-04 under backend#1420 (model-zoo-archive#115,
     start-training#32), `docs` the same day (its own code-quality-caller.yml), `rfcs`
     on 2026-08-25 under backend#2498, and `claude-skills` on 2026-08-25 under
     .github#335 (claude-skills#36 added the caller). Each went stale the same way -- a
