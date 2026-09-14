@@ -15,7 +15,7 @@ name: Conflict gate
 # conflicted PR is one written onto its head sha FROM OUTSIDE, which is what this
 # does: a check run, via the Checks API.
 #
-# MEASURED, on `model-zoo#206`, 2026-08-27, while it was DIRTY against develop:
+# MEASURED, on `model-zoo-archive#206`, 2026-08-27, while it was DIRTY against develop:
 #   * `actions/runs?head_sha=e7465ea` -> total_count 0. Nothing dispatched.
 #   * its rollup carried ONE entry: `Cursor Bugbot`, SUCCESS. Bugbot reviews the
 #     diff rather than via a `pull_request` trigger, so it is the one voice left,
