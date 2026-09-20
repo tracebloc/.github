@@ -1,0 +1,55 @@
+name: 🐛 Bug
+description: Report a defect or regression
+labels: ["work-type:bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One-line summary of what's broken
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps anyone can follow
+      placeholder: |
+        1. Go to ...
+        2. Click ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - "S1 — Production down / data loss"
+        - "S2 — Feature broken / no workaround"
+        - "S3 — Feature degraded / workaround exists"
+        - "S4 — Cosmetic / minor"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "dev / staging / prod / all"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots / video
+      description: Attach evidence

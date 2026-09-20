@@ -1,0 +1,16 @@
+# Code owners for tracebloc/.github
+#
+# This repository holds only the organization profile and the org-wide issue
+# and pull request templates; the reusable workflows and scripts that made it
+# the org's enforcement root moved to a private repository.
+#
+# What this file does: it AUTO-REQUESTS a reviewer on the paths below. It does
+# NOT gate the merge -- `require_code_owner_reviews` is false on every branch,
+# so any approving review turns a PR green. That is deliberate.
+
+# The organization landing page, rendered on github.com/tracebloc.
+/profile/                   @LukasWodka
+
+# Templates that appear in every repository's "new issue" / "new PR" chooser.
+/.github/ISSUE_TEMPLATE/    @LukasWodka
+/.github/pull_request_template.md   @LukasWodka
