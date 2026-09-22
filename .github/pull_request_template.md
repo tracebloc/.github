@@ -4,6 +4,11 @@
 ## Related
 <!-- REQUIRED when the title names a ticket: the `closing-ref` check reads this section's link graph, not the title. Same repo: Closes #123 · Cross-repo: Closes tracebloc/<repo>#123 (owner-qualified — a bare `Closes #123` resolves against THIS repo and links the wrong issue or none). Every train repo's default branch is now `develop` (measured 2026-08-23), so a closing keyword DOES fire on merge — the earlier note here saying it does not predates that migration. -->
 
+## Release note
+<!-- REQUIRED on `feat` and `fix` pull requests in a customer-facing repository, where the `release-note / check` context reads it; optional everywhere else. ONE line in the customer's voice -- what a user notices, never what the code does -- or the literal `none`. `Surface:` is one of platform / client / sdk / cli / docs. Notes are compiled into the product changelog when a release is cut; titles never are. The values are blank on purpose: writing `none` is a decision, not a default. -->
+Release note:
+Surface:
+
 ## Type of change
 - [ ] Feature
 - [ ] Bug fix
